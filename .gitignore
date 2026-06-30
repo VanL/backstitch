@@ -6,6 +6,16 @@ __pycache__/
 # C extensions
 *.so
 
+.weft/
+.taut.db
+.taut.db-shm
+.taut.db-wal
+.taut.toml
+.taut.lock
+.broker.db
+.broker.*
+.DS_Store
+
 # Distribution / packaging
 .Python
 build/
