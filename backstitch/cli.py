@@ -436,8 +436,9 @@ def _packet_shape_error(row: dict[str, Any]) -> str | None:
     if not all(isinstance(t, str) for t in row["tests"]):
         return "invalid `tests` item; expected strings"
     for issue in row["issues"]:
-        # [SC-11]: issue records carry a known code, a real severity, and a
-        # path locator -- string-shaped garbage is not an issue record.
+        # [SC-11]: issue records carry a known code, a real severity, a
+        # path locator, and correctly typed optional metadata --
+        # string-shaped garbage is not an issue record.
         if (
             not isinstance(issue, dict)
             or issue.get("code") not in ISSUE_CODES
@@ -445,10 +446,15 @@ def _packet_shape_error(row: dict[str, Any]) -> str | None:
             or not isinstance(issue.get("message"), str)
             or not isinstance(issue.get("path"), str)
             or not issue["path"]
+            or isinstance(issue.get("line"), bool)
+            or not isinstance(issue.get("line"), int | None)
+            or not isinstance(issue.get("section_id"), str | None)
+            or not isinstance(issue.get("symbol"), str | None)
         ):
             return (
                 "invalid `issues` item; expected a deterministic issue"
-                " record (known code, severity, message, path)"
+                " record (known code, severity, message, path, and typed"
+                " line/section_id/symbol)"
             )
     if not all(isinstance(w, str) for w in row["packet_warnings"]):
         return "invalid `packet_warnings` item; expected strings"
@@ -548,12 +554,29 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
     except json.JSONDecodeError as exc:
         msg = f"{args.deterministic_report}: not valid JSON: {exc}"
         raise ValueError(msg) from None
-    if not isinstance(report_data, dict) or "summary" not in report_data:
-        msg = (
-            f"{args.deterministic_report}: not a backstitch deterministic"
-            " report (missing `summary`)"
-        )
+    # [SC-6]/[SC-5]: the deterministic report contract has fixed top-level
+    # keys; a report missing any of them is malformed input, exit 2 -- not
+    # a valid report whose problems get blamed on the analysis file.
+    if not isinstance(report_data, dict):
+        msg = f"{args.deterministic_report}: not a backstitch deterministic report"
         raise ValueError(msg)
+    report_keys = (
+        ("profile", str),
+        ("repo_root", str),
+        ("summary", dict),
+        ("spec_sections", list),
+        ("code_refs", list),
+        ("spec_mappings", list),
+        ("edges", list),
+        ("issues", list),
+    )
+    for key, key_type in report_keys:
+        if not isinstance(report_data.get(key), key_type):
+            msg = (
+                f"{args.deterministic_report}: not a backstitch deterministic"
+                f" report (missing or invalid `{key}`)"
+            )
+            raise ValueError(msg)
     load = load_analysis_results(
         args.analysis_results.read_text(encoding="utf-8"),
         packet_ids_from_report(report_data),

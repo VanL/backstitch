@@ -128,6 +128,23 @@ def parse_traceability_codes(
     return frozenset(codes), warnings
 
 
+def _parse_ignore_codes(
+    raw: str, *, allow_unknown: bool, location: str
+) -> tuple[bool, frozenset[str], list[str]]:
+    codes, warnings = parse_traceability_codes(
+        raw, allow_unknown=allow_unknown, location=location
+    )
+    if not codes and not warnings:
+        # [EXC-4]: an ignore marker with no codes (`_Traceability: ignore_`,
+        # `<!-- backstitch: ignore -->`) is malformed -- fake protection,
+        # same strictness and hatch as an unknown code.
+        message = f"malformed traceability marker in {location}: ignore with no codes"
+        if not allow_unknown:
+            raise UnknownSuppressionCodeError(message)
+        return False, frozenset(), [message]
+    return False, codes, warnings
+
+
 def parse_traceability_marker_line(
     line: str, *, allow_unknown: bool = False, location: str = "inline marker"
 ) -> tuple[bool, frozenset[str], list[str]]:
@@ -136,18 +153,16 @@ def parse_traceability_marker_line(
         return True, META_DEFAULT_SUPPRESSED, []
     match = TRACEABILITY_IGNORE_RE.match(stripped)
     if match:
-        codes, warnings = parse_traceability_codes(
+        return _parse_ignore_codes(
             match.group(1), allow_unknown=allow_unknown, location=location
         )
-        return False, codes, warnings
     if HTML_META_RE.search(stripped):
         return True, META_DEFAULT_SUPPRESSED, []
     match = HTML_IGNORE_RE.search(stripped)
     if match:
-        codes, warnings = parse_traceability_codes(
+        return _parse_ignore_codes(
             match.group(1), allow_unknown=allow_unknown, location=location
         )
-        return False, codes, warnings
     # [EXC-4]: a line that STARTS like a marker but parses as neither form
     # (`_Traceability: ignore_` with no codes, `_Traceability: bogus_`) is
     # a malformed suppression -- the same fake affordance as an unknown
@@ -406,6 +421,7 @@ def build_suppression_index(
     if marker_warnings:
         index.suppression_warnings.extend(marker_warnings)
     _validate_config_codes(index, allow_unknown=allow_unknown)
+    _warn_inline_error_code_attempts(index)
     return index
 
 
@@ -459,20 +475,44 @@ def _validate_config_codes(index: SuppressionIndex, *, allow_unknown: bool) -> N
     )
 
 
-def _iter_inline_ignore_code_sets(index: SuppressionIndex) -> Iterator[frozenset[str]]:
-    yield from index.inline_file_ignores.values()
-    yield from index.inline_spec_ignores.values()
-    yield from index.inline_code_ignores.values()
+def _iter_inline_ignore_code_sets(
+    index: SuppressionIndex,
+) -> Iterator[tuple[str, frozenset[str]]]:
+    for path, codes in index.inline_file_ignores.items():
+        yield path, codes
+    for (spec_path, section_id), codes in index.inline_spec_ignores.items():
+        yield f"{spec_path}::{section_id}", codes
+    for path, codes in index.inline_code_ignores.items():
+        yield path, codes
     # [EXC-5]/[EXC-8]: statement-scoped Python noqa spans are suppression
     # attempts too -- an error-severity code in a span must warn, not be
     # silently ignored.
-    for spans in index.inline_code_span_ignores.values():
-        for _start, _end, codes in spans:
-            yield codes
+    for path, spans in index.inline_code_span_ignores.items():
+        for start, _end, codes in spans:
+            yield f"{path}:{start}", codes
+
+
+def _warn_inline_error_code_attempts(index: SuppressionIndex) -> None:
+    """[EXC-8]: warn on EVERY inline attempt to suppress an always-error
+    code, whether or not a matching finding was emitted this run -- a stale
+    directive that only warns when the error fires is silent exactly when
+    the author believes it works."""
+
+    for location, codes in _iter_inline_ignore_code_sets(index):
+        for code in sorted(codes & ERROR_SEVERITY_CODES):
+            index.suppression_warnings.append(
+                f"cannot suppress error-severity code {code} in inline"
+                f" marker at {location}"
+            )
 
 
 def _warn_error_code_suppression(issue: Issue, index: SuppressionIndex) -> None:
-    for codes in _iter_inline_ignore_code_sets(index):
+    # Always-error codes already warned unconditionally at index build
+    # (_warn_inline_error_code_attempts); this per-issue path covers the
+    # context-dependent codes whose severity is only known per instance.
+    if issue.code in ERROR_SEVERITY_CODES:
+        return
+    for _location, codes in _iter_inline_ignore_code_sets(index):
         if issue.code in codes:
             index.suppression_warnings.append(
                 f"suppression ignored for error-severity code {issue.code}"

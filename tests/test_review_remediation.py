@@ -826,3 +826,205 @@ def test_packets_prints_load_warnings_exactly_once(tmp_path: Path) -> None:
         str(tmp_path / "p.jsonl"),
     )
     assert result.stderr.count("bogus_key") == 1, result.stderr
+
+
+# --- Round 9 P1: malformed trailing HTML ignore must not delete sections ----
+
+
+def test_empty_html_ignore_on_heading_is_strict_error(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "docs/specs/01-x.md",
+        "# X\n\n## One [HI-2] <!-- backstitch: ignore  -->\n",
+    )
+    _write(tmp_path, "pkg/mod.py", '"""Mod."""\n')
+    result = run_cli(
+        "check",
+        "--repo-root",
+        str(tmp_path),
+        "--no-config",
+        "--spec-root",
+        "docs/specs",
+        "--plan-root",
+        "",
+        "--code-root",
+        "pkg",
+    )
+    assert result.returncode == 2
+    assert "malformed traceability marker" in result.stderr
+
+
+def test_empty_html_ignore_keeps_section_under_hatch(tmp_path: Path) -> None:
+    # Under allow_unknown_keys the malformed marker warns -- and the
+    # heading's section must survive, never be silently deleted.
+    _write(
+        tmp_path,
+        "docs/specs/01-x.md",
+        "# X\n\n## One [HI-3] <!-- backstitch: ignore  -->\n",
+    )
+    _write(tmp_path, "pkg/mod.py", '"""Mod."""\n')
+    _write(
+        tmp_path,
+        ".backstitch.toml",
+        "allow_unknown_keys = true\n[profile]\n"
+        'spec_roots = ["docs/specs"]\nplan_roots = []\ncode_roots = ["pkg"]\n',
+    )
+    result = run_cli("check", "--repo-root", str(tmp_path), "--format", "json")
+    data = json.loads(result.stdout)
+    assert data["summary"]["spec_sections"] == 1
+    assert "malformed traceability marker" in result.stderr
+
+
+# --- Round 9 P2: extended config paths anchor at the defining file ----------
+
+
+def test_extended_config_paths_resolve_against_defining_file(
+    tmp_path: Path,
+) -> None:
+    shared = tmp_path / "shared"
+    repo = tmp_path / "repo"
+    _write(tmp_path, "shared/parent.toml", '[check]\noutput = "reports/out.json"\n')
+    _write(
+        tmp_path,
+        "repo/.backstitch.toml",
+        'extend = "../shared/parent.toml"\n',
+    )
+    result = run_cli("config", "show", "--repo-root", str(repo))
+    assert result.returncode == 0, result.stderr
+    output = json.loads(result.stdout)["check"]["output"]
+    assert output == str((shared / "reports/out.json").resolve()), output
+
+
+# --- Round 9 P2: absolute roots fail with a clear diagnostic ---------------
+
+
+def test_root_outside_repo_is_clear_invocation_error(tmp_path: Path) -> None:
+    import os
+
+    outside = tmp_path / "outside-specs"
+    _write(tmp_path, "outside-specs/01-y.md", "# Y\n\n## One [OS-1]\n")
+    repo = tmp_path / "repo"
+    _write(tmp_path, "repo/pkg/mod.py", '"""Mod."""\n')
+    _write(
+        tmp_path,
+        "repo/.backstitch.toml",
+        '[profile]\nspec_roots = ["$BACKSTITCH_TEST_ABS_ROOT"]\n'
+        'plan_roots = []\ncode_roots = ["pkg"]\n',
+    )
+    result = subprocess.run(
+        [sys.executable, "-m", "backstitch", "check", "--repo-root", str(repo)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "BACKSTITCH_TEST_ABS_ROOT": str(outside)},
+    )
+    assert result.returncode == 2
+    assert "outside the repository root" in result.stderr
+    assert "subpath" not in result.stderr
+
+
+# --- Round 9 P2: evidence is line-local, not just path-local ---------------
+
+
+def test_evidence_line_outside_snippet_is_rejected() -> None:
+    from backstitch.analysis_llm import analyze_packets
+
+    packet = _full_packet(
+        owners=[
+            {
+                "path": "pkg/mod.py",
+                "symbol": None,
+                "start_line": 10,
+                "snippet": "a\nb\nc",
+            }
+        ]
+    )
+
+    def respond(line: int) -> str:
+        return json.dumps(
+            {
+                "packet_id": packet["packet_id"],
+                "classification": "ok",
+                "summary": "fine",
+                "evidence": [{"path": "pkg/mod.py", "line": line}],
+            }
+        )
+
+    rows, errors = analyze_packets([packet], lambda prompt: respond(999999))
+    assert rows[0]["classification"] == "ambiguous"
+    assert any("outside the packet's snippets" in e for e in errors)
+    # A line inside the snippet range (10..12) is accepted.
+    rows, errors = analyze_packets([packet], lambda prompt: respond(11))
+    assert rows[0]["classification"] == "ok"
+    assert errors == []
+
+
+# --- Round 9 P2: summarize-analysis validates the report shape --------------
+
+
+def test_summarize_rejects_summary_only_report(tmp_path: Path) -> None:
+    report = tmp_path / "report.json"
+    report.write_text(
+        json.dumps({"summary": {"errors": 0, "warnings": 0, "infos": 0}}),
+        encoding="utf-8",
+    )
+    results = tmp_path / "results.jsonl"
+    results.write_text("", encoding="utf-8")
+    result = run_cli(
+        "summarize-analysis",
+        "--deterministic-report",
+        str(report),
+        "--analysis-results",
+        str(results),
+    )
+    assert result.returncode == 2
+    assert "not a backstitch deterministic report" in result.stderr
+
+
+# --- Round 9 P2: packet issue metadata types ---------------------------------
+
+
+def test_packet_issue_with_malformed_metadata_is_invocation_error(
+    tmp_path: Path,
+) -> None:
+    bad = {
+        "code": "SPEC_SECTION_UNMAPPED",
+        "severity": "info",
+        "message": "x",
+        "path": "docs/specs/01-x.md",
+        "line": True,
+        "section_id": 42,
+        "symbol": [],
+    }
+    result = _run_analyze(tmp_path, json.dumps(_full_packet(issues=[bad])))
+    assert result.returncode == 2
+    assert "issues" in result.stderr
+
+
+# --- Round 9 P3: stale error-code noqa warns without a matching finding -----
+
+
+def test_stale_error_code_noqa_warns_unconditionally(tmp_path: Path) -> None:
+    # [EXC-8]: the attempt warns even when no matching error is emitted --
+    # a directive that only warns when the error fires is silent exactly
+    # when its author believes it works.
+    _write(tmp_path, "docs/specs/01-x.md", "# X\n\n## One [SN-1]\n")
+    _write(
+        tmp_path,
+        "pkg/mod.py",
+        '"""Mod."""\n\n# backstitch: noqa SPEC_FILE_MISSING\ndef f() -> None:\n    pass\n',
+    )
+    result = run_cli(
+        "check",
+        "--repo-root",
+        str(tmp_path),
+        "--no-config",
+        "--spec-root",
+        "docs/specs",
+        "--plan-root",
+        "",
+        "--code-root",
+        "pkg",
+    )
+    assert result.returncode == 0
+    assert "cannot suppress error-severity code SPEC_FILE_MISSING" in result.stderr

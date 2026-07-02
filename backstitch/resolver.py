@@ -775,7 +775,17 @@ def scan_repository_with_artifacts(
         files: list[Path] = []
         seen: set[Path] = set()
         for rel_root in roots:
-            base = root / rel_root
+            base = (root / rel_root).resolve()
+            # CFG §4.3 allows env expansion to produce an absolute root,
+            # but every root must stay INSIDE the target repository: report
+            # paths are repo-relative by contract. Outside -> invocation
+            # error with a one-line diagnostic, never a raw subpath
+            # traceback.
+            if not base.is_relative_to(root):
+                raise ScanError(
+                    f"configured root `{rel_root}` is outside the"
+                    f" repository root {root}"
+                )
             if not base.is_dir():
                 scan_issues.append(
                     Issue(

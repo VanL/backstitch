@@ -285,6 +285,26 @@ def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]
     return merged
 
 
+def _expand_raw_paths(body: dict[str, Any], base_dir: Path) -> None:
+    """Expand path values against the file that DEFINED them (CFG §2).
+
+    Must run per file BEFORE `extend` merging: a parent's relative
+    `check.output` anchors at the parent's directory, not at whichever
+    child extended it. expand_path_value is idempotent on the absolute
+    results, so the later _parse_settings expansion is a no-op for these.
+    """
+
+    for table_name, key in (("check", "output"), ("packets", "output")):
+        table = body.get(table_name)
+        if isinstance(table, dict) and isinstance(table.get(key), str):
+            table[key] = expand_path_value(table[key], base_dir=base_dir)
+    roots = body.get("target_roots")
+    if isinstance(roots, dict):
+        for name, value in roots.items():
+            if isinstance(value, str):
+                roots[name] = expand_path_value(value, base_dir=base_dir)
+
+
 def _load_config_chain(
     path: Path,
     seen: set[Path],
@@ -296,6 +316,7 @@ def _load_config_chain(
     seen.add(resolved)
 
     body = _extract_config_body(resolved)
+    _expand_raw_paths(body, resolved.parent)
     extend = body.get("extend")
     warnings: list[str] = []
     if extend is None:

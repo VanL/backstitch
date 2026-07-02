@@ -238,7 +238,10 @@ def parse_markdown_spec(
                 else (False, frozenset(), [])
             )
             marker_warnings.extend(warnings)
-            if trailing_meta or trailing_codes:
+            if trailing_meta or trailing_codes or warnings:
+                # Strip a RECOGNIZED backstitch marker comment even when it
+                # was malformed (warnings, no codes): a bad marker must
+                # never silently delete the heading's section.
                 heading_line = re.sub(r"\s*<!--.*?-->\s*$", "", line)
                 heading = _HEADING_RE.match(heading_line)
                 assert heading is not None

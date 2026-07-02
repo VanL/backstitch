@@ -46,12 +46,16 @@ def validate_analysis_row(
     row: Any,
     known_packet_ids: set[str] | None,
     *,
-    allowed_evidence_paths: set[str] | None = None,
+    allowed_evidence: Mapping[str, tuple[tuple[int, int], ...]] | None = None,
 ) -> AnalysisResult | str:
     """Validate one untrusted model-output row ([SC-7]).
 
-    ``allowed_evidence_paths``, when provided, keeps evidence packet-local:
-    the model may only cite paths that were in the packet it was shown.
+    ``allowed_evidence``, when provided, keeps evidence packet-local: the
+    model may only cite paths that were in the packet it was shown, and --
+    where the packet carried line-bounded snippets for a path -- only lines
+    inside one of those ``(start, end)`` inclusive ranges. An empty range
+    tuple means the path was in the packet without line bounds (the spec
+    file, linked tests): any positive line is accepted.
     """
 
     if not isinstance(row, dict):
@@ -88,15 +92,22 @@ def validate_analysis_row(
             or not isinstance(item.get("path"), str)
             or isinstance(item.get("line"), bool)
             or not isinstance(item.get("line"), int)
+            or item["line"] < 1
         ):
-            return "invalid `evidence` item; expected {path, line}"
-        if (
-            allowed_evidence_paths is not None
-            and item["path"] not in allowed_evidence_paths
-        ):
+            return "invalid `evidence` item; expected {path, line >= 1}"
+        if allowed_evidence is not None:
             # [SC-7]: model output is untrusted; evidence must stay inside
-            # the packet boundary.
-            return f"evidence path `{item['path']}` is not part of the packet"
+            # the packet boundary -- both the path and the line.
+            ranges = allowed_evidence.get(item["path"])
+            if ranges is None:
+                return f"evidence path `{item['path']}` is not part of the packet"
+            if ranges and not any(
+                start <= item["line"] <= end for start, end in ranges
+            ):
+                return (
+                    f"evidence line {item['line']} in `{item['path']}` is"
+                    " outside the packet's snippets"
+                )
         evidence.append((item["path"], item["line"]))
     return AnalysisResult(
         packet_id=packet_id,

@@ -46,20 +46,32 @@ def build_prompt(packet: dict[str, Any]) -> str:
     return f"{packet['instructions']}\n\n{json.dumps(body)}"
 
 
-def _packet_paths(packet: dict[str, Any]) -> set[str]:
-    """Paths the model was shown: spec file, owners, and linked tests."""
+def _packet_evidence_bounds(
+    packet: dict[str, Any],
+) -> dict[str, tuple[tuple[int, int], ...]]:
+    """What the model was shown, as path -> allowed line ranges ([SC-7]).
 
-    paths: set[str] = set()
+    Owner snippets are line-bounded, so evidence in an owner file must
+    fall inside one of its snippets. The spec file and linked tests were
+    named without line bounds: empty ranges, any positive line.
+    """
+
+    bounds: dict[str, list[tuple[int, int]]] = {}
     spec_path = packet.get("spec_path")
     if isinstance(spec_path, str):
-        paths.add(spec_path)
-    for owner in packet.get("owners", ()):
-        if isinstance(owner, dict) and isinstance(owner.get("path"), str):
-            paths.add(owner["path"])
+        bounds.setdefault(spec_path, [])
     for test in packet.get("tests", ()):
         if isinstance(test, str):
-            paths.add(test)
-    return paths
+            bounds.setdefault(test, [])
+    for owner in packet.get("owners", ()):
+        if not isinstance(owner, dict) or not isinstance(owner.get("path"), str):
+            continue
+        ranges = bounds.setdefault(owner["path"], [])
+        start = owner.get("start_line")
+        snippet = owner.get("snippet")
+        if isinstance(start, int) and isinstance(snippet, str):
+            ranges.append((start, start + max(len(snippet.splitlines()) - 1, 0)))
+    return {path: tuple(ranges) for path, ranges in bounds.items()}
 
 
 def _parse_model_output(raw: str, packet: dict[str, Any]) -> dict[str, Any] | str:
@@ -73,7 +85,7 @@ def _parse_model_output(raw: str, packet: dict[str, Any]) -> dict[str, Any] | st
     except json.JSONDecodeError:
         return "model output is not valid JSON"
     validated = validate_analysis_row(
-        row, None, allowed_evidence_paths=_packet_paths(packet)
+        row, None, allowed_evidence=_packet_evidence_bounds(packet)
     )
     if isinstance(validated, str):
         return f"model output invalid: {validated}"
