@@ -1,0 +1,144 @@
+"""Semantic analysis over packets through the ``llm`` Python API.
+
+Spec: docs/specs/02-backstitch-core.md [SC-7]
+
+The adapter boundary exists so tests prove prompt construction, iteration,
+parsing, and malformed-output handling with fakes; only the default adapter
+touches ``llm`` and real models. Findings are advisory [SC-7].
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
+
+from backstitch.analysis_results import validate_analysis_row
+
+ModelAdapter = Callable[[str], str]
+
+_FENCE_RE = re.compile(r"^```[\w-]*\n(?P<body>.*)\n```\s*$", re.DOTALL)
+
+
+def default_adapter(model_name: str | None = None) -> ModelAdapter:
+    """Build the real adapter for an ``llm`` model.
+
+    With no name, ``llm``'s configured default model is used (whatever
+    ``llm models default`` reports).
+    """
+
+    import llm
+
+    model = llm.get_model(model_name) if model_name else llm.get_model()
+
+    def call(prompt: str) -> str:
+        return str(model.prompt(prompt).text())
+
+    return call
+
+
+def build_prompt(packet: dict[str, Any]) -> str:
+    """Compose the review prompt: instructions, then the bounded packet."""
+
+    body = {k: v for k, v in packet.items() if k != "instructions"}
+    return f"{packet['instructions']}\n\n{json.dumps(body)}"
+
+
+def _parse_model_output(raw: str, packet_id: str) -> dict[str, Any] | str:
+    text = raw.strip()
+    fence = _FENCE_RE.match(text)
+    if fence:
+        text = fence.group("body").strip()
+    try:
+        row = json.loads(text)
+    except json.JSONDecodeError:
+        return "model output is not valid JSON"
+    validated = validate_analysis_row(row, None)
+    if isinstance(validated, str):
+        return f"model output invalid: {validated}"
+    if validated.packet_id != packet_id:
+        return (
+            f"model output packet_id `{validated.packet_id}` does not match"
+            f" the packet"
+        )
+    assert isinstance(row, dict)
+    return row
+
+
+def analyze_packets(
+    packets: Iterable[dict[str, Any]],
+    adapter: ModelAdapter,
+    concurrency: int = 1,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Run the adapter over every packet; collect rows and per-packet errors.
+
+    Output rows keep packet order regardless of concurrency. A failure on
+    one packet never aborts the others.
+    """
+
+    packet_list = list(packets)
+
+    def run_one(packet: dict[str, Any]) -> dict[str, Any] | str:
+        packet_id = packet.get("packet_id", "<missing packet_id>")
+        if "instructions" not in packet:
+            return f"{packet_id}: packet has no `instructions` field"
+        try:
+            raw = adapter(build_prompt(packet))
+        except Exception as exc:  # noqa: BLE001 - adapter is an external boundary
+            return f"{packet_id}: model call failed: {exc}"
+        parsed = _parse_model_output(raw, packet_id)
+        if isinstance(parsed, str):
+            return f"{packet_id}: {parsed}"
+        return parsed
+
+    if concurrency <= 1:
+        outcomes = [run_one(packet) for packet in packet_list]
+    else:
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            outcomes = list(pool.map(run_one, packet_list))
+
+    rows = [o for o in outcomes if isinstance(o, dict)]
+    errors = [o for o in outcomes if isinstance(o, str)]
+    return rows, errors
+
+
+def analyze_exit_code(rows: list[dict[str, Any]], errors: list[str]) -> int:
+    """Exit 1 when analysis produced nothing but failures; 0 otherwise.
+
+    Partial failure (some rows, some errors) still exits 0 because the
+    output is usable; total failure must be scriptable without scraping
+    stderr.
+    """
+
+    return 1 if errors and not rows else 0
+
+
+def render_results_jsonl(rows: list[dict[str, Any]]) -> str:
+    """Render analysis rows as JSONL, one result per line."""
+
+    return "".join(json.dumps(row) + "\n" for row in rows)
+
+
+def resolve_model_name(
+    explicit: str | None = None,
+    *,
+    configured: str | None = None,
+) -> str | None:
+    """[SC-5]/[CFG-5] model precedence: --model, config, LLM_MODEL, llm default.
+
+    Returns ``None`` to mean "let ``llm`` use its configured default" so the
+    lazy-import boundary stays in ``default_adapter``.
+    """
+
+    import os
+
+    if explicit is not None and explicit.strip():
+        return explicit.strip()
+    if configured is not None and configured.strip():
+        return configured.strip()
+    env = os.environ.get("LLM_MODEL", "").strip()
+    if env:
+        return env
+    return None

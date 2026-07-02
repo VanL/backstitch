@@ -1,0 +1,185 @@
+"""Validation and aggregation of semantic analysis results.
+
+Spec: docs/specs/02-backstitch-core.md [SC-6], [SC-7]
+
+Invalid analysis rows are analysis-summary errors, never repository trace
+errors, and semantic findings never change deterministic issue severity.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
+
+CLASSIFICATIONS = (
+    "ok",
+    "confirmed_mismatch",
+    "probable_mismatch",
+    "missing_trace",
+    "ambiguous",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisResult:
+    """One validated semantic finding for a packet."""
+
+    packet_id: str
+    classification: str
+    confidence: float | None
+    rationale: str
+    evidence: tuple[tuple[str, int], ...]
+    summary: str
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisLoad:
+    """Validated results plus row-level input problems."""
+
+    results: tuple[AnalysisResult, ...]
+    errors: tuple[str, ...]
+
+
+def validate_analysis_row(
+    row: Any, known_packet_ids: set[str] | None
+) -> AnalysisResult | str:
+    if not isinstance(row, dict):
+        return "row is not a JSON object"
+    packet_id = row.get("packet_id")
+    if not isinstance(packet_id, str) or not packet_id:
+        return "missing or invalid `packet_id`"
+    if known_packet_ids is not None and packet_id not in known_packet_ids:
+        return f"unknown packet ID `{packet_id}`"
+    classification = row.get("classification")
+    if classification not in CLASSIFICATIONS:
+        return (
+            f"unsupported classification {classification!r}; expected one of"
+            f" {', '.join(CLASSIFICATIONS)}"
+        )
+    summary = row.get("summary")
+    if not isinstance(summary, str) or not summary:
+        return "missing or invalid `summary`"
+    confidence = row.get("confidence")
+    if confidence is not None and (
+        isinstance(confidence, bool) or not isinstance(confidence, int | float)
+    ):
+        return "invalid `confidence`; expected a number"
+    rationale = row.get("rationale", "")
+    if not isinstance(rationale, str):
+        return "invalid `rationale`; expected a string"
+    evidence_raw = row.get("evidence", [])
+    evidence: list[tuple[str, int]] = []
+    if not isinstance(evidence_raw, list):
+        return "invalid `evidence`; expected a list"
+    for item in evidence_raw:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("path"), str)
+            or not isinstance(item.get("line"), int)
+        ):
+            return "invalid `evidence` item; expected {path, line}"
+        evidence.append((item["path"], item["line"]))
+    return AnalysisResult(
+        packet_id=packet_id,
+        classification=classification,
+        confidence=float(confidence) if confidence is not None else None,
+        rationale=rationale,
+        evidence=tuple(evidence),
+        summary=summary,
+    )
+
+
+def load_analysis_results(
+    text: str, known_packet_ids: set[str] | None
+) -> AnalysisLoad:
+    """Parse analysis JSONL; bad rows become errors, not exceptions."""
+
+    results: list[AnalysisResult] = []
+    errors: list[str] = []
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            errors.append(f"line {line_no}: invalid JSON ({exc.msg})")
+            continue
+        validated = validate_analysis_row(row, known_packet_ids)
+        if isinstance(validated, str):
+            errors.append(f"line {line_no}: {validated}")
+        else:
+            results.append(validated)
+    return AnalysisLoad(results=tuple(results), errors=tuple(errors))
+
+
+def packet_ids_from_report(report_data: dict[str, Any]) -> set[str]:
+    """Derive valid packet IDs from a deterministic report's sections."""
+
+    return {
+        f"{section['path']}#{section['section_id']}"
+        for section in report_data.get("spec_sections", [])
+    }
+
+
+def render_analysis_summary(
+    summary: Mapping[str, int], load: AnalysisLoad
+) -> str:
+    """Render deterministic and semantic findings, kept clearly separate.
+
+    ``summary`` is the deterministic report's counts mapping — either
+    ``Report.summary()`` or the ``summary`` key of a parsed JSON report.
+    Structurally valid JSON missing the count keys is malformed input
+    ([SC-5]): raise a one-line ``ValueError`` for the CLI to map to exit 2,
+    never a ``KeyError`` traceback (known fable defect fixed at port time).
+    """
+
+    missing = [key for key in ("errors", "warnings", "infos") if key not in summary]
+    if missing:
+        msg = (
+            "deterministic report summary is missing required count"
+            f" keys: {', '.join(missing)}"
+        )
+        raise ValueError(msg)
+
+    lines = [
+        "backstitch analysis summary",
+        "",
+        (
+            f"deterministic: {summary['errors']} errors,"
+            f" {summary['warnings']} warnings, {summary['infos']} infos"
+            " (unchanged by semantic analysis)"
+        ),
+        "",
+        "semantic findings (advisory):",
+    ]
+    if load.results:
+        counts: dict[str, int] = {}
+        for result in load.results:
+            counts[result.classification] = (
+                counts.get(result.classification, 0) + 1
+            )
+        lines.append(
+            "  "
+            + ", ".join(
+                f"{counts[c]} {c}" for c in CLASSIFICATIONS if c in counts
+            )
+        )
+        for result in load.results:
+            confidence = (
+                f" (confidence {result.confidence:.2f})"
+                if result.confidence is not None
+                else ""
+            )
+            lines.append(
+                f"  {result.packet_id} [{result.classification}]"
+                f" {result.summary}{confidence}"
+            )
+    else:
+        lines.append("  none")
+    if load.errors:
+        lines.append("")
+        lines.append("analysis input problems:")
+        lines.extend(f"  {error}" for error in load.errors)
+    return "\n".join(lines) + "\n"

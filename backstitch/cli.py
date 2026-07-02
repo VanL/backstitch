@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -25,7 +26,7 @@ from backstitch.exclusions import (
     collect_unused_ignore_warnings,
     should_suppress,
 )
-from backstitch.models import Issue
+from backstitch.models import Issue, Report
 from backstitch.profiles import get_profile
 from backstitch.reporting import SuppressedRecord, render_json, render_text
 from backstitch.resolver import ScanError, scan_repository_with_artifacts
@@ -108,6 +109,79 @@ def _add_check_parser(subparsers: argparse._SubParsersAction[Any]) -> None:
         action="store_true",
         help="include suppressed findings with reasons in the output",
     )
+    check.add_argument(
+        "--warnings-as-errors",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "exit 1 when warnings exist, not only errors; the explicit"
+            " --no-warnings-as-errors overrides a config-set value"
+        ),
+    )
+
+
+def _add_other_parsers(subparsers: argparse._SubParsersAction[Any]) -> None:
+    packets = subparsers.add_parser(
+        "packets", help="generate semantic-review packets (no model calls)"
+    )
+    packets.add_argument("--repo-root", type=Path, default=Path("."))
+    packets.add_argument("--profile", default="backstitch-style-v1")
+    packets.add_argument(
+        "--spec-root", action="append", dest="spec_roots", metavar="PATH"
+    )
+    packets.add_argument(
+        "--plan-root", action="append", dest="plan_roots", metavar="PATH"
+    )
+    packets.add_argument(
+        "--code-root", action="append", dest="code_roots", metavar="PATH"
+    )
+    packets.add_argument("--config", type=Path, default=None, metavar="PATH")
+    packets.add_argument("--no-config", action="store_true")
+    packets.add_argument(
+        "--output", type=Path, required=True, metavar="PATH"
+    )
+
+    analyze = subparsers.add_parser(
+        "analyze", help="run llm-backed semantic review over packets"
+    )
+    analyze.add_argument(
+        "--packets", type=Path, required=True, metavar="PATH"
+    )
+    analyze.add_argument("--model", default=None, metavar="MODEL")
+    analyze.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="write results JSONL to PATH (default: stdout)",
+    )
+    analyze.add_argument("--concurrency", type=int, default=1, metavar="N")
+    analyze.add_argument("--config", type=Path, default=None, metavar="PATH")
+    analyze.add_argument("--no-config", action="store_true")
+
+    summarize = subparsers.add_parser(
+        "summarize-analysis",
+        help="combine a deterministic report with semantic results",
+    )
+    summarize.add_argument(
+        "--deterministic-report", type=Path, required=True, metavar="PATH"
+    )
+    summarize.add_argument(
+        "--analysis-results", type=Path, required=True, metavar="PATH"
+    )
+
+    config = subparsers.add_parser(
+        "config", help="inspect resolved configuration"
+    )
+    config_sub = config.add_subparsers(dest="config_command", required=True)
+    show = config_sub.add_parser(
+        "show", help="print effective settings as JSON"
+    )
+    show.add_argument("--repo-root", type=Path, default=Path("."))
+    path_cmd = config_sub.add_parser(
+        "path", help="print the discovered config file path"
+    )
+    path_cmd.add_argument("--repo-root", type=Path, default=Path("."))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -127,6 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     _add_check_parser(subparsers)
+    _add_other_parsers(subparsers)
     return parser
 
 
@@ -230,7 +305,158 @@ def _cmd_check(args: argparse.Namespace) -> int:
         sys.stdout.write(rendered)
 
     summary = report.summary()
-    return 1 if summary["errors"] else 0
+    warnings_as_errors = args.warnings_as_errors
+    if warnings_as_errors is None:
+        warnings_as_errors = bool(settings.check.warnings_as_errors)
+    if summary["errors"]:
+        return 1
+    if warnings_as_errors and summary["warnings"]:
+        return 1
+    return 0
+
+
+def _suppressed_report(args: argparse.Namespace) -> Report:
+    """Scan + suppress, shared by check-style consumers (packets)."""
+
+    settings = _resolve_settings(args)
+    profile = _profile_from(args, settings)
+    report, artifacts = scan_repository_with_artifacts(
+        args.repo_root,
+        profile,
+        exclude_globs=settings.exclude,
+        allow_unknown_suppression_codes=settings.allow_unknown_keys,
+    )
+    index = build_suppression_index(
+        meta_spec_globs=profile.meta_spec_globs,
+        lint=settings.lint,
+        section_meta=artifacts.section_meta,
+        inline_file_ignores=artifacts.inline_file_ignores,
+        inline_spec_ignores=artifacts.inline_spec_ignores,
+        inline_code_ignores=artifacts.inline_code_ignores,
+        inline_code_span_ignores=artifacts.inline_code_span_ignores,
+        marker_warnings=list(artifacts.marker_warnings),
+        allow_unknown=settings.allow_unknown_keys,
+    )
+    kept = tuple(
+        issue for issue in report.issues if not should_suppress(issue, index)[0]
+    )
+    return dataclasses.replace(report, issues=kept)
+
+
+def _cmd_packets(args: argparse.Namespace) -> int:
+    from backstitch.analysis_packets import generate_packets, render_packets_jsonl
+
+    settings = _resolve_settings(args)
+    profile = _profile_from(args, settings)
+    report = _suppressed_report(args)
+    packets = generate_packets(args.repo_root, profile, report=report)
+    try:
+        args.output.write_text(render_packets_jsonl(packets), encoding="utf-8")
+    except OSError as exc:
+        return _error(f"cannot write --output {args.output}: {exc}")
+    print(f"wrote {len(packets)} packets to {args.output}", file=sys.stderr)
+    # [SC-5]: packets still reports the deterministic scan outcome -- the
+    # packets were written either way, but exit 1 says findings exist.
+    return 1 if report.summary()["errors"] else 0
+
+
+def _load_packets(path: Path) -> list[dict[str, Any]]:
+    packets: list[dict[str, Any]] = []
+    for line_no, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            msg = f"{path}:{line_no}: malformed packet JSONL: {exc}"
+            raise ValueError(msg) from None
+        if not isinstance(row, dict):
+            msg = f"{path}:{line_no}: packet line is not a JSON object"
+            raise ValueError(msg)
+        packets.append(row)
+    return packets
+
+
+def _cmd_analyze(args: argparse.Namespace) -> int:
+    # Lazy import in the handler only: deterministic commands must be
+    # structurally incapable of importing llm ([SC-8]).
+    from backstitch.analysis_llm import (
+        analyze_exit_code,
+        analyze_packets,
+        default_adapter,
+        render_results_jsonl,
+        resolve_model_name,
+    )
+
+    if args.concurrency < 1:
+        raise ValueError("--concurrency must be at least 1")
+    # [CFG-3]: analyze anchors config discovery at the packets file's parent.
+    if args.no_config and args.config is not None:
+        raise ConfigLoadError("--config and --no-config are mutually exclusive")
+    if args.no_config:
+        settings = BackstitchSettings()
+    else:
+        settings = load_settings(
+            args.packets.resolve().parent, explicit=args.config
+        )
+    packets = _load_packets(args.packets)
+    model = resolve_model_name(args.model, configured=settings.analyze.model)
+    adapter = default_adapter(model)
+    rows, errors = analyze_packets(packets, adapter, args.concurrency)
+    rendered = render_results_jsonl(rows)
+    if args.output is not None:
+        try:
+            args.output.write_text(rendered, encoding="utf-8")
+        except OSError as exc:
+            return _error(f"cannot write --output {args.output}: {exc}")
+    else:
+        sys.stdout.write(rendered)
+    for problem in errors:
+        print(f"warning: {problem}", file=sys.stderr)
+    return analyze_exit_code(rows, errors)
+
+
+def _cmd_summarize(args: argparse.Namespace) -> int:
+    from backstitch.analysis_results import (
+        load_analysis_results,
+        packet_ids_from_report,
+        render_analysis_summary,
+    )
+
+    try:
+        report_data = json.loads(
+            args.deterministic_report.read_text(encoding="utf-8")
+        )
+    except json.JSONDecodeError as exc:
+        msg = f"{args.deterministic_report}: not valid JSON: {exc}"
+        raise ValueError(msg) from None
+    if not isinstance(report_data, dict) or "summary" not in report_data:
+        msg = (
+            f"{args.deterministic_report}: not a backstitch deterministic"
+            " report (missing `summary`)"
+        )
+        raise ValueError(msg)
+    load = load_analysis_results(
+        args.analysis_results.read_text(encoding="utf-8"),
+        packet_ids_from_report(report_data),
+    )
+    sys.stdout.write(render_analysis_summary(report_data["summary"], load))
+    return 0
+
+
+def _cmd_config(args: argparse.Namespace) -> int:
+    from backstitch.settings import discover_config_path, settings_to_json
+
+    if args.config_command == "show":
+        settings = load_settings(args.repo_root.resolve())
+        sys.stdout.write(settings_to_json(settings))
+        return 0
+    path = discover_config_path(args.repo_root.resolve())
+    if path is not None:
+        print(path)
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -238,10 +464,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+    handlers = {
+        "check": _cmd_check,
+        "packets": _cmd_packets,
+        "analyze": _cmd_analyze,
+        "summarize-analysis": _cmd_summarize,
+        "config": _cmd_config,
+    }
     try:
-        if args.command == "check":
-            return _cmd_check(args)
-        raise ValueError(f"unknown command: {args.command}")
+        handler = handlers.get(args.command)
+        if handler is None:
+            raise ValueError(f"unknown command: {args.command}")
+        return handler(args)
     except (ScanError, ValueError, OSError) as exc:
         return _error(str(exc))
     except Exception as exc:  # noqa: BLE001 -- [SC-5]: no traceback, ever.
