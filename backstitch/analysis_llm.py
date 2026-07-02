@@ -63,8 +63,8 @@ def _packet_evidence_bounds(
         ranges = bounds.setdefault(spec_path, [])
         start = packet.get("section_start_line")
         text = packet.get("section_text")
-        if isinstance(start, int) and isinstance(text, str):
-            ranges.append((start, start + max(len(text.splitlines()) - 1, 0)))
+        if isinstance(start, int) and isinstance(text, str) and text.splitlines():
+            ranges.append((start, start + len(text.splitlines()) - 1))
     for test in packet.get("tests", ()):
         if isinstance(test, str):
             bounds.setdefault(test, [])
@@ -74,8 +74,10 @@ def _packet_evidence_bounds(
         ranges = bounds.setdefault(owner["path"], [])
         start = owner.get("start_line")
         snippet = owner.get("snippet")
-        if isinstance(start, int) and isinstance(snippet, str):
-            ranges.append((start, start + max(len(snippet.splitlines()) - 1, 0)))
+        # An EMPTY snippet (directory mappings) showed no line content:
+        # like tests, the path is known but carries no valid line evidence.
+        if isinstance(start, int) and isinstance(snippet, str) and snippet.splitlines():
+            ranges.append((start, start + len(snippet.splitlines()) - 1))
     return {path: tuple(ranges) for path, ranges in bounds.items()}
 
 

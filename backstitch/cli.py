@@ -425,6 +425,9 @@ def _packet_shape_error(row: dict[str, Any]) -> str | None:
             return f"missing or invalid `{field_name}`"
     if not row["packet_id"] or not row["instructions"]:
         return "`packet_id` and `instructions` must be non-empty"
+    if row["section_start_line"] < 1:
+        # Line numbers are 1-based; zero or negative is malformed input.
+        return "invalid `section_start_line`; expected an integer >= 1"
     for owner in row["owners"]:
         if (
             not isinstance(owner, dict)
@@ -432,9 +435,13 @@ def _packet_shape_error(row: dict[str, Any]) -> str | None:
             or not (owner.get("symbol") is None or isinstance(owner["symbol"], str))
             or isinstance(owner.get("start_line"), bool)
             or not isinstance(owner.get("start_line"), int)
+            or owner["start_line"] < 1
             or not isinstance(owner.get("snippet"), str)
         ):
-            return "invalid `owners` item; expected {path, symbol, start_line, snippet}"
+            return (
+                "invalid `owners` item; expected {path, symbol,"
+                " start_line >= 1, snippet}"
+            )
     if not all(isinstance(t, str) for t in row["tests"]):
         return "invalid `tests` item; expected strings"
     for issue in row["issues"]:

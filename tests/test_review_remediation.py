@@ -1174,3 +1174,44 @@ def test_llm_model_env_overrides_configured_model(
     monkeypatch.delenv("LLM_MODEL")
     assert resolve_model_name(None, configured="from-config") == "from-config"
     assert resolve_model_name(None, configured=None) is None
+
+
+# --- Round 11 P2: empty snippets carry no line evidence ----------------------
+
+
+def test_empty_owner_snippet_rejects_line_evidence() -> None:
+    from backstitch.analysis_llm import analyze_packets
+
+    # Directory mappings produce owners with empty snippets: the path was
+    # named, but no line content was shown -- same rule as tests.
+    packet = _full_packet(
+        owners=[{"path": "pkg/", "symbol": None, "start_line": 1, "snippet": ""}]
+    )
+    response = json.dumps(
+        {
+            "packet_id": packet["packet_id"],
+            "classification": "ok",
+            "summary": "fine",
+            "evidence": [{"path": "pkg/", "line": 1}],
+        }
+    )
+    rows, errors = analyze_packets([packet], lambda prompt: response)
+    assert rows[0]["classification"] == "ambiguous"
+    assert any("fabricated" in e for e in errors)
+
+
+# --- Round 11 P2: start lines must be positive --------------------------------
+
+
+def test_non_positive_start_lines_are_invocation_errors(tmp_path: Path) -> None:
+    zero_section = _full_packet(section_start_line=0)
+    result = _run_analyze(tmp_path, json.dumps(zero_section))
+    assert result.returncode == 2
+    assert "section_start_line" in result.stderr
+
+    zero_owner = _full_packet(
+        owners=[{"path": "p.py", "symbol": None, "start_line": 0, "snippet": "x"}]
+    )
+    result = _run_analyze(tmp_path, json.dumps(zero_owner))
+    assert result.returncode == 2
+    assert "owners" in result.stderr
