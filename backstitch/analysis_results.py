@@ -86,10 +86,16 @@ def validate_analysis_row(
     rationale = row.get("rationale", "")
     if not isinstance(rationale, str):
         return "invalid `rationale`; expected a string"
-    evidence_raw = row.get("evidence", [])
+    if confidence is None and not rationale.strip():
+        # The [SC-7] record contract requires a confidence OR rationale
+        # field; a row carrying neither is malformed, not low-effort.
+        return "missing `confidence` or `rationale`; rows must carry at least one"
+    evidence_raw = row.get("evidence")
     evidence: list[tuple[str, int]] = []
     if not isinstance(evidence_raw, list):
-        return "invalid `evidence`; expected a list"
+        # `evidence` is a required key (an empty list is a valid value:
+        # it states explicitly that no evidence is cited).
+        return "missing or invalid `evidence`; expected a list"
     for item in evidence_raw:
         if (
             not isinstance(item, dict)

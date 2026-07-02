@@ -671,6 +671,7 @@ def test_evidence_outside_packet_is_rejected() -> None:
             "packet_id": packet["packet_id"],
             "classification": "ok",
             "summary": "fine",
+            "rationale": "because",
             "evidence": [{"path": "not-in-packet.py", "line": 999}],
         }
     )
@@ -683,6 +684,7 @@ def test_evidence_outside_packet_is_rejected() -> None:
             "packet_id": packet["packet_id"],
             "classification": "ok",
             "summary": "fine",
+            "rationale": "because",
             "evidence": [{"path": "pkg/mod.py", "line": True}],
         }
     )
@@ -947,6 +949,7 @@ def test_evidence_line_outside_snippet_is_rejected() -> None:
                 "packet_id": packet["packet_id"],
                 "classification": "ok",
                 "summary": "fine",
+                "rationale": "because",
                 "evidence": [{"path": "pkg/mod.py", "line": line}],
             }
         )
@@ -1137,6 +1140,7 @@ def test_evidence_into_spec_text_and_tests_is_line_local() -> None:
                 "packet_id": packet["packet_id"],
                 "classification": "ok",
                 "summary": "fine",
+                "rationale": "because",
                 "evidence": [{"path": path, "line": line}],
             }
         )
@@ -1192,6 +1196,7 @@ def test_empty_owner_snippet_rejects_line_evidence() -> None:
             "packet_id": packet["packet_id"],
             "classification": "ok",
             "summary": "fine",
+            "rationale": "because",
             "evidence": [{"path": "pkg/", "line": 1}],
         }
     )
@@ -1257,6 +1262,7 @@ def test_empty_paths_never_become_evidence_paths() -> None:
             "packet_id": packet["packet_id"],
             "classification": "ok",
             "summary": "fine",
+            "rationale": "because",
             "evidence": [{"path": "", "line": 1}],
         }
     )
@@ -1295,6 +1301,7 @@ def test_summarize_rejects_empty_edge_locators(tmp_path: Path) -> None:
                 "packet_id": "#X-1",
                 "classification": "ok",
                 "summary": "fine",
+                "rationale": "because",
                 "evidence": [],
             }
         )
@@ -1335,6 +1342,7 @@ def test_whitespace_paths_never_become_evidence_paths() -> None:
             "packet_id": packet["packet_id"],
             "classification": "ok",
             "summary": "fine",
+            "rationale": "because",
             "evidence": [{"path": "   ", "line": 1}],
         }
     )
@@ -1414,7 +1422,131 @@ def test_in_range_confidence_is_still_accepted() -> None:
         "classification": "ok",
         "summary": "fine",
         "confidence": 0.85,
+        "evidence": [],
     }
     load = load_analysis_results(json.dumps(row), None)
     assert load.errors == ()
     assert load.results[0].confidence == 0.85
+
+
+# --- Round 14 P2: analysis rows must carry the full [SC-7] record ------------
+
+
+@pytest.mark.parametrize(
+    ("row", "fragment"),
+    [
+        # No confidence and no rationale: the contract requires one.
+        (
+            {"packet_id": "a#A-1", "classification": "ok", "summary": "s"},
+            "confidence",
+        ),
+        # Whitespace rationale is not a rationale.
+        (
+            {
+                "packet_id": "a#A-1",
+                "classification": "ok",
+                "summary": "s",
+                "rationale": "   ",
+            },
+            "confidence",
+        ),
+        # `evidence` is a required key (empty list is the explicit "none").
+        (
+            {
+                "packet_id": "a#A-1",
+                "classification": "ok",
+                "summary": "s",
+                "confidence": 0.5,
+            },
+            "evidence",
+        ),
+    ],
+)
+def test_incomplete_analysis_rows_are_rejected(row: dict, fragment: str) -> None:
+    from backstitch.analysis_results import load_analysis_results
+
+    load = load_analysis_results(json.dumps(row), None)
+    assert load.results == ()
+    assert len(load.errors) == 1
+    assert fragment in load.errors[0]
+
+
+def test_error_records_are_contract_shaped() -> None:
+    from backstitch.analysis_llm import analyze_packets, render_results_jsonl
+    from backstitch.analysis_results import load_analysis_results
+
+    # A model failure row must itself satisfy the [SC-7] record contract,
+    # or summarize-analysis would reject the very rows analyze wrote.
+    packet = _full_packet()
+    rows, errors = analyze_packets([packet], lambda prompt: "not json")
+    load = load_analysis_results(render_results_jsonl(rows), None)
+    assert load.errors == ()
+    assert load.results[0].classification == "ambiguous"
+
+
+# --- Round 14 P2: every packet locator goes through one validator -------------
+
+
+@pytest.mark.parametrize(
+    ("overrides", "fragment"),
+    [
+        ({"tests": ["   "]}, "tests"),
+        (
+            {"section_id": "not an id", "packet_id": "docs/specs/01-x.md#not an id"},
+            "section_id",
+        ),
+        (
+            {
+                "issues": [
+                    {
+                        "code": "SPEC_SECTION_UNMAPPED",
+                        "severity": "info",
+                        "message": "m",
+                        "path": "   ",
+                        "line": None,
+                        "section_id": None,
+                        "symbol": None,
+                    }
+                ]
+            },
+            "issues",
+        ),
+        (
+            {
+                "issues": [
+                    {
+                        "code": "SPEC_SECTION_UNMAPPED",
+                        "severity": "info",
+                        "message": "m",
+                        "path": "docs/specs/01-x.md",
+                        "line": None,
+                        "section_id": "not an id",
+                        "symbol": None,
+                    }
+                ]
+            },
+            "issues",
+        ),
+    ],
+)
+def test_malformed_packet_locators_fail_validation(
+    tmp_path: Path, overrides: dict, fragment: str
+) -> None:
+    result = _run_analyze(tmp_path, json.dumps(_full_packet(**overrides)))
+    assert result.returncode == 2
+    assert fragment in result.stderr
+
+
+def test_summarize_rejects_invalid_edge_section_id(tmp_path: Path) -> None:
+    report = _report_with_edge(spec_path="docs/specs/01-x.md", section_id="not an id")
+    _write(tmp_path, "report.json", json.dumps(report))
+    _write(tmp_path, "rows.jsonl", "")
+    result = run_cli(
+        "summarize-analysis",
+        "--deterministic-report",
+        str(tmp_path / "report.json"),
+        "--analysis-results",
+        str(tmp_path / "rows.jsonl"),
+    )
+    assert result.returncode == 2
+    assert "edges[0]" in result.stderr

@@ -26,6 +26,7 @@ from backstitch.exclusions import (
     collect_unused_ignore_warnings,
     should_suppress,
 )
+from backstitch.grammar import is_valid_section_id
 from backstitch.models import ISSUE_CODES, Issue, Report
 from backstitch.profiles import get_profile
 from backstitch.reporting import SuppressedRecord, render_json, render_text
@@ -424,6 +425,17 @@ _PACKET_FIELDS: tuple[tuple[str, type], ...] = (
 )
 
 
+def _is_path_locator(value: object) -> bool:
+    """A path locator is a non-blank string; blank means absent.
+
+    One predicate for every path a packet or report can name (spec paths,
+    owner paths, test paths, issue paths, report-edge paths), so no
+    spelling of "no path" slips through one check but not another.
+    """
+
+    return isinstance(value, str) and bool(value.strip())
+
+
 def _packet_shape_error(row: dict[str, Any]) -> str | None:
     """Return an [SC-6] contract violation description, or None if valid."""
 
@@ -433,10 +445,12 @@ def _packet_shape_error(row: dict[str, Any]) -> str | None:
             return f"missing or invalid `{field_name}`"
     if not row["packet_id"].strip() or not row["instructions"].strip():
         return "`packet_id` and `instructions` must be non-empty"
-    if not row["spec_path"].strip() or not row["section_id"].strip():
+    if not _is_path_locator(row["spec_path"]):
         # Empty or whitespace-only locators would leak into evidence
         # paths and packet IDs -- blank means absent.
         return "`spec_path` and `section_id` must be non-empty"
+    if not is_valid_section_id(row["section_id"]):
+        return "invalid `section_id`; expected a spec section ID"
     if row["packet_id"] != f"{row['spec_path']}#{row['section_id']}":
         # [SC-6]: results are addressed by packet_id, which is defined as
         # `spec_path#section_id`; a mismatch means the packet was edited.
@@ -447,8 +461,7 @@ def _packet_shape_error(row: dict[str, Any]) -> str | None:
     for owner in row["owners"]:
         if (
             not isinstance(owner, dict)
-            or not isinstance(owner.get("path"), str)
-            or not owner["path"].strip()
+            or not _is_path_locator(owner.get("path"))
             or not (owner.get("symbol") is None or isinstance(owner["symbol"], str))
             or isinstance(owner.get("start_line"), bool)
             or not isinstance(owner.get("start_line"), int)
@@ -459,8 +472,8 @@ def _packet_shape_error(row: dict[str, Any]) -> str | None:
                 "invalid `owners` item; expected {non-empty path, symbol,"
                 " start_line >= 1, snippet}"
             )
-    if not all(isinstance(t, str) for t in row["tests"]):
-        return "invalid `tests` item; expected strings"
+    if not all(_is_path_locator(t) for t in row["tests"]):
+        return "invalid `tests` item; expected non-empty path strings"
     for issue in row["issues"]:
         # [SC-11]: issue records carry a known code, a real severity, a
         # path locator, and correctly typed optional metadata --
@@ -470,11 +483,16 @@ def _packet_shape_error(row: dict[str, Any]) -> str | None:
             or issue.get("code") not in ISSUE_CODES
             or issue.get("severity") not in ("error", "warning", "info")
             or not isinstance(issue.get("message"), str)
-            or not isinstance(issue.get("path"), str)
-            or not issue["path"]
+            or not _is_path_locator(issue.get("path"))
             or isinstance(issue.get("line"), bool)
             or not isinstance(issue.get("line"), int | None)
-            or not isinstance(issue.get("section_id"), str | None)
+            or not (
+                issue.get("section_id") is None
+                or (
+                    isinstance(issue["section_id"], str)
+                    and is_valid_section_id(issue["section_id"])
+                )
+            )
             or not isinstance(issue.get("symbol"), str | None)
         ):
             return (
@@ -608,15 +626,14 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
         # malformed input with a named location, never an internal error.
         if (
             not isinstance(edge, dict)
-            or not isinstance(edge.get("spec_path"), str)
-            or not edge["spec_path"].strip()
+            or not _is_path_locator(edge.get("spec_path"))
             or not isinstance(edge.get("section_id"), str)
-            or not edge["section_id"].strip()
+            or not is_valid_section_id(edge["section_id"])
         ):
             msg = (
                 f"{args.deterministic_report}: not a backstitch deterministic"
-                f" report (invalid `edges[{position}]`: expected non-empty"
-                " spec_path and section_id strings)"
+                f" report (invalid `edges[{position}]`: expected a non-empty"
+                " spec_path and a valid section_id)"
             )
             raise ValueError(msg)
     load = load_analysis_results(

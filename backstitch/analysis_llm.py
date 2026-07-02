@@ -120,6 +120,8 @@ def _error_record(packet_id: str, message: str) -> dict[str, Any]:
         "packet_id": packet_id,
         "classification": "ambiguous",
         "summary": f"analysis error: {message}",
+        "rationale": message,
+        "evidence": [],
         "error": message,
     }
 
