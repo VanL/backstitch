@@ -1,0 +1,897 @@
+{
+  "profile": "backstitch-style-v1",
+  "repo_root": "/Users/van/Developer/backstitch/.worktrees/fable-5/tests/fixtures/traceability_project",
+  "summary": {
+    "spec_sections": 13,
+    "code_refs": 19,
+    "spec_mappings": 11,
+    "errors": 2,
+    "warnings": 13,
+    "infos": 11
+  },
+  "spec_sections": [
+    {
+      "path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-1",
+      "title": "Runtime Behaviour",
+      "line": 6,
+      "anchor": "runtime-behaviour-core-1",
+      "kind": "heading"
+    },
+    {
+      "path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-2",
+      "title": "Persistence Rules",
+      "line": 15,
+      "anchor": "persistence-rules-core-2",
+      "kind": "heading"
+    },
+    {
+      "path": "docs/specifications/01-Core.md",
+      "section_id": "CORE.2.1",
+      "title": "writes are atomic.",
+      "line": 19,
+      "anchor": null,
+      "kind": "invariant"
+    },
+    {
+      "path": "docs/specifications/01-Core.md",
+      "section_id": "CORE.2.2",
+      "title": "partial writes are never visible to readers.",
+      "line": 20,
+      "anchor": null,
+      "kind": "invariant"
+    },
+    {
+      "path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-3",
+      "title": "Reference Forms",
+      "line": 27,
+      "anchor": "reference-forms-core-3",
+      "kind": "heading"
+    },
+    {
+      "path": "docs/specifications/01-Core.md",
+      "section_id": "DUP-1",
+      "title": "Ambiguity Case Original",
+      "line": 32,
+      "anchor": "ambiguity-case-original-dup-1",
+      "kind": "heading"
+    },
+    {
+      "path": "docs/specifications/01A-Core_Planned.md",
+      "section_id": "CORE-P1",
+      "title": "Future Sharding",
+      "line": 5,
+      "anchor": "future-sharding-core-p1",
+      "kind": "heading"
+    },
+    {
+      "path": "docs/specifications/02-Weft_Style.md",
+      "section_id": "ROUTE-A1.1",
+      "title": "Advanced Routing",
+      "line": 9,
+      "anchor": "advanced-routing-route-a11",
+      "kind": "heading"
+    },
+    {
+      "path": "docs/specifications/02-Weft_Style.md",
+      "section_id": "LAYER-1",
+      "title": "Layered Mapping",
+      "line": 13,
+      "anchor": "layered-mapping-layer-1",
+      "kind": "heading"
+    },
+    {
+      "path": "docs/specifications/02-Weft_Style.md",
+      "section_id": "LAYER-1.1",
+      "title": "Persistence details",
+      "line": 18,
+      "anchor": null,
+      "kind": "bullet"
+    },
+    {
+      "path": "docs/specifications/02-Weft_Style.md",
+      "section_id": "DIRMAP-1",
+      "title": "Directory Ownership",
+      "line": 31,
+      "anchor": "directory-ownership-dirmap-1",
+      "kind": "heading"
+    },
+    {
+      "path": "docs/specifications/02-Weft_Style.md",
+      "section_id": "DUP-1",
+      "title": "Ambiguity Case Duplicate",
+      "line": 36,
+      "anchor": "ambiguity-case-duplicate-dup-1",
+      "kind": "heading"
+    },
+    {
+      "path": "docs/specifications/02-Weft_Style.md",
+      "section_id": "FENCE-1",
+      "title": "Fenced Examples",
+      "line": 40,
+      "anchor": "fenced-examples-fence-1",
+      "kind": "heading"
+    }
+  ],
+  "code_refs": [
+    {
+      "path": "src/ranges.py",
+      "owner_symbol": "module",
+      "line": 3,
+      "raw": "Spec: [CORE.2.1]-[CORE.2.2]",
+      "spec_path": null,
+      "section_ids": [],
+      "anchor": null,
+      "ranges": [
+        [
+          "CORE.2.1",
+          "CORE.2.2"
+        ]
+      ]
+    },
+    {
+      "path": "src/ranges.py",
+      "owner_symbol": "module",
+      "line": 6,
+      "raw": "- docs/specifications/01-Core.md [CORE-1], [CORE-2]",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_ids": [
+        "CORE-1",
+        "CORE-2"
+      ],
+      "anchor": null,
+      "ranges": []
+    },
+    {
+      "path": "src/ranges.py",
+      "owner_symbol": "compact_range",
+      "line": 11,
+      "raw": "Spec: [CORE.2.1-CORE.2.2]",
+      "spec_path": null,
+      "section_ids": [],
+      "anchor": null,
+      "ranges": [
+        [
+          "CORE.2.1",
+          "CORE.2.2"
+        ]
+      ]
+    },
+    {
+      "path": "src/ranges.py",
+      "owner_symbol": "comma_list",
+      "line": 16,
+      "raw": "Spec: [CORE-1, CORE-2]",
+      "spec_path": null,
+      "section_ids": [
+        "CORE-1",
+        "CORE-2"
+      ],
+      "anchor": null,
+      "ranges": []
+    },
+    {
+      "path": "src/ranges.py",
+      "owner_symbol": "ambiguous",
+      "line": 21,
+      "raw": "Spec: [DUP-1]",
+      "spec_path": null,
+      "section_ids": [
+        "DUP-1"
+      ],
+      "anchor": null,
+      "ranges": []
+    },
+    {
+      "path": "src/ranges.py",
+      "owner_symbol": "bad_range",
+      "line": 26,
+      "raw": "Spec: [CORE-1]-[LAYER-1]",
+      "spec_path": null,
+      "section_ids": [],
+      "anchor": null,
+      "ranges": [
+        [
+          "CORE-1",
+          "LAYER-1"
+        ]
+      ]
+    },
+    {
+      "path": "src/ranges.py",
+      "owner_symbol": "ghost",
+      "line": 31,
+      "raw": "Spec: [CORE-99]",
+      "spec_path": null,
+      "section_ids": [
+        "CORE-99"
+      ],
+      "anchor": null,
+      "ranges": []
+    },
+    {
+      "path": "src/ranges.py",
+      "owner_symbol": "prose_reference",
+      "line": 36,
+      "raw": "bootstrap and queue binding - see [CORE-3] for details",
+      "spec_path": null,
+      "section_ids": [
+        "CORE-3"
+      ],
+      "anchor": null,
+      "ranges": []
+    },
+    {
+      "path": "src/ranges.py",
+      "owner_symbol": "endash_range",
+      "line": 41,
+      "raw": "Spec: [CORE.2.1]\u2013[CORE.2.2]",
+      "spec_path": null,
+      "section_ids": [],
+      "anchor": null,
+      "ranges": [
+        [
+          "CORE.2.1",
+          "CORE.2.2"
+        ]
+      ]
+    },
+    {
+      "path": "src/ranges.py",
+      "owner_symbol": "indexing_noise",
+      "line": 46,
+      "raw": "shift window[N-1] left; unknown prefix N stays silent at resolution",
+      "spec_path": null,
+      "section_ids": [
+        "N-1"
+      ],
+      "anchor": null,
+      "ranges": []
+    },
+    {
+      "path": "src/runtime.py",
+      "owner_symbol": "module",
+      "line": 3,
+      "raw": "Spec: docs/specifications/01-Core.md [CORE-1]",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_ids": [
+        "CORE-1"
+      ],
+      "anchor": null,
+      "ranges": []
+    },
+    {
+      "path": "src/runtime.py",
+      "owner_symbol": "Runtime",
+      "line": 10,
+      "raw": "Spec: [CORE-1]",
+      "spec_path": null,
+      "section_ids": [
+        "CORE-1"
+      ],
+      "anchor": null,
+      "ranges": []
+    },
+    {
+      "path": "src/runtime.py",
+      "owner_symbol": "Runtime.frobnicate",
+      "line": 16,
+      "raw": "Spec: docs/specifications/01-Core.md [CORE-1]",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_ids": [
+        "CORE-1"
+      ],
+      "anchor": null,
+      "ranges": []
+    },
+    {
+      "path": "src/runtime.py",
+      "owner_symbol": "broad_reader",
+      "line": 33,
+      "raw": "Spec: docs/specifications/01-Core.md",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_ids": [],
+      "anchor": null,
+      "ranges": []
+    },
+    {
+      "path": "src/runtime.py",
+      "owner_symbol": "read_reference_docs",
+      "line": 41,
+      "raw": "Spec: docs/specifications/01-Core.md#persistence-rules-core-2",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_ids": [],
+      "anchor": "persistence-rules-core-2",
+      "ranges": []
+    },
+    {
+      "path": "src/runtime.py",
+      "owner_symbol": "Runtime.save",
+      "line": 21,
+      "raw": "Spec: docs/specifications/01-Core.md [CORE-2]",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_ids": [
+        "CORE-2"
+      ],
+      "anchor": null,
+      "ranges": []
+    },
+    {
+      "path": "src/runtime.py",
+      "owner_symbol": "plan_shards",
+      "line": 26,
+      "raw": "Spec: docs/specifications/01A-Core_Planned.md [CORE-P1]",
+      "spec_path": "docs/specifications/01A-Core_Planned.md",
+      "section_ids": [
+        "CORE-P1"
+      ],
+      "anchor": null,
+      "ranges": []
+    },
+    {
+      "path": "tests/test_runtime.py",
+      "owner_symbol": "module",
+      "line": 3,
+      "raw": "Spec: docs/specifications/01-Core.md [CORE-1]",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_ids": [
+        "CORE-1"
+      ],
+      "anchor": null,
+      "ranges": []
+    },
+    {
+      "path": "tests/test_runtime.py",
+      "owner_symbol": "test_frobnicate",
+      "line": 10,
+      "raw": "Spec: [CORE-1]",
+      "spec_path": null,
+      "section_ids": [
+        "CORE-1"
+      ],
+      "anchor": null,
+      "ranges": []
+    }
+  ],
+  "spec_mappings": [
+    {
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-1",
+      "line": 12,
+      "target": "src/runtime.py",
+      "kind": "path",
+      "target_path": "src/runtime.py",
+      "target_symbol": null
+    },
+    {
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-1",
+      "line": 13,
+      "target": "src/runtime.py::Runtime.frobnicate",
+      "kind": "path_symbol",
+      "target_path": "src/runtime.py",
+      "target_symbol": "Runtime.frobnicate"
+    },
+    {
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-2",
+      "line": 24,
+      "target": "src/missing_module.py",
+      "kind": "path",
+      "target_path": "src/missing_module.py",
+      "target_symbol": null
+    },
+    {
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-2",
+      "line": 25,
+      "target": "Runtime.save",
+      "kind": "symbol",
+      "target_path": null,
+      "target_symbol": "Runtime.save"
+    },
+    {
+      "spec_path": "docs/specifications/02-Weft_Style.md",
+      "section_id": "ROUTE-A1.1",
+      "line": 11,
+      "target": "src/runtime.py",
+      "kind": "path",
+      "target_path": "src/runtime.py",
+      "target_symbol": null
+    },
+    {
+      "spec_path": "docs/specifications/02-Weft_Style.md",
+      "section_id": "ROUTE-A1.1",
+      "line": 11,
+      "target": "Runtime",
+      "kind": "symbol",
+      "target_path": null,
+      "target_symbol": "Runtime"
+    },
+    {
+      "spec_path": "docs/specifications/02-Weft_Style.md",
+      "section_id": "ROUTE-A1.1",
+      "line": 11,
+      "target": "Runtime.frobnicate",
+      "kind": "symbol",
+      "target_path": null,
+      "target_symbol": "Runtime.frobnicate"
+    },
+    {
+      "spec_path": "docs/specifications/02-Weft_Style.md",
+      "section_id": "LAYER-1",
+      "line": 17,
+      "target": "src/runtime.py::Runtime.save",
+      "kind": "path_symbol",
+      "target_path": "src/runtime.py",
+      "target_symbol": "Runtime.save"
+    },
+    {
+      "spec_path": "docs/specifications/02-Weft_Style.md",
+      "section_id": "LAYER-1.1",
+      "line": 18,
+      "target": "src/runtime.py",
+      "kind": "path",
+      "target_path": "src/runtime.py",
+      "target_symbol": null
+    },
+    {
+      "spec_path": "docs/specifications/02-Weft_Style.md",
+      "section_id": "DIRMAP-1",
+      "line": 33,
+      "target": "src/",
+      "kind": "path",
+      "target_path": "src/",
+      "target_symbol": null
+    },
+    {
+      "spec_path": "docs/specifications/02-Weft_Style.md",
+      "section_id": "DIRMAP-1",
+      "line": 34,
+      "target": "frobnicate_all()",
+      "kind": "symbol",
+      "target_path": null,
+      "target_symbol": "frobnicate_all"
+    }
+  ],
+  "edges": [
+    {
+      "kind": "backlink",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-1",
+      "code_path": "src/ranges.py",
+      "code_symbol": "comma_list",
+      "line": 16
+    },
+    {
+      "kind": "backlink",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-1",
+      "code_path": "src/ranges.py",
+      "code_symbol": "module",
+      "line": 6
+    },
+    {
+      "kind": "backlink",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-1",
+      "code_path": "src/runtime.py",
+      "code_symbol": "Runtime",
+      "line": 10
+    },
+    {
+      "kind": "backlink",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-1",
+      "code_path": "src/runtime.py",
+      "code_symbol": "Runtime.frobnicate",
+      "line": 16
+    },
+    {
+      "kind": "backlink",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-1",
+      "code_path": "src/runtime.py",
+      "code_symbol": "module",
+      "line": 3
+    },
+    {
+      "kind": "backlink",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-1",
+      "code_path": "tests/test_runtime.py",
+      "code_symbol": "module",
+      "line": 3
+    },
+    {
+      "kind": "backlink",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-1",
+      "code_path": "tests/test_runtime.py",
+      "code_symbol": "test_frobnicate",
+      "line": 10
+    },
+    {
+      "kind": "mapping",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-1",
+      "code_path": "src/runtime.py",
+      "code_symbol": null,
+      "line": 12
+    },
+    {
+      "kind": "mapping",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-1",
+      "code_path": "src/runtime.py",
+      "code_symbol": "Runtime.frobnicate",
+      "line": 13
+    },
+    {
+      "kind": "backlink",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-2",
+      "code_path": "src/ranges.py",
+      "code_symbol": "comma_list",
+      "line": 16
+    },
+    {
+      "kind": "backlink",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-2",
+      "code_path": "src/ranges.py",
+      "code_symbol": "module",
+      "line": 6
+    },
+    {
+      "kind": "backlink",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-2",
+      "code_path": "src/runtime.py",
+      "code_symbol": "Runtime.save",
+      "line": 21
+    },
+    {
+      "kind": "backlink",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-2",
+      "code_path": "src/runtime.py",
+      "code_symbol": "read_reference_docs",
+      "line": 41
+    },
+    {
+      "kind": "backlink",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE-3",
+      "code_path": "src/ranges.py",
+      "code_symbol": "prose_reference",
+      "line": 36
+    },
+    {
+      "kind": "backlink",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE.2.1",
+      "code_path": "src/ranges.py",
+      "code_symbol": "compact_range",
+      "line": 11
+    },
+    {
+      "kind": "backlink",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE.2.1",
+      "code_path": "src/ranges.py",
+      "code_symbol": "endash_range",
+      "line": 41
+    },
+    {
+      "kind": "backlink",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE.2.1",
+      "code_path": "src/ranges.py",
+      "code_symbol": "module",
+      "line": 3
+    },
+    {
+      "kind": "backlink",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE.2.2",
+      "code_path": "src/ranges.py",
+      "code_symbol": "compact_range",
+      "line": 11
+    },
+    {
+      "kind": "backlink",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE.2.2",
+      "code_path": "src/ranges.py",
+      "code_symbol": "endash_range",
+      "line": 41
+    },
+    {
+      "kind": "backlink",
+      "spec_path": "docs/specifications/01-Core.md",
+      "section_id": "CORE.2.2",
+      "code_path": "src/ranges.py",
+      "code_symbol": "module",
+      "line": 3
+    },
+    {
+      "kind": "backlink",
+      "spec_path": "docs/specifications/01A-Core_Planned.md",
+      "section_id": "CORE-P1",
+      "code_path": "src/runtime.py",
+      "code_symbol": "plan_shards",
+      "line": 26
+    },
+    {
+      "kind": "mapping",
+      "spec_path": "docs/specifications/02-Weft_Style.md",
+      "section_id": "DIRMAP-1",
+      "code_path": "src/",
+      "code_symbol": null,
+      "line": 33
+    },
+    {
+      "kind": "mapping",
+      "spec_path": "docs/specifications/02-Weft_Style.md",
+      "section_id": "LAYER-1",
+      "code_path": "src/runtime.py",
+      "code_symbol": "Runtime.save",
+      "line": 17
+    },
+    {
+      "kind": "mapping",
+      "spec_path": "docs/specifications/02-Weft_Style.md",
+      "section_id": "LAYER-1.1",
+      "code_path": "src/runtime.py",
+      "code_symbol": null,
+      "line": 18
+    },
+    {
+      "kind": "mapping",
+      "spec_path": "docs/specifications/02-Weft_Style.md",
+      "section_id": "ROUTE-A1.1",
+      "code_path": "src/runtime.py",
+      "code_symbol": null,
+      "line": 11
+    }
+  ],
+  "issues": [
+    {
+      "code": "MAPPING_PATH_MISSING",
+      "severity": "error",
+      "path": "docs/specifications/01-Core.md",
+      "line": 24,
+      "message": "mapping path `src/missing_module.py` does not exist",
+      "section_id": "CORE-2",
+      "symbol": null
+    },
+    {
+      "code": "REF_RANGE_UNSUPPORTED",
+      "severity": "error",
+      "path": "src/ranges.py",
+      "line": 26,
+      "message": "range [CORE-1]-[LAYER-1] does not share a common prefix",
+      "section_id": null,
+      "symbol": "bad_range"
+    },
+    {
+      "code": "MAPPING_SYMBOL_UNRESOLVED",
+      "severity": "warning",
+      "path": "docs/specifications/01-Core.md",
+      "line": 25,
+      "message": "bare mapping symbol `Runtime.save` is advisory; v1 does not infer its file",
+      "section_id": "CORE-2",
+      "symbol": "Runtime.save"
+    },
+    {
+      "code": "SPEC_SECTION_DUPLICATE",
+      "severity": "warning",
+      "path": "docs/specifications/01-Core.md",
+      "line": 32,
+      "message": "section ID [DUP-1] is defined more than once: docs/specifications/01-Core.md:32, docs/specifications/02-Weft_Style.md:36",
+      "section_id": "DUP-1",
+      "symbol": null
+    },
+    {
+      "code": "CODE_BACKLINK_MISSING",
+      "severity": "warning",
+      "path": "docs/specifications/02-Weft_Style.md",
+      "line": 9,
+      "message": "section [ROUTE-A1.1] is mapped to code but no code backlink points to it",
+      "section_id": "ROUTE-A1.1",
+      "symbol": null
+    },
+    {
+      "code": "MAPPING_SYMBOL_UNRESOLVED",
+      "severity": "warning",
+      "path": "docs/specifications/02-Weft_Style.md",
+      "line": 11,
+      "message": "bare mapping symbol `Runtime.frobnicate` is advisory; v1 does not infer its file",
+      "section_id": "ROUTE-A1.1",
+      "symbol": "Runtime.frobnicate"
+    },
+    {
+      "code": "MAPPING_SYMBOL_UNRESOLVED",
+      "severity": "warning",
+      "path": "docs/specifications/02-Weft_Style.md",
+      "line": 11,
+      "message": "bare mapping symbol `Runtime` is advisory; v1 does not infer its file",
+      "section_id": "ROUTE-A1.1",
+      "symbol": "Runtime"
+    },
+    {
+      "code": "CODE_BACKLINK_MISSING",
+      "severity": "warning",
+      "path": "docs/specifications/02-Weft_Style.md",
+      "line": 13,
+      "message": "section [LAYER-1] is mapped to code but no code backlink points to it",
+      "section_id": "LAYER-1",
+      "symbol": null
+    },
+    {
+      "code": "CODE_BACKLINK_MISSING",
+      "severity": "warning",
+      "path": "docs/specifications/02-Weft_Style.md",
+      "line": 18,
+      "message": "section [LAYER-1.1] is mapped to code but no code backlink points to it",
+      "section_id": "LAYER-1.1",
+      "symbol": null
+    },
+    {
+      "code": "CODE_BACKLINK_MISSING",
+      "severity": "warning",
+      "path": "docs/specifications/02-Weft_Style.md",
+      "line": 31,
+      "message": "section [DIRMAP-1] is mapped to code but no code backlink points to it",
+      "section_id": "DIRMAP-1",
+      "symbol": null
+    },
+    {
+      "code": "MAPPING_SYMBOL_UNRESOLVED",
+      "severity": "warning",
+      "path": "docs/specifications/02-Weft_Style.md",
+      "line": 34,
+      "message": "bare mapping symbol `frobnicate_all()` is advisory; v1 does not infer its file",
+      "section_id": "DIRMAP-1",
+      "symbol": "frobnicate_all"
+    },
+    {
+      "code": "SPEC_SECTION_AMBIGUOUS",
+      "severity": "warning",
+      "path": "src/ranges.py",
+      "line": 21,
+      "message": "bare reference [DUP-1] is ambiguous: docs/specifications/01-Core.md:32, docs/specifications/02-Weft_Style.md:36",
+      "section_id": "DUP-1",
+      "symbol": "ambiguous"
+    },
+    {
+      "code": "CODE_REF_BARE_UNRESOLVED",
+      "severity": "warning",
+      "path": "src/ranges.py",
+      "line": 31,
+      "message": "bare reference [CORE-99] matches no known section",
+      "section_id": "CORE-99",
+      "symbol": "ghost"
+    },
+    {
+      "code": "CODE_REF_PLANNED_SPEC",
+      "severity": "warning",
+      "path": "src/runtime.py",
+      "line": 26,
+      "message": "shipped code references planned spec `docs/specifications/01A-Core_Planned.md`",
+      "section_id": "CORE-P1",
+      "symbol": "plan_shards"
+    },
+    {
+      "code": "CODE_REF_BROAD",
+      "severity": "warning",
+      "path": "src/runtime.py",
+      "line": 33,
+      "message": "document-only reference to `docs/specifications/01-Core.md`; prefer an exact section ID",
+      "section_id": null,
+      "symbol": "broad_reader"
+    },
+    {
+      "code": "SPEC_SECTION_UNMAPPED",
+      "severity": "info",
+      "path": "docs/specifications/01-Core.md",
+      "line": 19,
+      "message": "section [CORE.2.1] has no implementation mapping",
+      "section_id": "CORE.2.1",
+      "symbol": null
+    },
+    {
+      "code": "SPEC_SECTION_UNMAPPED",
+      "severity": "info",
+      "path": "docs/specifications/01-Core.md",
+      "line": 20,
+      "message": "section [CORE.2.2] has no implementation mapping",
+      "section_id": "CORE.2.2",
+      "symbol": null
+    },
+    {
+      "code": "SPEC_SECTION_UNMAPPED",
+      "severity": "info",
+      "path": "docs/specifications/01-Core.md",
+      "line": 27,
+      "message": "section [CORE-3] has no implementation mapping",
+      "section_id": "CORE-3",
+      "symbol": null
+    },
+    {
+      "code": "SPEC_SECTION_UNMAPPED",
+      "severity": "info",
+      "path": "docs/specifications/01-Core.md",
+      "line": 32,
+      "message": "section [DUP-1] has no implementation mapping",
+      "section_id": "DUP-1",
+      "symbol": null
+    },
+    {
+      "code": "SPEC_SECTION_UNMAPPED",
+      "severity": "info",
+      "path": "docs/specifications/01A-Core_Planned.md",
+      "line": 5,
+      "message": "section [CORE-P1] has no implementation mapping",
+      "section_id": "CORE-P1",
+      "symbol": null
+    },
+    {
+      "code": "SPEC_SECTION_UNMAPPED",
+      "severity": "info",
+      "path": "docs/specifications/02-Weft_Style.md",
+      "line": 36,
+      "message": "section [DUP-1] has no implementation mapping",
+      "section_id": "DUP-1",
+      "symbol": null
+    },
+    {
+      "code": "SPEC_SECTION_UNMAPPED",
+      "severity": "info",
+      "path": "docs/specifications/02-Weft_Style.md",
+      "line": 40,
+      "message": "section [FENCE-1] has no implementation mapping",
+      "section_id": "FENCE-1",
+      "symbol": null
+    },
+    {
+      "code": "CODE_REF_UNMAPPED_FROM_SPEC",
+      "severity": "info",
+      "path": "src/ranges.py",
+      "line": 6,
+      "message": "code cites [CORE-1] but is not in that section's implementation mapping",
+      "section_id": "CORE-1",
+      "symbol": "module"
+    },
+    {
+      "code": "CODE_REF_UNMAPPED_FROM_SPEC",
+      "severity": "info",
+      "path": "src/ranges.py",
+      "line": 16,
+      "message": "code cites [CORE-1] but is not in that section's implementation mapping",
+      "section_id": "CORE-1",
+      "symbol": "comma_list"
+    },
+    {
+      "code": "CODE_REF_UNMAPPED_FROM_SPEC",
+      "severity": "info",
+      "path": "tests/test_runtime.py",
+      "line": 3,
+      "message": "code cites [CORE-1] but is not in that section's implementation mapping",
+      "section_id": "CORE-1",
+      "symbol": "module"
+    },
+    {
+      "code": "CODE_REF_UNMAPPED_FROM_SPEC",
+      "severity": "info",
+      "path": "tests/test_runtime.py",
+      "line": 10,
+      "message": "code cites [CORE-1] but is not in that section's implementation mapping",
+      "section_id": "CORE-1",
+      "symbol": "test_frobnicate"
+    }
+  ]
+}
