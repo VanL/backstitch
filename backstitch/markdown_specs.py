@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from backstitch.exclusions import parse_traceability_marker_line
 from backstitch.grammar import SECTION_ID
 from backstitch.models import Issue, MappingKind, SpecMapping, SpecSection
 
@@ -37,13 +38,23 @@ _ANCHOR_STRIP_RE = re.compile(r"[^\w\s-]", re.UNICODE)
 
 @dataclass(frozen=True, slots=True)
 class ParsedSpec:
-    """Parse result for one Markdown spec file."""
+    """Parse result for one Markdown spec file.
+
+    Traceability markers ([EXC-4]) ride along: ``file_meta``/``file_ignores``
+    from the pre-heading preamble, ``section_markers`` as
+    ``(section_id, is_meta, ignore_codes)`` for markers following a section
+    definition.
+    """
 
     path: str
     sections: tuple[SpecSection, ...]
     mappings: tuple[SpecMapping, ...]
     anchors: tuple[str, ...]
     issues: tuple[Issue, ...] = ()
+    file_meta: bool = False
+    file_ignores: frozenset[str] = frozenset()
+    section_markers: tuple[tuple[str, bool, frozenset[str]], ...] = ()
+    marker_warnings: tuple[str, ...] = ()
 
 
 def github_anchor(heading_text: str, seen: dict[str, int]) -> str:
@@ -79,7 +90,12 @@ def classify_mapping_token(token: str) -> tuple[MappingKind, str | None, str | N
     return "symbol", None, token.removesuffix("()")
 
 
-def parse_markdown_spec(file_path: Path, repo_root: Path) -> ParsedSpec:
+def parse_markdown_spec(
+    file_path: Path,
+    repo_root: Path,
+    *,
+    allow_unknown_codes: bool = False,
+) -> ParsedSpec:
     """Parse one spec file into sections, mappings, and anchor targets."""
 
     rel_path = file_path.resolve().relative_to(repo_root.resolve()).as_posix()
@@ -90,6 +106,10 @@ def parse_markdown_spec(file_path: Path, repo_root: Path) -> ParsedSpec:
     anchors: list[str] = []
     issues: list[Issue] = []
     anchor_seen: dict[str, int] = {}
+    file_meta = False
+    file_ignores: set[str] = set()
+    section_markers: dict[str, tuple[bool, set[str]]] = {}
+    marker_warnings: list[str] = []
 
     # Mapping blocks attach to the nearest preceding heading section.
     # Invariant bullets define sections but never own mapping blocks: a
@@ -150,6 +170,28 @@ def parse_markdown_spec(file_path: Path, repo_root: Path) -> ParsedSpec:
                 fence_marker = None
             continue
         if fence_marker is not None:
+            continue
+        # [EXC-4] traceability markers: file preamble before the first
+        # section, section-scoped after one; fenced content never counts.
+        is_meta, marker_codes, warnings = parse_traceability_marker_line(
+            line,
+            allow_unknown=allow_unknown_codes,
+            location=f"{rel_path}:{line_no}",
+        )
+        marker_warnings.extend(warnings)
+        if is_meta or marker_codes:
+            if not sections:
+                file_meta = file_meta or is_meta
+                file_ignores.update(marker_codes if not is_meta else ())
+            else:
+                target = sections[-1].section_id
+                meta_flag, codes = section_markers.setdefault(
+                    target, (False, set())
+                )
+                section_markers[target] = (
+                    meta_flag or is_meta,
+                    codes | (marker_codes if not is_meta else set()),
+                )
             continue
         heading = _HEADING_RE.match(line)
         if heading:
@@ -236,4 +278,11 @@ def parse_markdown_spec(file_path: Path, repo_root: Path) -> ParsedSpec:
         mappings=tuple(mappings),
         anchors=tuple(anchors),
         issues=tuple(issues),
+        file_meta=file_meta,
+        file_ignores=frozenset(file_ignores),
+        section_markers=tuple(
+            (section_id, meta_flag, frozenset(codes))
+            for section_id, (meta_flag, codes) in sorted(section_markers.items())
+        ),
+        marker_warnings=tuple(marker_warnings),
     )

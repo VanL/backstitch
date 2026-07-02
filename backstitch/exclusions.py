@@ -72,6 +72,9 @@ class SuppressionIndex:
     )
     inline_file_ignores: dict[str, frozenset[str]] = field(default_factory=dict)
     inline_code_ignores: dict[str, frozenset[str]] = field(default_factory=dict)
+    inline_code_span_ignores: dict[
+        str, tuple[tuple[int, int, frozenset[str]], ...]
+    ] = field(default_factory=dict)
     used_config_file_rules: set[str] = field(default_factory=set)
     used_config_section_rules: set[str] = field(default_factory=set)
     suppression_warnings: list[str] = field(default_factory=list)
@@ -305,6 +308,16 @@ def should_suppress(
         if issue.code in code_codes:
             suppressed = True
             reason = SuppressionReason.INLINE_CODE
+        # [EXC-5] comment form: statement-scoped -- the issue's line must
+        # fall inside the span the directive attached to.
+        if issue.line is not None:
+            for start, end, codes in index.inline_code_span_ignores.get(
+                resolved_code_file, ()
+            ):
+                if start <= issue.line <= end and issue.code in codes:
+                    suppressed = True
+                    reason = SuppressionReason.INLINE_CODE
+                    break
 
     return suppressed, reason
 
@@ -317,6 +330,10 @@ def build_suppression_index(
     inline_file_ignores: dict[str, frozenset[str]] | None = None,
     inline_spec_ignores: dict[tuple[str, str], frozenset[str]] | None = None,
     inline_code_ignores: dict[str, frozenset[str]] | None = None,
+    inline_code_span_ignores: dict[
+        str, tuple[tuple[int, int, frozenset[str]], ...]
+    ]
+    | None = None,
     marker_warnings: list[str] | None = None,
     allow_unknown: bool = False,
 ) -> SuppressionIndex:
@@ -327,6 +344,7 @@ def build_suppression_index(
         inline_spec_ignores=dict(inline_spec_ignores or {}),
         inline_file_ignores=dict(inline_file_ignores or {}),
         inline_code_ignores=dict(inline_code_ignores or {}),
+        inline_code_span_ignores=dict(inline_code_span_ignores or {}),
     )
     if marker_warnings:
         index.suppression_warnings.extend(marker_warnings)

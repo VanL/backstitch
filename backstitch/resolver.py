@@ -732,19 +732,55 @@ def _walkable(path: Path, root: Path) -> bool:
     return not any(part.startswith(".") or part == "__pycache__" for part in parts)
 
 
+@dataclass(frozen=True, slots=True)
+class ScanArtifacts:
+    """Suppression inputs gathered during the scan ([EXC-4], [EXC-5]).
+
+    These feed ``backstitch.exclusions.build_suppression_index``; they are
+    scan by-products, deliberately not part of the [SC-6] report contract.
+    """
+
+    section_meta: dict[tuple[str, str], bool]
+    inline_file_ignores: dict[str, frozenset[str]]
+    inline_spec_ignores: dict[tuple[str, str], frozenset[str]]
+    inline_code_ignores: dict[str, frozenset[str]]
+    inline_code_span_ignores: dict[str, tuple[tuple[int, int, frozenset[str]], ...]]
+    marker_warnings: tuple[str, ...]
+
+
 def scan_repository(
     repo_root: Path,
     profile: ProfileConfig,
     exclude_globs: tuple[str, ...] = (),
+    *,
+    allow_unknown_suppression_codes: bool = False,
 ) -> Report:
     """Scan a target repository and resolve its trace graph.
 
     Raises ``ScanError`` when the repo root itself is unusable; missing
     configured roots become ``SCAN_ROOT_MISSING`` error findings instead.
     ``exclude_globs`` are scan-boundary skips ([CFG-6.7]); settings merge
-    defaults and ``extend_exclude`` before calling (Task 12 wiring) -- the
-    profile itself carries no exclude state.
+    defaults and ``extend_exclude`` before calling -- the profile itself
+    carries no exclude state.
     """
+
+    report, _artifacts = scan_repository_with_artifacts(
+        repo_root,
+        profile,
+        exclude_globs,
+        allow_unknown_suppression_codes=allow_unknown_suppression_codes,
+    )
+    return report
+
+
+def scan_repository_with_artifacts(
+    repo_root: Path,
+    profile: ProfileConfig,
+    exclude_globs: tuple[str, ...] = (),
+    *,
+    allow_unknown_suppression_codes: bool = False,
+) -> tuple[Report, ScanArtifacts]:
+    """``scan_repository`` plus the suppression inputs the CLI needs."""
 
     root = repo_root.resolve()
     if not root.is_dir():
@@ -799,12 +835,24 @@ def scan_repository(
 
     for path in collect(profile.spec_roots, "*.md"):
         try:
-            parsed_specs.append(parse_markdown_spec(path, root))
+            parsed_specs.append(
+                parse_markdown_spec(
+                    path,
+                    root,
+                    allow_unknown_codes=allow_unknown_suppression_codes,
+                )
+            )
         except (OSError, UnicodeDecodeError) as exc:
             unreadable(path, exc)
     for path in collect(profile.code_roots, "*.py"):
         try:
-            parsed_python.append(parse_python_file(path, root))
+            parsed_python.append(
+                parse_python_file(
+                    path,
+                    root,
+                    allow_unknown_codes=allow_unknown_suppression_codes,
+                )
+            )
         except (OSError, UnicodeDecodeError) as exc:
             unreadable(path, exc)
 
@@ -842,7 +890,7 @@ def scan_repository(
                     root / inventory_target
                 )
 
-    return resolve(
+    report = resolve(
         profile=profile,
         repo_root=str(root),
         parsed_specs=parsed_specs,
@@ -851,4 +899,36 @@ def scan_repository(
         mapping_path_exists=mapping_path_exists,
         python_symbols=python_symbols,
         scan_files=scan_files,
+    )
+
+    section_meta: dict[tuple[str, str], bool] = {}
+    inline_file_ignores: dict[str, frozenset[str]] = {}
+    inline_spec_ignores: dict[tuple[str, str], frozenset[str]] = {}
+    marker_warnings: list[str] = []
+    for spec in parsed_specs:
+        marker_warnings.extend(spec.marker_warnings)
+        if spec.file_meta:
+            for section in spec.sections:
+                section_meta[(spec.path, section.section_id)] = True
+        if spec.file_ignores:
+            inline_file_ignores[spec.path] = spec.file_ignores
+        for section_id, is_meta, codes in spec.section_markers:
+            if is_meta:
+                section_meta[(spec.path, section_id)] = True
+            if codes:
+                inline_spec_ignores[(spec.path, section_id)] = codes
+    inline_code_ignores = {
+        p.path: p.module_noqa for p in parsed_python if p.module_noqa
+    }
+    inline_code_span_ignores = {
+        p.path: p.span_noqa for p in parsed_python if p.span_noqa
+    }
+
+    return report, ScanArtifacts(
+        section_meta=section_meta,
+        inline_file_ignores=inline_file_ignores,
+        inline_spec_ignores=inline_spec_ignores,
+        inline_code_ignores=inline_code_ignores,
+        inline_code_span_ignores=inline_code_span_ignores,
+        marker_warnings=tuple(marker_warnings),
     )

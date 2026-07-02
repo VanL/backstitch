@@ -10,9 +10,14 @@ audit trail is the anti-pattern the exclusions spec exists to prevent.
 
 from __future__ import annotations
 
+import dataclasses
 import json
+from collections.abc import Sequence
 
 from backstitch.models import Issue, Report
+
+SuppressedRecord = tuple[Issue, str]
+"""One suppressed finding plus its reason ([EXC-7])."""
 
 _SEVERITY_ORDER = ("error", "warning", "info")
 _GROUP_TITLES = {"error": "errors", "warning": "warnings", "info": "infos"}
@@ -24,8 +29,14 @@ def _issue_line(issue: Issue) -> str:
     return f"  {location} [{issue.code}] {issue.message}{suffix}"
 
 
-def render_text(report: Report) -> str:
-    """Render a stable, grouped text report."""
+def render_text(
+    report: Report, suppressed: Sequence[SuppressedRecord] | None = None
+) -> str:
+    """Render a stable, grouped text report.
+
+    ``suppressed`` is the ``--show-suppressions`` view ([EXC-7]): omitted by
+    default, appended as its own group with reasons when provided.
+    """
 
     summary = report.summary()
     lines = [
@@ -51,10 +62,29 @@ def render_text(report: Report) -> str:
         lines.append("")
         lines.append(f"{_GROUP_TITLES[severity]}:")
         lines.extend(_issue_line(issue) for issue in group)
+    if suppressed is not None and suppressed:
+        lines.append("")
+        lines.append(f"suppressed ({len(suppressed)}):")
+        lines.extend(
+            f"{_issue_line(issue)} [suppressed: {reason}]"
+            for issue, reason in suppressed
+        )
     return "\n".join(lines) + "\n"
 
 
-def render_json(report: Report) -> str:
-    """Render the exact [SC-6] JSON report contract."""
+def render_json(
+    report: Report, suppressed: Sequence[SuppressedRecord] | None = None
+) -> str:
+    """Render the exact [SC-6] JSON report contract.
 
-    return json.dumps(report.to_dict(), indent=2) + "\n"
+    With ``suppressed`` provided, the payload gains the [EXC-7]
+    ``suppressed_issues`` collection (issue fields plus ``reason``).
+    """
+
+    payload = report.to_dict()
+    if suppressed is not None:
+        payload["suppressed_issues"] = [
+            {**dataclasses.asdict(issue), "reason": reason}
+            for issue, reason in suppressed
+        ]
+    return json.dumps(payload, indent=2) + "\n"

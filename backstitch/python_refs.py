@@ -19,6 +19,7 @@ import tokenize
 from dataclasses import dataclass
 from pathlib import Path
 
+from backstitch.exclusions import parse_noqa_text
 from backstitch.grammar import SECTION_ID
 from backstitch.models import CodeRef, Issue, RefContext
 
@@ -37,11 +38,19 @@ _DASH_CHARS = "-–—"
 
 @dataclass(frozen=True, slots=True)
 class ParsedPython:
-    """Parse result for one Python file."""
+    """Parse result for one Python file.
+
+    ``module_noqa`` holds codes suppressed for the whole file (docstring
+    form, [EXC-5]); ``span_noqa`` holds ``(start, end, codes)`` for
+    comment-form directives, scoped to the NEXT STATEMENT only -- file-wide
+    bleed of a comment directive is the [EXC-9] regression class.
+    """
 
     path: str
     refs: tuple[CodeRef, ...]
     issues: tuple[Issue, ...]
+    module_noqa: frozenset[str] = frozenset()
+    span_noqa: tuple[tuple[int, int, frozenset[str]], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,7 +247,35 @@ def python_symbol_inventory(file_path: Path) -> frozenset[str] | None:
     return frozenset(qualname for qualname, _, _, _ in _iter_owner_spans(tree))
 
 
-def parse_python_file(file_path: Path, repo_root: Path) -> ParsedPython:
+def _statement_spans(tree: ast.Module) -> list[tuple[int, int]]:
+    """(start, end) line spans for every statement, sorted by start."""
+
+    spans = [
+        (node.lineno, node.end_lineno or node.lineno)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.stmt)
+    ]
+    spans.sort()
+    return spans
+
+
+def _next_statement_span(
+    line_no: int, spans: list[tuple[int, int]]
+) -> tuple[int, int] | None:
+    """The span the [EXC-5] comment form attaches to: the next statement."""
+
+    for start, end in spans:
+        if start > line_no:
+            return (start, end)
+    return None
+
+
+def parse_python_file(
+    file_path: Path,
+    repo_root: Path,
+    *,
+    allow_unknown_codes: bool = False,
+) -> ParsedPython:
     """Parse one Python file into code refs, or a syntax-error issue."""
 
     rel_path = file_path.resolve().relative_to(repo_root.resolve()).as_posix()
@@ -288,6 +325,18 @@ def parse_python_file(file_path: Path, repo_root: Path) -> ParsedPython:
         for offset, text_line in enumerate(str(docstring.value).splitlines()):
             emit(owner, docstring.lineno + offset, text_line, "docstring")
 
+    # [EXC-5] module-docstring noqa: file-scoped suppression codes.
+    module_doc = _docstring_node(tree)
+    module_noqa = (
+        parse_noqa_text(
+            str(module_doc.value),
+            allow_unknown=allow_unknown_codes,
+            location=f"{rel_path} module docstring",
+        )
+        if module_doc is not None
+        else frozenset()
+    )
+
     # Comments, with the innermost enclosing owner.
     def owner_for_line(line_no: int) -> str:
         best: str | None = None
@@ -299,9 +348,22 @@ def parse_python_file(file_path: Path, repo_root: Path) -> ParsedPython:
                     best, best_size = qualname, size
         return best or "module"
 
+    statement_spans = _statement_spans(tree)
+    span_noqa: list[tuple[int, int, frozenset[str]]] = []
     for token in tokenize.generate_tokens(io.StringIO(source).readline):
         if token.type == tokenize.COMMENT:
             comment_text = token.string.lstrip("#").strip()
+            codes = parse_noqa_text(
+                comment_text,
+                allow_unknown=allow_unknown_codes,
+                location=f"{rel_path}:{token.start[0]}",
+            )
+            if codes:
+                # [EXC-5] comment form: next statement only, never file-wide.
+                span = _next_statement_span(token.start[0], statement_spans)
+                if span is not None:
+                    span_noqa.append((span[0], span[1], codes))
+                continue
             emit(
                 owner_for_line(token.start[0]),
                 token.start[0],
@@ -309,4 +371,10 @@ def parse_python_file(file_path: Path, repo_root: Path) -> ParsedPython:
                 "comment",
             )
 
-    return ParsedPython(path=rel_path, refs=tuple(refs), issues=())
+    return ParsedPython(
+        path=rel_path,
+        refs=tuple(refs),
+        issues=(),
+        module_noqa=module_noqa,
+        span_noqa=tuple(span_noqa),
+    )
