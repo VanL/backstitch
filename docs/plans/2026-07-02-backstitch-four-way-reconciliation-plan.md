@@ -1,6 +1,6 @@
 # Backstitch Four-Way Reconciliation Plan
 
-Status: active  
+Status: implemented (pending independent review)  
 Supersedes (for implementation):  
 `docs/plans/2026-06-18-backstitch-style-spec-code-traceability-tool-plan.md` (deterministic + semantic body),  
 `docs/plans/2026-07-01-backstitch-toml-configuration-plan.md` (archival),  
@@ -191,7 +191,9 @@ These must remain true throughout:
 
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |----------|------------------|-----------------|-----------|---------------|
-| *(empty at plan start — append a row only when implementation behavior diverges from the baseline spec; sequencing notes and open questions belong in task text or Out of Scope, not here)* | | | | |
+| [EXC-*] mapping blocks | Spec 04 shipped without `_Implementation mapping_` blocks | Blocks added to [EXC-1]..[EXC-10] during the Task 17 dogfood burn-down | Documentation traceability (same class as Task 20 backlinks), not a requirements change; without them every module backlink to [EXC-*] warned | none needed |
+| [SC-4] ID-less subheadings | Unstated | Deeper ID-less subheadings (`### 6.7` inside `## 6 [CFG-6]`) retain mapping-block ownership; same-or-shallower ones clear it | Real specs put subsections between an ID heading and its mapping block; the dogfood run surfaced the case | propose one clarifying sentence for [SC-4] at review |
+| [SC-5] analyze `--output` | Usage examples always pass `--output` | `--output` optional; results JSONL to stdout by default | Fable's CLI contract and its ported tests; the spec text is an example, not a prohibition | none needed |
 
 ## Tasks
 
