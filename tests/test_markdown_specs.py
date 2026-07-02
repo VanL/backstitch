@@ -158,6 +158,25 @@ def test_tilde_fences_are_skipped(tmp_path: Path) -> None:
     assert [s.section_id for s in parsed.sections] == ["T-1"]
 
 
+def test_deeper_idless_subheading_keeps_mapping_ownership(
+    tmp_path: Path,
+) -> None:
+    # [SC-4]: a deeper ID-less subheading between an ID heading and its
+    # mapping block is prose structure, not a new owner; same-or-shallower
+    # ID-less headings clear ownership (see the ownerless tests below).
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "# T\n\n## Schema [T-1]\n\n### 1.1 Details\n\n"
+        "_Implementation mapping_:\n\n- `pkg/x.py`\n",
+        encoding="utf-8",
+    )
+    parsed = parse_markdown_spec(doc, tmp_path)
+    assert [(m.section_id, m.target) for m in parsed.mappings] == [
+        ("T-1", "pkg/x.py"),
+    ]
+    assert parsed.issues == ()
+
+
 def test_ownerless_mapping_block_is_flagged_and_dropped(tmp_path: Path) -> None:
     doc = tmp_path / "01-T.md"
     doc.write_text(

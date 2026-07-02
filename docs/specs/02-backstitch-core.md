@@ -167,6 +167,16 @@ full heading text including the bracketed section ID (for
 block that has no preceding ID-bearing heading has no owner; its tokens are
 ignored and reported (`MAPPING_BLOCK_OWNERLESS`).
 
+Mapping-block ownership follows the nearest preceding ID-bearing heading. An
+ID-less heading at the same depth or shallower than the current owning heading
+clears that ownership — a following mapping block has no owner and is reported
+(`MAPPING_BLOCK_OWNERLESS`). A deeper ID-less subheading under an ID-bearing
+section does not clear ownership: subsection titles between an ID heading and
+its `_Implementation mapping_:` block are prose structure, not a new owner.
+Example: under `## 6. Schema [CFG-6]`, a `### 6.7 Scan boundaries` subheading
+does not detach a mapping block that still documents `[CFG-6]`; an
+`## Open Questions` heading at the same depth as `## 6. Schema [CFG-6]` does.
+
 Mapping path tokens are repo-relative, and resolution is a fixed ladder with
 no discretion:
 
