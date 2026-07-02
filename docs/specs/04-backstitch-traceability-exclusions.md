@@ -36,6 +36,10 @@ This spec does not own:
 - semantic (`llm`) advisory findings
 - changing default severities in [SC-11]
 
+_Implementation mapping_:
+
+- `backstitch/exclusions.py`
+
 ## 2. Mental Model [EXC-2]
 
 Think in three layers, mirroring common Python tooling:
@@ -60,6 +64,10 @@ Think in three layers, mirroring common Python tooling:
 A valid suppression must name at least one issue code. Blanket “ignore
 everything” is not allowed except through explicit `meta` classification on a
 file or section.
+
+_Implementation mapping_:
+
+- `backstitch/exclusions.py`
 
 ## 3. Classification Globs [EXC-3]
 
@@ -101,6 +109,12 @@ not be conflated: this section (§3) governs how a *file* is classified when
 globs overlap; [EXC-6.2] governs whether an *emitted issue* is suppressed.
 When a file is both a `meta_spec_glob` match and carries an inline ignore,
 classify the file by §3, then run each emitted issue through §6.2.
+
+_Implementation mapping_:
+
+- `backstitch/exclusions.py`
+- `backstitch/config.py`
+- `backstitch/settings.py`
 
 ## 4. Inline Directives In Specs [EXC-4]
 
@@ -174,6 +188,11 @@ both.
   warning.
 - Markers must not suppress error-severity issue codes.
 
+_Implementation mapping_:
+
+- `backstitch/exclusions.py`
+- `backstitch/markdown_specs.py`
+
 ## 5. Inline Directives In Python [EXC-5]
 
 ### 5.1 Module docstring and comments
@@ -199,6 +218,12 @@ Rules:
   (comment form applies to next statement only in v1; module scope for
   docstring).
 - `# backstitch: ignore` is an alias for `# backstitch: noqa`.
+
+_Implementation mapping_:
+
+- `backstitch/python_refs.py`
+- `backstitch/exclusions.py`
+- `backstitch/resolver.py`
 
 ## 6. Configuration [EXC-6]
 
@@ -256,6 +281,12 @@ Inline markers win over config so local intent beats central config, matching
 For `01-development-documentation-operating-model.md`, prefer `meta_spec_globs`
 or `per-file-ignores`, not `extend_exclude`, so the file stays in the corpus.
 
+_Implementation mapping_:
+
+- `backstitch/exclusions.py`
+- `backstitch/settings.py`
+- `backstitch/cli.py`
+
 ## 7. Reporting And CLI [EXC-7]
 
 Add optional reporting flags:
@@ -270,6 +301,11 @@ scope.
 
 Default output omits suppressed findings entirely.
 
+_Implementation mapping_:
+
+- `backstitch/reporting.py`
+- `backstitch/cli.py`
+
 ## 8. Failure Modes [EXC-8]
 
 Exit code `2` when:
@@ -282,6 +318,10 @@ Warnings on stderr when:
 
 - `warn_unused_ignores = true` and a configured suppression never matches
 - a suppression names an error-severity code (ignored + warned)
+
+_Implementation mapping_:
+
+- `backstitch/exclusions.py`
 
 ## 9. Verification Expectations [EXC-9]
 
@@ -307,12 +347,21 @@ Required proof:
 - DOM fixture: zero `SPEC_SECTION_UNMAPPED` with `meta_spec_globs`, sections
   still parsed
 
+_Implementation mapping_:
+
+- `tests/test_exclusions.py`
+- `tests/test_python_noqa.py`
+
 ## 10. Documentation [EXC-10]
 
 Update on implementation:
 
 - `docs/specs/03-backstitch-configuration.md` — cross-link `lint` tables
 - `docs/specs/02-backstitch-core.md` — note exclusions in [SC-9]
+- `docs/implementation/04-backstitch-style-traceability.md`
+
+_Implementation mapping_:
+
 - `docs/implementation/04-backstitch-style-traceability.md`
 
 ## Related Plans

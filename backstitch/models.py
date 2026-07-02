@@ -1,6 +1,6 @@
 """Core value types for trace graphs, issues, and reports.
 
-Spec: docs/specs/02-backstitch-core.md [SC-4], [SC-6], [SC-11]
+Spec: docs/specs/02-backstitch-core.md [SC-2], [SC-4], [SC-6], [SC-11]
 """
 
 from __future__ import annotations

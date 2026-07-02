@@ -1,6 +1,6 @@
 """Command-line entry point for backstitch.
 
-Spec: docs/specs/02-backstitch-core.md [SC-5]
+Spec: docs/specs/02-backstitch-core.md [SC-1], [SC-5]
 
 Exit-code contract ([SC-5]): exit 1 is a statement about the target
 repository (deterministic findings exist); exit 2 is a statement about the
@@ -55,7 +55,7 @@ def _add_check_parser(subparsers: argparse._SubParsersAction[Any]) -> None:
     )
     check.add_argument(
         "--profile",
-        default="backstitch-style-v1",
+        default=None,
         help="built-in profile name (default: backstitch-style-v1)",
     )
     check.add_argument(
@@ -125,7 +125,7 @@ def _add_other_parsers(subparsers: argparse._SubParsersAction[Any]) -> None:
         "packets", help="generate semantic-review packets (no model calls)"
     )
     packets.add_argument("--repo-root", type=Path, default=Path("."))
-    packets.add_argument("--profile", default="backstitch-style-v1")
+    packets.add_argument("--profile", default=None)
     packets.add_argument(
         "--spec-root", action="append", dest="spec_roots", metavar="PATH"
     )
@@ -221,7 +221,9 @@ def _profile_from(
 ) -> ProfileConfig:
     """[CFG-5] precedence: CLI flags > config values > built-in profile."""
 
-    profile = get_profile(settings.profile or args.profile)
+    # An explicit --profile beats config; config beats the built-in default.
+    name = args.profile or settings.profile or "backstitch-style-v1"
+    profile = get_profile(name)
     config_overrides: dict[str, tuple[str, ...]] = {}
     for field in (
         "spec_roots",
@@ -258,9 +260,9 @@ def _cmd_check(args: argparse.Namespace) -> int:
         allow_unknown_suppression_codes=settings.allow_unknown_keys,
     )
 
-    # [EXC-6.2]: suppression runs after emission and before exit-code and
-    # render, so every view (text, JSON, exit code) agrees; suppressed
-    # findings stay recoverable via --show-suppressions ([EXC-7]).
+    # [EXC-6] precedence: suppression runs after emission and before
+    # exit-code and render, so every view (text, JSON, exit code) agrees;
+    # suppressed findings stay recoverable via --show-suppressions ([EXC-7]).
     index = build_suppression_index(
         meta_spec_globs=profile.meta_spec_globs,
         lint=settings.lint,

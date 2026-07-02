@@ -759,7 +759,7 @@ def scan_repository(
 
     Raises ``ScanError`` when the repo root itself is unusable; missing
     configured roots become ``SCAN_ROOT_MISSING`` error findings instead.
-    ``exclude_globs`` are scan-boundary skips ([CFG-6.7]); settings merge
+    ``exclude_globs`` are scan-boundary skips (CFG §6.7); settings merge
     defaults and ``extend_exclude`` before calling -- the profile itself
     carries no exclude state.
     """

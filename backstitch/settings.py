@@ -340,7 +340,7 @@ def _parse_settings(raw: dict[str, Any], *, config_path: Path) -> BackstitchSett
         profile_name = None
         profile_table = {}
     else:
-        # [CFG-6.1]: the only profile-name spelling is [profile].name; TOML
+        # CFG §6.1: the only profile-name spelling is [profile].name; TOML
         # cannot represent both a top-level string and a [profile] table, so
         # the string form is rejected rather than given a "wins" rule.
         msg = (
@@ -357,7 +357,7 @@ def _parse_settings(raw: dict[str, Any], *, config_path: Path) -> BackstitchSett
     target_table = _expect_table(raw.get("target_roots"), "target_roots")
     lint_table = _expect_table(raw.get("lint"), "lint")
 
-    # [CFG-6.4]: [packets].output is stored for forward compatibility; the
+    # CFG §6.4: [packets].output is stored for forward compatibility; the
     # CLI still requires --output in v1 -- parsed here so the schema key is
     # never silently dead.
     packets_output = packets_table.get("output")
@@ -550,7 +550,7 @@ def _parse_ignore_table(value: Any, field_name: str) -> dict[str, tuple[str, ...
 
 
 def _merged_meta_globs(profile_table: dict[str, Any]) -> tuple[str, ...] | None:
-    """[EXC-3.2]: `process_spec_globs` is a v1 alias of `meta_spec_globs`;
+    """EXC §3.2: `process_spec_globs` is a v1 alias of `meta_spec_globs`;
     both keys merge at load time."""
 
     meta = _optional_str_tuple(

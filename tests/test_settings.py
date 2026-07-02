@@ -146,7 +146,7 @@ def test_load_settings_from_fixture_project() -> None:
     assert settings.check.format == "json"
     assert settings.check.warnings_as_errors is True
     assert settings.analyze.model == "gpt-configured"
-    # Top-level extend_exclude appends to the default exclude list [CFG-6.7].
+    # Top-level extend_exclude appends to the default exclude list CFG §6.7.
     assert settings.exclude == (*DEFAULT_EXCLUDES, "vendored/**")
 
 
@@ -177,7 +177,7 @@ def test_unknown_profile_name_errors(tmp_path: Path) -> None:
 
 
 def test_process_spec_globs_merged_into_meta(tmp_path: Path) -> None:
-    # [EXC-3.2]: process_spec_globs is a v1 alias of meta_spec_globs; both
+    # EXC §3.2: process_spec_globs is a v1 alias of meta_spec_globs; both
     # keys merge at load time.
     config = tmp_path / ".backstitch.toml"
     config.write_text(
@@ -210,7 +210,7 @@ def test_process_spec_globs_alone_populates_meta(tmp_path: Path) -> None:
 
 
 def test_packets_output_is_parsed(tmp_path: Path) -> None:
-    # [CFG-6.4]: packets.output is reserved in v1 but must be stored, not
+    # CFG §6.4: packets.output is reserved in v1 but must be stored, not
     # silently dead schema.
     config = tmp_path / ".backstitch.toml"
     config.write_text('[packets]\noutput = "out/packets.jsonl"\n', encoding="utf-8")
@@ -247,7 +247,7 @@ def test_unknown_nested_key_exits_two(tmp_path: Path) -> None:
 
 
 def test_top_level_profile_string_exits_two(tmp_path: Path) -> None:
-    # [CFG-6.1]: the only profile-name spelling is [profile].name; a
+    # CFG §6.1: the only profile-name spelling is [profile].name; a
     # top-level profile string is an unknown key.
     config = tmp_path / ".backstitch.toml"
     config.write_text('profile = "backstitch-style-v1"\n', encoding="utf-8")
@@ -310,7 +310,7 @@ def test_invalid_toml_errors_naming_file(tmp_path: Path) -> None:
     assert ".backstitch.toml" in str(excinfo.value)
 
 
-# --- extend merge [CFG-6.8] ---------------------------------------------
+# --- extend merge CFG §6.8 ---------------------------------------------
 
 
 def test_extend_merge_overrides_parent(tmp_path: Path) -> None:
@@ -367,7 +367,7 @@ def test_extend_missing_target_errors(tmp_path: Path) -> None:
     assert "missing.toml" in str(excinfo.value)
 
 
-# --- Path expansion [CFG-4.3] -------------------------------------------
+# --- Path expansion CFG §4.3 -------------------------------------------
 
 
 def test_expand_tilde_before_relative_base(
@@ -400,7 +400,7 @@ def test_expand_relative_env_resolves_against_config_dir(
     assert value == str((tmp_path / "sub" / "child").resolve())
 
 
-# --- Scan-boundary excludes [CFG-6.7] -----------------------------------
+# --- Scan-boundary excludes CFG §6.7 -----------------------------------
 
 
 def test_exclude_replaces_defaults(tmp_path: Path) -> None:

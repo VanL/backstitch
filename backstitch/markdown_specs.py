@@ -116,6 +116,7 @@ def parse_markdown_spec(
     # mapping after a bullet group documents the heading's ownership, not
     # the last bullet's.
     current_heading_section: SpecSection | None = None
+    current_heading_level = 0
     # Mapping-block state machine: "idle" outside a block, "block" while the
     # marker paragraph or a following bullet list may still continue, and
     # "gap" right after a blank line inside a block (only a bullet may
@@ -197,6 +198,7 @@ def parse_markdown_spec(
         if heading:
             state = "idle"
             block_section = None
+            level = len(heading.group(1))
             anchors.append(github_anchor(heading.group("text"), anchor_seen))
             with_id = _HEADING_ID_RE.match(line)
             if with_id:
@@ -210,10 +212,14 @@ def parse_markdown_spec(
                 )
                 sections.append(section)
                 current_heading_section = section
-            else:
-                # An ID-less heading starts a region no section owns;
-                # mapping blocks under it must not attach to the previous
-                # ID-bearing section.
+                current_heading_level = level
+            elif level <= current_heading_level:
+                # A same-or-shallower ID-less heading starts a region no
+                # section owns. DEEPER ID-less subheadings (`### 3.3` inside
+                # `## 3. Discovery [CFG-3]`) stay inside the owning section:
+                # [SC-4] attaches mapping blocks to the nearest preceding
+                # ID-BEARING heading, and real specs put subsections between
+                # the ID heading and its mapping block.
                 current_heading_section = None
             continue
 

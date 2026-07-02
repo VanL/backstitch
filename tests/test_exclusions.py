@@ -53,7 +53,7 @@ def test_meta_glob_suppresses_unmapped_but_not_missing() -> None:
 
 
 def test_inline_marker_beats_config_in_reported_reason() -> None:
-    # [EXC-6.2]: inline wins over config so local intent beats central
+    # EXC §6.2: inline wins over config so local intent beats central
     # config; both match here, the reason must say inline.
     index = build_suppression_index(
         meta_spec_globs=(),

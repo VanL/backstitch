@@ -52,6 +52,25 @@ Issues = "https://github.com/VanL/backstitch/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["backstitch"]
 
+[tool.backstitch]
+# Top-level keys ([CFG-6.7]); NOT under [profile] -- TOML table scope would
+# make extend_exclude a profile key and fail strict load. extend_exclude
+# appends to defaults (which already exclude .worktrees); a bare `exclude`
+# would REPLACE the defaults and start scanning four dead implementations.
+extend_exclude = ["tests/fixtures/**", "tests/acceptance/fixtures/**"]
+
+[tool.backstitch.profile]
+name = "backstitch-style-v1"
+spec_roots = ["docs/specs"]
+plan_roots = ["docs/plans"]
+code_roots = ["backstitch", "tests"]
+meta_spec_globs = ["docs/specs/01-development-documentation-operating-model.md"]
+
+[tool.backstitch.lint.per-file-ignores]
+# Test files legitimately cite spec sections without being implementation
+# owners; the unmapped-citation inventory is noise for them.
+"tests/*" = ["CODE_REF_UNMAPPED_FROM_SPEC", "SPEC_MAPPING_RECIPROCAL_MISSING"]
+
 [tool.pytest.ini_options]
 minversion = "7.0"
 testpaths = ["tests"]
