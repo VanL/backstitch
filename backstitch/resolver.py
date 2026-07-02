@@ -38,6 +38,7 @@ from backstitch.python_refs import (
     parse_python_file,
     python_symbol_inventory,
 )
+from backstitch.settings import DEFAULT_EXCLUDES, is_excluded
 
 _FINAL_NUMBER_RE = re.compile(r"^(?P<base>.*?)(?P<num>\d+)$")
 _ALPHA_PREFIX_RE = re.compile(r"^[A-Z][A-Za-z]*")
@@ -703,11 +704,6 @@ def resolve(
     )
 
 
-def _walkable(path: Path, root: Path) -> bool:
-    parts = path.relative_to(root).parts
-    return not any(part.startswith(".") or part == "__pycache__" for part in parts)
-
-
 @dataclass(frozen=True, slots=True)
 class ScanArtifacts:
     """Suppression inputs gathered during the scan ([EXC-4], [EXC-5]).
@@ -728,7 +724,7 @@ class ScanArtifacts:
 def scan_repository(
     repo_root: Path,
     profile: ProfileConfig,
-    exclude_globs: tuple[str, ...] = (),
+    exclude_globs: tuple[str, ...] | None = None,
     *,
     allow_unknown_suppression_codes: bool = False,
 ) -> Report:
@@ -736,9 +732,10 @@ def scan_repository(
 
     Raises ``ScanError`` when the repo root itself is unusable; missing
     configured roots become ``SCAN_ROOT_MISSING`` error findings instead.
-    ``exclude_globs`` are scan-boundary skips (CFG §6.7); settings merge
-    defaults and ``extend_exclude`` before calling -- the profile itself
-    carries no exclude state.
+    ``exclude_globs`` are scan-boundary skips (CFG §6.7); ``None`` means
+    the built-in DEFAULT_EXCLUDES, while an explicit empty tuple excludes
+    nothing (`exclude = []` replaces the defaults). The CLI always passes
+    the resolved settings value -- the profile carries no exclude state.
     """
 
     report, _artifacts = scan_repository_with_artifacts(
@@ -753,7 +750,7 @@ def scan_repository(
 def scan_repository_with_artifacts(
     repo_root: Path,
     profile: ProfileConfig,
-    exclude_globs: tuple[str, ...] = (),
+    exclude_globs: tuple[str, ...] | None = None,
     *,
     allow_unknown_suppression_codes: bool = False,
 ) -> tuple[Report, ScanArtifacts]:
@@ -763,11 +760,16 @@ def scan_repository_with_artifacts(
     if not root.is_dir():
         raise ScanError(f"repository root is not a directory: {repo_root}")
 
+    # CFG §6.7/§6.9: exclusion is is_excluded's component-aware match (a
+    # bare `venv` excludes the whole subtree at any depth), and the ONLY
+    # skip policy -- an explicit `exclude = []` scans everything, so no
+    # hard-coded dot-directory rule may sit underneath it.
+    active_excludes = DEFAULT_EXCLUDES if exclude_globs is None else exclude_globs
     scan_issues: list[Issue] = []
 
     def excluded(path: Path) -> bool:
         rel = path.relative_to(root).as_posix()
-        return any(fnmatch(rel, glob) for glob in exclude_globs)
+        return is_excluded(rel, active_excludes)
 
     def collect(roots: Sequence[str], pattern: str) -> list[Path]:
         files: list[Path] = []
@@ -786,12 +788,7 @@ def scan_repository_with_artifacts(
                 )
                 continue
             for path in sorted(base.rglob(pattern)):
-                if (
-                    path.is_file()
-                    and _walkable(path, root)
-                    and not excluded(path)
-                    and path not in seen
-                ):
+                if path.is_file() and not excluded(path) and path not in seen:
                     seen.add(path)
                     files.append(path)
         return files

@@ -26,7 +26,7 @@ from backstitch.exclusions import (
     collect_unused_ignore_warnings,
     should_suppress,
 )
-from backstitch.models import Issue, Report
+from backstitch.models import ISSUE_CODES, Issue, Report
 from backstitch.profiles import get_profile
 from backstitch.reporting import SuppressedRecord, render_json, render_text
 from backstitch.resolver import ScanError, scan_repository_with_artifacts
@@ -336,11 +336,18 @@ def _cmd_check(args: argparse.Namespace) -> int:
     return 0
 
 
-def _suppressed_report(args: argparse.Namespace) -> Report:
-    """Scan + suppress, shared by check-style consumers (packets)."""
+def _suppressed_report(
+    args: argparse.Namespace,
+    settings: BackstitchSettings,
+    profile: ProfileConfig,
+) -> Report:
+    """Scan + suppress, shared by check-style consumers (packets).
 
-    settings = _resolve_settings(args)
-    profile = _profile_from(args, settings)
+    [CFG-1]: configuration is resolved once per command invocation -- the
+    caller resolves and passes it in, so load-time diagnostics (unknown-key
+    warnings) print exactly once.
+    """
+
     report, artifacts = scan_repository_with_artifacts(
         args.repo_root,
         profile,
@@ -379,7 +386,7 @@ def _cmd_packets(args: argparse.Namespace) -> int:
 
     settings = _resolve_settings(args)
     profile = _profile_from(args, settings)
-    report = _suppressed_report(args)
+    report = _suppressed_report(args, settings, profile)
     packets = generate_packets(args.repo_root, profile, report=report)
     try:
         args.output.write_text(render_packets_jsonl(packets), encoding="utf-8")
@@ -429,13 +436,20 @@ def _packet_shape_error(row: dict[str, Any]) -> str | None:
     if not all(isinstance(t, str) for t in row["tests"]):
         return "invalid `tests` item; expected strings"
     for issue in row["issues"]:
+        # [SC-11]: issue records carry a known code, a real severity, and a
+        # path locator -- string-shaped garbage is not an issue record.
         if (
             not isinstance(issue, dict)
-            or not isinstance(issue.get("code"), str)
-            or not isinstance(issue.get("severity"), str)
+            or issue.get("code") not in ISSUE_CODES
+            or issue.get("severity") not in ("error", "warning", "info")
             or not isinstance(issue.get("message"), str)
+            or not isinstance(issue.get("path"), str)
+            or not issue["path"]
         ):
-            return "invalid `issues` item; expected {code, severity, message, ...}"
+            return (
+                "invalid `issues` item; expected a deterministic issue"
+                " record (known code, severity, message, path)"
+            )
     if not all(isinstance(w, str) for w in row["packet_warnings"]):
         return "invalid `packet_warnings` item; expected strings"
     return None
@@ -549,6 +563,7 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
 
 
 def _cmd_config(args: argparse.Namespace) -> int:
+    from backstitch.exclusions import validate_lint_codes
     from backstitch.settings import discover_config_path, settings_to_json
 
     if args.config_command == "show":
@@ -556,6 +571,13 @@ def _cmd_config(args: argparse.Namespace) -> int:
             settings = BackstitchSettings()
         else:
             settings = load_settings(args.repo_root.resolve(), explicit=args.config)
+        # [CFG-9]/[EXC-4]: `config show` follows load strictness -- an
+        # invalid suppression code that would fail `check` must not print
+        # as effective configuration with exit 0.
+        for warning in validate_lint_codes(
+            settings.lint, allow_unknown=settings.allow_unknown_keys
+        ):
+            print(f"warning: {warning}", file=sys.stderr)
         sys.stdout.write(settings_to_json(settings))
         return 0
     if args.no_config:

@@ -208,9 +208,9 @@ def is_excluded(rel_path: str, excludes: tuple[str, ...]) -> bool:
     return False
 
 
-def expand_path_value(value: str, *, base_dir: Path) -> str:
+def _expand_user_and_env(value: str) -> str:
     expanded = os.path.expanduser(value)
-    expanded = re.sub(
+    return re.sub(
         r"\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)",
         lambda match: os.environ.get(
             match.group(1) or match.group(2) or "",
@@ -218,10 +218,27 @@ def expand_path_value(value: str, *, base_dir: Path) -> str:
         ),
         expanded,
     )
+
+
+def expand_path_value(value: str, *, base_dir: Path) -> str:
+    expanded = _expand_user_and_env(value)
     path = Path(expanded)
     if path.is_absolute():
         return str(path.resolve())
     return str((base_dir / path).resolve())
+
+
+def expand_root_value(value: str) -> str:
+    """CFG §4.3 expansion for scan roots: `~` and env vars only.
+
+    Roots are relative to the TARGET repo root ([SC-3]), not to the config
+    file, so the config-dir resolution step of expand_path_value must not
+    apply -- a `$HOME` config declaring `docs/specs` would otherwise anchor
+    the root at `$HOME/docs/specs`. An expanded absolute result passes
+    through unchanged.
+    """
+
+    return _expand_user_and_env(value)
 
 
 def _pyproject_has_backstitch(path: Path) -> bool:
@@ -366,16 +383,18 @@ def _parse_settings(raw: dict[str, Any], *, config_path: Path) -> BackstitchSett
     if packets_output is not None:
         packets_output = expand_path_value(packets_output, base_dir=config_path.parent)
 
+    def _roots(key: str) -> tuple[str, ...] | None:
+        # CFG §4.3: roots support `~` and env expansion (but stay
+        # repo-relative -- see expand_root_value).
+        values = _optional_str_tuple(profile_table.get(key), f"profile.{key}")
+        if values is None:
+            return None
+        return tuple(expand_root_value(v) for v in values)
+
     profile_settings = ProfileSettings(
-        spec_roots=_optional_str_tuple(
-            profile_table.get("spec_roots"), "profile.spec_roots"
-        ),
-        plan_roots=_optional_str_tuple(
-            profile_table.get("plan_roots"), "profile.plan_roots"
-        ),
-        code_roots=_optional_str_tuple(
-            profile_table.get("code_roots"), "profile.code_roots"
-        ),
+        spec_roots=_roots("spec_roots"),
+        plan_roots=_roots("plan_roots"),
+        code_roots=_roots("code_roots"),
         planned_spec_globs=_optional_str_tuple(
             profile_table.get("planned_spec_globs"),
             "profile.planned_spec_globs",

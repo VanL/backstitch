@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import fnmatch
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -29,6 +30,10 @@ TRACEABILITY_IGNORE_RE = re.compile(
     re.IGNORECASE,
 )
 HTML_META_RE = re.compile(r"<!--\s*backstitch:\s*meta\s*-->", re.IGNORECASE)
+# A line that opens with the marker sigil but matches neither valid form.
+MALFORMED_MARKER_RE = re.compile(
+    r"^(?:_Traceability:|<!--\s*backstitch:)", re.IGNORECASE
+)
 HTML_IGNORE_RE = re.compile(
     r"<!--\s*backstitch:\s*ignore\s+(.+?)\s*-->",
     re.IGNORECASE,
@@ -143,6 +148,15 @@ def parse_traceability_marker_line(
             match.group(1), allow_unknown=allow_unknown, location=location
         )
         return False, codes, warnings
+    # [EXC-4]: a line that STARTS like a marker but parses as neither form
+    # (`_Traceability: ignore_` with no codes, `_Traceability: bogus_`) is
+    # a malformed suppression -- the same fake affordance as an unknown
+    # code, with the same strictness and hatch.
+    if MALFORMED_MARKER_RE.match(stripped):
+        message = f"malformed traceability marker in {location}: {stripped!r}"
+        if not allow_unknown:
+            raise UnknownSuppressionCodeError(message)
+        return False, frozenset(), [message]
     return False, frozenset(), []
 
 
@@ -408,10 +422,18 @@ def collect_unused_ignore_warnings(index: SuppressionIndex) -> list[str]:
     return warnings
 
 
-def _validate_config_codes(index: SuppressionIndex, *, allow_unknown: bool) -> None:
+def validate_lint_codes(lint: LintSettings, *, allow_unknown: bool) -> list[str]:
+    """Validate suppression codes in config lint tables ([EXC-4]).
+
+    Raises ``UnknownSuppressionCodeError`` by default; ``allow_unknown``
+    downgrades unknown codes to returned warnings. Shared by the check
+    pipeline and `config show` so both apply the same load strictness.
+    """
+
+    warnings: list[str] = []
     for table_name, table in (
-        ("lint.per-file-ignores", index.lint.per_file_ignores),
-        ("lint.per-section-ignores", index.lint.per_section_ignores),
+        ("lint.per-file-ignores", lint.per_file_ignores),
+        ("lint.per-section-ignores", lint.per_section_ignores),
     ):
         for path_key, codes in table.items():
             for code in codes:
@@ -423,22 +445,36 @@ def _validate_config_codes(index: SuppressionIndex, *, allow_unknown: bool) -> N
                     )
                     if not allow_unknown:
                         raise UnknownSuppressionCodeError(message)
-                    index.suppression_warnings.append(message)
+                    warnings.append(message)
                 elif code in ERROR_SEVERITY_CODES:
-                    index.suppression_warnings.append(
+                    warnings.append(
                         f"cannot suppress error-severity code {code} in {table_name}"
                     )
+    return warnings
+
+
+def _validate_config_codes(index: SuppressionIndex, *, allow_unknown: bool) -> None:
+    index.suppression_warnings.extend(
+        validate_lint_codes(index.lint, allow_unknown=allow_unknown)
+    )
+
+
+def _iter_inline_ignore_code_sets(index: SuppressionIndex) -> Iterator[frozenset[str]]:
+    yield from index.inline_file_ignores.values()
+    yield from index.inline_spec_ignores.values()
+    yield from index.inline_code_ignores.values()
+    # [EXC-5]/[EXC-8]: statement-scoped Python noqa spans are suppression
+    # attempts too -- an error-severity code in a span must warn, not be
+    # silently ignored.
+    for spans in index.inline_code_span_ignores.values():
+        for _start, _end, codes in spans:
+            yield codes
 
 
 def _warn_error_code_suppression(issue: Issue, index: SuppressionIndex) -> None:
-    for source in (
-        index.inline_file_ignores.values(),
-        index.inline_spec_ignores.values(),
-        index.inline_code_ignores.values(),
-    ):
-        for codes in source:
-            if issue.code in codes:
-                index.suppression_warnings.append(
-                    f"suppression ignored for error-severity code {issue.code}"
-                )
-                return
+    for codes in _iter_inline_ignore_code_sets(index):
+        if issue.code in codes:
+            index.suppression_warnings.append(
+                f"suppression ignored for error-severity code {issue.code}"
+            )
+            return

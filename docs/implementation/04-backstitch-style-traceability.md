@@ -79,6 +79,11 @@ reasons:
 - `extend_exclude` (never bare `exclude`): the defaults already exclude
   `.worktrees`; replacing them would scan four archived bake-off
   implementations into the corpus.
+- Exclusion has exactly one authority: `settings.is_excluded`
+  (component-aware, so a bare `venv` skips the subtree at any depth). The
+  resolver takes `None` to mean the built-in defaults and an explicit
+  empty tuple to mean scan everything — no hard-coded dot-directory skip
+  sits underneath the config ([CFG-6.7]).
 - `tests` stays in `code_roots` because test-to-spec edges are part of the
   graph; the fixture corpora inside `tests/` are intentionally broken
   mini-projects and are excluded as scan boundaries, not suppressed.

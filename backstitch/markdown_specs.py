@@ -157,11 +157,23 @@ def parse_markdown_spec(
         sections.append(section)
         block_section = section
 
-    def record_marker(is_meta: bool, marker_codes: frozenset[str]) -> None:
+    def record_marker(
+        is_meta: bool, marker_codes: frozenset[str], line_no: int
+    ) -> None:
         if not sections:
             nonlocal file_meta
             file_meta = file_meta or is_meta
             file_ignores.update(marker_codes if not is_meta else ())
+            return
+        # [EXC-4] §4.2: a section marker goes IMMEDIATELY after the heading
+        # or invariant bullet, before body text. A misplaced marker never
+        # applies -- and silently not applying is fake protection, so warn.
+        if not marker_window_open:
+            marker_warnings.append(
+                f"{rel_path}:{line_no}: traceability marker after body text"
+                " is ignored ([EXC-4]: markers go immediately after the"
+                " heading)"
+            )
             return
         target = sections[-1].section_id
         meta_flag, codes = section_markers.setdefault(target, (False, set()))
@@ -170,6 +182,10 @@ def parse_markdown_spec(
             codes | (marker_codes if not is_meta else set()),
         )
 
+    # [EXC-4] §4.2 placement window: True from a section-defining heading
+    # or invariant bullet until the first body line; only markers inside
+    # the window attach to the section.
+    marker_window_open = False
     # Fenced blocks open with ``` or ~~~; the closer uses the same character
     # and is at least as long as the opener ([SC-4] CommonMark rule).
     fence_state: tuple[str, int] | None = None
@@ -198,8 +214,12 @@ def parse_markdown_spec(
             )
             marker_warnings.extend(warnings)
             if is_meta or marker_codes:
-                record_marker(is_meta, marker_codes)
+                record_marker(is_meta, marker_codes, line_no)
                 continue
+            if line.strip():
+                # Any other non-blank content line closes the placement
+                # window (blank lines between heading and marker are fine).
+                marker_window_open = False
         if heading:
             state = "idle"
             block_section = None
@@ -236,8 +256,9 @@ def parse_markdown_spec(
                 sections.append(section)
                 current_heading_section = section
                 current_heading_level = level
+                marker_window_open = True
                 if trailing_meta or trailing_codes:
-                    record_marker(trailing_meta, trailing_codes)
+                    record_marker(trailing_meta, trailing_codes, line_no)
             elif level <= current_heading_level:
                 # A same-or-shallower ID-less heading starts a region no
                 # section owns. DEEPER ID-less subheadings (`### 3.3` inside
@@ -246,6 +267,7 @@ def parse_markdown_spec(
                 # ID-BEARING heading, and real specs put subsections between
                 # the ID heading and its mapping block.
                 current_heading_section = None
+                marker_window_open = False
             continue
 
         marker = _MAPPING_MARKER_RE.match(line)
@@ -281,6 +303,7 @@ def parse_markdown_spec(
                 kind="invariant",
             )
             sections.append(section)
+            marker_window_open = True
             continue
 
         if state == "block":

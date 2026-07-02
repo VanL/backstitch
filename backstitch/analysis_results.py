@@ -43,8 +43,17 @@ class AnalysisLoad:
 
 
 def validate_analysis_row(
-    row: Any, known_packet_ids: set[str] | None
+    row: Any,
+    known_packet_ids: set[str] | None,
+    *,
+    allowed_evidence_paths: set[str] | None = None,
 ) -> AnalysisResult | str:
+    """Validate one untrusted model-output row ([SC-7]).
+
+    ``allowed_evidence_paths``, when provided, keeps evidence packet-local:
+    the model may only cite paths that were in the packet it was shown.
+    """
+
     if not isinstance(row, dict):
         return "row is not a JSON object"
     packet_id = row.get("packet_id")
@@ -77,9 +86,17 @@ def validate_analysis_row(
         if (
             not isinstance(item, dict)
             or not isinstance(item.get("path"), str)
+            or isinstance(item.get("line"), bool)
             or not isinstance(item.get("line"), int)
         ):
             return "invalid `evidence` item; expected {path, line}"
+        if (
+            allowed_evidence_paths is not None
+            and item["path"] not in allowed_evidence_paths
+        ):
+            # [SC-7]: model output is untrusted; evidence must stay inside
+            # the packet boundary.
+            return f"evidence path `{item['path']}` is not part of the packet"
         evidence.append((item["path"], item["line"]))
     return AnalysisResult(
         packet_id=packet_id,
@@ -113,11 +130,17 @@ def load_analysis_results(text: str, known_packet_ids: set[str] | None) -> Analy
 
 
 def packet_ids_from_report(report_data: dict[str, Any]) -> set[str]:
-    """Derive valid packet IDs from a deterministic report's sections."""
+    """Derive valid packet IDs from a deterministic report.
+
+    Packet generation ([SC-6]) emits a packet only for sections that have
+    at least one trace edge, so the valid-ID universe is edge-bearing
+    sections -- a forged analysis row for a section that never produced a
+    packet must be rejected, not summarized.
+    """
 
     return {
-        f"{section['path']}#{section['section_id']}"
-        for section in report_data.get("spec_sections", [])
+        f"{edge['spec_path']}#{edge['section_id']}"
+        for edge in report_data.get("edges", [])
     }
 
 

@@ -46,7 +46,24 @@ def build_prompt(packet: dict[str, Any]) -> str:
     return f"{packet['instructions']}\n\n{json.dumps(body)}"
 
 
-def _parse_model_output(raw: str, packet_id: str) -> dict[str, Any] | str:
+def _packet_paths(packet: dict[str, Any]) -> set[str]:
+    """Paths the model was shown: spec file, owners, and linked tests."""
+
+    paths: set[str] = set()
+    spec_path = packet.get("spec_path")
+    if isinstance(spec_path, str):
+        paths.add(spec_path)
+    for owner in packet.get("owners", ()):
+        if isinstance(owner, dict) and isinstance(owner.get("path"), str):
+            paths.add(owner["path"])
+    for test in packet.get("tests", ()):
+        if isinstance(test, str):
+            paths.add(test)
+    return paths
+
+
+def _parse_model_output(raw: str, packet: dict[str, Any]) -> dict[str, Any] | str:
+    packet_id = packet["packet_id"]
     text = raw.strip()
     fence = _FENCE_RE.match(text)
     if fence:
@@ -55,7 +72,9 @@ def _parse_model_output(raw: str, packet_id: str) -> dict[str, Any] | str:
         row = json.loads(text)
     except json.JSONDecodeError:
         return "model output is not valid JSON"
-    validated = validate_analysis_row(row, None)
+    validated = validate_analysis_row(
+        row, None, allowed_evidence_paths=_packet_paths(packet)
+    )
     if isinstance(validated, str):
         return f"model output invalid: {validated}"
     if validated.packet_id != packet_id:
@@ -104,7 +123,7 @@ def analyze_packets(
         except Exception as exc:  # noqa: BLE001 - adapter is an external boundary
             message = f"model call failed: {exc}"
             return _error_record(packet_id, message), f"{packet_id}: {message}"
-        parsed = _parse_model_output(raw, packet_id)
+        parsed = _parse_model_output(raw, packet)
         if isinstance(parsed, str):
             return _error_record(packet_id, parsed), f"{packet_id}: {parsed}"
         return parsed, None

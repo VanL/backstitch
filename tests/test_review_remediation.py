@@ -532,3 +532,297 @@ def test_analyze_unknown_model_is_invocation_error(tmp_path: Path) -> None:
     assert f"'Unknown model: {HERMETIC_MODEL}'" not in result.stderr, (
         "KeyError repr quoting leaked into the diagnostic"
     )
+
+
+# --- Round 8 P1: exclude semantics ------------------------------------------
+
+
+def test_default_exclude_covers_nested_venv(tmp_path: Path) -> None:
+    # CFG-6.7: a bare `venv` in the exclude list skips the subtree at any
+    # depth, not only a top-level path named exactly `venv`.
+    _write(tmp_path, "docs/specs/01-x.md", "# X\n\n## One [EX-1]\n")
+    _write(tmp_path, "pkg/mod.py", '"""Mod."""\n')
+    _write(tmp_path, "pkg/venv/bad.py", "def broken(:\n")
+    _write(
+        tmp_path,
+        ".backstitch.toml",
+        '[profile]\nspec_roots = ["docs/specs"]\nplan_roots = []\ncode_roots = ["pkg"]\n',
+    )
+    result = run_cli("check", "--repo-root", str(tmp_path), "--format", "json")
+    codes = {i["code"] for i in json.loads(result.stdout)["issues"]}
+    assert "PYTHON_SYNTAX_ERROR" not in codes, codes
+
+
+def test_empty_exclude_scans_everything_including_dot_dirs(
+    tmp_path: Path,
+) -> None:
+    # CFG-6.7: `exclude = []` REPLACES the defaults; no hard-coded
+    # dot-directory skip may sit underneath the config.
+    _write(tmp_path, "docs/specs/01-x.md", "# X\n\n## One [EX-2]\n")
+    _write(tmp_path, "pkg/.hidden/bad.py", "def broken(:\n")
+    _write(tmp_path, "pkg/venv/bad.py", "def broken(:\n")
+    _write(
+        tmp_path,
+        ".backstitch.toml",
+        'exclude = []\n[profile]\nspec_roots = ["docs/specs"]\nplan_roots = []\ncode_roots = ["pkg"]\n',
+    )
+    result = run_cli("check", "--repo-root", str(tmp_path), "--format", "json")
+    syntax_paths = {
+        i["path"]
+        for i in json.loads(result.stdout)["issues"]
+        if i["code"] == "PYTHON_SYNTAX_ERROR"
+    }
+    assert syntax_paths == {"pkg/.hidden/bad.py", "pkg/venv/bad.py"}
+
+
+# --- Round 8 P2: env expansion in profile roots -----------------------------
+
+
+def test_env_vars_expand_in_config_roots(tmp_path: Path) -> None:
+    import os
+
+    _write(tmp_path, "actual-specs/01-x.md", "# X\n\n## One [EV-1]\n")
+    _write(tmp_path, "pkg/mod.py", '"""Mod."""\n')
+    _write(
+        tmp_path,
+        ".backstitch.toml",
+        '[profile]\nspec_roots = ["$BACKSTITCH_TEST_SPEC_DIR"]\n'
+        'plan_roots = []\ncode_roots = ["pkg"]\n',
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "backstitch",
+            "check",
+            "--repo-root",
+            str(tmp_path),
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "BACKSTITCH_TEST_SPEC_DIR": "actual-specs"},
+    )
+    data = json.loads(result.stdout)
+    assert data["summary"]["spec_sections"] == 1, result.stderr
+    assert "SCAN_ROOT_MISSING" not in {i["code"] for i in data["issues"]}
+
+
+# --- Round 8 P2: config show follows load strictness for lint codes ---------
+
+
+def test_config_show_rejects_invalid_suppression_code(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        ".backstitch.toml",
+        '[lint.per-file-ignores]\n"pkg/*" = ["NOT_A_REAL_CODE"]\n',
+    )
+    strict = run_cli("config", "show", "--repo-root", str(tmp_path))
+    assert strict.returncode == 2
+    assert "NOT_A_REAL_CODE" in strict.stderr
+    _write(
+        tmp_path,
+        ".backstitch.toml",
+        "allow_unknown_keys = true\n"
+        '[lint.per-file-ignores]\n"pkg/*" = ["NOT_A_REAL_CODE"]\n',
+    )
+    hatch = run_cli("config", "show", "--repo-root", str(tmp_path))
+    assert hatch.returncode == 0
+    assert "NOT_A_REAL_CODE" in hatch.stderr
+
+
+# --- Round 8 P2: packet issue records must be real issue records ------------
+
+
+def test_packet_with_bogus_issue_record_is_invocation_error(
+    tmp_path: Path,
+) -> None:
+    bogus = {"code": "NOT_A_BACKSTITCH_CODE", "severity": "bogus", "message": "x"}
+    result = _run_analyze(tmp_path, json.dumps(_full_packet(issues=[bogus])))
+    assert result.returncode == 2
+    assert "issues" in result.stderr
+
+
+# --- Round 8 P2: model evidence stays packet-local ---------------------------
+
+
+def test_evidence_outside_packet_is_rejected() -> None:
+    from backstitch.analysis_llm import analyze_packets
+
+    packet = {
+        "packet_id": "docs/specs/01-x.md#X-1",
+        "spec_path": "docs/specs/01-x.md",
+        "section_id": "X-1",
+        "title": "One",
+        "section_text": "## One [X-1]",
+        "owners": [
+            {"path": "pkg/mod.py", "symbol": None, "start_line": 1, "snippet": "x"}
+        ],
+        "tests": [],
+        "issues": [],
+        "packet_warnings": [],
+        "instructions": "Respond with JSON.",
+    }
+    response = json.dumps(
+        {
+            "packet_id": packet["packet_id"],
+            "classification": "ok",
+            "summary": "fine",
+            "evidence": [{"path": "not-in-packet.py", "line": 999}],
+        }
+    )
+    rows, errors = analyze_packets([packet], lambda prompt: response)
+    assert rows[0]["classification"] == "ambiguous"
+    assert any("not part of the packet" in e for e in errors)
+    # bool is an int subclass; line=true must not validate.
+    bool_line = json.dumps(
+        {
+            "packet_id": packet["packet_id"],
+            "classification": "ok",
+            "summary": "fine",
+            "evidence": [{"path": "pkg/mod.py", "line": True}],
+        }
+    )
+    rows, errors = analyze_packets([packet], lambda prompt: bool_line)
+    assert rows[0]["classification"] == "ambiguous"
+
+
+# --- Round 8 P2: summarize packet-ID universe = sections with packets --------
+
+
+def test_forged_row_for_packetless_section_is_rejected() -> None:
+    from backstitch.analysis_results import (
+        load_analysis_results,
+        packet_ids_from_report,
+    )
+
+    report = {
+        "spec_sections": [
+            {"path": "docs/specs/01-x.md", "section_id": "X-1"},
+            {"path": "docs/specs/01-x.md", "section_id": "X-2"},  # no edges
+        ],
+        "edges": [
+            {
+                "kind": "backlink",
+                "spec_path": "docs/specs/01-x.md",
+                "section_id": "X-1",
+                "code_path": "pkg/mod.py",
+                "code_symbol": None,
+                "line": 1,
+            }
+        ],
+    }
+    ids = packet_ids_from_report(report)
+    assert ids == {"docs/specs/01-x.md#X-1"}
+    forged = json.dumps(
+        {
+            "packet_id": "docs/specs/01-x.md#X-2",
+            "classification": "ok",
+            "summary": "forged",
+        }
+    )
+    load = load_analysis_results(forged + "\n", ids)
+    assert load.results == ()
+    assert any("unknown packet ID" in e for e in load.errors)
+
+
+# --- Round 8 P2: _Traceability marker syntax and placement -------------------
+
+
+def test_bare_traceability_ignore_marker_is_strict_error(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "docs/specs/01-x.md",
+        "# X\n\n## One [TM-1]\n\n_Traceability: ignore_\n",
+    )
+    _write(tmp_path, "pkg/mod.py", '"""Mod."""\n')
+    result = run_cli(
+        "check",
+        "--repo-root",
+        str(tmp_path),
+        "--spec-root",
+        "docs/specs",
+        "--plan-root",
+        "",
+        "--code-root",
+        "pkg",
+    )
+    assert result.returncode == 2
+    assert "malformed traceability marker" in result.stderr
+
+
+def test_marker_after_body_text_does_not_apply(tmp_path: Path) -> None:
+    # [EXC-4] §4.2: section markers go immediately after the heading; a
+    # marker after body text neither applies nor stays silent.
+    _write(
+        tmp_path,
+        "docs/specs/01-x.md",
+        "# X\n\n## One [TM-2]\n\nBody text first.\n\n_Traceability: meta_\n",
+    )
+    _write(tmp_path, "pkg/mod.py", '"""Mod."""\n')
+    result = run_cli(
+        "check",
+        "--repo-root",
+        str(tmp_path),
+        "--spec-root",
+        "docs/specs",
+        "--plan-root",
+        "",
+        "--code-root",
+        "pkg",
+        "--format",
+        "json",
+    )
+    data = json.loads(result.stdout)
+    unmapped = {
+        i["section_id"] for i in data["issues"] if i["code"] == "SPEC_SECTION_UNMAPPED"
+    }
+    assert "TM-2" in unmapped, "misplaced marker still suppressed the section"
+    assert "after body text" in result.stderr
+
+
+# --- Round 8 P3: span noqa attempting an error code warns --------------------
+
+
+def test_span_noqa_on_error_code_warns(tmp_path: Path) -> None:
+    _write(tmp_path, "docs/specs/01-x.md", "# X\n\n## One [SP-1]\n")
+    _write(
+        tmp_path,
+        "pkg/mod.py",
+        '"""Mod."""\n\n# backstitch: noqa SPEC_FILE_MISSING\n'
+        'def f() -> None:\n    """Spec: docs/specs/09-gone.md [SP-1]"""\n',
+    )
+    _write(
+        tmp_path,
+        ".backstitch.toml",
+        '[profile]\nspec_roots = ["docs/specs"]\nplan_roots = []\ncode_roots = ["pkg"]\n',
+    )
+    result = run_cli("check", "--repo-root", str(tmp_path))
+    assert result.returncode == 1  # the error finding survives
+    assert "error-severity" in result.stderr, (
+        "span suppression of an error code was silently ignored"
+    )
+
+
+# --- Round 8 P3: packets resolves configuration once -------------------------
+
+
+def test_packets_prints_load_warnings_exactly_once(tmp_path: Path) -> None:
+    _write(tmp_path, "docs/specs/01-x.md", "# X\n\n## One [OC-1]\n")
+    _write(tmp_path, "pkg/mod.py", '"""Mod."""\n')
+    _write(
+        tmp_path,
+        ".backstitch.toml",
+        "allow_unknown_keys = true\nbogus_key = 1\n"
+        '[profile]\nspec_roots = ["docs/specs"]\nplan_roots = []\ncode_roots = ["pkg"]\n',
+    )
+    result = run_cli(
+        "packets",
+        "--repo-root",
+        str(tmp_path),
+        "--output",
+        str(tmp_path / "p.jsonl"),
+    )
+    assert result.stderr.count("bogus_key") == 1, result.stderr
