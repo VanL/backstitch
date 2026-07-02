@@ -48,17 +48,13 @@ def _section_text(
         line = file_lines[section.line - 1] if section.line <= len(file_lines) else ""
         return line.strip()
     next_headings = [
-        s.line
-        for s in siblings
-        if s.kind == "heading" and s.line > section.line
+        s.line for s in siblings if s.kind == "heading" and s.line > section.line
     ]
     end = min(next_headings) - 1 if next_headings else len(file_lines)
     block = file_lines[section.line - 1 : end]
     if len(block) > MAX_SECTION_LINES:
         block = block[:MAX_SECTION_LINES]
-        warnings.append(
-            f"section text truncated to {MAX_SECTION_LINES} lines"
-        )
+        warnings.append(f"section text truncated to {MAX_SECTION_LINES} lines")
     return "\n".join(block).rstrip()
 
 
@@ -85,14 +81,10 @@ def _owner_snippet(
             start, end = span
             lines = lines[start - 1 : end]
         else:
-            warnings.append(
-                f"symbol `{symbol}` not found in `{path}`; using file head"
-            )
+            warnings.append(f"symbol `{symbol}` not found in `{path}`; using file head")
     if len(lines) > MAX_SNIPPET_LINES:
         lines = lines[:MAX_SNIPPET_LINES]
-        warnings.append(
-            f"snippet for `{path}` truncated to {MAX_SNIPPET_LINES} lines"
-        )
+        warnings.append(f"snippet for `{path}` truncated to {MAX_SNIPPET_LINES} lines")
     return "\n".join(lines), start
 
 

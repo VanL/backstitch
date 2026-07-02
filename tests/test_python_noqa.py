@@ -50,9 +50,7 @@ def test_comment_noqa_suppresses_next_statement_only() -> None:
     # only the second function.
     data = _check_json()
     remaining = [
-        i
-        for i in data["issues"]
-        if i["code"] == "SPEC_MAPPING_RECIPROCAL_MISSING"
+        i for i in data["issues"] if i["code"] == "SPEC_MAPPING_RECIPROCAL_MISSING"
     ]
     assert len(remaining) == 1
     assert remaining[0]["symbol"] == "uncovered"

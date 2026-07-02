@@ -83,9 +83,7 @@ def test_missing_required_field_is_analysis_error() -> None:
 
 def test_summary_separates_deterministic_from_semantic() -> None:
     report = scan_repository(CLEAN, CLEAN_PROFILE)
-    load = load_analysis_results(
-        _row(classification="probable_mismatch") + "\n", None
-    )
+    load = load_analysis_results(_row(classification="probable_mismatch") + "\n", None)
     text = render_analysis_summary(report.summary(), load)
     assert "deterministic" in text
     assert "semantic findings (advisory)" in text

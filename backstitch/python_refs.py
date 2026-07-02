@@ -25,9 +25,7 @@ from backstitch.models import CodeRef, Issue, RefContext
 
 _ID_RE = re.compile(rf"^{SECTION_ID}$")
 _PREFIX_RE = re.compile(r"^[A-Z][A-Za-z]*")
-_MD_PATH_RE = re.compile(
-    r"(?P<path>[\w.-]+(?:/[\w.-]+)*\.md)(?:#(?P<anchor>[\w-]+))?"
-)
+_MD_PATH_RE = re.compile(r"(?P<path>[\w.-]+(?:/[\w.-]+)*\.md)(?:#(?P<anchor>[\w-]+))?")
 _BRACKET_RE = re.compile(r"\[(?P<content>[^\[\]]+)\]")
 _CROSS_RANGE_RE = re.compile(
     rf"\[(?P<start>{SECTION_ID})\]\s*[-–—]{{1,2}}\s*\[(?P<end>{SECTION_ID})\]"
@@ -93,11 +91,7 @@ def _in_bracket_range(item: str) -> tuple[str, str] | None:
             continue
         left_prefix = _PREFIX_RE.match(left)
         right_prefix = _PREFIX_RE.match(right)
-        if (
-            left_prefix
-            and right_prefix
-            and left_prefix.group() == right_prefix.group()
-        ):
+        if left_prefix and right_prefix and left_prefix.group() == right_prefix.group():
             return left, right
     return None
 
@@ -195,9 +189,7 @@ def _iter_owner_spans(tree: ast.Module) -> list[tuple[str, int, int, ast.AST]]:
 
     def visit(node: ast.AST, prefix: str) -> None:
         for child in ast.iter_child_nodes(node):
-            if isinstance(
-                child, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef
-            ):
+            if isinstance(child, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
                 qualname = f"{prefix}{child.name}"
                 end = child.end_lineno or child.lineno
                 spans.append((qualname, child.lineno, end, child))
@@ -295,9 +287,7 @@ def parse_python_file(
 
     refs: list[CodeRef] = []
 
-    def emit(
-        owner: str, line_no: int, text: str, context: RefContext
-    ) -> None:
+    def emit(owner: str, line_no: int, text: str, context: RefContext) -> None:
         for line_ref in _extract_line_refs(text):
             refs.append(
                 CodeRef(

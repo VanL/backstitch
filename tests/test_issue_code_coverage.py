@@ -130,7 +130,5 @@ def test_context_dependent_severities_fire_both_ways(
     }
     assert mapping_missing["AA-5"] == "error"
     assert mapping_missing["AA-6"] == "warning"
-    ambiguous = [
-        i for i in everything.issues if i.code == "SPEC_SECTION_AMBIGUOUS"
-    ]
+    ambiguous = [i for i in everything.issues if i.code == "SPEC_SECTION_AMBIGUOUS"]
     assert {i.severity for i in ambiguous} == {"warning"}

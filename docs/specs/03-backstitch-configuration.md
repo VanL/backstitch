@@ -476,5 +476,6 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-07-02-backstitch-four-way-reconciliation-plan.md` (implementing)
 - `docs/plans/2026-07-01-backstitch-toml-configuration-plan.md`
 - `docs/plans/2026-07-02-backstitch-traceability-exclusions-plan.md`

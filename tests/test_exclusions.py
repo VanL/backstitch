@@ -72,9 +72,7 @@ def test_per_section_ignore_suppresses_only_that_section() -> None:
     index = build_suppression_index(
         meta_spec_globs=(),
         lint=LintSettings(
-            per_section_ignores={
-                "docs/specs/01-x.md::X-1": ("SPEC_SECTION_UNMAPPED",)
-            }
+            per_section_ignores={"docs/specs/01-x.md::X-1": ("SPEC_SECTION_UNMAPPED",)}
         ),
     )
     suppressed, _ = should_suppress(_issue("SPEC_SECTION_UNMAPPED"), index)
@@ -89,9 +87,7 @@ def test_context_dependent_code_suppressibility_gates_on_instance_severity() -> 
     # warning instance (a plan .md ref) is suppressible.
     index = build_suppression_index(
         meta_spec_globs=(),
-        lint=LintSettings(
-            per_file_ignores={"docs/specs/*": ("MAPPING_PATH_MISSING",)}
-        ),
+        lint=LintSettings(per_file_ignores={"docs/specs/*": ("MAPPING_PATH_MISSING",)}),
     )
     warning_instance = _issue("MAPPING_PATH_MISSING", severity="warning")
     suppressed, _ = should_suppress(warning_instance, index)
@@ -125,23 +121,18 @@ def test_unknown_suppression_code_in_inline_marker_raises() -> None:
 def test_allow_unknown_downgrades_unknown_suppression_code() -> None:
     index = build_suppression_index(
         meta_spec_globs=(),
-        lint=LintSettings(
-            per_file_ignores={"docs/specs/*": ("SPEC_SECTON_UNMAPPED",)}
-        ),
+        lint=LintSettings(per_file_ignores={"docs/specs/*": ("SPEC_SECTON_UNMAPPED",)}),
         allow_unknown=True,
     )
     assert any(
-        "SPEC_SECTON_UNMAPPED" in warning
-        for warning in index.suppression_warnings
+        "SPEC_SECTON_UNMAPPED" in warning for warning in index.suppression_warnings
     )
 
 
 def test_error_severity_code_in_config_warns_and_does_not_suppress() -> None:
     index = build_suppression_index(
         meta_spec_globs=(),
-        lint=LintSettings(
-            per_file_ignores={"docs/specs/*": ("SPEC_FILE_MISSING",)}
-        ),
+        lint=LintSettings(per_file_ignores={"docs/specs/*": ("SPEC_FILE_MISSING",)}),
     )
     assert any(
         "cannot suppress error-severity" in warning
@@ -173,9 +164,7 @@ def test_unused_ignores_warn_when_enabled() -> None:
 
 
 def test_noqa_parsing_accepts_alias_and_comma_lists() -> None:
-    codes = parse_noqa_text(
-        "backstitch: noqa SPEC_SECTION_UNMAPPED, CODE_REF_BROAD"
-    )
+    codes = parse_noqa_text("backstitch: noqa SPEC_SECTION_UNMAPPED, CODE_REF_BROAD")
     assert codes == frozenset({"SPEC_SECTION_UNMAPPED", "CODE_REF_BROAD"})
     codes = parse_noqa_text("backstitch: ignore CODE_REF_BROAD")
     assert codes == frozenset({"CODE_REF_BROAD"})

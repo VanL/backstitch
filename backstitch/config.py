@@ -46,8 +46,6 @@ class ProfileConfig:
                 else self.exploratory_spec_globs
             ),
             meta_spec_globs=(
-                meta_spec_globs
-                if meta_spec_globs is not None
-                else self.meta_spec_globs
+                meta_spec_globs if meta_spec_globs is not None else self.meta_spec_globs
             ),
         )

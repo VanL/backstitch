@@ -1,7 +1,7 @@
 # Backstitch Style Spec-Code Traceability Tool Plan
-Status: draft
+Status: superseded
 Source specs: docs/specs/01-development-documentation-operating-model.md [DOM-4], [DOM-5], [DOM-10], [DOM-11]; docs/specs/02-backstitch-core.md [SC-1]-[SC-10]
-Superseded by: none
+Superseded by: docs/plans/2026-07-02-backstitch-four-way-reconciliation-plan.md
 
 ## Goal
 

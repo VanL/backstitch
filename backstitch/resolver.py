@@ -149,9 +149,7 @@ def _emit(
     )
 
 
-def _duplicate_section_issues(
-    index: _GraphIndex, issues: list[Issue]
-) -> None:
+def _duplicate_section_issues(index: _GraphIndex, issues: list[Issue]) -> None:
     for section_id, defs in sorted(index.sections_by_id.items()):
         if len(defs) > 1:
             locations = ", ".join(f"{d.path}:{d.line}" for d in defs)
@@ -161,8 +159,7 @@ def _duplicate_section_issues(
                 "warning",
                 defs[0].path,
                 defs[0].line,
-                f"section ID [{section_id}] is defined more than once:"
-                f" {locations}",
+                f"section ID [{section_id}] is defined more than once: {locations}",
                 section_id=section_id,
             )
 
@@ -278,8 +275,7 @@ def _resolve_mappings(
                 "warning",
                 mapping.spec_path,
                 mapping.line,
-                f"cannot inventory symbols in non-Python file"
-                f" `{target_path}`",
+                f"cannot inventory symbols in non-Python file `{target_path}`",
                 section_id=mapping.section_id,
                 symbol=mapping.target_symbol,
             )
@@ -314,8 +310,7 @@ def _resolve_mappings(
                 "error",
                 mapping.spec_path,
                 mapping.line,
-                f"symbol `{mapping.target_symbol}` not found in"
-                f" `{target_path}`",
+                f"symbol `{mapping.target_symbol}` not found in `{target_path}`",
                 section_id=mapping.section_id,
                 symbol=mapping.target_symbol,
             )
@@ -364,9 +359,7 @@ def _resolve_bare(
         # specific trace edge that cannot be established (error); the same
         # bare ID in a comment is prose (warning). Context comes from the
         # parser via CodeRef.ref_context -- never re-inferred from raw text.
-        severity: Severity = (
-            "error" if ref.ref_context == "docstring" else "warning"
-        )
+        severity: Severity = "error" if ref.ref_context == "docstring" else "warning"
         _emit(
             issues,
             "SPEC_SECTION_AMBIGUOUS",
@@ -420,9 +413,7 @@ def _resolve_code_refs(
                     for endpoint in (start, end)
                     if (match := _ALPHA_PREFIX_RE.match(endpoint))
                 ]
-                if not any(
-                    prefix in index.known_prefixes for prefix in prefixes
-                ):
+                if not any(prefix in index.known_prefixes for prefix in prefixes):
                     continue
                 expansion = _expand_range(start, end)
                 if isinstance(expansion, str):
@@ -437,9 +428,7 @@ def _resolve_code_refs(
                     )
                     continue
                 for section_id in expansion[1]:
-                    bare_section = _resolve_bare(
-                        ref, section_id, index, issues
-                    )
+                    bare_section = _resolve_bare(ref, section_id, index, issues)
                     if bare_section is not None:
                         target_files.add(bare_section.path)
                         backlink_edge(ref, bare_section)
@@ -459,8 +448,7 @@ def _resolve_code_refs(
                 "warning",
                 ref.path,
                 ref.line,
-                f"shipped code references {classification} spec"
-                f" `{target}`",
+                f"shipped code references {classification} spec `{target}`",
                 section_id=ref.section_ids[0] if ref.section_ids else None,
                 symbol=ref.owner_symbol,
             )
@@ -521,16 +509,13 @@ def _resolve_file_qualified_ref(
             backlink_edge(ref, file_section)
     for start, end in ref.ranges:
         expansion = _expand_range(start, end)
-        if isinstance(expansion, str) or not set(
-            expansion[1]
-        ) <= index.ids_by_file.get(norm, set()):
+        if isinstance(expansion, str) or not set(expansion[1]) <= index.ids_by_file.get(
+            norm, set()
+        ):
             detail = (
                 expansion
                 if isinstance(expansion, str)
-                else (
-                    f"range [{start}]-[{end}] has undefined sections"
-                    f" in `{norm}`"
-                )
+                else (f"range [{start}]-[{end}] has undefined sections in `{norm}`")
             )
             _emit(
                 issues,
@@ -551,8 +536,7 @@ def _resolve_file_qualified_ref(
             "warning",
             ref.path,
             ref.line,
-            f"document-only reference to `{norm}`; prefer an"
-            " exact section ID",
+            f"document-only reference to `{norm}`; prefer an exact section ID",
             symbol=ref.owner_symbol,
         )
 
@@ -580,9 +564,7 @@ def _reciprocal_and_inventory_issues(
             if edge.code_path.endswith(".py") or "." not in basename:
                 backlink_capable.add(key)
     backlinked = {
-        (edge.spec_path, edge.section_id)
-        for edge in edges
-        if edge.kind == "backlink"
+        (edge.spec_path, edge.section_id) for edge in edges if edge.kind == "backlink"
     }
     raw_mapped_keys = {(m.spec_path, m.section_id) for m in mappings}
 
@@ -606,8 +588,7 @@ def _reciprocal_and_inventory_issues(
                 "info",
                 section.path,
                 section.line,
-                f"section [{section.section_id}] has no implementation"
-                " mapping",
+                f"section [{section.section_id}] has no implementation mapping",
                 section_id=section.section_id,
             )
 
@@ -615,10 +596,7 @@ def _reciprocal_and_inventory_issues(
         if code_path in targets:
             return True
         # Directory ownership: `weft/core/monitor/` covers files inside it.
-        return any(
-            code_path.startswith(target.rstrip("/") + "/")
-            for target in targets
-        )
+        return any(code_path.startswith(target.rstrip("/") + "/") for target in targets)
 
     for edge in edges:
         if edge.kind != "backlink":
@@ -640,9 +618,7 @@ def _reciprocal_and_inventory_issues(
                 section_id=edge.section_id,
                 symbol=edge.code_symbol,
             )
-        elif targets is not None and not covered_by_mapping(
-            edge.code_path, targets
-        ):
+        elif targets is not None and not covered_by_mapping(edge.code_path, targets):
             _emit(
                 issues,
                 "CODE_REF_UNMAPPED_FROM_SPEC",

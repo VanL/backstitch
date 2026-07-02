@@ -240,7 +240,7 @@ def test_unknown_key_exits_two(tmp_path: Path) -> None:
 
 def test_unknown_nested_key_exits_two(tmp_path: Path) -> None:
     config = tmp_path / ".backstitch.toml"
-    config.write_text('[check]\ncolor = true\n', encoding="utf-8")
+    config.write_text("[check]\ncolor = true\n", encoding="utf-8")
     with pytest.raises(ConfigLoadError) as excinfo:
         load_settings(tmp_path, explicit=config)
     assert "check.color" in str(excinfo.value)

@@ -29,9 +29,7 @@ _MAPPING_MARKER_RE = re.compile(
 _BULLET_RE = re.compile(r"^\s*[-*]\s+")
 # `- [MA-1.1] Spawn queue consumption — ...` inside a mapping block defines
 # a subsection AND owns the mapping tokens on its line (observed Weft form).
-_BULLET_DEF_RE = re.compile(
-    rf"^\s*[-*]\s+\[(?P<id>{SECTION_ID})\]\s+(?P<title>\S.*)$"
-)
+_BULLET_DEF_RE = re.compile(rf"^\s*[-*]\s+\[(?P<id>{SECTION_ID})\]\s+(?P<title>\S.*)$")
 _BACKTICK_TOKEN_RE = re.compile(r"`(?P<token>[^`]+)`")
 _ANCHOR_STRIP_RE = re.compile(r"[^\w\s-]", re.UNICODE)
 
@@ -186,9 +184,7 @@ def parse_markdown_spec(
                 file_ignores.update(marker_codes if not is_meta else ())
             else:
                 target = sections[-1].section_id
-                meta_flag, codes = section_markers.setdefault(
-                    target, (False, set())
-                )
+                meta_flag, codes = section_markers.setdefault(target, (False, set()))
                 section_markers[target] = (
                     meta_flag or is_meta,
                     codes | (marker_codes if not is_meta else set()),

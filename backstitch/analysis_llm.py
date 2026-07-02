@@ -60,8 +60,7 @@ def _parse_model_output(raw: str, packet_id: str) -> dict[str, Any] | str:
         return f"model output invalid: {validated}"
     if validated.packet_id != packet_id:
         return (
-            f"model output packet_id `{validated.packet_id}` does not match"
-            f" the packet"
+            f"model output packet_id `{validated.packet_id}` does not match the packet"
         )
     assert isinstance(row, dict)
     return row

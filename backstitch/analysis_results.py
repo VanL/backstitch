@@ -91,9 +91,7 @@ def validate_analysis_row(
     )
 
 
-def load_analysis_results(
-    text: str, known_packet_ids: set[str] | None
-) -> AnalysisLoad:
+def load_analysis_results(text: str, known_packet_ids: set[str] | None) -> AnalysisLoad:
     """Parse analysis JSONL; bad rows become errors, not exceptions."""
 
     results: list[AnalysisResult] = []
@@ -123,9 +121,7 @@ def packet_ids_from_report(report_data: dict[str, Any]) -> set[str]:
     }
 
 
-def render_analysis_summary(
-    summary: Mapping[str, int], load: AnalysisLoad
-) -> str:
+def render_analysis_summary(summary: Mapping[str, int], load: AnalysisLoad) -> str:
     """Render deterministic and semantic findings, kept clearly separate.
 
     ``summary`` is the deterministic report's counts mapping — either
@@ -157,14 +153,9 @@ def render_analysis_summary(
     if load.results:
         counts: dict[str, int] = {}
         for result in load.results:
-            counts[result.classification] = (
-                counts.get(result.classification, 0) + 1
-            )
+            counts[result.classification] = counts.get(result.classification, 0) + 1
         lines.append(
-            "  "
-            + ", ".join(
-                f"{counts[c]} {c}" for c in CLASSIFICATIONS if c in counts
-            )
+            "  " + ", ".join(f"{counts[c]} {c}" for c in CLASSIFICATIONS if c in counts)
         )
         for result in load.results:
             confidence = (

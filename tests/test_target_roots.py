@@ -88,9 +88,7 @@ def test_config_override_beats_sibling(
     monkeypatch.delenv("BACKSTITCH_WEFT_ROOT", raising=False)
     configured = tmp_path / "configured-weft"
     configured.mkdir()
-    settings = BackstitchSettings(
-        target_roots=TargetRootSettings(weft=str(configured))
-    )
+    settings = BackstitchSettings(target_roots=TargetRootSettings(weft=str(configured)))
     assert discover_weft(anchor=worktree, settings=settings) == configured.resolve()
 
 
@@ -105,9 +103,7 @@ def test_env_beats_config(
     config_dir = tmp_path / "config-weft"
     config_dir.mkdir()
     monkeypatch.setenv("BACKSTITCH_WEFT_ROOT", str(env_dir))
-    settings = BackstitchSettings(
-        target_roots=TargetRootSettings(weft=str(config_dir))
-    )
+    settings = BackstitchSettings(target_roots=TargetRootSettings(weft=str(config_dir)))
     assert discover_weft(anchor=worktree, settings=settings) == env_dir.resolve()
 
 

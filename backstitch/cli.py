@@ -137,16 +137,12 @@ def _add_other_parsers(subparsers: argparse._SubParsersAction[Any]) -> None:
     )
     packets.add_argument("--config", type=Path, default=None, metavar="PATH")
     packets.add_argument("--no-config", action="store_true")
-    packets.add_argument(
-        "--output", type=Path, required=True, metavar="PATH"
-    )
+    packets.add_argument("--output", type=Path, required=True, metavar="PATH")
 
     analyze = subparsers.add_parser(
         "analyze", help="run llm-backed semantic review over packets"
     )
-    analyze.add_argument(
-        "--packets", type=Path, required=True, metavar="PATH"
-    )
+    analyze.add_argument("--packets", type=Path, required=True, metavar="PATH")
     analyze.add_argument("--model", default=None, metavar="MODEL")
     analyze.add_argument(
         "--output",
@@ -170,13 +166,9 @@ def _add_other_parsers(subparsers: argparse._SubParsersAction[Any]) -> None:
         "--analysis-results", type=Path, required=True, metavar="PATH"
     )
 
-    config = subparsers.add_parser(
-        "config", help="inspect resolved configuration"
-    )
+    config = subparsers.add_parser("config", help="inspect resolved configuration")
     config_sub = config.add_subparsers(dest="config_command", required=True)
-    show = config_sub.add_parser(
-        "show", help="print effective settings as JSON"
-    )
+    show = config_sub.add_parser("show", help="print effective settings as JSON")
     show.add_argument("--repo-root", type=Path, default=Path("."))
     path_cmd = config_sub.add_parser(
         "path", help="print the discovered config file path"
@@ -190,8 +182,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="backstitch",
         description=(
-            "Backstitch style traceability checks for spec-driven"
-            " repositories."
+            "Backstitch style traceability checks for spec-driven repositories."
         ),
     )
     parser.add_argument(
@@ -400,9 +391,7 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     if args.no_config:
         settings = BackstitchSettings()
     else:
-        settings = load_settings(
-            args.packets.resolve().parent, explicit=args.config
-        )
+        settings = load_settings(args.packets.resolve().parent, explicit=args.config)
     packets = _load_packets(args.packets)
     model = resolve_model_name(args.model, configured=settings.analyze.model)
     adapter = default_adapter(model)
@@ -428,9 +417,7 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
     )
 
     try:
-        report_data = json.loads(
-            args.deterministic_report.read_text(encoding="utf-8")
-        )
+        report_data = json.loads(args.deterministic_report.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         msg = f"{args.deterministic_report}: not valid JSON: {exc}"
         raise ValueError(msg) from None

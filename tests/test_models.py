@@ -49,8 +49,12 @@ def test_error_severity_codes_are_always_error_only() -> None:
 
 def test_report_summary_counts_by_severity() -> None:
     issues = (
-        Issue(code="SPEC_FILE_MISSING", severity="error", path="a.py", line=1, message="x"),
-        Issue(code="CODE_REF_BROAD", severity="warning", path="a.py", line=2, message="y"),
+        Issue(
+            code="SPEC_FILE_MISSING", severity="error", path="a.py", line=1, message="x"
+        ),
+        Issue(
+            code="CODE_REF_BROAD", severity="warning", path="a.py", line=2, message="y"
+        ),
     )
     report = Report(
         profile="backstitch-style-v1",

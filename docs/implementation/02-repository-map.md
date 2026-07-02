@@ -15,6 +15,22 @@ Quick pointers to the key guidance documents in this repository.
 | Path | Purpose |
 |------|---------|
 | `backstitch/` | Python package for the backstitch CLI and traceability implementation |
+| `backstitch/grammar.py` | Single section-ID regex shared by both parsers ([SC-4]) |
+| `backstitch/models.py` | Frozen graph/issue datatypes; canonical `ISSUE_CODES` ([SC-11]) |
+| `backstitch/config.py` | `ProfileConfig` and overrides ([SC-3]) |
+| `backstitch/profiles.py` | Built-in `backstitch-style-v1` profile ([SC-3]) |
+| `backstitch/markdown_specs.py` | Spec parser: sections, mappings, markers ([SC-4], [EXC-4]) |
+| `backstitch/python_refs.py` | Code parser: backlinks, noqa spans ([SC-4], [EXC-5]) |
+| `backstitch/resolver.py` | Pure `resolve()` + `scan_repository` ([SC-4], [SC-9]) |
+| `backstitch/reporting.py` | Text/JSON rendering, suppressed view ([SC-6], [EXC-7]) |
+| `backstitch/settings.py` | TOML discovery/validation ([CFG-*]) |
+| `backstitch/exclusions.py` | Suppression engine ([EXC-*]) |
+| `backstitch/target_roots.py` | Worktree-safe sibling discovery ([SC-12]) |
+| `backstitch/analysis_packets.py` | Bounded packet generation ([SC-6], [SC-7]) |
+| `backstitch/analysis_results.py` | Result JSONL load/summarize ([SC-6]) |
+| `backstitch/analysis_llm.py` | Lazy-`llm` adapter boundary ([SC-7], [SC-8]) |
+| `backstitch/cli.py` | All subcommands, exit-code contract ([SC-5], [CFG-7]) |
+| `tests/acceptance/` | The twelve [SC-10] acceptance probes |
 
 ## Shared Agent Context
 

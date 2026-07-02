@@ -18,7 +18,9 @@ PACKET_A = {
     "section_id": "X-1",
     "title": "Thing",
     "section_text": "## Thing [X-1]\n\nMust frob.",
-    "owners": [{"path": "pkg/mod.py", "symbol": None, "start_line": 1, "snippet": "x = 1"}],
+    "owners": [
+        {"path": "pkg/mod.py", "symbol": None, "start_line": 1, "snippet": "x = 1"}
+    ],
     "tests": [],
     "issues": [],
     "warnings": [],

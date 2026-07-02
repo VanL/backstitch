@@ -72,9 +72,9 @@ class SuppressionIndex:
     )
     inline_file_ignores: dict[str, frozenset[str]] = field(default_factory=dict)
     inline_code_ignores: dict[str, frozenset[str]] = field(default_factory=dict)
-    inline_code_span_ignores: dict[
-        str, tuple[tuple[int, int, frozenset[str]], ...]
-    ] = field(default_factory=dict)
+    inline_code_span_ignores: dict[str, tuple[tuple[int, int, frozenset[str]], ...]] = (
+        field(default_factory=dict)
+    )
     used_config_file_rules: set[str] = field(default_factory=set)
     used_config_section_rules: set[str] = field(default_factory=set)
     suppression_warnings: list[str] = field(default_factory=list)
@@ -174,9 +174,8 @@ def _section_is_meta(
 ) -> bool:
     if spec_file is None:
         return False
-    if (
-        section_id is not None
-        and index.section_meta.get((spec_file, section_id), False)
+    if section_id is not None and index.section_meta.get(
+        (spec_file, section_id), False
     ):
         return True
     return _file_is_meta(spec_file, index)
@@ -330,9 +329,7 @@ def build_suppression_index(
     inline_file_ignores: dict[str, frozenset[str]] | None = None,
     inline_spec_ignores: dict[tuple[str, str], frozenset[str]] | None = None,
     inline_code_ignores: dict[str, frozenset[str]] | None = None,
-    inline_code_span_ignores: dict[
-        str, tuple[tuple[int, int, frozenset[str]], ...]
-    ]
+    inline_code_span_ignores: dict[str, tuple[tuple[int, int, frozenset[str]], ...]]
     | None = None,
     marker_warnings: list[str] | None = None,
     allow_unknown: bool = False,
@@ -376,16 +373,14 @@ def _validate_config_codes(index: SuppressionIndex, *, allow_unknown: bool) -> N
                     # [EXC-4]: unknown suppression codes fail load by
                     # default -- same hatch, same scope as [CFG-8].
                     message = (
-                        f"unknown issue code `{code}` in {table_name}"
-                        f" for {path_key}"
+                        f"unknown issue code `{code}` in {table_name} for {path_key}"
                     )
                     if not allow_unknown:
                         raise UnknownSuppressionCodeError(message)
                     index.suppression_warnings.append(message)
                 elif code in ERROR_SEVERITY_CODES:
                     index.suppression_warnings.append(
-                        f"cannot suppress error-severity code {code}"
-                        f" in {table_name}"
+                        f"cannot suppress error-severity code {code} in {table_name}"
                     )
 
 

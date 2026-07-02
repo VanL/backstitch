@@ -28,9 +28,7 @@ def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
     return result
 
 
-def check_json(
-    repo: Path, *extra: str, expect_exit: int | None = None
-) -> dict:
+def check_json(repo: Path, *extra: str, expect_exit: int | None = None) -> dict:
     result = run_cli(
         "check",
         "--repo-root",

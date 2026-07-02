@@ -260,11 +260,7 @@ def _extract_config_body(path: Path) -> dict[str, Any]:
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     merged = dict(base)
     for key, value in overlay.items():
-        if (
-            key in merged
-            and isinstance(merged[key], dict)
-            and isinstance(value, dict)
-        ):
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
             merged[key] = _deep_merge(merged[key], value)
         else:
             merged[key] = value
@@ -291,7 +287,9 @@ def _load_config_chain(
         msg = f"Invalid extend value in {resolved}"
         raise ConfigLoadError(msg)
 
-    parent_path = (resolved.parent / expand_path_value(extend.strip(), base_dir=resolved.parent)).resolve()
+    parent_path = (
+        resolved.parent / expand_path_value(extend.strip(), base_dir=resolved.parent)
+    ).resolve()
     if not parent_path.is_file():
         msg = f"extend target not found: {parent_path}"
         raise ConfigLoadError(msg)
@@ -365,14 +363,18 @@ def _parse_settings(raw: dict[str, Any], *, config_path: Path) -> BackstitchSett
         msg = f"packets.output must be a string in {config_path}"
         raise ConfigLoadError(msg)
     if packets_output is not None:
-        packets_output = expand_path_value(
-            packets_output, base_dir=config_path.parent
-        )
+        packets_output = expand_path_value(packets_output, base_dir=config_path.parent)
 
     profile_settings = ProfileSettings(
-        spec_roots=_optional_str_tuple(profile_table.get("spec_roots"), "profile.spec_roots"),
-        plan_roots=_optional_str_tuple(profile_table.get("plan_roots"), "profile.plan_roots"),
-        code_roots=_optional_str_tuple(profile_table.get("code_roots"), "profile.code_roots"),
+        spec_roots=_optional_str_tuple(
+            profile_table.get("spec_roots"), "profile.spec_roots"
+        ),
+        plan_roots=_optional_str_tuple(
+            profile_table.get("plan_roots"), "profile.plan_roots"
+        ),
+        code_roots=_optional_str_tuple(
+            profile_table.get("code_roots"), "profile.code_roots"
+        ),
         planned_spec_globs=_optional_str_tuple(
             profile_table.get("planned_spec_globs"),
             "profile.planned_spec_globs",

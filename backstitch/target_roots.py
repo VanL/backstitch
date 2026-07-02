@@ -35,7 +35,7 @@ def git_worktree_root(start: Path | None = None) -> Path:
             text=True,
             stderr=subprocess.DEVNULL,
         ).strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except subprocess.CalledProcessError, FileNotFoundError:
         return start_path
     return Path(toplevel).resolve()
 

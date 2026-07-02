@@ -59,6 +59,4 @@ def test_probe_9_concurrent_output_byte_identical_to_serial() -> None:
 
     serial_rows, _ = analyze_packets(packets, adapter, 1)
     parallel_rows, _ = analyze_packets(packets, adapter, 4)
-    assert render_results_jsonl(parallel_rows) == render_results_jsonl(
-        serial_rows
-    )
+    assert render_results_jsonl(parallel_rows) == render_results_jsonl(serial_rows)

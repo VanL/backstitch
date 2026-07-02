@@ -23,8 +23,18 @@ def test_probe_10_sibling_discovery_from_linked_worktree(
     main.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=main, check=True)
     subprocess.run(
-        ["git", "-c", "user.email=t@example.com", "-c", "user.name=t",
-         "commit", "--allow-empty", "-q", "-m", "init"],
+        [
+            "git",
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "init",
+        ],
         cwd=main,
         check=True,
     )
@@ -60,16 +70,24 @@ def test_probe_11_malformed_inputs_exit_two_with_one_line_errors(
     bad_packets = tmp_path / "bad.jsonl"
     bad_packets.write_text("not json {\n", encoding="utf-8")
     outcome = run_cli(
-        "analyze", "--packets", str(bad_packets), "--no-config",
-        "--model", "irrelevant",
+        "analyze",
+        "--packets",
+        str(bad_packets),
+        "--no-config",
+        "--model",
+        "irrelevant",
     )
     assert outcome.returncode == 2
     assert "backstitch: error:" in outcome.stderr
 
     unwritable = tmp_path / "no-dir" / "out.json"
     outcome = run_cli(
-        "check", "--repo-root", str(mini_repo), *ROOTS,
-        "--output", str(unwritable),
+        "check",
+        "--repo-root",
+        str(mini_repo),
+        *ROOTS,
+        "--output",
+        str(unwritable),
     )
     assert outcome.returncode == 2
     assert "backstitch: error:" in outcome.stderr
@@ -86,15 +104,11 @@ def test_probe_12_path_ladder_ambiguous_and_inexact(mini_repo: Path) -> None:
         "## Inex [LP-2]\n\n_Implementation mapping_:\n\n- `leaf.py`\n",
         encoding="utf-8",
     )
-    result = run_cli(
-        "check", "--repo-root", str(mini_repo), *ROOTS, "--format", "json"
-    )
+    result = run_cli("check", "--repo-root", str(mini_repo), *ROOTS, "--format", "json")
     data = json.loads(result.stdout)
     codes = {i["code"]: i for i in data["issues"]}
     assert codes["TARGET_PATH_AMBIGUOUS"]["section_id"] == "LP-1"
-    ambiguous_edges = [
-        e for e in data["edges"] if e["section_id"] == "LP-1"
-    ]
+    ambiguous_edges = [e for e in data["edges"] if e["section_id"] == "LP-1"]
     assert ambiguous_edges == []
     assert codes["MAPPING_PATH_INEXACT"]["section_id"] == "LP-2"
     inexact_edges = [e for e in data["edges"] if e["section_id"] == "LP-2"]

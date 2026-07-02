@@ -36,11 +36,7 @@ def clean() -> Report:
 
 
 def _codes(report: Report, severity: str | None = None) -> list[str]:
-    return [
-        i.code
-        for i in report.issues
-        if severity is None or i.severity == severity
-    ]
+    return [i.code for i in report.issues if severity is None or i.severity == severity]
 
 
 def test_clean_graph_has_no_issues(clean: Report) -> None:
@@ -196,9 +192,7 @@ def test_path_symbol_missing_symbol_error(tmp_path: Path) -> None:
 
 
 def test_reciprocal_backlink_missing_warns(broken: Report) -> None:
-    issues = [
-        i for i in broken.issues if i.code == "CODE_BACKLINK_RECIPROCAL_MISSING"
-    ]
+    issues = [i for i in broken.issues if i.code == "CODE_BACKLINK_RECIPROCAL_MISSING"]
     sections = {i.section_id for i in issues}
     assert "LAYER-1" in sections
     assert "ROUTE-A1.1" in sections
@@ -391,9 +385,9 @@ def test_ownerless_mapping_block_warns(tmp_path: Path) -> None:
     codes = {i.code for i in report.issues}
     assert "MAPPING_BLOCK_OWNERLESS" in codes
     # The block under the ID-less heading must NOT attach to X-1.
-    assert not any(
-        m.section_id == "X-1" for m in report.spec_mappings
-    ), "ownerless mapping block leaked to the previous section"
+    assert not any(m.section_id == "X-1" for m in report.spec_mappings), (
+        "ownerless mapping block leaked to the previous section"
+    )
 
 
 def test_missing_scan_root_is_error(tmp_path: Path) -> None:
