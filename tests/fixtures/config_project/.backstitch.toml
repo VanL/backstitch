@@ -1,0 +1,13 @@
+extend_exclude = ["vendored/**"]
+
+[profile]
+name = "backstitch-style-v1"
+spec_roots = ["docs/specifications"]
+code_roots = ["src"]
+
+[check]
+format = "json"
+warnings_as_errors = true
+
+[analyze]
+model = "gpt-configured"
