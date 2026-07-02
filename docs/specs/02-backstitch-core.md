@@ -333,9 +333,12 @@ Packet JSONL records must include:
 - packet ID
 - spec file and section ID
 - section title and bounded section text
+- the section's starting line in the spec file, so evidence line-locality
+  can be enforced against the section text a model was shown
 - resolved implementation owners
 - bounded code snippets
-- directly linked tests when available
+- directly linked tests when available; test files are named by path only,
+  so a semantic result cannot cite line evidence into them
 - deterministic issues relevant to the packet
 - prompt instructions for structured semantic review
 - truncation warnings (`packet_warnings`) whenever a snippet, owner, or
