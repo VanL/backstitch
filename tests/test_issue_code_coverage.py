@@ -62,6 +62,7 @@ _FILES: dict[str, str | bytes] = {
         "    Spec: docs/specs/01-a.md#no-such-anchor\n"  # missing anchor
         "    Spec: docs/specs/02-planned-p.md [PP-1]\n"  # planned ref
         "    Spec: docs/specs/03-exploratory-x.md [XX-1]\n"  # exploratory
+        "    Spec: [DD-1]\n"  # asserted ambiguous -> error branch
         '    """\n'
         "    # [AA-77] known-prefix bare ref, no match\n"
         "    # [DD-1] ambiguous bare ref in a comment\n"
@@ -130,5 +131,7 @@ def test_context_dependent_severities_fire_both_ways(
     }
     assert mapping_missing["AA-5"] == "error"
     assert mapping_missing["AA-6"] == "warning"
+    # Both severity branches must fire: the asserted `Spec:` line is an
+    # error; the comment reference is a warning ([SC-11] context split).
     ambiguous = [i for i in everything.issues if i.code == "SPEC_SECTION_AMBIGUOUS"]
-    assert {i.severity for i in ambiguous} == {"warning"}
+    assert {i.severity for i in ambiguous} == {"error", "warning"}

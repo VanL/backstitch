@@ -49,6 +49,7 @@ class ParsedPython:
     issues: tuple[Issue, ...]
     module_noqa: frozenset[str] = frozenset()
     span_noqa: tuple[tuple[int, int, frozenset[str]], ...] = ()
+    noqa_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,19 +314,26 @@ def parse_python_file(
         if docstring is None:
             continue
         for offset, text_line in enumerate(str(docstring.value).splitlines()):
-            emit(owner, docstring.lineno + offset, text_line, "docstring")
+            # [SC-11] context: a `Spec:` marker line ASSERTS a trace edge;
+            # any other docstring line is prose. The distinction is made
+            # here, at parse time, never re-inferred downstream.
+            context: RefContext = (
+                "asserted" if text_line.lstrip().startswith("Spec:") else "docstring"
+            )
+            emit(owner, docstring.lineno + offset, text_line, context)
 
     # [EXC-5] module-docstring noqa: file-scoped suppression codes.
+    noqa_warnings: list[str] = []
     module_doc = _docstring_node(tree)
-    module_noqa = (
-        parse_noqa_text(
+    if module_doc is not None:
+        module_noqa, doc_warnings = parse_noqa_text(
             str(module_doc.value),
             allow_unknown=allow_unknown_codes,
             location=f"{rel_path} module docstring",
         )
-        if module_doc is not None
-        else frozenset()
-    )
+        noqa_warnings.extend(doc_warnings)
+    else:
+        module_noqa = frozenset()
 
     # Comments, with the innermost enclosing owner.
     def owner_for_line(line_no: int) -> str:
@@ -343,11 +351,12 @@ def parse_python_file(
     for token in tokenize.generate_tokens(io.StringIO(source).readline):
         if token.type == tokenize.COMMENT:
             comment_text = token.string.lstrip("#").strip()
-            codes = parse_noqa_text(
+            codes, comment_warnings = parse_noqa_text(
                 comment_text,
                 allow_unknown=allow_unknown_codes,
                 location=f"{rel_path}:{token.start[0]}",
             )
+            noqa_warnings.extend(comment_warnings)
             if codes:
                 # [EXC-5] comment form: next statement only, never file-wide.
                 span = _next_statement_span(token.start[0], statement_spans)
@@ -367,4 +376,5 @@ def parse_python_file(
         issues=(),
         module_noqa=module_noqa,
         span_noqa=tuple(span_noqa),
+        noqa_warnings=tuple(noqa_warnings),
     )

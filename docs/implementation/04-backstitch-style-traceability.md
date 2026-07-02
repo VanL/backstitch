@@ -45,8 +45,12 @@ Load-bearing boundaries:
   (`window[N-1]`, `[JIRA-123]`) are silent; known prefixes that match
   nothing warn (`CODE_REF_BARE_UNRESOLVED`).
 - Ambiguity severity follows reference context ([SC-11]):
-  `CodeRef.ref_context` is set by the parser (docstring vs comment), never
-  re-inferred from text downstream.
+  `CodeRef.ref_context` is set by the parser and never re-inferred from
+  text downstream. The context is three-way: `asserted` (a docstring line
+  starting with the `Spec:` marker — a claimed trace edge, ambiguity is an
+  error), `docstring` (docstring prose citing an ID — a weak link, warning),
+  and `comment` (warning). Only the marker line asserts; prose in the same
+  docstring does not.
 - ID-less subheadings deeper than the owning section (`### 6.7` inside
   `## 6 [CFG-6]`) do not clear mapping-block ownership; same-or-shallower
   ID-less headings do. Real specs put subsections between an ID heading and
@@ -89,5 +93,24 @@ diffing against `--no-config`.
   exclusions, target roots, analysis pipeline)
 - Contract coverage: `tests/test_issue_code_coverage.py` — every [SC-11]
   code fires, context-dependent severities fire both ways
+- Review remediation regressions: `tests/test_review_remediation.py` — one
+  test per reproduced independent-review finding (heading markers, live
+  config keys, noqa hygiene, marker override, fence length)
 - Acceptance: `tests/acceptance/` — the twelve [SC-10] probes, black-box
 - Self-corpus: `tests/test_backstitch_corpus_traceability.py`
+
+## Golden Report Ledger
+
+`tests/fixtures/traceability_project.expected.json` freezes the full broken-
+fixture report; `tests/test_behavior_freeze.py` regenerates it only under
+`BACKSTITCH_UPDATE_GOLDEN=1`. Intentional regenerations so far:
+
+- Reconciliation Task 19 (initial freeze): baseline capture of the reconciled
+  behavior over the four-way fixture corpus.
+- Review remediation (2026-07-02): `ref_context` gained the asserted/prose
+  split. The diff was ten hunks, all relabeling `"docstring"` refs on `Spec:`
+  marker lines to `"asserted"`; the issue histogram was unchanged (the
+  fixture's one ambiguity is comment-context and stays a warning). The Weft
+  external gate moved 32 -> 24 errors for the same reason: eight
+  docstring-prose ambiguity instances became warnings; the nine pinned error
+  signatures are unchanged.

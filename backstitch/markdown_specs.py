@@ -157,46 +157,73 @@ def parse_markdown_spec(
         sections.append(section)
         block_section = section
 
-    # Fenced blocks open with ``` or ~~~ and close only on the same marker.
-    fence_marker: str | None = None
+    def record_marker(is_meta: bool, marker_codes: frozenset[str]) -> None:
+        if not sections:
+            nonlocal file_meta
+            file_meta = file_meta or is_meta
+            file_ignores.update(marker_codes if not is_meta else ())
+            return
+        target = sections[-1].section_id
+        meta_flag, codes = section_markers.setdefault(target, (False, set()))
+        section_markers[target] = (
+            meta_flag or is_meta,
+            codes | (marker_codes if not is_meta else set()),
+        )
+
+    # Fenced blocks open with ``` or ~~~; the closer uses the same character
+    # and is at least as long as the opener ([SC-4] CommonMark rule).
+    fence_state: tuple[str, int] | None = None
     for line_no, line in enumerate(lines, start=1):
         stripped = line.lstrip()
         if stripped.startswith("```") or stripped.startswith("~~~"):
-            fence_chars = stripped[:3]
-            if fence_marker is None:
-                fence_marker = fence_chars
-            elif fence_marker == fence_chars:
-                fence_marker = None
+            char = stripped[0]
+            run = len(stripped) - len(stripped.lstrip(char))
+            if fence_state is None:
+                fence_state = (char, run)
+            elif fence_state[0] == char and run >= fence_state[1]:
+                fence_state = None
             continue
-        if fence_marker is not None:
-            continue
-        # [EXC-4] traceability markers: file preamble before the first
-        # section, section-scoped after one; fenced content never counts.
-        is_meta, marker_codes, warnings = parse_traceability_marker_line(
-            line,
-            allow_unknown=allow_unknown_codes,
-            location=f"{rel_path}:{line_no}",
-        )
-        marker_warnings.extend(warnings)
-        if is_meta or marker_codes:
-            if not sections:
-                file_meta = file_meta or is_meta
-                file_ignores.update(marker_codes if not is_meta else ())
-            else:
-                target = sections[-1].section_id
-                meta_flag, codes = section_markers.setdefault(target, (False, set()))
-                section_markers[target] = (
-                    meta_flag or is_meta,
-                    codes | (marker_codes if not is_meta else set()),
-                )
+        if fence_state is not None:
             continue
         heading = _HEADING_RE.match(line)
+        if heading is None:
+            # [EXC-4] traceability markers on their own line: file preamble
+            # before the first section, section-scoped after one; fenced
+            # content never counts. Heading lines are handled below so a
+            # trailing HTML marker can never swallow the heading itself.
+            is_meta, marker_codes, warnings = parse_traceability_marker_line(
+                line,
+                allow_unknown=allow_unknown_codes,
+                location=f"{rel_path}:{line_no}",
+            )
+            marker_warnings.extend(warnings)
+            if is_meta or marker_codes:
+                record_marker(is_meta, marker_codes)
+                continue
         if heading:
             state = "idle"
             block_section = None
             level = len(heading.group(1))
+            # EXC-4.3: an HTML marker may trail the heading itself
+            # (`## X [ID] <!-- backstitch: meta -->`); it annotates the NEW
+            # section and must never consume the heading.
+            heading_line = line
+            trailing_meta, trailing_codes, warnings = (
+                parse_traceability_marker_line(
+                    line,
+                    allow_unknown=allow_unknown_codes,
+                    location=f"{rel_path}:{line_no}",
+                )
+                if "<!--" in line
+                else (False, frozenset(), [])
+            )
+            marker_warnings.extend(warnings)
+            if trailing_meta or trailing_codes:
+                heading_line = re.sub(r"\s*<!--.*?-->\s*$", "", line)
+                heading = _HEADING_RE.match(heading_line)
+                assert heading is not None
             anchors.append(github_anchor(heading.group("text"), anchor_seen))
-            with_id = _HEADING_ID_RE.match(line)
+            with_id = _HEADING_ID_RE.match(heading_line)
             if with_id:
                 section = SpecSection(
                     path=rel_path,
@@ -209,6 +236,8 @@ def parse_markdown_spec(
                 sections.append(section)
                 current_heading_section = section
                 current_heading_level = level
+                if trailing_meta or trailing_codes:
+                    record_marker(trailing_meta, trailing_codes)
             elif level <= current_heading_level:
                 # A same-or-shallower ID-less heading starts a region no
                 # section owns. DEEPER ID-less subheadings (`### 3.3` inside

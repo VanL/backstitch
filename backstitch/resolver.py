@@ -355,11 +355,11 @@ def _resolve_bare(
         )
     else:
         locations = ", ".join(f"{d.path}:{d.line}" for d in defs)
-        # [SC-11] context-dependent severity: a docstring backlink asserts a
-        # specific trace edge that cannot be established (error); the same
-        # bare ID in a comment is prose (warning). Context comes from the
-        # parser via CodeRef.ref_context -- never re-inferred from raw text.
-        severity: Severity = "error" if ref.ref_context == "docstring" else "warning"
+        # [SC-11] context-dependent severity: a `Spec:` marker line ASSERTS
+        # a specific trace edge that cannot be established (error); the same
+        # bare ID in docstring prose or a comment is a weak link (warning).
+        # Context comes from CodeRef.ref_context, set at parse time.
+        severity: Severity = "error" if ref.ref_context == "asserted" else "warning"
         _emit(
             issues,
             "SPEC_SECTION_AMBIGUOUS",
@@ -721,6 +721,7 @@ class ScanArtifacts:
     inline_spec_ignores: dict[tuple[str, str], frozenset[str]]
     inline_code_ignores: dict[str, frozenset[str]]
     inline_code_span_ignores: dict[str, tuple[tuple[int, int, frozenset[str]], ...]]
+    sections_with_markers: frozenset[tuple[str, str]]
     marker_warnings: tuple[str, ...]
 
 
@@ -880,12 +881,18 @@ def scan_repository_with_artifacts(
     section_meta: dict[tuple[str, str], bool] = {}
     inline_file_ignores: dict[str, frozenset[str]] = {}
     inline_spec_ignores: dict[tuple[str, str], frozenset[str]] = {}
+    sections_with_markers: set[tuple[str, str]] = set()
     marker_warnings: list[str] = []
     for spec in parsed_specs:
         marker_warnings.extend(spec.marker_warnings)
+        marked = {section_id for section_id, _, _ in spec.section_markers}
+        sections_with_markers.update((spec.path, sid) for sid in marked)
         if spec.file_meta:
+            # EXC-4.1: file-level markers apply to all sections "unless a
+            # section overrides it" -- marked sections opt out entirely.
             for section in spec.sections:
-                section_meta[(spec.path, section.section_id)] = True
+                if section.section_id not in marked:
+                    section_meta[(spec.path, section.section_id)] = True
         if spec.file_ignores:
             inline_file_ignores[spec.path] = spec.file_ignores
         for section_id, is_meta, codes in spec.section_markers:
@@ -899,6 +906,7 @@ def scan_repository_with_artifacts(
     inline_code_span_ignores = {
         p.path: p.span_noqa for p in parsed_python if p.span_noqa
     }
+    marker_warnings.extend(w for p in parsed_python for w in p.noqa_warnings)
 
     return report, ScanArtifacts(
         section_meta=section_meta,
@@ -906,5 +914,6 @@ def scan_repository_with_artifacts(
         inline_spec_ignores=inline_spec_ignores,
         inline_code_ignores=inline_code_ignores,
         inline_code_span_ignores=inline_code_span_ignores,
+        sections_with_markers=frozenset(sections_with_markers),
         marker_warnings=tuple(marker_warnings),
     )

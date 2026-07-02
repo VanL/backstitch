@@ -42,7 +42,10 @@ KNOWN_WEFT_DEBT = {
     ("SPEC_SECTION_MISSING", "weft/commands/run.py", "MF-1"),
     ("SPEC_SECTION_MISSING", "weft/commands/types.py", "CLI-1"),
 }
-KNOWN_WEFT_ERROR_TOTAL = 32
+# 32 -> 24 when ref_context gained the asserted/prose split (post-review
+# remediation): eight docstring-PROSE ambiguity instances became warnings;
+# the remaining ambiguity errors sit on genuine `Spec:` marker lines.
+KNOWN_WEFT_ERROR_TOTAL = 24
 
 
 @pytest.mark.integration

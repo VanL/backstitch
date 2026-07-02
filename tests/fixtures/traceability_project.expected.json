@@ -1,6 +1,5 @@
 {
   "profile": "backstitch-style-v1",
-  "repo_root": "/Users/van/Developer/backstitch/tests/fixtures/traceability_project",
   "summary": {
     "spec_sections": 13,
     "code_refs": 19,
@@ -130,7 +129,7 @@
           "CORE.2.2"
         ]
       ],
-      "ref_context": "docstring"
+      "ref_context": "asserted"
     },
     {
       "path": "src/ranges.py",
@@ -271,7 +270,7 @@
       ],
       "anchor": null,
       "ranges": [],
-      "ref_context": "docstring"
+      "ref_context": "asserted"
     },
     {
       "path": "src/runtime.py",
@@ -284,7 +283,7 @@
       ],
       "anchor": null,
       "ranges": [],
-      "ref_context": "docstring"
+      "ref_context": "asserted"
     },
     {
       "path": "src/runtime.py",
@@ -297,7 +296,7 @@
       ],
       "anchor": null,
       "ranges": [],
-      "ref_context": "docstring"
+      "ref_context": "asserted"
     },
     {
       "path": "src/runtime.py",
@@ -308,7 +307,7 @@
       "section_ids": [],
       "anchor": null,
       "ranges": [],
-      "ref_context": "docstring"
+      "ref_context": "asserted"
     },
     {
       "path": "src/runtime.py",
@@ -319,7 +318,7 @@
       "section_ids": [],
       "anchor": "persistence-rules-core-2",
       "ranges": [],
-      "ref_context": "docstring"
+      "ref_context": "asserted"
     },
     {
       "path": "src/runtime.py",
@@ -358,7 +357,7 @@
       ],
       "anchor": null,
       "ranges": [],
-      "ref_context": "docstring"
+      "ref_context": "asserted"
     },
     {
       "path": "tests/test_runtime.py",
@@ -371,7 +370,7 @@
       ],
       "anchor": null,
       "ranges": [],
-      "ref_context": "docstring"
+      "ref_context": "asserted"
     }
   ],
   "spec_mappings": [
@@ -1001,5 +1000,6 @@
       "section_id": "CORE-1",
       "symbol": "test_frobnicate"
     }
-  ]
+  ],
+  "repo_root": "<regenerated>"
 }

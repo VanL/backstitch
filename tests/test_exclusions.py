@@ -164,8 +164,12 @@ def test_unused_ignores_warn_when_enabled() -> None:
 
 
 def test_noqa_parsing_accepts_alias_and_comma_lists() -> None:
-    codes = parse_noqa_text("backstitch: noqa SPEC_SECTION_UNMAPPED, CODE_REF_BROAD")
+    codes, warnings = parse_noqa_text(
+        "backstitch: noqa SPEC_SECTION_UNMAPPED, CODE_REF_BROAD"
+    )
     assert codes == frozenset({"SPEC_SECTION_UNMAPPED", "CODE_REF_BROAD"})
-    codes = parse_noqa_text("backstitch: ignore CODE_REF_BROAD")
+    assert warnings == []
+    codes, warnings = parse_noqa_text("backstitch: ignore CODE_REF_BROAD")
     assert codes == frozenset({"CODE_REF_BROAD"})
-    assert parse_noqa_text("nothing here") == frozenset()
+    assert warnings == []
+    assert parse_noqa_text("nothing here") == (frozenset(), [])

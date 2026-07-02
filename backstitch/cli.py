@@ -82,8 +82,8 @@ def _add_check_parser(subparsers: argparse._SubParsersAction[Any]) -> None:
     check.add_argument(
         "--format",
         choices=("text", "json"),
-        default="text",
-        help="report format (default: text)",
+        default=None,
+        help="report format (default: text, or configuration)",
     )
     check.add_argument(
         "--output",
@@ -151,7 +151,7 @@ def _add_other_parsers(subparsers: argparse._SubParsersAction[Any]) -> None:
         metavar="PATH",
         help="write results JSONL to PATH (default: stdout)",
     )
-    analyze.add_argument("--concurrency", type=int, default=1, metavar="N")
+    analyze.add_argument("--concurrency", type=int, default=None, metavar="N")
     analyze.add_argument("--config", type=Path, default=None, metavar="PATH")
     analyze.add_argument("--no-config", action="store_true")
 
@@ -262,6 +262,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
         inline_spec_ignores=artifacts.inline_spec_ignores,
         inline_code_ignores=artifacts.inline_code_ignores,
         inline_code_span_ignores=artifacts.inline_code_span_ignores,
+        sections_with_markers=artifacts.sections_with_markers,
         marker_warnings=list(artifacts.marker_warnings),
         allow_unknown=settings.allow_unknown_keys,
     )
@@ -280,20 +281,25 @@ def _cmd_check(args: argparse.Namespace) -> int:
     for warning in collect_unused_ignore_warnings(index):
         print(f"warning: {warning}", file=sys.stderr)
 
+    # [CFG-5]/[CFG-9]: config-set check.format and check.output apply when
+    # the CLI flag is omitted; a parsed-but-unconsulted key is dead schema.
+    fmt = args.format or settings.check.format or "text"
+    output = args.output
+    if output is None and settings.check.output is not None:
+        output = Path(settings.check.output)
+
     shown = suppressed if args.show_suppressions else None
     rendered = (
-        render_json(report, shown)
-        if args.format == "json"
-        else render_text(report, shown)
+        render_json(report, shown) if fmt == "json" else render_text(report, shown)
     )
 
-    if args.output is not None:
+    if output is not None:
         # Known fable defect fixed at port time: an unwritable --output path
         # must be exit 2 with a one-line error, never a traceback/exit 1.
         try:
-            args.output.write_text(rendered, encoding="utf-8")
+            output.write_text(rendered, encoding="utf-8")
         except OSError as exc:
-            return _error(f"cannot write --output {args.output}: {exc}")
+            return _error(f"cannot write --output {output}: {exc}")
     else:
         sys.stdout.write(rendered)
 
@@ -327,6 +333,7 @@ def _suppressed_report(args: argparse.Namespace) -> Report:
         inline_spec_ignores=artifacts.inline_spec_ignores,
         inline_code_ignores=artifacts.inline_code_ignores,
         inline_code_span_ignores=artifacts.inline_code_span_ignores,
+        sections_with_markers=artifacts.sections_with_markers,
         marker_warnings=list(artifacts.marker_warnings),
         allow_unknown=settings.allow_unknown_keys,
     )
@@ -383,8 +390,6 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         resolve_model_name,
     )
 
-    if args.concurrency < 1:
-        raise ValueError("--concurrency must be at least 1")
     # [CFG-3]: analyze anchors config discovery at the packets file's parent.
     if args.no_config and args.config is not None:
         raise ConfigLoadError("--config and --no-config are mutually exclusive")
@@ -392,10 +397,17 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         settings = BackstitchSettings()
     else:
         settings = load_settings(args.packets.resolve().parent, explicit=args.config)
+    # [CFG-5]: config-set analyze.concurrency applies when the flag is
+    # omitted; validation runs on the resolved value.
+    concurrency = args.concurrency
+    if concurrency is None:
+        concurrency = settings.analyze.concurrency or 1
+    if concurrency < 1:
+        raise ValueError("--concurrency must be at least 1")
     packets = _load_packets(args.packets)
     model = resolve_model_name(args.model, configured=settings.analyze.model)
     adapter = default_adapter(model)
-    rows, errors = analyze_packets(packets, adapter, args.concurrency)
+    rows, errors = analyze_packets(packets, adapter, concurrency)
     rendered = render_results_jsonl(rows)
     if args.output is not None:
         try:

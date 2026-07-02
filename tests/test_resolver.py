@@ -85,9 +85,7 @@ def test_ambiguous_bare_id_in_comment_is_warning(broken: Report) -> None:
     assert issues[0].section_id == "DUP-1"
 
 
-def test_ambiguous_bare_id_in_docstring_is_error(tmp_path: Path) -> None:
-    # [SC-11] context split: a docstring backlink asserts a trace edge; an
-    # ambiguous ID there means the claimed edge cannot be built -- error.
+def _dup_corpus(tmp_path: Path, code: str) -> Report:
     (tmp_path / "docs/specs").mkdir(parents=True)
     (tmp_path / "docs/specs/01-a.md").write_text(
         "# A\n\n## One [DUP-7]\n", encoding="utf-8"
@@ -96,19 +94,40 @@ def test_ambiguous_bare_id_in_docstring_is_error(tmp_path: Path) -> None:
         "# B\n\n## Two [DUP-7]\n", encoding="utf-8"
     )
     (tmp_path / "pkg").mkdir()
-    (tmp_path / "pkg/mod.py").write_text(
-        '"""Implements [DUP-7]."""\n', encoding="utf-8"
-    )
-    report = scan_repository(
+    (tmp_path / "pkg/mod.py").write_text(code, encoding="utf-8")
+    return scan_repository(
         tmp_path,
         get_profile("backstitch-style-v1").with_overrides(
             spec_roots=("docs/specs",), plan_roots=(), code_roots=("pkg",)
         ),
     )
-    issues = [i for i in report.issues if i.code == "SPEC_SECTION_AMBIGUOUS"]
+
+
+def _ambiguous(report: Report) -> list:
+    return [i for i in report.issues if i.code == "SPEC_SECTION_AMBIGUOUS"]
+
+
+def test_ambiguous_bare_id_in_asserted_backlink_is_error(
+    tmp_path: Path,
+) -> None:
+    # [SC-11]: a `Spec:` marker line asserts a trace edge; ambiguity there
+    # means the claimed edge cannot be built -- error.
+    report = _dup_corpus(tmp_path, '"""Spec: [DUP-7]"""\n')
+    issues = _ambiguous(report)
     assert len(issues) == 1
     assert issues[0].severity == "error"
     assert issues[0].path == "pkg/mod.py"
+
+
+def test_docstring_without_spec_marker_is_prose_not_asserted(
+    tmp_path: Path,
+) -> None:
+    # [SC-11]: docstring PROSE citing an ambiguous ID is a weak link, not an
+    # asserted edge -- warning, same as a comment.
+    report = _dup_corpus(tmp_path, '"""Implements [DUP-7]."""\n')
+    issues = _ambiguous(report)
+    assert len(issues) == 1
+    assert issues[0].severity == "warning"
 
 
 def test_backlink_to_unmapped_section_fires_reciprocal_warning(

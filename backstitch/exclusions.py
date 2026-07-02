@@ -33,8 +33,11 @@ HTML_IGNORE_RE = re.compile(
     r"<!--\s*backstitch:\s*ignore\s+(.+?)\s*-->",
     re.IGNORECASE,
 )
+# Line-oriented on purpose: horizontal whitespace only, so a directive in a
+# module docstring never captures following prose lines as issue codes.
 NOQA_RE = re.compile(
-    r"backstitch:\s*(?:noqa|ignore)\s+([\w_,\s]+)",
+    r"backstitch:[ \t]*(?:noqa|ignore)[ \t]+"
+    r"([A-Za-z_][A-Za-z0-9_]*(?:[ \t]*,[ \t]*[A-Za-z_][A-Za-z0-9_]*)*)",
     re.IGNORECASE,
 )
 
@@ -75,6 +78,9 @@ class SuppressionIndex:
     inline_code_span_ignores: dict[str, tuple[tuple[int, int, frozenset[str]], ...]] = (
         field(default_factory=dict)
     )
+    # Sections carrying their own [EXC-4] marker: file-level inline markers
+    # do not apply to them ("section markers override file-level markers").
+    sections_with_markers: frozenset[tuple[str, str]] = frozenset()
     used_config_file_rules: set[str] = field(default_factory=set)
     used_config_section_rules: set[str] = field(default_factory=set)
     suppression_warnings: list[str] = field(default_factory=list)
@@ -139,14 +145,22 @@ def parse_traceability_marker_line(
 
 def parse_noqa_text(
     text: str, *, allow_unknown: bool = False, location: str = "inline noqa"
-) -> frozenset[str]:
+) -> tuple[frozenset[str], list[str]]:
+    """Parse ``backstitch: noqa`` directives; returns (codes, warnings).
+
+    Warnings are non-empty only under ``allow_unknown`` ([EXC-4] hatch) and
+    must reach stderr -- a discarded warning makes typo suppressions silent.
+    """
+
     codes: set[str] = set()
+    warnings: list[str] = []
     for match in NOQA_RE.finditer(text):
-        parsed, _ = parse_traceability_codes(
+        parsed, parse_warnings = parse_traceability_codes(
             match.group(1), allow_unknown=allow_unknown, location=location
         )
         codes.update(parsed)
-    return frozenset(codes)
+        warnings.extend(parse_warnings)
+    return frozenset(codes), warnings
 
 
 def _is_non_suppressible(issue: Issue) -> bool:
@@ -296,7 +310,13 @@ def should_suppress(
             suppressed = True
             reason = SuppressionReason.INLINE_SPEC
 
-    if resolved_spec_file:
+    if resolved_spec_file and (
+        resolved_section_id is None
+        or (resolved_spec_file, resolved_section_id) not in index.sections_with_markers
+    ):
+        # EXC-4.1: file-level markers apply "unless a section overrides
+        # it" -- a section with its own marker opts out of file-level
+        # inline ignores entirely.
         file_codes = index.inline_file_ignores.get(resolved_spec_file, frozenset())
         if issue.code in file_codes:
             suppressed = True
@@ -331,6 +351,7 @@ def build_suppression_index(
     inline_code_ignores: dict[str, frozenset[str]] | None = None,
     inline_code_span_ignores: dict[str, tuple[tuple[int, int, frozenset[str]], ...]]
     | None = None,
+    sections_with_markers: frozenset[tuple[str, str]] = frozenset(),
     marker_warnings: list[str] | None = None,
     allow_unknown: bool = False,
 ) -> SuppressionIndex:
@@ -342,6 +363,7 @@ def build_suppression_index(
         inline_file_ignores=dict(inline_file_ignores or {}),
         inline_code_ignores=dict(inline_code_ignores or {}),
         inline_code_span_ignores=dict(inline_code_span_ignores or {}),
+        sections_with_markers=sections_with_markers,
     )
     if marker_warnings:
         index.suppression_warnings.extend(marker_warnings)

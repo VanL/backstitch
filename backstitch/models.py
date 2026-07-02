@@ -17,7 +17,10 @@ MappingKind = Literal["path", "path_symbol", "symbol"]
 
 EdgeKind = Literal["mapping", "backlink"]
 
-RefContext = Literal["docstring", "comment"]
+# "asserted": a docstring `Spec:` marker line -- claims a specific trace
+# edge. "docstring": docstring prose. "comment": code comment. Ambiguity is
+# an error only in asserted context ([SC-11]).
+RefContext = Literal["asserted", "docstring", "comment"]
 
 # Canonical inventory of deterministic issue codes -- exactly the [SC-11]
 # table. Configuration validates suppression lists against this set, and
