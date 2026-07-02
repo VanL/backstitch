@@ -170,10 +170,14 @@ def _add_other_parsers(subparsers: argparse._SubParsersAction[Any]) -> None:
     config_sub = config.add_subparsers(dest="config_command", required=True)
     show = config_sub.add_parser("show", help="print effective settings as JSON")
     show.add_argument("--repo-root", type=Path, default=Path("."))
+    show.add_argument("--config", type=Path, default=None, metavar="PATH")
+    show.add_argument("--no-config", action="store_true")
     path_cmd = config_sub.add_parser(
         "path", help="print the discovered config file path"
     )
     path_cmd.add_argument("--repo-root", type=Path, default=Path("."))
+    path_cmd.add_argument("--config", type=Path, default=None, metavar="PATH")
+    path_cmd.add_argument("--no-config", action="store_true")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -189,6 +193,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
+    )
+    # [CFG-7] global spellings: `backstitch --config PATH <command>` and
+    # `backstitch --no-config <command>`. Distinct dests so a subcommand's
+    # own --config/--no-config defaults never clobber a global value;
+    # main() merges the two spellings.
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        dest="global_config",
+        help="use exactly this configuration file (skips discovery)",
+    )
+    parser.add_argument(
+        "--no-config",
+        action="store_true",
+        dest="global_no_config",
+        help="ignore all configuration files",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     _add_check_parser(subparsers)
@@ -460,10 +482,16 @@ def _cmd_config(args: argparse.Namespace) -> int:
     from backstitch.settings import discover_config_path, settings_to_json
 
     if args.config_command == "show":
-        settings = load_settings(args.repo_root.resolve())
+        if args.no_config:
+            settings = BackstitchSettings()
+        else:
+            settings = load_settings(args.repo_root.resolve(), explicit=args.config)
         sys.stdout.write(settings_to_json(settings))
         return 0
-    path = discover_config_path(args.repo_root.resolve())
+    if args.no_config:
+        # Discovery is skipped entirely: there is no path to print.
+        return 0
+    path = discover_config_path(args.repo_root.resolve(), explicit=args.config)
     if path is not None:
         print(path)
     return 0
@@ -474,6 +502,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+    # [CFG-7]: merge the global `backstitch --config/--no-config <command>`
+    # spellings with the per-command flags; any mix of --config and
+    # --no-config across spellings is a usage error (exit 2).
+    args.config = getattr(args, "config", None) or args.global_config
+    args.no_config = bool(getattr(args, "no_config", False) or args.global_no_config)
     handlers = {
         "check": _cmd_check,
         "packets": _cmd_packets,
@@ -482,6 +515,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "config": _cmd_config,
     }
     try:
+        if args.config is not None and args.no_config:
+            msg = "--config and --no-config are mutually exclusive"
+            raise ConfigLoadError(msg)
         handler = handlers.get(args.command)
         if handler is None:
             raise ValueError(f"unknown command: {args.command}")

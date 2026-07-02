@@ -77,18 +77,35 @@ def test_fenced_model_output_is_parsed() -> None:
     assert rows[0]["classification"] == "ok"
 
 
-def test_malformed_model_output_is_error_not_crash() -> None:
+def test_malformed_model_output_yields_ambiguous_record() -> None:
+    # [SC-7]: one bad response yields one `ambiguous`/error record for the
+    # packet -- the packet never vanishes from the results JSONL.
     rows, errors = analyze_packets([PACKET_A], lambda prompt: "I cannot help")
-    assert rows == []
+    assert len(rows) == 1
+    assert rows[0]["packet_id"] == PACKET_A["packet_id"]
+    assert rows[0]["classification"] == "ambiguous"
+    assert "analysis error" in rows[0]["summary"]
     assert len(errors) == 1
     assert PACKET_A["packet_id"] in errors[0]
+    # The record reaches the rendered JSONL and passes consumer validation.
+    from backstitch.analysis_llm import render_results_jsonl
+    from backstitch.analysis_results import validate_analysis_row
+
+    rendered = render_results_jsonl(rows)
+    assert rendered.strip(), "error record missing from rendered JSONL"
+    validated = validate_analysis_row(json.loads(rendered), {PACKET_A["packet_id"]})
+    assert not isinstance(validated, str), validated
 
 
-def test_wrong_packet_id_in_output_is_error() -> None:
+def test_wrong_packet_id_in_output_is_error_record() -> None:
+    # [SC-7]: the record's packet_id comes from the packet, never from the
+    # (hallucinated) model response.
     rows, errors = analyze_packets(
         [PACKET_A], lambda prompt: _ok_response("docs/specs/99.md#Z-9")
     )
-    assert rows == []
+    assert len(rows) == 1
+    assert rows[0]["packet_id"] == PACKET_A["packet_id"]
+    assert rows[0]["classification"] == "ambiguous"
     assert any("packet_id" in e for e in errors)
 
 
@@ -99,7 +116,12 @@ def test_adapter_exception_is_error_for_that_packet_only() -> None:
         return _ok_response(PACKET_B["packet_id"])
 
     rows, errors = analyze_packets([PACKET_A, PACKET_B], adapter)
-    assert [r["packet_id"] for r in rows] == [PACKET_B["packet_id"]]
+    assert [r["packet_id"] for r in rows] == [
+        PACKET_A["packet_id"],
+        PACKET_B["packet_id"],
+    ]
+    assert rows[0]["classification"] == "ambiguous"
+    assert rows[1]["classification"] == "ok"
     assert len(errors) == 1
     assert "model unavailable" in errors[0]
 
@@ -118,20 +140,25 @@ def test_concurrency_preserves_packet_order() -> None:
     assert [r["packet_id"] for r in rows] == [p["packet_id"] for p in packets]
 
 
-def test_missing_instructions_field_is_error_not_crash() -> None:
+def test_missing_instructions_field_is_error_record_not_crash() -> None:
     packet = {k: v for k, v in PACKET_A.items() if k != "instructions"}
     rows, errors = analyze_packets([packet], lambda prompt: "unused")
-    assert rows == []
+    assert len(rows) == 1
+    assert rows[0]["classification"] == "ambiguous"
     assert any("instructions" in e for e in errors)
 
 
 def test_analyze_exit_code_rules() -> None:
     from backstitch.analysis_llm import analyze_exit_code
 
+    # Rows include per-packet error records, so total failure means every
+    # packet errored (len(errors) == len(rows)); partial failure exits 0.
     assert analyze_exit_code([], []) == 0
     assert analyze_exit_code([{"packet_id": "x"}], []) == 0
-    assert analyze_exit_code([{"packet_id": "x"}], ["one failed"]) == 0
-    assert analyze_exit_code([], ["all failed"]) == 1
+    assert (
+        analyze_exit_code([{"packet_id": "x"}, {"packet_id": "y"}], ["one failed"]) == 0
+    )
+    assert analyze_exit_code([{"packet_id": "x"}], ["all failed"]) == 1
 
 
 def test_analyze_model_flag_is_optional() -> None:

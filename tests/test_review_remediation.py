@@ -347,3 +347,84 @@ def test_packets_does_not_report_used_ignores_as_stale(tmp_path: Path) -> None:
     assert "unused" not in packets.stderr, (
         "packets reported a used ignore as stale: " + packets.stderr
     )
+
+
+# --- Round 4 P2: [CFG-7] global --config / --no-config spellings -----------
+
+
+def _custom_config_repo(tmp_path: Path) -> Path:
+    _write(tmp_path, "docs/specs/01-x.md", "# X\n\n## One [GX-1]\n")
+    _write(tmp_path, "pkg/mod.py", '"""Mod."""\n')
+    _write(
+        tmp_path,
+        "custom.toml",
+        "\n".join(
+            [
+                "[profile]",
+                'spec_roots = ["docs/specs"]',
+                "plan_roots = []",
+                'code_roots = ["pkg"]',
+                "[check]",
+                'format = "json"',
+                'output = "from-custom.json"',
+            ]
+        )
+        + "\n",
+    )
+    return tmp_path / "custom.toml"
+
+
+def test_global_config_flag_applies_to_check(tmp_path: Path) -> None:
+    custom = _custom_config_repo(tmp_path)
+    result = run_cli("--config", str(custom), "check", "--repo-root", str(tmp_path))
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "from-custom.json").is_file(), (
+        "global --config spelling was not honored"
+    )
+
+
+def test_global_no_config_flag_applies_to_check(tmp_path: Path) -> None:
+    _custom_config_repo(tmp_path)
+    # Discovery skipped: the custom.toml roots never load, so the explicit
+    # CLI roots are required and check runs on defaults.
+    result = run_cli(
+        "--no-config",
+        "check",
+        "--repo-root",
+        str(tmp_path),
+        "--spec-root",
+        "docs/specs",
+        "--plan-root",
+        "",
+        "--code-root",
+        "pkg",
+    )
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "from-custom.json").exists()
+
+
+def test_mixed_config_spellings_are_usage_error(tmp_path: Path) -> None:
+    custom = _custom_config_repo(tmp_path)
+    result = run_cli(
+        "--no-config",
+        "check",
+        "--repo-root",
+        str(tmp_path),
+        "--config",
+        str(custom),
+    )
+    assert result.returncode == 2
+    assert "mutually exclusive" in result.stderr
+
+
+def test_config_show_and_path_honor_config_flags(tmp_path: Path) -> None:
+    custom = _custom_config_repo(tmp_path)
+    shown = run_cli("config", "show", "--config", str(custom))
+    assert shown.returncode == 0, shown.stderr
+    assert json.loads(shown.stdout)["check"]["format"] == "json"
+    path = run_cli("--config", str(custom), "config", "path")
+    assert path.returncode == 0
+    assert path.stdout.strip() == str(custom)
+    no_config_path = run_cli("--no-config", "config", "path")
+    assert no_config_path.returncode == 0
+    assert no_config_path.stdout.strip() == ""

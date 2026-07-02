@@ -66,6 +66,19 @@ def _parse_model_output(raw: str, packet_id: str) -> dict[str, Any] | str:
     return row
 
 
+def _error_record(packet_id: str, message: str) -> dict[str, Any]:
+    # [SC-7]: one bad response yields one `ambiguous`/error record for the
+    # packet -- a consumer of the results JSONL never loses a packet-level
+    # result to a model failure. `packet_id` comes from the packet, never
+    # the response, and the record passes validate_analysis_row.
+    return {
+        "packet_id": packet_id,
+        "classification": "ambiguous",
+        "summary": f"analysis error: {message}",
+        "error": message,
+    }
+
+
 def analyze_packets(
     packets: Iterable[dict[str, Any]],
     adapter: ModelAdapter,
@@ -73,24 +86,28 @@ def analyze_packets(
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Run the adapter over every packet; collect rows and per-packet errors.
 
-    Output rows keep packet order regardless of concurrency. A failure on
-    one packet never aborts the others.
+    Every packet yields exactly one row: a failed packet yields an
+    `ambiguous`/error record ([SC-7]) and its message is also collected in
+    ``errors`` for stderr. Output rows keep packet order regardless of
+    concurrency. A failure on one packet never aborts the others.
     """
 
     packet_list = list(packets)
 
-    def run_one(packet: dict[str, Any]) -> dict[str, Any] | str:
+    def run_one(packet: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
         packet_id = packet.get("packet_id", "<missing packet_id>")
         if "instructions" not in packet:
-            return f"{packet_id}: packet has no `instructions` field"
+            message = "packet has no `instructions` field"
+            return _error_record(packet_id, message), f"{packet_id}: {message}"
         try:
             raw = adapter(build_prompt(packet))
         except Exception as exc:  # noqa: BLE001 - adapter is an external boundary
-            return f"{packet_id}: model call failed: {exc}"
+            message = f"model call failed: {exc}"
+            return _error_record(packet_id, message), f"{packet_id}: {message}"
         parsed = _parse_model_output(raw, packet_id)
         if isinstance(parsed, str):
-            return f"{packet_id}: {parsed}"
-        return parsed
+            return _error_record(packet_id, parsed), f"{packet_id}: {parsed}"
+        return parsed, None
 
     if concurrency <= 1:
         outcomes = [run_one(packet) for packet in packet_list]
@@ -98,20 +115,20 @@ def analyze_packets(
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             outcomes = list(pool.map(run_one, packet_list))
 
-    rows = [o for o in outcomes if isinstance(o, dict)]
-    errors = [o for o in outcomes if isinstance(o, str)]
+    rows = [row for row, _ in outcomes]
+    errors = [error for _, error in outcomes if error is not None]
     return rows, errors
 
 
 def analyze_exit_code(rows: list[dict[str, Any]], errors: list[str]) -> int:
     """Exit 1 when analysis produced nothing but failures; 0 otherwise.
 
-    Partial failure (some rows, some errors) still exits 0 because the
-    output is usable; total failure must be scriptable without scraping
-    stderr.
+    Rows include per-packet error records, so "nothing but failures" means
+    every packet errored. Partial failure still exits 0 because the output
+    is usable; total failure must be scriptable without scraping stderr.
     """
 
-    return 1 if errors and not rows else 0
+    return 1 if errors and len(errors) == len(rows) else 0
 
 
 def render_results_jsonl(rows: list[dict[str, Any]]) -> str:

@@ -44,8 +44,10 @@ def test_probe_8_malformed_model_output_contained_per_packet() -> None:
         return _row(pid)
 
     rows, errors = analyze_packets(packets, adapter, 1)
-    # One bad response yields one error record; the others survive.
-    assert len(rows) == 2
+    # [SC-7]: one bad response yields one `ambiguous`/error record for that
+    # packet; the others survive and no packet vanishes from the output.
+    assert [r["packet_id"] for r in rows] == ["a#A-1", "b#B-1", "c#C-1"]
+    assert [r["classification"] for r in rows] == ["ok", "ambiguous", "ok"]
     assert len(errors) == 1
     assert "b#B-1" in errors[0]
 
