@@ -110,8 +110,10 @@ def test_directory_callable_and_doc_tokens() -> None:
     assert dirmap["src/"].kind == "path"
     assert dirmap["frobnicate_all()"].kind == "symbol"
     assert dirmap["frobnicate_all()"].target_symbol == "frobnicate_all"
-    # Backticked .md tokens are document citations, not ownership mappings.
-    assert "docs/specifications/01-Core.md" not in dirmap
+    # Backticked .md tokens are path mappings per [SC-11] -- the resolver
+    # applies the plan-root severity predicate, and the reciprocity check
+    # never demands backlinks from documents.
+    assert dirmap["docs/specifications/01-Core.md"].kind == "path"
 
 
 def test_fenced_code_blocks_define_nothing() -> None:

@@ -167,10 +167,34 @@ def _duplicate_section_issues(
             )
 
 
+def ladder_candidates(token: str, scan_files: Sequence[str]) -> list[str]:
+    """Suffix/basename candidates for a non-exact mapping token ([SC-4] ladder).
+
+    Exact matches are the caller's rung 1 and never reach here; candidates
+    are scanned files whose path ends with ``/<token>`` (which also covers
+    bare basenames). Sorted for deterministic output.
+    """
+
+    suffix = "/" + token.lstrip("/")
+    return sorted(rel for rel in scan_files if rel != token and rel.endswith(suffix))
+
+
+def _missing_path_severity(token: str, plan_roots: tuple[str, ...]) -> Severity:
+    """[SC-11] predicate: `.md` under a configured plan root is a warning."""
+
+    if token.endswith(".md") and any(
+        token.startswith(root.rstrip("/") + "/") for root in plan_roots
+    ):
+        return "warning"
+    return "error"
+
+
 def _resolve_mappings(
     mappings: Sequence[SpecMapping],
     mapping_path_exists: Mapping[str, bool],
     python_symbols: Mapping[str, frozenset[str] | None],
+    scan_files: Sequence[str],
+    plan_roots: tuple[str, ...],
     issues: list[Issue],
     edges: list[Edge],
 ) -> None:
@@ -190,17 +214,50 @@ def _resolve_mappings(
             continue
         target_path = mapping.target_path or ""
         if not mapping_path_exists.get(target_path, False):
-            _emit(
-                issues,
-                "MAPPING_PATH_MISSING",
-                "error",
-                mapping.spec_path,
-                mapping.line,
-                f"mapping path `{target_path}` does not exist",
-                section_id=mapping.section_id,
-                symbol=mapping.target_symbol,
-            )
-            continue
+            # [SC-4] ladder rungs 2-4: exact failed; try unique suffix or
+            # basename, report ambiguity, or report missing -- never guess.
+            candidates = ladder_candidates(target_path, scan_files)
+            if len(candidates) == 1:
+                resolved = candidates[0]
+                _emit(
+                    issues,
+                    "MAPPING_PATH_INEXACT",
+                    "warning",
+                    mapping.spec_path,
+                    mapping.line,
+                    f"mapping token `{target_path}` resolved via unique"
+                    f" suffix match to `{resolved}`; use the exact"
+                    " repo-relative path",
+                    section_id=mapping.section_id,
+                    symbol=mapping.target_symbol,
+                )
+                target_path = resolved
+            elif candidates:
+                listed = ", ".join(f"`{c}`" for c in candidates)
+                _emit(
+                    issues,
+                    "TARGET_PATH_AMBIGUOUS",
+                    "error",
+                    mapping.spec_path,
+                    mapping.line,
+                    f"mapping token `{target_path}` matches multiple"
+                    f" paths: {listed}; no edge emitted",
+                    section_id=mapping.section_id,
+                    symbol=mapping.target_symbol,
+                )
+                continue
+            else:
+                _emit(
+                    issues,
+                    "MAPPING_PATH_MISSING",
+                    _missing_path_severity(target_path, plan_roots),
+                    mapping.spec_path,
+                    mapping.line,
+                    f"mapping path `{target_path}` does not exist",
+                    section_id=mapping.section_id,
+                    symbol=mapping.target_symbol,
+                )
+                continue
         if mapping.kind == "path":
             edges.append(
                 Edge(
@@ -511,22 +568,27 @@ def _reciprocal_and_inventory_issues(
     # declarations (including ones that failed to resolve) drive
     # SPEC_SECTION_UNMAPPED.
     mapping_targets: dict[tuple[str, str], set[str]] = {}
+    backlink_capable: set[tuple[str, str]] = set()
     for edge in edges:
         if edge.kind == "mapping":
-            mapping_targets.setdefault(
-                (edge.spec_path, edge.section_id), set()
-            ).add(edge.code_path)
+            key = (edge.spec_path, edge.section_id)
+            mapping_targets.setdefault(key, set()).add(edge.code_path)
+            # Only Python files and directory targets can carry backlinks;
+            # a section mapped solely to documents (`.md` plan refs) must
+            # not demand a reciprocal backlink it cannot have.
+            basename = edge.code_path.rstrip("/").rsplit("/", 1)[-1]
+            if edge.code_path.endswith(".py") or "." not in basename:
+                backlink_capable.add(key)
     backlinked = {
         (edge.spec_path, edge.section_id)
         for edge in edges
         if edge.kind == "backlink"
     }
-    mapped_keys = set(mapping_targets)
     raw_mapped_keys = {(m.spec_path, m.section_id) for m in mappings}
 
     for section in sections:
         key = (section.path, section.section_id)
-        if key in mapped_keys and key not in backlinked:
+        if key in backlink_capable and key not in backlinked:
             _emit(
                 issues,
                 "CODE_BACKLINK_RECIPROCAL_MISSING",
@@ -626,6 +688,7 @@ def resolve(
     scan_issues: Sequence[Issue],
     mapping_path_exists: Mapping[str, bool],
     python_symbols: Mapping[str, frozenset[str] | None],
+    scan_files: Sequence[str] = (),
 ) -> Report:
     """Combine parsed records into a trace graph with deterministic issues."""
 
@@ -640,7 +703,15 @@ def resolve(
 
     index = _build_index(parsed_specs)
     _duplicate_section_issues(index, issues)
-    _resolve_mappings(mappings, mapping_path_exists, python_symbols, issues, edges)
+    _resolve_mappings(
+        mappings,
+        mapping_path_exists,
+        python_symbols,
+        scan_files,
+        profile.plan_roots,
+        issues,
+        edges,
+    )
     _resolve_code_refs(refs, index, profile, issues, edges)
     _reciprocal_and_inventory_issues(sections, mappings, edges, issues)
     _sort_report_parts(issues, edges)
@@ -737,6 +808,10 @@ def scan_repository(
         except (OSError, UnicodeDecodeError) as exc:
             unreadable(path, exc)
 
+    scan_files = sorted(
+        {p.path for p in parsed_specs} | {p.path for p in parsed_python}
+    )
+
     mapping_path_exists: dict[str, bool] = {}
     python_symbols: dict[str, frozenset[str] | None] = {}
     for spec in parsed_specs:
@@ -748,13 +823,24 @@ def scan_repository(
                 # Directory ownership (`weft/core/monitor/`) is a valid
                 # mapping target, so existence covers files and directories.
                 mapping_path_exists[target] = (root / target).exists()
+            inventory_target: str | None = None
+            if mapping_path_exists[target]:
+                inventory_target = target
+            else:
+                # [SC-4] ladder rung 2: a unique suffix candidate will be
+                # the effective path, so its symbol inventory is needed too.
+                candidates = ladder_candidates(target, scan_files)
+                if len(candidates) == 1:
+                    inventory_target = candidates[0]
             if (
                 mapping.kind == "path_symbol"
-                and mapping_path_exists[target]
-                and target.endswith(".py")
-                and target not in python_symbols
+                and inventory_target is not None
+                and inventory_target.endswith(".py")
+                and inventory_target not in python_symbols
             ):
-                python_symbols[target] = python_symbol_inventory(root / target)
+                python_symbols[inventory_target] = python_symbol_inventory(
+                    root / inventory_target
+                )
 
     return resolve(
         profile=profile,
@@ -764,4 +850,5 @@ def scan_repository(
         scan_issues=scan_issues,
         mapping_path_exists=mapping_path_exists,
         python_symbols=python_symbols,
+        scan_files=scan_files,
     )

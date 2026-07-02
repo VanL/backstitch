@@ -71,7 +71,7 @@ def classify_mapping_token(token: str) -> tuple[MappingKind, str | None, str | N
     # without a slash counts as a path only when it ends in a known file
     # extension. Trailing slashes mark directory ownership and stay paths.
     if "/" in token or re.search(
-        r"\.(py|txt|toml|yaml|yml|json|cfg|ini|rst|sh|bash|js|jsx|ts|tsx"
+        r"\.(py|md|txt|toml|yaml|yml|json|cfg|ini|rst|sh|bash|js|jsx|ts|tsx"
         r"|sql|c|h|cpp|hpp|cc|rs|go|rb|java|kt|css|html|xml|proto|lock)$",
         token,
     ):
@@ -108,10 +108,6 @@ def parse_markdown_spec(file_path: Path, repo_root: Path) -> ParsedSpec:
             return
         for match in _BACKTICK_TOKEN_RE.finditer(line_text):
             token = match.group("token")
-            if token.endswith(".md"):
-                # Backticked .md tokens inside mapping blocks are document
-                # citations (related plans or specs), not code ownership.
-                continue
             kind, target_path, target_symbol = classify_mapping_token(token)
             mappings.append(
                 SpecMapping(
