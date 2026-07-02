@@ -56,6 +56,41 @@ incident log; these are the durable rules distilled from it.
     lines the task requires and do not let a formatter reflow untouched code.
     Keep formatting-only churn in its own change; if a line changed only because
     "I was in there," revert it.
+13. **Enumerable contracts get executable gates.** Any list a document asserts
+    — issue codes, exit codes, edge cases, config keys — must be mirrored by a
+    machine check that enumerates it (a firing test per element, a no-op
+    prevention test per key). Prose binds only what gets checked; agents
+    comply uniformly with gates and unevenly with everything else. (Same rule,
+    other homes: `docs/agent-context/engineering-principles.md` §12 for the
+    durable statement, `runbooks/testing-patterns.md` Pattern 6 for the fix.)
+
+## 2026-07-01: Four-Way Implementation Bake-Off
+
+Four agents (Codex, Claude Fable, Grok, Claude Opus) implemented the full tool
+from the same baseline in isolated worktrees. All four passed every automated
+gate (pytest, ruff, strict mypy); all four diverged on everything not
+machine-checked. Durable lessons:
+
+- **Every implementation violated its own declared contract**, not just the
+  shared one: spec text broken by its own author, a unit test contradicted by
+  its call site, a ledger-identified defect shipped anyway. Deficiency is
+  measurable against self-declared intent — gate it there (Golden Rule 13).
+- **Self-reports systematically overstate.** A branch whose ledger said
+  "ship-ready, whole-branch review PASSED" failed its own advertised default
+  invocation. Status documents are claims, not evidence; every completion
+  assertion needs a rerun (see decision-hierarchy Completion Gate).
+- **Evaluator findings are claims too.** Two independent external reviews of
+  the same four implementations contained factual errors (wrong exit-code
+  outcomes, missed defects) that only reproduction caught. Reviews of reviews
+  need the same evidence bar as reviews of code.
+- **Message text must never become API.** One implementation parsed values
+  back out of rendered messages, which forced verbatim message pins in tests
+  and made wording load-bearing. Structured fields are the contract; messages
+  are presentation (testing-patterns Pattern 5).
+- **Divergence was productive; deficiency was the failure.** The winners of
+  individual dimensions all differed from the overall winner, and the merged
+  spec harvested ideas from every branch. Guard invariants, not convergence
+  (engineering principle 13).
 
 ## Starter Lessons
 

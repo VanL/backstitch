@@ -30,6 +30,8 @@ agents, and human contributors working in this repository.
 - `writing-specs.md`: how to define intended behavior with stable references
 - `writing-implementation-docs.md`: how to capture rationale and boundaries
 - `testing-patterns.md`: how to choose the right proof and avoid weak tests
+- `adversarial-acceptance-probes.md`: the black-box probe kit any
+  implementation must pass before integration, independent of spec version
 - `maintaining-traceability.md`: how to keep docs synchronized during delivery
 - `skills-lifecycle.md`: how to add, update, and retire reusable skills
 

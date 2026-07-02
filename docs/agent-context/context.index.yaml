@@ -29,6 +29,8 @@ documents:
     role: operational_runbook
   - path: docs/agent-context/runbooks/testing-patterns.md
     role: operational_runbook
+  - path: docs/agent-context/runbooks/adversarial-acceptance-probes.md
+    role: operational_runbook
   - path: docs/agent-context/runbooks/maintaining-traceability.md
     role: operational_runbook
   - path: docs/agent-context/runbooks/skills-lifecycle.md
