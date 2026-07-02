@@ -389,6 +389,13 @@ Semantic findings are advisory. They must not change deterministic issue
 severity and must not be treated as CI-failing findings unless a separate
 policy explicitly chooses that later.
 
+`analyze` therefore never exits `1` — exit `1` is reserved for deterministic
+findings about the target repository. Total semantic failure (every packet
+failed to produce a valid model result) is a statement about the tool or the
+model, not the target: exit `2`. Partial failure exits `0`: the output is
+usable, each failed packet carries its `ambiguous`/error record, and the
+failure messages reach stderr.
+
 Tests for semantic analysis must not call external models. They should use fake
 model adapters or equivalent local fakes to prove prompt construction, model
 selection, output parsing, malformed model-output handling, and result
