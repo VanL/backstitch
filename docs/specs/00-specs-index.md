@@ -19,6 +19,10 @@ stay aligned instead of competing.
 
 1. `01-development-documentation-operating-model.md`
 2. `02-backstitch-core.md`
+3. `03-backstitch-configuration.md`
+4. `04-backstitch-traceability-exclusions.md`
+5. `05-backstitch-invariants.md` (Status: Proposed — not yet implementation
+   guidance)
 
 ## Naming
 
@@ -31,3 +35,5 @@ stay aligned instead of competing.
 - `docs/plans/` for execution
 - `docs/implementation/` for rationale and repository maps
 - `skills/` for reusable workflow instructions
+- `tests/acceptance/` for the [SC-10] acceptance probe suite (once an
+  implementation lands)
