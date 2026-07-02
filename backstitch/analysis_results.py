@@ -76,9 +76,13 @@ def validate_analysis_row(
         return "missing or invalid `summary`"
     confidence = row.get("confidence")
     if confidence is not None and (
-        isinstance(confidence, bool) or not isinstance(confidence, int | float)
+        isinstance(confidence, bool)
+        or not isinstance(confidence, int | float)
+        or not 0.0 <= confidence <= 1.0
     ):
-        return "invalid `confidence`; expected a number"
+        # The prompt contract asks for a confidence between 0 and 1;
+        # anything else is a malformed row, not a very confident one.
+        return "invalid `confidence`; expected a number between 0 and 1"
     rationale = row.get("rationale", "")
     if not isinstance(rationale, str):
         return "invalid `rationale`; expected a string"
@@ -90,11 +94,12 @@ def validate_analysis_row(
         if (
             not isinstance(item, dict)
             or not isinstance(item.get("path"), str)
+            or not item["path"].strip()
             or isinstance(item.get("line"), bool)
             or not isinstance(item.get("line"), int)
             or item["line"] < 1
         ):
-            return "invalid `evidence` item; expected {path, line >= 1}"
+            return "invalid `evidence` item; expected {non-empty path, line >= 1}"
         if allowed_evidence is not None:
             # [SC-7]: model output is untrusted; evidence must stay inside
             # the packet boundary -- both the path and the line.

@@ -1309,3 +1309,112 @@ def test_summarize_rejects_empty_edge_locators(tmp_path: Path) -> None:
     )
     assert result.returncode == 2
     assert "edges[0]" in result.stderr
+
+
+# --- Round 13 P2: blank means absent, everywhere a locator appears ------------
+
+
+def test_whitespace_only_packet_locators_are_invocation_errors(
+    tmp_path: Path,
+) -> None:
+    packet = _full_packet(spec_path="   ", packet_id="   #X-1")
+    result = _run_analyze(tmp_path, json.dumps(packet))
+    assert result.returncode == 2
+    assert "spec_path" in result.stderr
+
+
+def test_whitespace_paths_never_become_evidence_paths() -> None:
+    from backstitch.analysis_llm import analyze_packets
+
+    packet = _full_packet(
+        spec_path="   ",
+        owners=[{"path": "   ", "symbol": None, "start_line": 1, "snippet": "x"}],
+    )
+    response = json.dumps(
+        {
+            "packet_id": packet["packet_id"],
+            "classification": "ok",
+            "summary": "fine",
+            "evidence": [{"path": "   ", "line": 1}],
+        }
+    )
+    rows, errors = analyze_packets([packet], lambda prompt: response)
+    assert rows[0]["classification"] == "ambiguous"
+
+
+def _report_with_edge(spec_path: str, section_id: str) -> dict:
+    return {
+        "profile": "backstitch-style-v1",
+        "repo_root": ".",
+        "summary": {"errors": 0, "warnings": 0, "infos": 0},
+        "spec_sections": [],
+        "code_refs": [],
+        "spec_mappings": [],
+        "edges": [
+            {
+                "spec_path": spec_path,
+                "section_id": section_id,
+                "kind": "mapping",
+                "code_path": "p.py",
+                "code_symbol": None,
+            }
+        ],
+        "issues": [],
+    }
+
+
+def test_summarize_rejects_whitespace_edge_locators(tmp_path: Path) -> None:
+    report = _report_with_edge(spec_path="   ", section_id="X-1")
+    _write(tmp_path, "report.json", json.dumps(report))
+    _write(tmp_path, "rows.jsonl", "")
+    result = run_cli(
+        "summarize-analysis",
+        "--deterministic-report",
+        str(tmp_path / "report.json"),
+        "--analysis-results",
+        str(tmp_path / "rows.jsonl"),
+    )
+    assert result.returncode == 2
+    assert "edges[0]" in result.stderr
+
+
+# --- Round 13 P2: analysis rows must honor the prompt's schema contract ------
+
+
+@pytest.mark.parametrize(
+    "row_overrides",
+    [
+        {"confidence": 7},
+        {"confidence": -0.25},
+        {"evidence": [{"path": "", "line": 1}]},
+        {"evidence": [{"path": "   ", "line": 1}]},
+    ],
+)
+def test_out_of_contract_analysis_rows_are_input_problems(
+    row_overrides: dict,
+) -> None:
+    from backstitch.analysis_results import load_analysis_results
+
+    row = {
+        "packet_id": "a#1",
+        "classification": "ok",
+        "summary": "fine",
+        **row_overrides,
+    }
+    load = load_analysis_results(json.dumps(row), None)
+    assert load.results == ()
+    assert len(load.errors) == 1
+
+
+def test_in_range_confidence_is_still_accepted() -> None:
+    from backstitch.analysis_results import load_analysis_results
+
+    row = {
+        "packet_id": "a#1",
+        "classification": "ok",
+        "summary": "fine",
+        "confidence": 0.85,
+    }
+    load = load_analysis_results(json.dumps(row), None)
+    assert load.errors == ()
+    assert load.results[0].confidence == 0.85

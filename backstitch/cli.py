@@ -158,6 +158,14 @@ def _add_other_parsers(subparsers: argparse._SubParsersAction[Any]) -> None:
     summarize = subparsers.add_parser(
         "summarize-analysis",
         help="combine a deterministic report with semantic results",
+        description=(
+            "Combine a deterministic report with semantic analysis results."
+            " Validates the schema of both inputs and rejects rows whose"
+            " packet ID no section in the report could have produced."
+            " Packet-local evidence bounds are enforced by `backstitch"
+            " analyze` (which wrote the results file), not re-checked here:"
+            " this command never sees the packets."
+        ),
     )
     summarize.add_argument(
         "--deterministic-report", type=Path, required=True, metavar="PATH"
@@ -423,10 +431,11 @@ def _packet_shape_error(row: dict[str, Any]) -> str | None:
         value = row.get(field_name)
         if isinstance(value, bool) or not isinstance(value, field_type):
             return f"missing or invalid `{field_name}`"
-    if not row["packet_id"] or not row["instructions"]:
+    if not row["packet_id"].strip() or not row["instructions"].strip():
         return "`packet_id` and `instructions` must be non-empty"
-    if not row["spec_path"] or not row["section_id"]:
-        # Empty locators would leak into evidence paths and packet IDs.
+    if not row["spec_path"].strip() or not row["section_id"].strip():
+        # Empty or whitespace-only locators would leak into evidence
+        # paths and packet IDs -- blank means absent.
         return "`spec_path` and `section_id` must be non-empty"
     if row["packet_id"] != f"{row['spec_path']}#{row['section_id']}":
         # [SC-6]: results are addressed by packet_id, which is defined as
@@ -439,7 +448,7 @@ def _packet_shape_error(row: dict[str, Any]) -> str | None:
         if (
             not isinstance(owner, dict)
             or not isinstance(owner.get("path"), str)
-            or not owner["path"]
+            or not owner["path"].strip()
             or not (owner.get("symbol") is None or isinstance(owner["symbol"], str))
             or isinstance(owner.get("start_line"), bool)
             or not isinstance(owner.get("start_line"), int)
@@ -600,9 +609,9 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
         if (
             not isinstance(edge, dict)
             or not isinstance(edge.get("spec_path"), str)
-            or not edge["spec_path"]
+            or not edge["spec_path"].strip()
             or not isinstance(edge.get("section_id"), str)
-            or not edge["section_id"]
+            or not edge["section_id"].strip()
         ):
             msg = (
                 f"{args.deterministic_report}: not a backstitch deterministic"

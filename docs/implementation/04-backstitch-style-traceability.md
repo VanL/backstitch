@@ -36,6 +36,14 @@ Load-bearing boundaries:
 - **Severity gates on the instance.** [SC-11] has context-dependent codes;
   non-suppressibility checks `issue.severity == "error"`, never bare code
   membership, so a warning-context finding stays suppressible.
+- **Evidence locality is enforced where the packets are.** `analyze` holds
+  the packets, so it is the boundary that rejects model evidence outside
+  the packet's shown paths and line ranges ([SC-7]).
+  `summarize-analysis` never sees packets: it validates result-row schema
+  (classification, confidence in [0, 1], non-blank evidence paths) and
+  rejects packet IDs no report section could have produced, and trusts
+  that the rows came from `analyze`. Its `--help` says so; verifying a
+  hand-edited results file requires rerunning `analyze`.
 
 ## Grammar Decisions Worth Knowing
 
