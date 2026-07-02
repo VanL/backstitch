@@ -219,6 +219,8 @@ _Implementation mapping_:
 |-----|------|------------|---------|
 | `extend` | string | all commands | Load and merge another config first |
 | `allow_unknown_keys` | bool | load time | Downgrade unknown-key errors to warnings (default `false`) |
+| `exclude` | array of glob strings | scan | Replace default scan excludes ([CFG-6.7]); applies to spec discovery and code scan |
+| `extend_exclude` | array of glob strings | scan | Append to the active exclude list ([CFG-6.7]); applies to spec discovery and code scan |
 
 The profile name has exactly one spelling: `[profile].name` (that is,
 `[tool.backstitch.profile]` `name` in `pyproject.toml`). There is no
@@ -226,6 +228,13 @@ top-level `profile` string key — TOML cannot represent `profile = "x"` and a
 `[profile]` table in the same document, so offering both spellings creates a
 "which wins" rule for a state that cannot exist. A top-level `profile` key
 is an unknown key ([CFG-8]).
+
+Scan-boundary keys (`exclude`, `extend_exclude`) are top-level
+`[tool.backstitch]` keys in `pyproject.toml` (siblings of
+`[tool.backstitch.profile]`), not fields inside `[profile]`. TOML table scope
+would treat a key written under `[profile]` as a profile override; those keys
+are not valid profile fields and must error under strict unknown-key handling
+([CFG-8]).
 
 ### 6.2 `[profile]` / `[tool.backstitch.profile]`
 
@@ -278,6 +287,13 @@ Additional sibling names are reserved for future spec revisions.
 
 ### 6.7 Scan boundaries (ruff `exclude` analogue)
 
+`exclude` and `extend_exclude` are configured at the top level of
+`[tool.backstitch]` / `.backstitch.toml` — the same scope as `extend` and
+`allow_unknown_keys` (§6.1) — not inside `[profile]`. They govern which paths
+are skipped during spec discovery (`spec_roots`) and Python scan
+(`code_roots`); they do not suppress findings on scanned files (that is
+`[lint]`, per the exclusions spec [EXC-*]).
+
 | Key | Type | Meaning |
 |-----|------|---------|
 | `exclude` | array of glob strings | Skip matching paths under `code_roots` and spec discovery |
@@ -300,6 +316,25 @@ build
 
 `exclude` replaces the default list. `extend_exclude` appends to the active
 exclude list.
+
+Placement example — valid:
+
+```toml
+[tool.backstitch]
+extend_exclude = ["tests/fixtures/**"]
+
+[tool.backstitch.profile]
+name = "backstitch-style-v1"
+spec_roots = ["docs/specs"]
+code_roots = ["backstitch", "tests"]
+```
+
+Invalid under strict load — `extend_exclude` is not a profile field:
+
+```toml
+[tool.backstitch.profile]
+extend_exclude = ["tests/fixtures/**"]  # -> unknown key ([CFG-8])
+```
 
 ### 6.8 `extend` merge semantics
 

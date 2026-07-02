@@ -256,6 +256,19 @@ def test_top_level_profile_string_exits_two(tmp_path: Path) -> None:
     assert "profile" in str(excinfo.value)
 
 
+def test_exclude_under_profile_is_unknown_key(tmp_path: Path) -> None:
+    # CFG §6.7: exclude/extend_exclude are top-level scan-boundary keys,
+    # not profile fields; writing one under [profile] errors under strict
+    # load rather than silently doing nothing.
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(
+        '[profile]\nextend_exclude = ["tests/fixtures/**"]\n', encoding="utf-8"
+    )
+    with pytest.raises(ConfigLoadError) as excinfo:
+        load_settings(tmp_path, explicit=config)
+    assert "extend_exclude" in str(excinfo.value)
+
+
 def test_warn_unused_keys_is_itself_unknown(tmp_path: Path) -> None:
     # The implement-branch warn_unused_keys switch was removed; only
     # allow_unknown_keys exists ([CFG-8]).
