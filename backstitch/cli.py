@@ -408,13 +408,46 @@ _PACKET_FIELDS: tuple[tuple[str, type], ...] = (
 )
 
 
+def _packet_shape_error(row: dict[str, Any]) -> str | None:
+    """Return an [SC-6] contract violation description, or None if valid."""
+
+    for field_name, field_type in _PACKET_FIELDS:
+        if not isinstance(row.get(field_name), field_type):
+            return f"missing or invalid `{field_name}`"
+    if not row["packet_id"] or not row["instructions"]:
+        return "`packet_id` and `instructions` must be non-empty"
+    for owner in row["owners"]:
+        if (
+            not isinstance(owner, dict)
+            or not isinstance(owner.get("path"), str)
+            or not (owner.get("symbol") is None or isinstance(owner["symbol"], str))
+            or isinstance(owner.get("start_line"), bool)
+            or not isinstance(owner.get("start_line"), int)
+            or not isinstance(owner.get("snippet"), str)
+        ):
+            return "invalid `owners` item; expected {path, symbol, start_line, snippet}"
+    if not all(isinstance(t, str) for t in row["tests"]):
+        return "invalid `tests` item; expected strings"
+    for issue in row["issues"]:
+        if (
+            not isinstance(issue, dict)
+            or not isinstance(issue.get("code"), str)
+            or not isinstance(issue.get("severity"), str)
+            or not isinstance(issue.get("message"), str)
+        ):
+            return "invalid `issues` item; expected {code, severity, message, ...}"
+    if not all(isinstance(w, str) for w in row["packet_warnings"]):
+        return "invalid `packet_warnings` item; expected strings"
+    return None
+
+
 def _load_packets(path: Path) -> list[dict[str, Any]]:
     """Load and validate packet JSONL ([SC-6]).
 
     A malformed packets file is an invocation error ([SC-5] exit 2), never
     a model-analysis result: invalid packets must be rejected here, before
-    any of them can reach analyze_packets and come back as `ambiguous`
-    rows with invented packet IDs.
+    any of them can reach analyze_packets -- as an `ambiguous` row with an
+    invented packet ID, or as a prompt built from corrupted content.
     """
 
     packets: list[dict[str, Any]] = []
@@ -431,19 +464,9 @@ def _load_packets(path: Path) -> list[dict[str, Any]]:
         if not isinstance(row, dict):
             msg = f"{path}:{line_no}: packet line is not a JSON object"
             raise ValueError(msg)
-        for field_name, field_type in _PACKET_FIELDS:
-            value = row.get(field_name)
-            if not isinstance(value, field_type):
-                msg = (
-                    f"{path}:{line_no}: malformed packet: missing or invalid"
-                    f" `{field_name}`"
-                )
-                raise ValueError(msg)
-        if not row["packet_id"] or not row["instructions"]:
-            msg = (
-                f"{path}:{line_no}: malformed packet: `packet_id` and"
-                " `instructions` must be non-empty"
-            )
+        problem = _packet_shape_error(row)
+        if problem is not None:
+            msg = f"{path}:{line_no}: malformed packet: {problem}"
             raise ValueError(msg)
         packets.append(row)
     return packets

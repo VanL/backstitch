@@ -488,3 +488,38 @@ def test_packet_with_wrong_field_type_is_invocation_error(tmp_path: Path) -> Non
     result = _run_analyze(tmp_path, json.dumps(_full_packet(owners="not-a-list")))
     assert result.returncode == 2
     assert "owners" in result.stderr
+
+
+# --- Round 6 P2: packet validation covers nested structures ----------------
+
+
+def test_packet_with_malformed_nested_content_is_invocation_error(
+    tmp_path: Path,
+) -> None:
+    # [SC-6] defines owners, issues, and packet_warnings as structured
+    # content; corrupted items must be rejected at the boundary, not
+    # prompted on.
+    for overrides in (
+        {"owners": ["bad-owner"]},
+        {"issues": ["bad-issue"]},
+        {"packet_warnings": [123]},
+        {"tests": [42]},
+        {
+            "owners": [
+                {"path": "p.py", "symbol": None, "start_line": True, "snippet": ""}
+            ]
+        },
+    ):
+        result = _run_analyze(tmp_path, json.dumps(_full_packet(**overrides)))
+        assert result.returncode == 2, (overrides, result.stdout, result.stderr)
+        assert "malformed packet" in result.stderr, (overrides, result.stderr)
+
+
+def test_analyze_unknown_model_is_invocation_error(tmp_path: Path) -> None:
+    # [SC-5]: an unknown model name fails adapter construction -> exit 2.
+    # The total-model-failure -> exit 2 rule (analyze never exits 1;
+    # semantic findings are advisory) is pinned at the unit level in
+    # tests/test_analysis_llm.py::test_analyze_exit_code_rules.
+    result = _run_analyze(tmp_path, json.dumps(_full_packet()))
+    assert result.returncode == 2
+    assert result.returncode != 1

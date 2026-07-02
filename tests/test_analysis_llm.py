@@ -151,14 +151,15 @@ def test_missing_instructions_field_is_error_record_not_crash() -> None:
 def test_analyze_exit_code_rules() -> None:
     from backstitch.analysis_llm import analyze_exit_code
 
-    # Rows include per-packet error records, so total failure means every
-    # packet errored (len(errors) == len(rows)); partial failure exits 0.
+    # [SC-5]: analyze never exits 1 (semantic findings are advisory; 1 is
+    # reserved for deterministic target findings). Total failure -- every
+    # packet errored -- is a tool/model statement: exit 2. Partial exits 0.
     assert analyze_exit_code([], []) == 0
     assert analyze_exit_code([{"packet_id": "x"}], []) == 0
     assert (
         analyze_exit_code([{"packet_id": "x"}, {"packet_id": "y"}], ["one failed"]) == 0
     )
-    assert analyze_exit_code([{"packet_id": "x"}], ["all failed"]) == 1
+    assert analyze_exit_code([{"packet_id": "x"}], ["all failed"]) == 2
 
 
 def test_analyze_model_flag_is_optional() -> None:

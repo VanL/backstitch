@@ -121,14 +121,17 @@ def analyze_packets(
 
 
 def analyze_exit_code(rows: list[dict[str, Any]], errors: list[str]) -> int:
-    """Exit 1 when analysis produced nothing but failures; 0 otherwise.
+    """Exit 2 when analysis produced nothing but failures; 0 otherwise.
 
-    Rows include per-packet error records, so "nothing but failures" means
-    every packet errored. Partial failure still exits 0 because the output
-    is usable; total failure must be scriptable without scraping stderr.
+    [SC-5]: exit 1 is reserved for deterministic findings about the target
+    repository, and semantic findings are advisory -- `analyze` never
+    returns 1. Total failure (every packet errored; rows include the
+    per-packet error records) is a statement about the tool or the model,
+    so it is exit 2. Partial failure still exits 0 because the output is
+    usable; total failure must be scriptable without scraping stderr.
     """
 
-    return 1 if errors and len(errors) == len(rows) else 0
+    return 2 if errors and len(errors) == len(rows) else 0
 
 
 def render_results_jsonl(rows: list[dict[str, Any]]) -> str:
