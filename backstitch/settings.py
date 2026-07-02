@@ -188,6 +188,7 @@ def settings_to_json(settings: BackstitchSettings) -> str:
             },
         },
         "check": asdict(settings.check),
+        "packets": asdict(settings.packets),
         "analyze": asdict(settings.analyze),
         "target_roots": asdict(settings.target_roots),
     }

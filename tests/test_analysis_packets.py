@@ -43,7 +43,8 @@ def test_packet_rows_have_stable_fields() -> None:
             "owners",
             "tests",
             "issues",
-            "warnings",
+            # [SC-6]: the truncation-diagnostics field is `packet_warnings`.
+            "packet_warnings",
             "instructions",
         ]
 
@@ -110,7 +111,7 @@ def test_snippets_are_bounded_with_warning(tmp_path: Path) -> None:
     packet = next(p for p in packets if p["section_id"] == "X-1")
     owner = packet["owners"][0]
     assert len(owner["snippet"].splitlines()) <= MAX_SNIPPET_LINES
-    assert any("truncated" in w for w in packet["warnings"])
+    assert any("truncated" in w for w in packet["packet_warnings"])
 
 
 def test_owner_count_is_bounded_with_warning(tmp_path: Path) -> None:
@@ -134,7 +135,7 @@ def test_owner_count_is_bounded_with_warning(tmp_path: Path) -> None:
     packets = generate_packets(tmp_path, profile)
     packet = next(p for p in packets if p["section_id"] == "X-1")
     assert len(packet["owners"]) == MAX_OWNERS_PER_PACKET
-    assert any("omitted" in w for w in packet["warnings"])
+    assert any("omitted" in w for w in packet["packet_warnings"])
 
 
 def test_cli_packets_writes_jsonl(tmp_path: Path) -> None:

@@ -33,13 +33,16 @@ HTML_IGNORE_RE = re.compile(
     r"<!--\s*backstitch:\s*ignore\s+(.+?)\s*-->",
     re.IGNORECASE,
 )
-# Line-oriented on purpose: horizontal whitespace only, so a directive in a
-# module docstring never captures following prose lines as issue codes.
-NOQA_RE = re.compile(
-    r"backstitch:[ \t]*(?:noqa|ignore)[ \t]+"
-    r"([A-Za-z_][A-Za-z0-9_]*(?:[ \t]*,[ \t]*[A-Za-z_][A-Za-z0-9_]*)*)",
+# Anchored on purpose: a directive line IS the directive ([EXC-5] grammar
+# `backstitch:` then `noqa` then codes), so prose that merely mentions
+# `backstitch: noqa` mid-sentence never parses, and everything after the
+# marker on a directive line must be issue codes -- a silently dropped tail
+# is the fake-protection class this spec exists to prevent.
+NOQA_LINE_RE = re.compile(
+    r"^backstitch:[ \t]*(?:noqa|ignore)\b[ \t]*(?P<rest>.*)$",
     re.IGNORECASE,
 )
+CODE_TOKEN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class UnknownSuppressionCodeError(ValueError):
@@ -148,15 +151,36 @@ def parse_noqa_text(
 ) -> tuple[frozenset[str], list[str]]:
     """Parse ``backstitch: noqa`` directives; returns (codes, warnings).
 
-    Warnings are non-empty only under ``allow_unknown`` ([EXC-4] hatch) and
-    must reach stderr -- a discarded warning makes typo suppressions silent.
+    Only lines that START with the marker are directives ([EXC-5] grammar).
+    Malformed directives (no codes, or unparseable tokens) always warn;
+    unknown codes follow [EXC-4] strictness -- error by default,
+    ``allow_unknown`` downgrades to warnings. All warnings must reach
+    stderr -- a discarded warning makes typo suppressions silent.
     """
 
     codes: set[str] = set()
     warnings: list[str] = []
-    for match in NOQA_RE.finditer(text):
+    for raw_line in text.splitlines():
+        match = NOQA_LINE_RE.match(raw_line.strip())
+        if match is None:
+            continue
+        rest = match.group("rest").strip()
+        if not rest:
+            warnings.append(
+                f"malformed `backstitch: noqa` directive in {location}: no issue codes"
+            )
+            continue
+        tokens = [t for t in re.split(r"[,\s]+", rest) if t]
+        bad = sorted({t for t in tokens if not CODE_TOKEN_RE.match(t)})
+        if bad:
+            warnings.append(
+                f"malformed `backstitch: noqa` directive in {location}:"
+                f" unparseable token(s) {', '.join(bad)}"
+                " -- codes are comma-separated issue codes"
+            )
+        idents = ",".join(t for t in tokens if CODE_TOKEN_RE.match(t))
         parsed, parse_warnings = parse_traceability_codes(
-            match.group(1), allow_unknown=allow_unknown, location=location
+            idents, allow_unknown=allow_unknown, location=location
         )
         codes.update(parsed)
         warnings.extend(parse_warnings)

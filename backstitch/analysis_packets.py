@@ -184,7 +184,9 @@ def generate_packets(
                 "owners": owners,
                 "tests": tests,
                 "issues": issues,
-                "warnings": warnings,
+                # [SC-6] field name is contractual: consumers look for
+                # `packet_warnings` for truncation/omission context.
+                "packet_warnings": warnings,
                 "instructions": instructions,
             }
         )

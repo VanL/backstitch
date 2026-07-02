@@ -63,6 +63,13 @@ Load-bearing boundaries:
   only ([EXC-5]); the docstring form is module-scoped. File-wide bleed of a
   comment directive is the [EXC-9] regression class and has a dedicated
   containment fixture.
+- The noqa directive is anchored at line start ([EXC-5] grammar): prose
+  merely mentioning `backstitch: noqa` never parses, and on a directive
+  line everything after the marker must be issue codes — a bare directive
+  or an unparseable tail always warns, and an unknown code follows [EXC-4]
+  strictness (error by default, warning under the hatch). Silently dropped
+  tails are the fake-protection class the exclusions spec exists to
+  prevent.
 
 ## Dogfood Configuration And Suppression Audit
 

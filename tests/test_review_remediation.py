@@ -1,6 +1,6 @@
 """Regression tests for the independent-review findings (P1/P2 remediation).
 
-Spec: docs/specs/02-backstitch-core.md [SC-4], [SC-11]
+Spec: docs/specs/02-backstitch-core.md [SC-4], [SC-6], [SC-11]
 Spec: docs/specs/03-backstitch-configuration.md [CFG-5], [CFG-9]
 Spec: docs/specs/04-backstitch-traceability-exclusions.md [EXC-4], [EXC-5]
 
@@ -14,7 +14,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from backstitch.exclusions import parse_noqa_text
+import pytest
+
+from backstitch.exclusions import (
+    UnknownSuppressionCodeError,
+    parse_noqa_text,
+)
 from backstitch.markdown_specs import parse_markdown_spec
 from backstitch.profiles import get_profile
 from backstitch.resolver import scan_repository_with_artifacts
@@ -204,3 +209,99 @@ def test_longer_fence_opener_requires_matching_close_length(
     )
     parsed = parse_markdown_spec(tmp_path / "docs/specs/01-x.md", tmp_path)
     assert [s.section_id for s in parsed.sections] == ["FL-1"]
+
+
+# --- Round 2 findings (post-remediation review) --------------------------
+# P1: [SC-6] packet truncation diagnostics field is `packet_warnings`
+# (pinned by tests/test_analysis_packets.py::test_packet_rows_have_stable_fields).
+
+
+# --- Round 2 P2: packets surfaces the same suppression diagnostics as check
+
+
+def test_packets_emits_suppression_diagnostics(tmp_path: Path) -> None:
+    _write(tmp_path, "docs/specs/01-x.md", "# X\n\n## One [PX-1]\n")
+    _write(
+        tmp_path,
+        "pkg/mod.py",
+        '"""Mod."""\n\n# backstitch: noqa NOT_A_REAL_CODE_9\ndef f() -> None:\n    pass\n',
+    )
+    _write(
+        tmp_path,
+        ".backstitch.toml",
+        "\n".join(
+            [
+                "allow_unknown_keys = true",
+                "[profile]",
+                'spec_roots = ["docs/specs"]',
+                "plan_roots = []",
+                'code_roots = ["pkg"]',
+                "[lint.per-file-ignores]",
+                '"nonexistent/*" = ["CODE_REF_BROAD"]',
+            ]
+        )
+        + "\n",
+    )
+    result = run_cli(
+        "packets",
+        "--repo-root",
+        str(tmp_path),
+        "--output",
+        str(tmp_path / "p.jsonl"),
+    )
+    assert "NOT_A_REAL_CODE_9" in result.stderr, "unknown-code warning dropped"
+    assert "unused per-file-ignore" in result.stderr, "stale-ignore warning dropped"
+
+
+# --- Round 2 P2: config show serializes [packets] -------------------------
+
+
+def test_config_show_includes_packets_settings(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        ".backstitch.toml",
+        '[packets]\noutput = "out/packets.jsonl"\n',
+    )
+    result = run_cli("config", "show", "--repo-root", str(tmp_path))
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert "packets" in data, "config show dropped the [packets] table"
+    assert data["packets"]["output"].endswith("out/packets.jsonl")
+
+
+# --- Round 2 P2: malformed noqa directives are never silently accepted ----
+
+
+def test_bare_noqa_directive_warns() -> None:
+    codes, warnings = parse_noqa_text("backstitch: noqa")
+    assert codes == frozenset()
+    assert any("no issue codes" in w for w in warnings)
+
+
+def test_space_separated_unknown_tail_is_not_dropped() -> None:
+    # Strict mode: the tail is an unknown code, same as the comma form.
+    with pytest.raises(UnknownSuppressionCodeError):
+        parse_noqa_text("backstitch: noqa CODE_REF_BROAD NOT_A_CODE")
+    # Hatch: the good code applies and the tail warns.
+    codes, warnings = parse_noqa_text(
+        "backstitch: noqa CODE_REF_BROAD NOT_A_CODE", allow_unknown=True
+    )
+    assert codes == frozenset({"CODE_REF_BROAD"})
+    assert any("NOT_A_CODE" in w for w in warnings)
+
+
+def test_unparseable_noqa_token_warns() -> None:
+    codes, warnings = parse_noqa_text(
+        "backstitch: noqa CODE_REF_BROAD, (huh)", allow_unknown=True
+    )
+    assert codes == frozenset({"CODE_REF_BROAD"})
+    assert any("unparseable" in w for w in warnings)
+
+
+def test_prose_mention_of_noqa_is_not_a_directive() -> None:
+    # [EXC-5] grammar anchors the directive at line start; docstring prose
+    # that merely mentions the marker never parses (and never warns).
+    assert parse_noqa_text("Use backstitch: noqa to suppress findings.") == (
+        frozenset(),
+        [],
+    )
