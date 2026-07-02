@@ -1215,3 +1215,97 @@ def test_non_positive_start_lines_are_invocation_errors(tmp_path: Path) -> None:
     result = _run_analyze(tmp_path, json.dumps(zero_owner))
     assert result.returncode == 2
     assert "owners" in result.stderr
+
+
+# --- Round 12 P2: packet locators must be non-empty and consistent -----------
+
+
+@pytest.mark.parametrize(
+    ("overrides", "fragment"),
+    [
+        ({"spec_path": ""}, "spec_path"),
+        (
+            {"section_id": "", "packet_id": "docs/specs/01-x.md#"},
+            "section_id",
+        ),
+        ({"packet_id": "other.md#Y-9"}, "does not match"),
+        (
+            {"owners": [{"path": "", "symbol": None, "start_line": 1, "snippet": "x"}]},
+            "owners",
+        ),
+    ],
+)
+def test_empty_or_mismatched_packet_locators_are_invocation_errors(
+    tmp_path: Path, overrides: dict, fragment: str
+) -> None:
+    result = _run_analyze(tmp_path, json.dumps(_full_packet(**overrides)))
+    assert result.returncode == 2
+    assert fragment in result.stderr
+
+
+def test_empty_paths_never_become_evidence_paths() -> None:
+    from backstitch.analysis_llm import analyze_packets
+
+    # Library callers can bypass CLI load validation; the evidence
+    # boundary itself must not admit "" as a citable path.
+    packet = _full_packet(
+        spec_path="",
+        owners=[{"path": "", "symbol": None, "start_line": 1, "snippet": "x"}],
+    )
+    response = json.dumps(
+        {
+            "packet_id": packet["packet_id"],
+            "classification": "ok",
+            "summary": "fine",
+            "evidence": [{"path": "", "line": 1}],
+        }
+    )
+    rows, errors = analyze_packets([packet], lambda prompt: response)
+    assert rows[0]["classification"] == "ambiguous"
+
+
+# --- Round 12 P2: report edges need non-empty locators ------------------------
+
+
+def test_summarize_rejects_empty_edge_locators(tmp_path: Path) -> None:
+    report = {
+        "profile": "backstitch-style-v1",
+        "repo_root": ".",
+        "summary": {"errors": 0, "warnings": 0, "infos": 0},
+        "spec_sections": [],
+        "code_refs": [],
+        "spec_mappings": [],
+        "edges": [
+            {
+                "spec_path": "",
+                "section_id": "X-1",
+                "kind": "mapping",
+                "code_path": "p.py",
+                "code_symbol": None,
+            }
+        ],
+        "issues": [],
+    }
+    _write(tmp_path, "report.json", json.dumps(report))
+    _write(
+        tmp_path,
+        "rows.jsonl",
+        json.dumps(
+            {
+                "packet_id": "#X-1",
+                "classification": "ok",
+                "summary": "fine",
+                "evidence": [],
+            }
+        )
+        + "\n",
+    )
+    result = run_cli(
+        "summarize-analysis",
+        "--deterministic-report",
+        str(tmp_path / "report.json"),
+        "--analysis-results",
+        str(tmp_path / "rows.jsonl"),
+    )
+    assert result.returncode == 2
+    assert "edges[0]" in result.stderr

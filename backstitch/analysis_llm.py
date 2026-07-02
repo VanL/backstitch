@@ -59,17 +59,24 @@ def _packet_evidence_bounds(
 
     bounds: dict[str, list[tuple[int, int]]] = {}
     spec_path = packet.get("spec_path")
-    if isinstance(spec_path, str):
+    # Empty paths never name a packet member: an empty string must not
+    # become a citable evidence path (load-time validation rejects these,
+    # but analyze_packets is also a library entry point).
+    if isinstance(spec_path, str) and spec_path:
         ranges = bounds.setdefault(spec_path, [])
         start = packet.get("section_start_line")
         text = packet.get("section_text")
         if isinstance(start, int) and isinstance(text, str) and text.splitlines():
             ranges.append((start, start + len(text.splitlines()) - 1))
     for test in packet.get("tests", ()):
-        if isinstance(test, str):
+        if isinstance(test, str) and test:
             bounds.setdefault(test, [])
     for owner in packet.get("owners", ()):
-        if not isinstance(owner, dict) or not isinstance(owner.get("path"), str):
+        if (
+            not isinstance(owner, dict)
+            or not isinstance(owner.get("path"), str)
+            or not owner["path"]
+        ):
             continue
         ranges = bounds.setdefault(owner["path"], [])
         start = owner.get("start_line")

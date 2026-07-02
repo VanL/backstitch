@@ -425,6 +425,13 @@ def _packet_shape_error(row: dict[str, Any]) -> str | None:
             return f"missing or invalid `{field_name}`"
     if not row["packet_id"] or not row["instructions"]:
         return "`packet_id` and `instructions` must be non-empty"
+    if not row["spec_path"] or not row["section_id"]:
+        # Empty locators would leak into evidence paths and packet IDs.
+        return "`spec_path` and `section_id` must be non-empty"
+    if row["packet_id"] != f"{row['spec_path']}#{row['section_id']}":
+        # [SC-6]: results are addressed by packet_id, which is defined as
+        # `spec_path#section_id`; a mismatch means the packet was edited.
+        return "`packet_id` does not match `spec_path#section_id`"
     if row["section_start_line"] < 1:
         # Line numbers are 1-based; zero or negative is malformed input.
         return "invalid `section_start_line`; expected an integer >= 1"
@@ -432,6 +439,7 @@ def _packet_shape_error(row: dict[str, Any]) -> str | None:
         if (
             not isinstance(owner, dict)
             or not isinstance(owner.get("path"), str)
+            or not owner["path"]
             or not (owner.get("symbol") is None or isinstance(owner["symbol"], str))
             or isinstance(owner.get("start_line"), bool)
             or not isinstance(owner.get("start_line"), int)
@@ -439,7 +447,7 @@ def _packet_shape_error(row: dict[str, Any]) -> str | None:
             or not isinstance(owner.get("snippet"), str)
         ):
             return (
-                "invalid `owners` item; expected {path, symbol,"
+                "invalid `owners` item; expected {non-empty path, symbol,"
                 " start_line >= 1, snippet}"
             )
     if not all(isinstance(t, str) for t in row["tests"]):
@@ -592,12 +600,14 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
         if (
             not isinstance(edge, dict)
             or not isinstance(edge.get("spec_path"), str)
+            or not edge["spec_path"]
             or not isinstance(edge.get("section_id"), str)
+            or not edge["section_id"]
         ):
             msg = (
                 f"{args.deterministic_report}: not a backstitch deterministic"
-                f" report (invalid `edges[{position}]`: expected spec_path"
-                " and section_id strings)"
+                f" report (invalid `edges[{position}]`: expected non-empty"
+                " spec_path and section_id strings)"
             )
             raise ValueError(msg)
     load = load_analysis_results(
