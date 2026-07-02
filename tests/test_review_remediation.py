@@ -28,6 +28,10 @@ PROFILE = get_profile("backstitch-style-v1").with_overrides(
     spec_roots=("docs/specs",), plan_roots=(), code_roots=("pkg",)
 )
 
+# [SC-7] hermetic testing: a name no local `llm` alias could plausibly
+# resolve, so CLI tests can never construct a real adapter or call a model.
+HERMETIC_MODEL = "backstitch-hermetic-model-that-must-not-exist"
+
 
 def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -460,7 +464,7 @@ def _run_analyze(
         "--packets",
         str(packets),
         "--model",
-        "fake-model",
+        HERMETIC_MODEL,
         "--no-config",
         "--output",
         str(tmp_path / "out.jsonl"),
@@ -516,10 +520,15 @@ def test_packet_with_malformed_nested_content_is_invocation_error(
 
 
 def test_analyze_unknown_model_is_invocation_error(tmp_path: Path) -> None:
-    # [SC-5]: an unknown model name fails adapter construction -> exit 2.
-    # The total-model-failure -> exit 2 rule (analyze never exits 1;
-    # semantic findings are advisory) is pinned at the unit level in
-    # tests/test_analysis_llm.py::test_analyze_exit_code_rules.
+    # [SC-5]: an unknown model name is an invocation error -> exit 2 with a
+    # clear one-line diagnostic, never "internal error" and never the
+    # KeyError repr quoting. The total-model-failure -> exit 2 rule
+    # (analyze never exits 1; semantic findings are advisory) is pinned at
+    # the unit level in test_analysis_llm.py::test_analyze_exit_code_rules.
     result = _run_analyze(tmp_path, json.dumps(_full_packet()))
     assert result.returncode == 2
-    assert result.returncode != 1
+    assert "internal error" not in result.stderr, result.stderr
+    assert HERMETIC_MODEL in result.stderr, result.stderr
+    assert f"'Unknown model: {HERMETIC_MODEL}'" not in result.stderr, (
+        "KeyError repr quoting leaked into the diagnostic"
+    )

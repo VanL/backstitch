@@ -28,6 +28,10 @@ PACKET_A = {
 }
 PACKET_B = dict(PACKET_A, packet_id="docs/specs/01-X.md#X-2", section_id="X-2")
 
+# [SC-7] hermetic testing: a name no local `llm` alias could plausibly
+# resolve, so CLI tests can never construct a real adapter or call a model.
+HERMETIC_MODEL = "backstitch-hermetic-model-that-must-not-exist"
+
 
 def _ok_response(packet_id: str) -> str:
     return json.dumps(
@@ -207,7 +211,7 @@ def test_cli_analyze_non_object_packet_line_exits_two(tmp_path: Path) -> None:
             "--packets",
             str(packets),
             "--model",
-            "fake-model",
+            HERMETIC_MODEL,
             "--no-config",
             "--output",
             str(tmp_path / "out.jsonl"),
@@ -229,7 +233,7 @@ def test_cli_analyze_missing_packets_file_exits_two(tmp_path: Path) -> None:
             "--packets",
             str(tmp_path / "missing.jsonl"),
             "--model",
-            "fake-model",
+            HERMETIC_MODEL,
             "--no-config",
             "--output",
             str(tmp_path / "out.jsonl"),

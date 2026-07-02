@@ -499,7 +499,15 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         raise ValueError("--concurrency must be at least 1")
     packets = _load_packets(args.packets)
     model = resolve_model_name(args.model, configured=settings.analyze.model)
-    adapter = default_adapter(model)
+    try:
+        adapter = default_adapter(model)
+    except KeyError as exc:
+        # [SC-5]: an unknown model name is an invocation error with a clear
+        # one-line diagnostic, not an "internal error". llm's
+        # UnknownModelError subclasses KeyError, whose str() adds repr
+        # quoting -- unwrap args for the clean message.
+        message = exc.args[0] if exc.args else exc
+        return _error(str(message))
     rows, errors = analyze_packets(packets, adapter, concurrency)
     rendered = render_results_jsonl(rows)
     if args.output is not None:
