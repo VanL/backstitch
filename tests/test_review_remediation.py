@@ -305,3 +305,45 @@ def test_prose_mention_of_noqa_is_not_a_directive() -> None:
         frozenset(),
         [],
     )
+
+
+def test_packets_does_not_report_used_ignores_as_stale(tmp_path: Path) -> None:
+    # Round 3: the unused-ignore audit must run AFTER the suppression pass
+    # (should_suppress records usage); auditing first made `packets` call
+    # every used config rule stale while `check` stayed silent.
+    _write(
+        tmp_path,
+        "docs/specs/01-x.md",
+        "# X\n\n## One [X-1]\n\n_Implementation mapping_:\n\n"
+        "- `pkg/mod.py`\n\n## Two [X-2]\n",
+    )
+    _write(tmp_path, "pkg/mod.py", '"""Spec: docs/specs/01-x.md [X-1]"""\n')
+    _write(
+        tmp_path,
+        ".backstitch.toml",
+        "\n".join(
+            [
+                "[profile]",
+                'spec_roots = ["docs/specs"]',
+                "plan_roots = []",
+                'code_roots = ["pkg"]',
+                "[lint.per-section-ignores]",
+                '"docs/specs/01-x.md::X-2" = ["SPEC_SECTION_UNMAPPED"]',
+            ]
+        )
+        + "\n",
+    )
+    check = run_cli("check", "--repo-root", str(tmp_path))
+    assert check.returncode == 0, check.stdout + check.stderr
+    assert "unused" not in check.stderr
+    packets = run_cli(
+        "packets",
+        "--repo-root",
+        str(tmp_path),
+        "--output",
+        str(tmp_path / "p.jsonl"),
+    )
+    assert packets.returncode == 0, packets.stdout + packets.stderr
+    assert "unused" not in packets.stderr, (
+        "packets reported a used ignore as stale: " + packets.stderr
+    )

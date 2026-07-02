@@ -105,10 +105,11 @@ class CodeRef:
     ``ranges`` holds unexpanded ``(start, end)`` range pairs; the resolver
     expands them only when every intermediate section exists [SC-4].
     A document-only reference has a ``spec_path`` but no IDs, ranges, or
-    anchor. ``ref_context`` records provenance at parse time -- a docstring
-    reference is an asserted backlink, a comment reference is prose -- so
-    the resolver can apply [SC-11] context-dependent severities without
-    re-inspecting raw text.
+    anchor. ``ref_context`` records provenance at parse time -- only a
+    docstring ``Spec:`` marker line is an asserted backlink; ordinary
+    docstring prose and comments are weak/prose context -- so the resolver
+    can apply [SC-11] context-dependent severities without re-inspecting
+    raw text.
     """
 
     path: str

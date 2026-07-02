@@ -337,16 +337,18 @@ def _suppressed_report(args: argparse.Namespace) -> Report:
         marker_warnings=list(artifacts.marker_warnings),
         allow_unknown=settings.allow_unknown_keys,
     )
+    kept = tuple(
+        issue for issue in report.issues if not should_suppress(issue, index)[0]
+    )
     # [EXC-4]/[EXC-8]: suppression diagnostics reach stderr on EVERY command
-    # that suppresses, not only `check` -- a typo'd or stale ignore that
-    # only warns under one subcommand is silent under the others.
+    # that suppresses, not only `check`. The unused-ignore audit must run
+    # AFTER the should_suppress pass above -- should_suppress is what
+    # records config-rule usage, so auditing first reports every used rule
+    # as stale.
     for warning in index.suppression_warnings:
         print(f"warning: {warning}", file=sys.stderr)
     for warning in collect_unused_ignore_warnings(index):
         print(f"warning: {warning}", file=sys.stderr)
-    kept = tuple(
-        issue for issue in report.issues if not should_suppress(issue, index)[0]
-    )
     return dataclasses.replace(report, issues=kept)
 
 
