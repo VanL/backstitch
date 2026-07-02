@@ -428,3 +428,63 @@ def test_config_show_and_path_honor_config_flags(tmp_path: Path) -> None:
     no_config_path = run_cli("--no-config", "config", "path")
     assert no_config_path.returncode == 0
     assert no_config_path.stdout.strip() == ""
+
+
+# --- Round 5 P1: malformed packet files are invocation errors, exit 2 ------
+
+
+def _full_packet(**overrides: object) -> dict:
+    packet: dict = {
+        "packet_id": "docs/specs/01-x.md#X-1",
+        "spec_path": "docs/specs/01-x.md",
+        "section_id": "X-1",
+        "title": "One",
+        "section_text": "## One [X-1]",
+        "owners": [],
+        "tests": [],
+        "issues": [],
+        "packet_warnings": [],
+        "instructions": "Respond with JSON.",
+    }
+    packet.update(overrides)
+    return packet
+
+
+def _run_analyze(
+    tmp_path: Path, *packet_lines: str
+) -> subprocess.CompletedProcess[str]:
+    packets = tmp_path / "packets.jsonl"
+    packets.write_text("".join(line + "\n" for line in packet_lines), encoding="utf-8")
+    return run_cli(
+        "analyze",
+        "--packets",
+        str(packets),
+        "--model",
+        "fake-model",
+        "--no-config",
+        "--output",
+        str(tmp_path / "out.jsonl"),
+    )
+
+
+def test_empty_object_packet_is_invocation_error(tmp_path: Path) -> None:
+    # [SC-5]/[SC-6]: a malformed packets file exits 2; it must never come
+    # back as an `ambiguous` analysis row with an invented packet ID.
+    result = _run_analyze(tmp_path, "{}")
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "malformed packet" in result.stderr
+    assert "<missing packet_id>" not in result.stdout
+    assert not (tmp_path / "out.jsonl").exists()
+
+
+def test_packet_missing_instructions_is_invocation_error(tmp_path: Path) -> None:
+    packet = {k: v for k, v in _full_packet().items() if k != "instructions"}
+    result = _run_analyze(tmp_path, json.dumps(packet))
+    assert result.returncode == 2
+    assert "instructions" in result.stderr
+
+
+def test_packet_with_wrong_field_type_is_invocation_error(tmp_path: Path) -> None:
+    result = _run_analyze(tmp_path, json.dumps(_full_packet(owners="not-a-list")))
+    assert result.returncode == 2
+    assert "owners" in result.stderr

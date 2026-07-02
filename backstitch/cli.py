@@ -391,7 +391,32 @@ def _cmd_packets(args: argparse.Namespace) -> int:
     return 1 if report.summary()["errors"] else 0
 
 
+# The [SC-6] packet record contract, as produced by generate_packets().
+# `packet_id` and `instructions` must additionally be non-empty: the
+# pipeline addresses results by the former and prompts with the latter.
+_PACKET_FIELDS: tuple[tuple[str, type], ...] = (
+    ("packet_id", str),
+    ("spec_path", str),
+    ("section_id", str),
+    ("title", str),
+    ("section_text", str),
+    ("owners", list),
+    ("tests", list),
+    ("issues", list),
+    ("packet_warnings", list),
+    ("instructions", str),
+)
+
+
 def _load_packets(path: Path) -> list[dict[str, Any]]:
+    """Load and validate packet JSONL ([SC-6]).
+
+    A malformed packets file is an invocation error ([SC-5] exit 2), never
+    a model-analysis result: invalid packets must be rejected here, before
+    any of them can reach analyze_packets and come back as `ambiguous`
+    rows with invented packet IDs.
+    """
+
     packets: list[dict[str, Any]] = []
     for line_no, line in enumerate(
         path.read_text(encoding="utf-8").splitlines(), start=1
@@ -405,6 +430,20 @@ def _load_packets(path: Path) -> list[dict[str, Any]]:
             raise ValueError(msg) from None
         if not isinstance(row, dict):
             msg = f"{path}:{line_no}: packet line is not a JSON object"
+            raise ValueError(msg)
+        for field_name, field_type in _PACKET_FIELDS:
+            value = row.get(field_name)
+            if not isinstance(value, field_type):
+                msg = (
+                    f"{path}:{line_no}: malformed packet: missing or invalid"
+                    f" `{field_name}`"
+                )
+                raise ValueError(msg)
+        if not row["packet_id"] or not row["instructions"]:
+            msg = (
+                f"{path}:{line_no}: malformed packet: `packet_id` and"
+                " `instructions` must be non-empty"
+            )
             raise ValueError(msg)
         packets.append(row)
     return packets

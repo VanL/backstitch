@@ -1,12 +1,14 @@
 # Backstitch Four-Way Reconciliation Plan
 
-Status: implemented (pending independent review)  
-Supersedes (for implementation):  
-`docs/plans/2026-06-18-backstitch-style-spec-code-traceability-tool-plan.md` (deterministic + semantic body),  
-`docs/plans/2026-07-01-backstitch-toml-configuration-plan.md` (archival),  
-`docs/plans/2026-07-02-backstitch-traceability-exclusions-plan.md` (archival)
+Status: implemented (pending independent review)
 
-**Spec baseline (record in every commit message until complete):**  
+Supersedes (for implementation):
+
+- `docs/plans/2026-06-18-backstitch-style-spec-code-traceability-tool-plan.md` (deterministic + semantic body)
+- `docs/plans/2026-07-01-backstitch-toml-configuration-plan.md` (archival)
+- `docs/plans/2026-07-02-backstitch-traceability-exclusions-plan.md` (archival)
+
+**Spec baseline (record in every commit message until complete):**
 `1e9c0d9d185c1a2c244f70db8af8c39139fc245c` — `docs/specs/02-backstitch-core.md`, `03`, `04` at Status: Active; `05` at Status: Proposed (**do not implement [INV-*]**).
 
 ## Goal

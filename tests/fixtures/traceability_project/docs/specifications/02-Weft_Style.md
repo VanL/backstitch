@@ -44,4 +44,3 @@ Deliberate duplicate of the ID defined in 01-Core.md.
 
 _Implementation mapping_: `src/phantom.py`
 ```
-
