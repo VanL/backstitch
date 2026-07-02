@@ -181,6 +181,9 @@ def generate_packets(
                     sections_by_file[section.path],
                     warnings,
                 ),
+                # [SC-6]: the section's starting line anchors evidence
+                # line-locality checks against the shown section text.
+                "section_start_line": section.line,
                 "owners": owners,
                 "tests": tests,
                 "issues": issues,

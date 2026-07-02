@@ -444,6 +444,7 @@ def _full_packet(**overrides: object) -> dict:
         "section_id": "X-1",
         "title": "One",
         "section_text": "## One [X-1]",
+        "section_start_line": 3,
         "owners": [],
         "tests": [],
         "issues": [],
@@ -952,7 +953,7 @@ def test_evidence_line_outside_snippet_is_rejected() -> None:
 
     rows, errors = analyze_packets([packet], lambda prompt: respond(999999))
     assert rows[0]["classification"] == "ambiguous"
-    assert any("outside the packet's snippets" in e for e in errors)
+    assert any("outside the packet's shown content" in e for e in errors)
     # A line inside the snippet range (10..12) is accepted.
     rows, errors = analyze_packets([packet], lambda prompt: respond(11))
     assert rows[0]["classification"] == "ok"
@@ -1028,3 +1029,148 @@ def test_stale_error_code_noqa_warns_unconditionally(tmp_path: Path) -> None:
     )
     assert result.returncode == 0
     assert "cannot suppress error-severity code SPEC_FILE_MISSING" in result.stderr
+
+
+# --- Round 10 P1: one-space empty HTML ignore --------------------------------
+
+
+def test_one_space_empty_html_ignore_is_strict_error(tmp_path: Path) -> None:
+    # `<!-- backstitch: ignore -->` (single space) previously matched no
+    # marker form at all, so a trailing heading marker silently deleted
+    # the section; both empty-ignore spellings are malformed now.
+    _write(
+        tmp_path,
+        "docs/specs/01-x.md",
+        "# X\n\n## One [HI-4] <!-- backstitch: ignore -->\n",
+    )
+    _write(tmp_path, "pkg/mod.py", '"""Mod."""\n')
+    result = run_cli(
+        "check",
+        "--repo-root",
+        str(tmp_path),
+        "--no-config",
+        "--spec-root",
+        "docs/specs",
+        "--plan-root",
+        "",
+        "--code-root",
+        "pkg",
+    )
+    assert result.returncode == 2
+    assert "malformed traceability marker" in result.stderr
+
+
+def test_bogus_html_marker_form_is_strict_error(tmp_path: Path) -> None:
+    # Any backstitch HTML comment that matches neither valid form errors;
+    # it must never fall through unrecognized.
+    _write(
+        tmp_path,
+        "docs/specs/01-x.md",
+        "# X\n\n## One [HI-5] <!-- backstitch: bogus -->\n",
+    )
+    _write(tmp_path, "pkg/mod.py", '"""Mod."""\n')
+    result = run_cli(
+        "check",
+        "--repo-root",
+        str(tmp_path),
+        "--no-config",
+        "--spec-root",
+        "docs/specs",
+        "--plan-root",
+        "",
+        "--code-root",
+        "pkg",
+    )
+    assert result.returncode == 2
+    assert "malformed traceability marker" in result.stderr
+
+
+# --- Round 10 P2: summarize validates edge internals -------------------------
+
+
+def test_summarize_rejects_malformed_edge_records(tmp_path: Path) -> None:
+    report = tmp_path / "report.json"
+    report.write_text(
+        json.dumps(
+            {
+                "profile": "p",
+                "repo_root": "r",
+                "summary": {"errors": 0, "warnings": 0, "infos": 0},
+                "spec_sections": [],
+                "code_refs": [],
+                "spec_mappings": [],
+                "edges": [{}],
+                "issues": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    results = tmp_path / "results.jsonl"
+    results.write_text("", encoding="utf-8")
+    result = run_cli(
+        "summarize-analysis",
+        "--deterministic-report",
+        str(report),
+        "--analysis-results",
+        str(results),
+    )
+    assert result.returncode == 2
+    assert "internal error" not in result.stderr
+    assert "edges[0]" in result.stderr
+
+
+# --- Round 10 P2: evidence line-locality covers spec text and tests ----------
+
+
+def test_evidence_into_spec_text_and_tests_is_line_local() -> None:
+    from backstitch.analysis_llm import analyze_packets
+
+    packet = _full_packet(
+        section_start_line=10,
+        section_text="## One [X-1]\n\nBody line.",
+        tests=["tests/test_x.py"],
+    )
+
+    def respond(path: str, line: int) -> str:
+        return json.dumps(
+            {
+                "packet_id": packet["packet_id"],
+                "classification": "ok",
+                "summary": "fine",
+                "evidence": [{"path": path, "line": line}],
+            }
+        )
+
+    # Spec citation outside the shown section text (lines 10..12): rejected.
+    rows, errors = analyze_packets(
+        [packet], lambda p: respond("docs/specs/01-x.md", 999999)
+    )
+    assert rows[0]["classification"] == "ambiguous"
+    # Spec citation inside the section text: accepted.
+    rows, errors = analyze_packets(
+        [packet], lambda p: respond("docs/specs/01-x.md", 11)
+    )
+    assert rows[0]["classification"] == "ok", errors
+    # Tests are named by path only; line evidence into them is fabricated.
+    rows, errors = analyze_packets(
+        [packet], lambda p: respond("tests/test_x.py", 999999)
+    )
+    assert rows[0]["classification"] == "ambiguous"
+    assert any("fabricated" in e for e in errors)
+
+
+# --- Round 10 P2: LLM_MODEL overrides analyze.model --------------------------
+
+
+def test_llm_model_env_overrides_configured_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backstitch.analysis_llm import resolve_model_name
+
+    # [CFG-5] assembly order: CLI > env > config > built-in default.
+    monkeypatch.setenv("LLM_MODEL", "from-env")
+    assert resolve_model_name(None, configured="from-config") == "from-env"
+    assert resolve_model_name("from-cli", configured="from-config") == "from-cli"
+    monkeypatch.delenv("LLM_MODEL")
+    assert resolve_model_name(None, configured="from-config") == "from-config"
+    assert resolve_model_name(None, configured=None) is None

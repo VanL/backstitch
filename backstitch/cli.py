@@ -407,6 +407,7 @@ _PACKET_FIELDS: tuple[tuple[str, type], ...] = (
     ("section_id", str),
     ("title", str),
     ("section_text", str),
+    ("section_start_line", int),
     ("owners", list),
     ("tests", list),
     ("issues", list),
@@ -419,7 +420,8 @@ def _packet_shape_error(row: dict[str, Any]) -> str | None:
     """Return an [SC-6] contract violation description, or None if valid."""
 
     for field_name, field_type in _PACKET_FIELDS:
-        if not isinstance(row.get(field_name), field_type):
+        value = row.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, field_type):
             return f"missing or invalid `{field_name}`"
     if not row["packet_id"] or not row["instructions"]:
         return "`packet_id` and `instructions` must be non-empty"
@@ -575,6 +577,20 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
             msg = (
                 f"{args.deterministic_report}: not a backstitch deterministic"
                 f" report (missing or invalid `{key}`)"
+            )
+            raise ValueError(msg)
+    for position, edge in enumerate(report_data["edges"]):
+        # The packet-ID universe is derived from edges; a malformed edge is
+        # malformed input with a named location, never an internal error.
+        if (
+            not isinstance(edge, dict)
+            or not isinstance(edge.get("spec_path"), str)
+            or not isinstance(edge.get("section_id"), str)
+        ):
+            msg = (
+                f"{args.deterministic_report}: not a backstitch deterministic"
+                f" report (invalid `edges[{position}]`: expected spec_path"
+                " and section_id strings)"
             )
             raise ValueError(msg)
     load = load_analysis_results(

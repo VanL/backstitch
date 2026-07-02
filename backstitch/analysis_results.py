@@ -51,11 +51,11 @@ def validate_analysis_row(
     """Validate one untrusted model-output row ([SC-7]).
 
     ``allowed_evidence``, when provided, keeps evidence packet-local: the
-    model may only cite paths that were in the packet it was shown, and --
-    where the packet carried line-bounded snippets for a path -- only lines
-    inside one of those ``(start, end)`` inclusive ranges. An empty range
-    tuple means the path was in the packet without line bounds (the spec
-    file, linked tests): any positive line is accepted.
+    model may only cite paths that were in the packet it was shown, and
+    only lines inside one of that path's ``(start, end)`` inclusive
+    ranges. An empty range tuple means the path was named in the packet
+    WITHOUT line-bounded content (linked tests): it cannot carry line
+    evidence at all -- any cited line there is fabricated.
     """
 
     if not isinstance(row, dict):
@@ -101,12 +101,16 @@ def validate_analysis_row(
             ranges = allowed_evidence.get(item["path"])
             if ranges is None:
                 return f"evidence path `{item['path']}` is not part of the packet"
-            if ranges and not any(
-                start <= item["line"] <= end for start, end in ranges
-            ):
+            if not ranges:
                 return (
                     f"evidence line {item['line']} in `{item['path']}` is"
-                    " outside the packet's snippets"
+                    " fabricated: the packet named this path without"
+                    " line-bounded content"
+                )
+            if not any(start <= item["line"] <= end for start, end in ranges):
+                return (
+                    f"evidence line {item['line']} in `{item['path']}` is"
+                    " outside the packet's shown content"
                 )
         evidence.append((item["path"], item["line"]))
     return AnalysisResult(

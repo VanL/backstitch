@@ -30,12 +30,17 @@ TRACEABILITY_IGNORE_RE = re.compile(
     re.IGNORECASE,
 )
 HTML_META_RE = re.compile(r"<!--\s*backstitch:\s*meta\s*-->", re.IGNORECASE)
-# A line that opens with the marker sigil but matches neither valid form.
-MALFORMED_MARKER_RE = re.compile(
-    r"^(?:_Traceability:|<!--\s*backstitch:)", re.IGNORECASE
-)
+# A line that opens with the underscore marker sigil, or contains a
+# backstitch HTML comment ANYWHERE (HTML markers may trail headings), but
+# matches neither valid form.
+MALFORMED_MARKER_RE = re.compile(r"^_Traceability:", re.IGNORECASE)
+MALFORMED_HTML_MARKER_RE = re.compile(r"<!--\s*backstitch:", re.IGNORECASE)
+# The codes group may be EMPTY so `<!-- backstitch: ignore -->` still
+# matches and is rejected as "ignore with no codes" rather than falling
+# through unrecognized (where a trailing heading marker would silently
+# delete the heading's section).
 HTML_IGNORE_RE = re.compile(
-    r"<!--\s*backstitch:\s*ignore\s+(.+?)\s*-->",
+    r"<!--\s*backstitch:\s*ignore\b[ \t]*(.*?)\s*-->",
     re.IGNORECASE,
 )
 # Anchored on purpose: a directive line IS the directive ([EXC-5] grammar
@@ -167,7 +172,7 @@ def parse_traceability_marker_line(
     # (`_Traceability: ignore_` with no codes, `_Traceability: bogus_`) is
     # a malformed suppression -- the same fake affordance as an unknown
     # code, with the same strictness and hatch.
-    if MALFORMED_MARKER_RE.match(stripped):
+    if MALFORMED_MARKER_RE.match(stripped) or MALFORMED_HTML_MARKER_RE.search(stripped):
         message = f"malformed traceability marker in {location}: {stripped!r}"
         if not allow_unknown:
             raise UnknownSuppressionCodeError(message)

@@ -51,15 +51,20 @@ def _packet_evidence_bounds(
 ) -> dict[str, tuple[tuple[int, int], ...]]:
     """What the model was shown, as path -> allowed line ranges ([SC-7]).
 
-    Owner snippets are line-bounded, so evidence in an owner file must
-    fall inside one of its snippets. The spec file and linked tests were
-    named without line bounds: empty ranges, any positive line.
+    Owner snippets and the spec section text are line-bounded, so evidence
+    must fall inside one of those ranges. Linked tests are named by PATH
+    only -- the model never saw their content, so a path with no ranges is
+    known to the packet but cannot carry line evidence.
     """
 
     bounds: dict[str, list[tuple[int, int]]] = {}
     spec_path = packet.get("spec_path")
     if isinstance(spec_path, str):
-        bounds.setdefault(spec_path, [])
+        ranges = bounds.setdefault(spec_path, [])
+        start = packet.get("section_start_line")
+        text = packet.get("section_text")
+        if isinstance(start, int) and isinstance(text, str):
+            ranges.append((start, start + max(len(text.splitlines()) - 1, 0)))
     for test in packet.get("tests", ()):
         if isinstance(test, str):
             bounds.setdefault(test, [])
@@ -176,7 +181,11 @@ def resolve_model_name(
     *,
     configured: str | None = None,
 ) -> str | None:
-    """[SC-5]/[CFG-5] model precedence: --model, config, LLM_MODEL, llm default.
+    """[CFG-5] model precedence: --model, LLM_MODEL, config, llm default.
+
+    CLI beats env beats config -- [CFG-5]'s assembly order puts environment
+    variables ABOVE the config file, so `LLM_MODEL` overrides
+    `analyze.model` whenever --model is omitted.
 
     Returns ``None`` to mean "let ``llm`` use its configured default" so the
     lazy-import boundary stays in ``default_adapter``.
@@ -186,9 +195,9 @@ def resolve_model_name(
 
     if explicit is not None and explicit.strip():
         return explicit.strip()
-    if configured is not None and configured.strip():
-        return configured.strip()
     env = os.environ.get("LLM_MODEL", "").strip()
     if env:
         return env
+    if configured is not None and configured.strip():
+        return configured.strip()
     return None

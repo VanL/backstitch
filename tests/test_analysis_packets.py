@@ -40,6 +40,8 @@ def test_packet_rows_have_stable_fields() -> None:
             "section_id",
             "title",
             "section_text",
+            # [SC-6]: the section's starting line anchors evidence checks.
+            "section_start_line",
             "owners",
             "tests",
             "issues",
