@@ -124,6 +124,40 @@ diffing against `--no-config`.
   config keys, noqa hygiene, marker override, fence length)
 - Acceptance: `tests/acceptance/` — the twelve [SC-10] probes, black-box
 - Self-corpus: `tests/test_backstitch_corpus_traceability.py`
+- Optional live LLM: `tests/live/test_live_llm.py` — opt-in, real provider (see
+  below)
+
+## Optional Live LLM Verification
+
+The hermetic suite fakes the model boundary; it proves prompt construction,
+parsing, and aggregation, but never that the real `llm` adapter and a real
+provider actually work. `tests/live/test_live_llm.py` closes that gap under an
+explicit opt-in gate (`BACKSTITCH_LIVE_LLM=1`; module-level skip otherwise), per
+[SC-7]'s live-test allowance.
+
+Boundary and rationale:
+
+- **Real path only.** It drives the CLI (`packets` → `analyze` → `check` →
+  `summarize-analysis`) as subprocesses through the production `default_adapter`.
+  Nothing inside the live test is mocked; the only allowed skip is the opt-in
+  gate being unset.
+- **Bounded dogfood corpus.** It generates packets from this repository, then
+  selects a small deterministic subset (smallest matching packets from
+  `docs/specs/02-backstitch-core.md` owned by a semantic-analysis module) so the
+  proof stays a smoke/contract check, not an exhaustive review.
+- **Structure, not wording.** Assertions are on the result contract: one row per
+  packet, every row passes `validate_analysis_row`, `load_analysis_results`
+  reports zero errors, and — the load-bearing check — no row carries an `error`
+  field. `analysis_llm._error_record` deliberately emits a schema-valid
+  `ambiguous` row for a contained failure, and both `analyze` (partial failure)
+  and `summarize-analysis` (bad rows rendered as advisory text) exit `0`, so exit
+  codes prove command path and artifact health, not model success.
+- **Advisory findings stay advisory.** Semantic classification never fails CI;
+  the live job is a post-merge canary on `main` plus a manual
+  `workflow_dispatch` run (`.github/workflows/ci.yml`), never a PR gate, and
+  forked PRs — which do not receive repository secrets — cannot reach it.
+
+Local usage and the cost/flake tradeoff are documented in `README.md`.
 
 ## Golden Report Ledger
 

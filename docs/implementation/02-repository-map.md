@@ -31,6 +31,8 @@ Quick pointers to the key guidance documents in this repository.
 | `backstitch/analysis_llm.py` | Lazy-`llm` adapter boundary ([SC-7], [SC-8]) |
 | `backstitch/cli.py` | All subcommands, exit-code contract ([SC-5], [CFG-7]) |
 | `tests/acceptance/` | The twelve [SC-10] acceptance probes |
+| `tests/live/` | Opt-in live LLM smoke/contract test ([SC-7], `BACKSTITCH_LIVE_LLM=1`) |
+| `.github/workflows/ci.yml` | Hermetic CI + post-merge/manual live-LLM job |
 
 ## Shared Agent Context
 
