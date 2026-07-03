@@ -30,7 +30,18 @@ import pytest
 
 from backstitch.analysis_results import load_analysis_results, validate_analysis_row
 
-pytestmark = pytest.mark.live_llm
+# Function-level skip (not a module-level `pytest.skip(allow_module_level=True)`)
+# so the test is COLLECTED and reported as skipped. A module-level skip makes
+# `pytest tests/live/test_live_llm.py` collect nothing and exit 5 (no tests
+# ran), which would fail the hermetic CI step that proves the gate skips.
+# Collection stays hermetic: `import llm` lives inside the test body, not here.
+pytestmark = [
+    pytest.mark.live_llm,
+    pytest.mark.skipif(
+        os.environ.get("BACKSTITCH_LIVE_LLM") != "1",
+        reason="live LLM tests are opt-in; set BACKSTITCH_LIVE_LLM=1 to run",
+    ),
+]
 
 # Canonical default model. MUST stay byte-identical to
 # DEFAULT_BACKSTITCH_LIVE_LLM_MODEL in .github/workflows/ci.yml -- treat the two
@@ -42,12 +53,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 LIVE_SPEC = "docs/specs/02-backstitch-core.md"
 DEFAULT_LIVE_PACKETS = 1
 MAX_LIVE_PACKETS = 5
-
-if os.environ.get("BACKSTITCH_LIVE_LLM") != "1":
-    pytest.skip(
-        "live LLM tests are opt-in; set BACKSTITCH_LIVE_LLM=1 to run",
-        allow_module_level=True,
-    )
 
 
 def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
