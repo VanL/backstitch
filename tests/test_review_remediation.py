@@ -1274,24 +1274,7 @@ def test_empty_paths_never_become_evidence_paths() -> None:
 
 
 def test_summarize_rejects_empty_edge_locators(tmp_path: Path) -> None:
-    report = {
-        "profile": "backstitch-style-v1",
-        "repo_root": ".",
-        "summary": {"errors": 0, "warnings": 0, "infos": 0},
-        "spec_sections": [],
-        "code_refs": [],
-        "spec_mappings": [],
-        "edges": [
-            {
-                "spec_path": "",
-                "section_id": "X-1",
-                "kind": "mapping",
-                "code_path": "p.py",
-                "code_symbol": None,
-            }
-        ],
-        "issues": [],
-    }
+    report = _report_with_edge(spec_path="", section_id="X-1")
     _write(tmp_path, "report.json", json.dumps(report))
     _write(
         tmp_path,
@@ -1350,23 +1333,33 @@ def test_whitespace_paths_never_become_evidence_paths() -> None:
     assert rows[0]["classification"] == "ambiguous"
 
 
-def _report_with_edge(spec_path: str, section_id: str) -> dict:
+def _report_with_edge(
+    spec_path: str, section_id: str, **edge_overrides: object
+) -> dict:
+    edge: dict = {
+        "kind": "mapping",
+        "spec_path": spec_path,
+        "section_id": section_id,
+        "code_path": "p.py",
+        "code_symbol": None,
+        "line": 1,
+    }
+    edge.update(edge_overrides)
     return {
         "profile": "backstitch-style-v1",
         "repo_root": ".",
-        "summary": {"errors": 0, "warnings": 0, "infos": 0},
+        "summary": {
+            "spec_sections": 1,
+            "code_refs": 1,
+            "spec_mappings": 1,
+            "errors": 0,
+            "warnings": 0,
+            "infos": 0,
+        },
         "spec_sections": [],
         "code_refs": [],
         "spec_mappings": [],
-        "edges": [
-            {
-                "spec_path": spec_path,
-                "section_id": section_id,
-                "kind": "mapping",
-                "code_path": "p.py",
-                "code_symbol": None,
-            }
-        ],
+        "edges": [edge],
         "issues": [],
     }
 
@@ -1558,9 +1551,30 @@ def test_summarize_rejects_invalid_edge_section_id(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "counts",
     [
-        {"errors": "0", "warnings": [], "infos": {}},
-        {"errors": -1, "warnings": 0, "infos": 0},
-        {"errors": True, "warnings": 0, "infos": 0},
+        {
+            "spec_sections": 1,
+            "code_refs": 1,
+            "spec_mappings": 1,
+            "errors": "0",
+            "warnings": [],
+            "infos": {},
+        },
+        {
+            "spec_sections": 1,
+            "code_refs": 1,
+            "spec_mappings": 1,
+            "errors": -1,
+            "warnings": 0,
+            "infos": 0,
+        },
+        {
+            "spec_sections": 1,
+            "code_refs": 1,
+            "spec_mappings": 1,
+            "errors": True,
+            "warnings": 0,
+            "infos": 0,
+        },
     ],
 )
 def test_summarize_rejects_non_count_summary_values(
@@ -1595,3 +1609,67 @@ def test_whitespace_only_semantic_summary_is_rejected() -> None:
     assert load.results == ()
     assert len(load.errors) == 1
     assert "summary" in load.errors[0]
+
+
+# --- Round 16: edges must be full trace records; six count keys --------------
+
+
+@pytest.mark.parametrize(
+    "edge_overrides",
+    [
+        {"line": None},
+        {"kind": "not-a-kind"},
+        {"code_path": "  "},
+        {"code_symbol": 42},
+        {"line": 0},
+    ],
+)
+def test_summarize_rejects_partial_edge_records(
+    tmp_path: Path, edge_overrides: dict
+) -> None:
+    report = _report_with_edge(
+        spec_path="docs/specs/01-x.md", section_id="X-1", **edge_overrides
+    )
+    # A missing key must fail the same way as a wrong value.
+    if edge_overrides.get("line") is None and "line" in edge_overrides:
+        del report["edges"][0]["line"]
+    _write(tmp_path, "report.json", json.dumps(report))
+    _write(
+        tmp_path,
+        "rows.jsonl",
+        json.dumps(
+            {
+                "packet_id": "docs/specs/01-x.md#X-1",
+                "classification": "ok",
+                "summary": "fine",
+                "confidence": 0.5,
+                "evidence": [],
+            }
+        )
+        + "\n",
+    )
+    result = run_cli(
+        "summarize-analysis",
+        "--deterministic-report",
+        str(tmp_path / "report.json"),
+        "--analysis-results",
+        str(tmp_path / "rows.jsonl"),
+    )
+    assert result.returncode == 2
+    assert "edges[0]" in result.stderr
+
+
+def test_summarize_requires_all_six_summary_counts(tmp_path: Path) -> None:
+    report = _report_with_edge(spec_path="docs/specs/01-x.md", section_id="X-1")
+    report["summary"] = {"errors": 0, "warnings": 0, "infos": 0}
+    _write(tmp_path, "report.json", json.dumps(report))
+    _write(tmp_path, "rows.jsonl", "")
+    result = run_cli(
+        "summarize-analysis",
+        "--deterministic-report",
+        str(tmp_path / "report.json"),
+        "--analysis-results",
+        str(tmp_path / "rows.jsonl"),
+    )
+    assert result.returncode == 2
+    assert "spec_sections" in result.stderr

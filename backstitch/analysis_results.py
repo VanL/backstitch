@@ -181,7 +181,17 @@ def render_analysis_summary(summary: Mapping[str, int], load: AnalysisLoad) -> s
     never a ``KeyError`` traceback (known fable defect fixed at port time).
     """
 
-    missing = [key for key in ("errors", "warnings", "infos") if key not in summary]
+    # The [SC-6] summary contract has six count keys, not just the three
+    # this renderer happens to print.
+    count_keys = (
+        "spec_sections",
+        "code_refs",
+        "spec_mappings",
+        "errors",
+        "warnings",
+        "infos",
+    )
+    missing = [key for key in count_keys if key not in summary]
     if missing:
         msg = (
             "deterministic report summary is missing required count"
@@ -190,7 +200,7 @@ def render_analysis_summary(summary: Mapping[str, int], load: AnalysisLoad) -> s
         raise ValueError(msg)
     bad = [
         key
-        for key in ("errors", "warnings", "infos")
+        for key in count_keys
         if isinstance(summary[key], bool)
         or not isinstance(summary[key], int)
         or summary[key] < 0

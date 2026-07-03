@@ -624,16 +624,26 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
     for position, edge in enumerate(report_data["edges"]):
         # The packet-ID universe is derived from edges; a malformed edge is
         # malformed input with a named location, never an internal error.
+        # The shape mirrors the full Edge model, not just the two fields
+        # the packet-ID derivation happens to read.
         if (
             not isinstance(edge, dict)
+            or edge.get("kind") not in ("mapping", "backlink")
             or not _is_path_locator(edge.get("spec_path"))
             or not isinstance(edge.get("section_id"), str)
             or not is_valid_section_id(edge["section_id"])
+            or not _is_path_locator(edge.get("code_path"))
+            or not (
+                edge.get("code_symbol") is None or isinstance(edge["code_symbol"], str)
+            )
+            or isinstance(edge.get("line"), bool)
+            or not isinstance(edge.get("line"), int)
+            or edge["line"] < 1
         ):
             msg = (
                 f"{args.deterministic_report}: not a backstitch deterministic"
-                f" report (invalid `edges[{position}]`: expected a non-empty"
-                " spec_path and a valid section_id)"
+                f" report (invalid `edges[{position}]`: expected a full trace"
+                " edge record)"
             )
             raise ValueError(msg)
     load = load_analysis_results(
