@@ -425,6 +425,35 @@ _PACKET_FIELDS: tuple[tuple[str, type], ...] = (
 )
 
 
+def _is_issue_record(issue: object) -> bool:
+    """[SC-11] issue record: known code, real severity, path locator,
+    1-based optional line, grammar-valid optional section_id, typed symbol.
+
+    One validator for every place an issue record can arrive as untrusted
+    input (packet JSONL, deterministic reports)."""
+
+    return (
+        isinstance(issue, dict)
+        and issue.get("code") in ISSUE_CODES
+        and issue.get("severity") in ("error", "warning", "info")
+        and isinstance(issue.get("message"), str)
+        and _is_path_locator(issue.get("path"))
+        and not isinstance(issue.get("line"), bool)
+        and (
+            issue.get("line") is None
+            or (isinstance(issue["line"], int) and issue["line"] >= 1)
+        )
+        and (
+            issue.get("section_id") is None
+            or (
+                isinstance(issue["section_id"], str)
+                and is_valid_section_id(issue["section_id"])
+            )
+        )
+        and isinstance(issue.get("symbol"), str | None)
+    )
+
+
 def _is_path_locator(value: object) -> bool:
     """A path locator is a non-blank string; blank means absent.
 
@@ -475,26 +504,8 @@ def _packet_shape_error(row: dict[str, Any]) -> str | None:
     if not all(_is_path_locator(t) for t in row["tests"]):
         return "invalid `tests` item; expected non-empty path strings"
     for issue in row["issues"]:
-        # [SC-11]: issue records carry a known code, a real severity, a
-        # path locator, and correctly typed optional metadata --
-        # string-shaped garbage is not an issue record.
-        if (
-            not isinstance(issue, dict)
-            or issue.get("code") not in ISSUE_CODES
-            or issue.get("severity") not in ("error", "warning", "info")
-            or not isinstance(issue.get("message"), str)
-            or not _is_path_locator(issue.get("path"))
-            or isinstance(issue.get("line"), bool)
-            or not isinstance(issue.get("line"), int | None)
-            or not (
-                issue.get("section_id") is None
-                or (
-                    isinstance(issue["section_id"], str)
-                    and is_valid_section_id(issue["section_id"])
-                )
-            )
-            or not isinstance(issue.get("symbol"), str | None)
-        ):
+        # [SC-11]: string-shaped garbage is not an issue record.
+        if not _is_issue_record(issue):
             return (
                 "invalid `issues` item; expected a deterministic issue"
                 " record (known code, severity, message, path, and typed"
@@ -674,26 +685,71 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
                 " in `spec_sections`)"
             )
             raise ValueError(msg)
+    # code_refs and spec_mappings are counted by the summary and named by
+    # the schema; garbage items mirror the full record shapes.
+    for position, ref in enumerate(report_data["code_refs"]):
+        if (
+            not isinstance(ref, dict)
+            or not _is_path_locator(ref.get("path"))
+            or not isinstance(ref.get("owner_symbol"), str)
+            or not ref["owner_symbol"].strip()
+            or isinstance(ref.get("line"), bool)
+            or not isinstance(ref.get("line"), int)
+            or ref["line"] < 1
+            or not isinstance(ref.get("raw"), str)
+            or not (ref.get("spec_path") is None or isinstance(ref["spec_path"], str))
+            or not isinstance(ref.get("section_ids"), list)
+            or not all(
+                isinstance(s, str) and is_valid_section_id(s)
+                for s in ref["section_ids"]
+            )
+            or not (ref.get("anchor") is None or isinstance(ref["anchor"], str))
+            or not isinstance(ref.get("ranges"), list)
+            or not all(
+                isinstance(r, list)
+                and len(r) == 2
+                and all(isinstance(x, str) for x in r)
+                for r in ref["ranges"]
+            )
+            or ref.get("ref_context") not in ("asserted", "docstring", "comment")
+        ):
+            msg = (
+                f"{args.deterministic_report}: not a backstitch deterministic"
+                f" report (invalid `code_refs[{position}]`: expected a full"
+                " code reference record)"
+            )
+            raise ValueError(msg)
+    for position, mapping in enumerate(report_data["spec_mappings"]):
+        if (
+            not isinstance(mapping, dict)
+            or not _is_path_locator(mapping.get("spec_path"))
+            or not isinstance(mapping.get("section_id"), str)
+            or not is_valid_section_id(mapping["section_id"])
+            or isinstance(mapping.get("line"), bool)
+            or not isinstance(mapping.get("line"), int)
+            or mapping["line"] < 1
+            or not isinstance(mapping.get("target"), str)
+            or not mapping["target"].strip()
+            or mapping.get("kind") not in ("path", "path_symbol", "symbol")
+            or not (
+                mapping.get("target_path") is None
+                or isinstance(mapping["target_path"], str)
+            )
+            or not (
+                mapping.get("target_symbol") is None
+                or isinstance(mapping["target_symbol"], str)
+            )
+        ):
+            msg = (
+                f"{args.deterministic_report}: not a backstitch deterministic"
+                f" report (invalid `spec_mappings[{position}]`: expected a"
+                " full mapping record)"
+            )
+            raise ValueError(msg)
     severity_counts = {"error": 0, "warning": 0, "info": 0}
     for position, issue in enumerate(report_data["issues"]):
         # Same record rules as packet issues ([SC-11]).
-        if (
-            not isinstance(issue, dict)
-            or issue.get("code") not in ISSUE_CODES
-            or issue.get("severity") not in ("error", "warning", "info")
-            or not isinstance(issue.get("message"), str)
-            or not _is_path_locator(issue.get("path"))
-            or isinstance(issue.get("line"), bool)
-            or not isinstance(issue.get("line"), int | None)
-            or not (
-                issue.get("section_id") is None
-                or (
-                    isinstance(issue["section_id"], str)
-                    and is_valid_section_id(issue["section_id"])
-                )
-            )
-            or not isinstance(issue.get("symbol"), str | None)
-        ):
+        if not _is_issue_record(issue):
             msg = (
                 f"{args.deterministic_report}: not a backstitch deterministic"
                 f" report (invalid `issues[{position}]`: expected a"

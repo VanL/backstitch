@@ -1761,3 +1761,111 @@ def test_summarize_rejects_malformed_issue_records(tmp_path: Path) -> None:
     )
     assert result.returncode == 2
     assert "issues[0]" in result.stderr
+
+
+# --- Round 18: bool is not an int; lines are 1-based; full record shapes -----
+
+
+def test_bool_concurrency_in_config_is_rejected(tmp_path: Path) -> None:
+    from backstitch.settings import ConfigLoadError, load_settings
+
+    _write(tmp_path, ".backstitch.toml", "[analyze]\nconcurrency = true\n")
+    with pytest.raises(ConfigLoadError, match="concurrency"):
+        load_settings(tmp_path)
+
+
+def test_zero_line_issue_in_packet_is_invocation_error(tmp_path: Path) -> None:
+    packet = _full_packet(
+        issues=[
+            {
+                "code": "SPEC_SECTION_UNMAPPED",
+                "severity": "info",
+                "message": "m",
+                "path": "docs/specs/01-x.md",
+                "line": 0,
+                "section_id": "X-1",
+                "symbol": None,
+            }
+        ]
+    )
+    result = _run_analyze(tmp_path, json.dumps(packet))
+    assert result.returncode == 2
+    assert "issues" in result.stderr
+
+
+def test_zero_line_issue_in_report_is_rejected(tmp_path: Path) -> None:
+    report = _report_with_edge(spec_path="docs/specs/01-x.md", section_id="X-1")
+    report["issues"] = [
+        {
+            "code": "SPEC_SECTION_UNMAPPED",
+            "severity": "info",
+            "path": "docs/specs/01-x.md",
+            "line": 0,
+            "message": "m",
+            "section_id": "X-1",
+            "symbol": None,
+        }
+    ]
+    report["summary"]["infos"] = 1
+    _write(tmp_path, "report.json", json.dumps(report))
+    _write(tmp_path, "rows.jsonl", "")
+    result = run_cli(
+        "summarize-analysis",
+        "--deterministic-report",
+        str(tmp_path / "report.json"),
+        "--analysis-results",
+        str(tmp_path / "rows.jsonl"),
+    )
+    assert result.returncode == 2
+    assert "issues[0]" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "fragment"),
+    [
+        ("code_refs", ["not a code ref"], "code_refs[0]"),
+        ("spec_mappings", ["not a mapping"], "spec_mappings[0]"),
+    ],
+)
+def test_summarize_rejects_garbage_refs_and_mappings(
+    tmp_path: Path, key: str, value: list, fragment: str
+) -> None:
+    report = _report_with_edge(spec_path="docs/specs/01-x.md", section_id="X-1")
+    report[key] = value
+    report["summary"][key] = 1
+    _write(tmp_path, "report.json", json.dumps(report))
+    _write(tmp_path, "rows.jsonl", "")
+    result = run_cli(
+        "summarize-analysis",
+        "--deterministic-report",
+        str(tmp_path / "report.json"),
+        "--analysis-results",
+        str(tmp_path / "rows.jsonl"),
+    )
+    assert result.returncode == 2
+    assert fragment in result.stderr
+
+
+def test_real_report_still_round_trips_through_summarize(tmp_path: Path) -> None:
+    # Negative control for the record validators: everything `check`
+    # actually emits must pass them.
+    result = run_cli(
+        "check",
+        "--repo-root",
+        str(Path(__file__).parent.parent),
+        "--format",
+        "json",
+        "--output",
+        str(tmp_path / "report.json"),
+    )
+    assert result.returncode == 0, result.stderr
+    _write(tmp_path, "rows.jsonl", "")
+    result = run_cli(
+        "summarize-analysis",
+        "--deterministic-report",
+        str(tmp_path / "report.json"),
+        "--analysis-results",
+        str(tmp_path / "rows.jsonl"),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "backstitch analysis summary" in result.stdout

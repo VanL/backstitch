@@ -450,7 +450,13 @@ def _parse_settings(raw: dict[str, Any], *, config_path: Path) -> BackstitchSett
 
     analyze_concurrency = analyze_table.get("concurrency")
     if analyze_concurrency is not None:
-        if not isinstance(analyze_concurrency, int) or analyze_concurrency < 1:
+        # bool is an int subclass: `concurrency = true` is a type error
+        # under strict config, not concurrency 1.
+        if (
+            isinstance(analyze_concurrency, bool)
+            or not isinstance(analyze_concurrency, int)
+            or analyze_concurrency < 1
+        ):
             msg = "analyze.concurrency must be a positive integer"
             raise ConfigLoadError(msg)
 
