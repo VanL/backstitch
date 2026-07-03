@@ -1550,3 +1550,48 @@ def test_summarize_rejects_invalid_edge_section_id(tmp_path: Path) -> None:
     )
     assert result.returncode == 2
     assert "edges[0]" in result.stderr
+
+
+# --- Round 15: summary counts are counts; blank summaries are absent ----------
+
+
+@pytest.mark.parametrize(
+    "counts",
+    [
+        {"errors": "0", "warnings": [], "infos": {}},
+        {"errors": -1, "warnings": 0, "infos": 0},
+        {"errors": True, "warnings": 0, "infos": 0},
+    ],
+)
+def test_summarize_rejects_non_count_summary_values(
+    tmp_path: Path, counts: dict
+) -> None:
+    report = _report_with_edge(spec_path="docs/specs/01-x.md", section_id="X-1")
+    report["summary"] = counts
+    _write(tmp_path, "report.json", json.dumps(report))
+    _write(tmp_path, "rows.jsonl", "")
+    result = run_cli(
+        "summarize-analysis",
+        "--deterministic-report",
+        str(tmp_path / "report.json"),
+        "--analysis-results",
+        str(tmp_path / "rows.jsonl"),
+    )
+    assert result.returncode == 2
+    assert "non-count" in result.stderr
+
+
+def test_whitespace_only_semantic_summary_is_rejected() -> None:
+    from backstitch.analysis_results import load_analysis_results
+
+    row = {
+        "packet_id": "a#A-1",
+        "classification": "ok",
+        "summary": "   ",
+        "confidence": 0.5,
+        "evidence": [],
+    }
+    load = load_analysis_results(json.dumps(row), None)
+    assert load.results == ()
+    assert len(load.errors) == 1
+    assert "summary" in load.errors[0]

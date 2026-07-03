@@ -72,7 +72,8 @@ def validate_analysis_row(
             f" {', '.join(CLASSIFICATIONS)}"
         )
     summary = row.get("summary")
-    if not isinstance(summary, str) or not summary:
+    if not isinstance(summary, str) or not summary.strip():
+        # Blank means absent, same as locators and rationales.
         return "missing or invalid `summary`"
     confidence = row.get("confidence")
     if confidence is not None and (
@@ -186,6 +187,18 @@ def render_analysis_summary(summary: Mapping[str, int], load: AnalysisLoad) -> s
             "deterministic report summary is missing required count"
             f" keys: {', '.join(missing)}"
         )
+        raise ValueError(msg)
+    bad = [
+        key
+        for key in ("errors", "warnings", "infos")
+        if isinstance(summary[key], bool)
+        or not isinstance(summary[key], int)
+        or summary[key] < 0
+    ]
+    if bad:
+        # Counts are non-negative integers; anything else would render a
+        # nonsense line like "[] warnings" instead of failing the input.
+        msg = f"deterministic report summary has non-count values for: {', '.join(bad)}"
         raise ValueError(msg)
 
     lines = [
