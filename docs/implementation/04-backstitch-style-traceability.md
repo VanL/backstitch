@@ -132,8 +132,10 @@ diffing against `--no-config`.
 The hermetic suite fakes the model boundary; it proves prompt construction,
 parsing, and aggregation, but never that the real `llm` adapter and a real
 provider actually work. `tests/live/test_live_llm.py` closes that gap under an
-explicit opt-in gate (`BACKSTITCH_LIVE_LLM=1`; module-level skip otherwise), per
-[SC-7]'s live-test allowance.
+explicit opt-in gate (`BACKSTITCH_LIVE_LLM=1`; a function-level
+`pytest.mark.skipif` otherwise, so the test is collected and reported skipped
+rather than the file exiting 5 on direct invocation), per [SC-7]'s live-test
+allowance.
 
 Boundary and rationale:
 

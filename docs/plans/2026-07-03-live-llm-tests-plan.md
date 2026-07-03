@@ -300,8 +300,14 @@ semantics, or provider-specific runtime abstractions in this plan.
    - Files to touch: `pyproject.toml`, `tests/live/test_live_llm.py`.
    - Add marker: `live_llm: tests that call a real LLM provider when explicitly enabled`.
    - Test behavior:
-     - `pytestmark = pytest.mark.live_llm`.
-     - If `BACKSTITCH_LIVE_LLM != "1"`, skip at module or test setup time.
+     - `pytestmark = [pytest.mark.live_llm, pytest.mark.skipif(...)]`.
+     - If `BACKSTITCH_LIVE_LLM != "1"`, skip via a function-level
+       `pytest.mark.skipif` on `pytestmark`, NOT a module-level
+       `pytest.skip(..., allow_module_level=True)`. A module-level skip makes
+       `pytest tests/live/test_live_llm.py` collect zero tests and exit 5 (no
+       tests ran), which fails the hermetic CI skip-proof step. The skipif keeps
+       the test collected and reported as skipped; keep `import llm` inside the
+       test body so collection stays hermetic.
      - If opt-in is set, resolve `live_model = os.environ.get("LLM_MODEL") or
        DEFAULT_BACKSTITCH_LIVE_LLM_MODEL`, where
        `DEFAULT_BACKSTITCH_LIVE_LLM_MODEL` is `gpt-5.4-mini` unless the
