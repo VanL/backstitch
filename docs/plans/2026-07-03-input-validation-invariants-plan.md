@@ -41,7 +41,7 @@ log row and its own explicit fix, not a silent adjustment.
   `88b8ba0`) — docs/specs/02-backstitch-core.md,
   docs/specs/03-backstitch-configuration.md,
   docs/specs/04-backstitch-traceability-exclusions.md
-- Promotion baseline identifier: _recorded after the promotion slice lands_
+- Promotion baseline identifier: `06f8ea3` (the promotion-slice commit)
 
 ## Context and Key Files
 
