@@ -36,6 +36,12 @@ Load-bearing boundaries:
 - **Severity gates on the instance.** [SC-11] has context-dependent codes;
   non-suppressibility checks `issue.severity == "error"`, never bare code
   membership, so a warning-context finding stays suppressible.
+- **Validation is total, bounded by self-acceptance.** Input validators
+  mirror the *producer's* full record contract ([SC-13]), never the
+  consuming code path's projection — that asymmetry is how nineteen review
+  rounds found the same rule broken one field at a time. The counterweight
+  is [SC-13.5]: everything the tool emits must pass its own validation
+  (acceptance probe 13), so tightening can never orphan real output.
 - **Evidence locality is enforced where the packets are.** `analyze` holds
   the packets, so it is the boundary that rejects model evidence outside
   the packet's shown paths and line ranges ([SC-7]).

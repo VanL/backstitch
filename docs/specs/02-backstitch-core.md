@@ -384,6 +384,12 @@ hallucinated ID cannot corrupt aggregation. Malformed model output (including
 markdown-fenced JSON) is handled per packet: one bad response yields one
 `ambiguous`/error record, not an aborted run.
 
+Evidence in a model result is packet-local in both dimensions: the path
+must have been shown in the packet, and a path carries **line** evidence
+only if line-bounded content was shown for it. Linked tests and owners
+with empty snippets name a path without shown lines; citing any line
+against them is fabricated evidence and invalidates the row.
+
 `analyze` may process packets concurrently, but output must remain
 deterministic: results are emitted in packet order regardless of worker
 completion order.
@@ -515,6 +521,13 @@ Required proof surfaces:
   12. a mapping token with multiple suffix/basename candidates fires
       `TARGET_PATH_AMBIGUOUS` with no edge, and the same token with exactly
       one candidate resolves with `MAPPING_PATH_INEXACT` ([SC-4] ladder)
+  13. self-acceptance round-trip: a `check --format json` report of this
+      repository passes `summarize-analysis` validation unchanged (paired
+      with an empty analysis-results file); packets generated from this
+      repository pass `analyze`'s packet loading; and the per-packet error
+      records `analyze` emits for malformed model output pass
+      `validate_analysis_row` — every machine-readable artifact the tool
+      writes survives the tool's own reading
 - every issue code in the [SC-11] table has at least one test that proves it
   fires; a declared code with no firing test is an untested contract and a
   verification failure
@@ -632,8 +645,75 @@ and the config override each beat sibling discovery.
 _Implementation mapping_:
 - `backstitch/target_roots.py`
 
+## 13. Input Validation Invariants [SC-13]
+
+Every record backstitch accepts across a trust boundary — packet JSONL
+read by `analyze`, analysis-result JSONL and deterministic reports read by
+`summarize-analysis`, model output, configuration files — is validated
+against the rules below. These are stated as rules, not examples: a
+validator that checks only the fields its own code path consumes does not
+satisfy this section.
+
+- **[SC-13.1] Validation is total over required shape.** An input record
+  is validated against the full record contract of its producer — every
+  required field present, every type exact, every enumerated vocabulary
+  closed (issue codes, severities, classifications, edge kinds, section
+  kinds, mapping kinds, reference contexts) — not against the projection
+  the consumer happens to read. Unknown extra keys are tolerated: the
+  contract closes vocabularies and types, not the key set. (Passthrough
+  paths preserve extras; validating loaders that build typed records
+  need not.) For configuration, key and value-type strictness is
+  [CFG-8]'s rule; suppression-code vocabularies are validated in the CLI
+  and exclusions layer ([EXC-8]).
+- **[SC-13.2] Blank means absent.** An empty or whitespace-only string is
+  never a valid identifier — packet ID, path locator, section ID, symbol,
+  anchor — nor a valid summary or title. Where such a field is required,
+  blank is malformed input; where it is optional, the only way to omit it
+  is `null`, never `""` or `"   "`. A `rationale` discharges the
+  confidence-or-rationale requirement ([SC-7]) only when non-blank;
+  free-text fields (messages, raw reference text, snippets, section text)
+  are type-checked only.
+- **[SC-13.3] Numbers are exact.** `bool` is never accepted where an
+  integer is required. Line numbers are 1-based (`line >= 1`, or `null`
+  where the contract allows no line). Counts are non-negative integers.
+  Confidence is a number in `[0, 1]`.
+- **[SC-13.4] Composite documents are self-consistent.** A packet's
+  `packet_id` equals `spec_path#section_id`. A report's summary counts
+  equal what its own contents tally (issue severities; section, ref, and
+  mapping list lengths). A report's edges reference only sections the
+  report itself contains. Inconsistency is malformed input, not a value
+  judgment left to the consumer.
+- **[SC-13.5] Self-acceptance.** Every machine-readable artifact
+  backstitch emits — deterministic JSON reports, packet JSONL,
+  analysis-result JSONL — passes backstitch's own validation of that
+  artifact type. This bounds [SC-13.1]–[SC-13.4] from both sides:
+  validators must reject forgeries and must accept everything the tool
+  actually produces (probe 13, [SC-10]). Human-facing text output has no
+  validating consumer and is out of scope.
+- **[SC-13.6] Malformed directives are diagnostics.** A suppression or
+  marker directive that does not parse ([EXC-4], [EXC-5]) is an error or
+  warning naming the directive — never a silent no-op, and never silent
+  deletion of the section or content it is attached to.
+- **[SC-13.7] Rejection happens at the input boundary.** Malformed input
+  is rejected before downstream side effects: before model selection and
+  before any model call. Output-write failures are discovered when the
+  write happens and are exit `2` ([SC-5]); they are not required to be
+  pre-checked. Per-packet containment of model failures follows [SC-7].
+
+Severity of a validation failure is [SC-5] exit `2` for invocation inputs
+(packet files, report files, configuration) and a per-row input problem
+for analysis-result rows, consistent with [SC-7].
+
+_Implementation mapping_:
+- `backstitch/cli.py`
+- `backstitch/analysis_results.py`
+- `backstitch/analysis_llm.py`
+- `backstitch/settings.py`
+- `backstitch/exclusions.py`
+
 ## Related Plans
 
+- `docs/plans/2026-07-03-input-validation-invariants-plan.md` (implementing)
 - `docs/plans/2026-07-02-backstitch-four-way-reconciliation-plan.md` (implementing)
 - `docs/plans/2026-06-18-backstitch-style-spec-code-traceability-tool-plan.md` (superseded)
 - `docs/plans/2026-07-01-backstitch-toml-configuration-plan.md` (archival)

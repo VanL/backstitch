@@ -5,6 +5,27 @@ Spec: docs/specs/03-backstitch-configuration.md [CFG-5], [CFG-9]
 Spec: docs/specs/04-backstitch-traceability-exclusions.md [EXC-4], [EXC-5]
 
 Each test encodes one reviewer-reproduced defect so it cannot return.
+
+[SC-13] invariant-to-test map (the firing tests for each rule):
+- SC-13.1 validation is total: round 16 (full edge records), round 18
+  (code_refs/spec_mappings record shapes), round 19 (full section records)
+- SC-13.2 blank means absent: rounds 12/13 (locators), round 15 (blank
+  summary), round 19 (optional paths), promotion tests (blank optional
+  names, whitespace packet_id)
+- SC-13.3 numbers are exact: round 11 (1-based start lines), round 15
+  (counts), round 18 (bool concurrency, issue lines)
+- SC-13.4 composite self-consistency: round 12 (packet_id identity),
+  round 17 (edges reference real sections, honest counts)
+- SC-13.5 self-acceptance: round 14 (contract-shaped error records),
+  round 18 (real-report round-trip), acceptance probe 13
+- SC-13.6 malformed directives are diagnostics:
+  test_bare_traceability_ignore_marker_is_strict_error,
+  test_empty_html_ignore_on_heading_is_strict_error,
+  test_one_space_empty_html_ignore_is_strict_error,
+  test_section_marker_overrides_file_level_ignore,
+  test_unknown_noqa_code_warns_under_allow_unknown
+- SC-13.7 boundary rejection: rounds 5/11/12 (malformed packets exit 2
+  before model selection)
 """
 
 from __future__ import annotations
@@ -1952,3 +1973,116 @@ def test_blank_optional_paths_are_rejected(
     )
     assert result.returncode == 2
     assert f"{key}[0]" in result.stderr
+
+
+# --- [SC-13] promotion: enumerated blank-string tightenings -------------------
+
+
+@pytest.mark.parametrize(
+    ("overrides", "fragment"),
+    [
+        ({"title": "   "}, "title"),
+        (
+            {
+                "owners": [
+                    {"path": "p.py", "symbol": "   ", "start_line": 1, "snippet": "x"}
+                ]
+            },
+            "owners",
+        ),
+        (
+            {
+                "issues": [
+                    {
+                        "code": "SPEC_SECTION_UNMAPPED",
+                        "severity": "info",
+                        "message": "m",
+                        "path": "docs/specs/01-x.md",
+                        "line": None,
+                        "section_id": None,
+                        "symbol": "   ",
+                    }
+                ]
+            },
+            "issues",
+        ),
+    ],
+)
+def test_blank_optional_names_in_packets_are_rejected(
+    tmp_path: Path, overrides: dict, fragment: str
+) -> None:
+    # [SC-13] blank-means-absent: present means a real name; blank is
+    # an omission.
+    result = _run_analyze(tmp_path, json.dumps(_full_packet(**overrides)))
+    assert result.returncode == 2
+    assert fragment in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("mutate_key", "record_key", "value"),
+    [
+        ("edges", "code_symbol", "   "),
+        ("spec_mappings", "target_symbol", "   "),
+        ("code_refs", "anchor", "   "),
+    ],
+)
+def test_blank_optional_names_in_reports_are_rejected(
+    tmp_path: Path, mutate_key: str, record_key: str, value: str
+) -> None:
+    report = _report_with_edge(spec_path="docs/specs/01-x.md", section_id="X-1")
+    if mutate_key == "edges":
+        report["edges"][0][record_key] = value
+    elif mutate_key == "spec_mappings":
+        report["spec_mappings"] = [
+            {
+                "spec_path": "docs/specs/01-x.md",
+                "section_id": "X-1",
+                "line": 5,
+                "target": "t",
+                "kind": "path",
+                "target_path": None,
+                record_key: value,
+            }
+        ]
+        report["summary"]["spec_mappings"] = 1
+    else:
+        report["code_refs"] = [
+            {
+                "path": "pkg/m.py",
+                "owner_symbol": "module",
+                "line": 1,
+                "raw": "r",
+                "spec_path": None,
+                "section_ids": [],
+                "anchor": value,
+                "ranges": [],
+                "ref_context": "comment",
+            }
+        ]
+        report["summary"]["code_refs"] = 1
+    _write(tmp_path, "report.json", json.dumps(report))
+    _write(tmp_path, "rows.jsonl", "")
+    result = run_cli(
+        "summarize-analysis",
+        "--deterministic-report",
+        str(tmp_path / "report.json"),
+        "--analysis-results",
+        str(tmp_path / "rows.jsonl"),
+    )
+    assert result.returncode == 2
+    assert f"{mutate_key}[0]" in result.stderr
+
+
+def test_whitespace_packet_id_in_analysis_row_is_rejected() -> None:
+    from backstitch.analysis_results import load_analysis_results
+
+    row = {
+        "packet_id": "   ",
+        "classification": "ok",
+        "summary": "fine",
+        "confidence": 0.5,
+        "evidence": [],
+    }
+    load = load_analysis_results(json.dumps(row), None)
+    assert load.results == ()
+    assert "packet_id" in load.errors[0]

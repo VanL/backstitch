@@ -1,6 +1,6 @@
 """Validation and aggregation of semantic analysis results.
 
-Spec: docs/specs/02-backstitch-core.md [SC-6], [SC-7]
+Spec: docs/specs/02-backstitch-core.md [SC-6], [SC-7], [SC-13]
 
 Invalid analysis rows are analysis-summary errors, never repository trace
 errors, and semantic findings never change deterministic issue severity.
@@ -61,7 +61,7 @@ def validate_analysis_row(
     if not isinstance(row, dict):
         return "row is not a JSON object"
     packet_id = row.get("packet_id")
-    if not isinstance(packet_id, str) or not packet_id:
+    if not isinstance(packet_id, str) or not packet_id.strip():
         return "missing or invalid `packet_id`"
     if known_packet_ids is not None and packet_id not in known_packet_ids:
         return f"unknown packet ID `{packet_id}`"

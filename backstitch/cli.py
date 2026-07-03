@@ -1,6 +1,6 @@
 """Command-line entry point for backstitch.
 
-Spec: docs/specs/02-backstitch-core.md [SC-1], [SC-5]
+Spec: docs/specs/02-backstitch-core.md [SC-1], [SC-5], [SC-13]
 
 Exit-code contract ([SC-5]): exit 1 is a statement about the target
 repository (deterministic findings exist); exit 2 is a statement about the
@@ -450,8 +450,15 @@ def _is_issue_record(issue: object) -> bool:
                 and is_valid_section_id(issue["section_id"])
             )
         )
-        and isinstance(issue.get("symbol"), str | None)
+        and _is_optional_name(issue.get("symbol"))
     )
+
+
+def _is_optional_name(value: object) -> bool:
+    """[SC-13] blank-means-absent: an optional symbol/anchor is null or non-blank -- present
+    means a real name; blank is neither a name nor an omission."""
+
+    return value is None or (isinstance(value, str) and bool(value.strip()))
 
 
 def _is_path_locator(value: object) -> bool:
@@ -478,6 +485,10 @@ def _packet_shape_error(row: dict[str, Any]) -> str | None:
         # Empty or whitespace-only locators would leak into evidence
         # paths and packet IDs -- blank means absent.
         return "`spec_path` and `section_id` must be non-empty"
+    if not row["title"].strip():
+        # [SC-13] blank-means-absent: sections cannot be minted titleless, so a blank
+        # packet title is forged or corrupted input.
+        return "`title` must be non-empty"
     if not is_valid_section_id(row["section_id"]):
         return "invalid `section_id`; expected a spec section ID"
     if row["packet_id"] != f"{row['spec_path']}#{row['section_id']}":
@@ -491,7 +502,7 @@ def _packet_shape_error(row: dict[str, Any]) -> str | None:
         if (
             not isinstance(owner, dict)
             or not _is_path_locator(owner.get("path"))
-            or not (owner.get("symbol") is None or isinstance(owner["symbol"], str))
+            or not _is_optional_name(owner.get("symbol"))
             or isinstance(owner.get("start_line"), bool)
             or not isinstance(owner.get("start_line"), int)
             or owner["start_line"] < 1
@@ -644,9 +655,7 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
             or not isinstance(edge.get("section_id"), str)
             or not is_valid_section_id(edge["section_id"])
             or not _is_path_locator(edge.get("code_path"))
-            or not (
-                edge.get("code_symbol") is None or isinstance(edge["code_symbol"], str)
-            )
+            or not _is_optional_name(edge.get("code_symbol"))
             or isinstance(edge.get("line"), bool)
             or not isinstance(edge.get("line"), int)
             or edge["line"] < 1
@@ -718,7 +727,7 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
                 isinstance(s, str) and is_valid_section_id(s)
                 for s in ref["section_ids"]
             )
-            or not (ref.get("anchor") is None or isinstance(ref["anchor"], str))
+            or not _is_optional_name(ref.get("anchor"))
             or not isinstance(ref.get("ranges"), list)
             or not all(
                 isinstance(r, list)
@@ -750,10 +759,7 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
                 mapping.get("target_path") is None
                 or _is_path_locator(mapping["target_path"])
             )
-            or not (
-                mapping.get("target_symbol") is None
-                or isinstance(mapping["target_symbol"], str)
-            )
+            or not _is_optional_name(mapping.get("target_symbol"))
         ):
             msg = (
                 f"{args.deterministic_report}: not a backstitch deterministic"

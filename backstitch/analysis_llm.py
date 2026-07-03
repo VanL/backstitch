@@ -1,6 +1,6 @@
 """Semantic analysis over packets through the ``llm`` Python API.
 
-Spec: docs/specs/02-backstitch-core.md [SC-7]
+Spec: docs/specs/02-backstitch-core.md [SC-7], [SC-13]
 
 The adapter boundary exists so tests prove prompt construction, iteration,
 parsing, and malformed-output handling with fakes; only the default adapter

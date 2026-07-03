@@ -3,6 +3,7 @@
 Spec: docs/specs/03-backstitch-configuration.md [CFG-1], [CFG-2], [CFG-3], [CFG-4],
 [CFG-5], [CFG-6], [CFG-8]
 Spec: docs/specs/04-backstitch-traceability-exclusions.md [EXC-3], [EXC-6]
+Spec: docs/specs/02-backstitch-core.md [SC-13]
 """
 
 from __future__ import annotations

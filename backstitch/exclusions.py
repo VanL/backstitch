@@ -2,6 +2,7 @@
 
 Spec: docs/specs/04-backstitch-traceability-exclusions.md [EXC-1], [EXC-2],
 [EXC-3], [EXC-4], [EXC-6], [EXC-8]
+Spec: docs/specs/02-backstitch-core.md [SC-13]
 
 Suppression is auditable by contract: a suppressed finding moves to the
 report's ``suppressed_issues`` with a reason, it never silently disappears
