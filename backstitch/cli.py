@@ -663,16 +663,29 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
     # report, not a packet `backstitch packets` could have produced.
     sections: set[tuple[str, str]] = set()
     for position, section in enumerate(report_data["spec_sections"]):
+        # Full SpecSection record shape, same standard as edges and issues.
+        # A real heading cannot mint a section with a blank title (the
+        # heading grammar requires title text), so non-blank is safe.
         if (
             not isinstance(section, dict)
             or not _is_path_locator(section.get("path"))
             or not isinstance(section.get("section_id"), str)
             or not is_valid_section_id(section["section_id"])
+            or not isinstance(section.get("title"), str)
+            or not section["title"].strip()
+            or isinstance(section.get("line"), bool)
+            or not isinstance(section.get("line"), int)
+            or section["line"] < 1
+            or not (
+                section.get("anchor") is None
+                or (isinstance(section["anchor"], str) and section["anchor"].strip())
+            )
+            or section.get("kind") not in ("heading", "invariant", "bullet")
         ):
             msg = (
                 f"{args.deterministic_report}: not a backstitch deterministic"
                 f" report (invalid `spec_sections[{position}]`: expected a"
-                " section record with path and section_id)"
+                " full section record)"
             )
             raise ValueError(msg)
         sections.add((section["path"], section["section_id"]))
@@ -697,7 +710,9 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
             or not isinstance(ref.get("line"), int)
             or ref["line"] < 1
             or not isinstance(ref.get("raw"), str)
-            or not (ref.get("spec_path") is None or isinstance(ref["spec_path"], str))
+            # Optional paths follow the same blank-means-absent rule as
+            # required ones: present means a real locator.
+            or not (ref.get("spec_path") is None or _is_path_locator(ref["spec_path"]))
             or not isinstance(ref.get("section_ids"), list)
             or not all(
                 isinstance(s, str) and is_valid_section_id(s)
@@ -733,7 +748,7 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
             or mapping.get("kind") not in ("path", "path_symbol", "symbol")
             or not (
                 mapping.get("target_path") is None
-                or isinstance(mapping["target_path"], str)
+                or _is_path_locator(mapping["target_path"])
             )
             or not (
                 mapping.get("target_symbol") is None

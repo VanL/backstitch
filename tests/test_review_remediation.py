@@ -1869,3 +1869,86 @@ def test_real_report_still_round_trips_through_summarize(tmp_path: Path) -> None
     )
     assert result.returncode == 0, result.stderr
     assert "backstitch analysis summary" in result.stdout
+
+
+# --- Round 19: full section records; optional paths are locators too ---------
+
+
+@pytest.mark.parametrize(
+    "section_overrides",
+    [
+        {"title": 42},
+        {"title": "   "},
+        {"line": 0},
+        {"kind": "not-a-kind"},
+        {"anchor": "   "},
+    ],
+)
+def test_summarize_rejects_partial_section_records(
+    tmp_path: Path, section_overrides: dict
+) -> None:
+    report = _report_with_edge(spec_path="docs/specs/01-x.md", section_id="X-1")
+    report["spec_sections"][0].update(section_overrides)
+    _write(tmp_path, "report.json", json.dumps(report))
+    _write(tmp_path, "rows.jsonl", "")
+    result = run_cli(
+        "summarize-analysis",
+        "--deterministic-report",
+        str(tmp_path / "report.json"),
+        "--analysis-results",
+        str(tmp_path / "rows.jsonl"),
+    )
+    assert result.returncode == 2
+    assert "spec_sections[0]" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("key", "record"),
+    [
+        (
+            "code_refs",
+            {
+                "path": "pkg/m.py",
+                "owner_symbol": "module",
+                "line": 1,
+                "raw": "r",
+                "spec_path": "   ",
+                "section_ids": ["X-1"],
+                "anchor": None,
+                "ranges": [],
+                "ref_context": "comment",
+            },
+        ),
+        (
+            "spec_mappings",
+            {
+                "spec_path": "docs/specs/01-x.md",
+                "section_id": "X-1",
+                "line": 5,
+                "target": "t",
+                "kind": "path",
+                "target_path": "   ",
+                "target_symbol": None,
+            },
+        ),
+    ],
+)
+def test_blank_optional_paths_are_rejected(
+    tmp_path: Path, key: str, record: dict
+) -> None:
+    # Optional paths follow blank-means-absent: "   " is neither a real
+    # locator nor an explicit None.
+    report = _report_with_edge(spec_path="docs/specs/01-x.md", section_id="X-1")
+    report[key] = [record]
+    report["summary"][key] = 1
+    _write(tmp_path, "report.json", json.dumps(report))
+    _write(tmp_path, "rows.jsonl", "")
+    result = run_cli(
+        "summarize-analysis",
+        "--deterministic-report",
+        str(tmp_path / "report.json"),
+        "--analysis-results",
+        str(tmp_path / "rows.jsonl"),
+    )
+    assert result.returncode == 2
+    assert f"{key}[0]" in result.stderr
