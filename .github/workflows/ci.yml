@@ -1,9 +1,9 @@
 name: CI
 
 # Hermetic CI runs on every push and PR with no secrets. The paid, flake-prone
-# live-LLM job is a post-merge canary (push to main) plus an on-demand manual
-# run (workflow_dispatch); it never runs on pull_request, so forked PRs -- which
-# do not receive repository secrets -- cannot reach it.
+# live-LLM job is part of the normal CI workflow, but it checks secret
+# availability inside the step and skips without failure when repository
+# secrets are unavailable, such as forked PRs.
 on:
   push:
   pull_request:
@@ -31,17 +31,23 @@ jobs:
         run: uv run pytest tests/live/test_live_llm.py -q
       - name: Lint
         run: uv run ruff check .
+      - name: Format
+        run: >
+          uv run ruff format --check
+          backstitch
+          bin
+          .github/scripts
+          tests/test_release_script.py
+          tests/test_release_workflow.py
+          tests/test_release_workflow_gate.py
       - name: Types
-        run: uv run mypy backstitch
+        run: uv run mypy backstitch bin/release.py --config-file pyproject.toml
       - name: Self-corpus gate
         run: uv run backstitch check --repo-root .
 
   live-llm:
     name: live LLM
     needs: test
-    # Event-based gate only. `secrets.*` is NOT available in job-level `if`
-    # (GitHub context table), so secret presence is checked inside the step.
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     env:
       BACKSTITCH_LIVE_LLM: "1"
