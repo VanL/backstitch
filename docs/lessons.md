@@ -112,3 +112,15 @@ machine-checked. Durable lessons:
 - Optimize docs for agent usability, not just human readability. If something
   is human-clear but agent-ambiguous, call it out and suggest a specific fix.
   Check for missing owner, boundary, verification, or required action.
+
+## Specs: state contracts as rules, not examples (2026-07-03)
+
+Nineteen independent review rounds on the reconciliation implementation
+reduced to about seven general rules (now [SC-13]) being rediscovered one
+field at a time — because the spec stated its record contracts by example
+(JSON shapes), which invites validating only the visible fields. A rule
+("all identifiers non-blank, all vocabularies closed, validation total")
+invites a sweep. Corollary, proved during promotion: rules drafted from
+memory overclaim — three codex review rounds each caught the delta claiming
+more than the validators enforced. Verify each codifying rule against the
+implementation before promotion, and point reviewers at rule-vs-code.

@@ -19,3 +19,5 @@ read order stay aligned instead of competing.
 1. `01-documentation-system.md`
 2. `02-repository-map.md`
 3. `03-agent-inventory.md`
+4. `04-backstitch-style-traceability.md`
+5. `05-release-publishing.md`

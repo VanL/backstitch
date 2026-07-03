@@ -47,6 +47,14 @@ cleanup.
 - Implementation docs explain the current rationale and ownership.
 - Code points back to governing specs when ownership would otherwise be
   ambiguous.
+- When a plan changes intended behavior, exact proposed spec sections live in
+  the plan for review; the **spec-promotion slice** applies them per a named
+  strategy (in-file text-first, atomic, new file under a glob rung, or
+  spec-authoring only). v1 planned/exploratory glob rungs are per-file;
+  per-section meta/ignore uses inline `_Traceability:` markers ([EXC-4]).
+  Prose `Status:` headers and globs are different mechanisms. After promotion,
+  `docs/specs/` is the single governing contract — not plan appendix text. See
+  `runbooks/writing-plans.md` §4b–4d and `runbooks/writing-specs.md` §9.
 
 ## 6. Reuse Local Paths and Helpers Before Inventing New Ones
 

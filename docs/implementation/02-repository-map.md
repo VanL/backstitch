@@ -9,6 +9,7 @@ Quick pointers to the key guidance documents in this repository.
 | `AGENTS.md` | Canonical agent entry point |
 | `CLAUDE.md` | Alias for tools that expect Claude-style root guidance |
 | `pyproject.toml` | Package metadata, dependency declarations, console script, and Python tool configuration |
+| `bin/release.py` | Maintainer release helper for version updates, checks, release commit, and tag push |
 
 ## Source Package
 
@@ -33,6 +34,8 @@ Quick pointers to the key guidance documents in this repository.
 | `tests/acceptance/` | The twelve [SC-10] acceptance probes |
 | `tests/live/` | Opt-in live LLM smoke/contract test ([SC-7], `BACKSTITCH_LIVE_LLM=1`) |
 | `.github/workflows/ci.yml` | Hermetic CI + post-merge/manual live-LLM job |
+| `.github/workflows/release-gate.yml` | Tag-triggered PyPI/GitHub release gate |
+| `.github/scripts/require_green_workflows.py` | Release-gate helper that waits for required green workflow runs |
 
 ## Shared Agent Context
 
@@ -69,6 +72,8 @@ Quick pointers to the key guidance documents in this repository.
 | `docs/implementation/00-implementation-index.md` | Numbered entry point for implementation docs |
 | `docs/implementation/01-documentation-system.md` | Why the documentation system is shaped this way |
 | `docs/implementation/03-agent-inventory.md` | Current observed agent availability and review preference |
+| `docs/implementation/04-backstitch-style-traceability.md` | Traceability implementation rationale and verification map |
+| `docs/implementation/05-release-publishing.md` | Release helper, publishing gate, rollback, and operator notes |
 | `docs/lessons.md` | Canonical lessons ledger |
 
 ## Skills

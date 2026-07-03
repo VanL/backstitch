@@ -395,6 +395,10 @@ semantics, or provider-specific runtime abstractions in this plan.
    - State the cost and flake tradeoff plainly.
 
 5. Add GitHub Actions workflow.
+   - Superseded on 2026-07-03 by
+     `docs/plans/2026-07-03-backstitch-release-publishing-plan.md` after user
+     correction: live LLM is now part of the normal `CI` workflow and skips
+     only when repository secrets are unavailable.
    - Files to touch: `.github/workflows/ci.yml`.
    - Workflow triggers:
      - `pull_request` for normal no-secret CI only.

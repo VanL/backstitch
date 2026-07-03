@@ -54,7 +54,24 @@ These tests **cost money** (real provider calls) and can be **flaky** for
 reasons unrelated to Backstitch — provider outages, rate limits, model
 retirement, and nondeterministic output. Keep the packet set small; the live
 test is a smoke and contract check, not an exhaustive semantic review. In CI the
-live job is a post-merge canary on `main` plus an on-demand `workflow_dispatch`
-run; it never gates pull requests. See
+live job is part of the normal `CI` workflow: it runs when the repository
+`OPENAI_API_KEY` secret is available and skips without failure when secrets are
+unavailable, such as forked pull requests. See
 `docs/implementation/04-backstitch-style-traceability.md` for the boundary
 rationale.
+
+## Release
+
+Backstitch releases use `bin/release.py` locally and a tag-triggered GitHub
+release gate. The helper updates `pyproject.toml` and `backstitch/__init__.py`
+together, runs local checks including the live LLM test, creates the release
+commit when needed, and pushes the `vX.Y.Z` tag. The GitHub workflow publishes
+to PyPI through Trusted Publishing and creates the GitHub Release.
+
+```bash
+bin/release.py --version X.Y.Z --dry-run
+bin/release.py --version X.Y.Z
+```
+
+See `docs/implementation/05-release-publishing.md` for setup, rollback, and
+verification details.

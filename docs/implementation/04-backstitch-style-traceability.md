@@ -154,10 +154,12 @@ Boundary and rationale:
   `ambiguous` row for a contained failure, and both `analyze` (partial failure)
   and `summarize-analysis` (bad rows rendered as advisory text) exit `0`, so exit
   codes prove command path and artifact health, not model success.
-- **Advisory findings stay advisory.** Semantic classification never fails CI;
-  the live job is a post-merge canary on `main` plus a manual
-  `workflow_dispatch` run (`.github/workflows/ci.yml`), never a PR gate, and
-  forked PRs — which do not receive repository secrets — cannot reach it.
+- **Advisory findings stay advisory.** Semantic classification never fails the
+  deterministic checker, but the live provider path is part of the normal `CI`
+  workflow when repository secrets are available. `.github/workflows/ci.yml`
+  injects `OPENAI_API_KEY` from repository secrets and skips the live provider
+  call without failure when secrets are unavailable, such as forked pull
+  requests.
 
 Local usage and the cost/flake tradeoff are documented in `README.md`.
 
