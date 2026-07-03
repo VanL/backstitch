@@ -1350,13 +1350,22 @@ def _report_with_edge(
         "repo_root": ".",
         "summary": {
             "spec_sections": 1,
-            "code_refs": 1,
-            "spec_mappings": 1,
+            "code_refs": 0,
+            "spec_mappings": 0,
             "errors": 0,
             "warnings": 0,
             "infos": 0,
         },
-        "spec_sections": [],
+        "spec_sections": [
+            {
+                "path": spec_path,
+                "section_id": section_id,
+                "title": "One",
+                "line": 3,
+                "anchor": "one",
+                "kind": "heading",
+            }
+        ],
         "code_refs": [],
         "spec_mappings": [],
         "edges": [edge],
@@ -1553,24 +1562,24 @@ def test_summarize_rejects_invalid_edge_section_id(tmp_path: Path) -> None:
     [
         {
             "spec_sections": 1,
-            "code_refs": 1,
-            "spec_mappings": 1,
+            "code_refs": 0,
+            "spec_mappings": 0,
             "errors": "0",
             "warnings": [],
             "infos": {},
         },
         {
             "spec_sections": 1,
-            "code_refs": 1,
-            "spec_mappings": 1,
+            "code_refs": 0,
+            "spec_mappings": 0,
             "errors": -1,
             "warnings": 0,
             "infos": 0,
         },
         {
             "spec_sections": 1,
-            "code_refs": 1,
-            "spec_mappings": 1,
+            "code_refs": 0,
+            "spec_mappings": 0,
             "errors": True,
             "warnings": 0,
             "infos": 0,
@@ -1673,3 +1682,82 @@ def test_summarize_requires_all_six_summary_counts(tmp_path: Path) -> None:
     )
     assert result.returncode == 2
     assert "spec_sections" in result.stderr
+
+
+# --- Round 17: edges must reference real sections; summaries must not lie ----
+
+
+def test_summarize_rejects_edge_to_section_not_in_report(tmp_path: Path) -> None:
+    report = _report_with_edge(spec_path="docs/specs/01-x.md", section_id="X-1")
+    # `check` builds edges from resolved sections; an edge to a section
+    # absent from spec_sections is a report packets could never act on.
+    report["spec_sections"] = []
+    report["summary"]["spec_sections"] = 0
+    _write(tmp_path, "report.json", json.dumps(report))
+    _write(
+        tmp_path,
+        "rows.jsonl",
+        json.dumps(
+            {
+                "packet_id": "docs/specs/01-x.md#X-1",
+                "classification": "ok",
+                "summary": "fine",
+                "confidence": 0.5,
+                "evidence": [],
+            }
+        )
+        + "\n",
+    )
+    result = run_cli(
+        "summarize-analysis",
+        "--deterministic-report",
+        str(tmp_path / "report.json"),
+        "--analysis-results",
+        str(tmp_path / "rows.jsonl"),
+    )
+    assert result.returncode == 2
+    assert "not in `spec_sections`" in result.stderr
+
+
+def test_summarize_rejects_summary_disagreeing_with_issues(tmp_path: Path) -> None:
+    report = _report_with_edge(spec_path="docs/specs/01-x.md", section_id="X-1")
+    report["issues"] = [
+        {
+            "code": "SPEC_FILE_MISSING",
+            "severity": "error",
+            "path": "p.py",
+            "line": 1,
+            "message": "m",
+            "section_id": None,
+            "symbol": None,
+        }
+    ]
+    # summary still claims zero errors: the rendered line would lie.
+    _write(tmp_path, "report.json", json.dumps(report))
+    _write(tmp_path, "rows.jsonl", "")
+    result = run_cli(
+        "summarize-analysis",
+        "--deterministic-report",
+        str(tmp_path / "report.json"),
+        "--analysis-results",
+        str(tmp_path / "rows.jsonl"),
+    )
+    assert result.returncode == 2
+    assert "disagree" in result.stderr
+    assert "errors" in result.stderr
+
+
+def test_summarize_rejects_malformed_issue_records(tmp_path: Path) -> None:
+    report = _report_with_edge(spec_path="docs/specs/01-x.md", section_id="X-1")
+    report["issues"] = [{"code": "NOT_A_CODE", "severity": "bogus"}]
+    _write(tmp_path, "report.json", json.dumps(report))
+    _write(tmp_path, "rows.jsonl", "")
+    result = run_cli(
+        "summarize-analysis",
+        "--deterministic-report",
+        str(tmp_path / "report.json"),
+        "--analysis-results",
+        str(tmp_path / "rows.jsonl"),
+    )
+    assert result.returncode == 2
+    assert "issues[0]" in result.stderr

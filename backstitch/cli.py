@@ -646,6 +646,90 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
                 " edge record)"
             )
             raise ValueError(msg)
+    # Edges only authorize packet IDs for sections the report actually
+    # contains: `check` builds edges from resolved sections, so an edge
+    # naming a section absent from `spec_sections` is a forged or corrupted
+    # report, not a packet `backstitch packets` could have produced.
+    sections: set[tuple[str, str]] = set()
+    for position, section in enumerate(report_data["spec_sections"]):
+        if (
+            not isinstance(section, dict)
+            or not _is_path_locator(section.get("path"))
+            or not isinstance(section.get("section_id"), str)
+            or not is_valid_section_id(section["section_id"])
+        ):
+            msg = (
+                f"{args.deterministic_report}: not a backstitch deterministic"
+                f" report (invalid `spec_sections[{position}]`: expected a"
+                " section record with path and section_id)"
+            )
+            raise ValueError(msg)
+        sections.add((section["path"], section["section_id"]))
+    for position, edge in enumerate(report_data["edges"]):
+        if (edge["spec_path"], edge["section_id"]) not in sections:
+            msg = (
+                f"{args.deterministic_report}: not a backstitch deterministic"
+                f" report (`edges[{position}]` references"
+                f" `{edge['spec_path']}#{edge['section_id']}`, which is not"
+                " in `spec_sections`)"
+            )
+            raise ValueError(msg)
+    severity_counts = {"error": 0, "warning": 0, "info": 0}
+    for position, issue in enumerate(report_data["issues"]):
+        # Same record rules as packet issues ([SC-11]).
+        if (
+            not isinstance(issue, dict)
+            or issue.get("code") not in ISSUE_CODES
+            or issue.get("severity") not in ("error", "warning", "info")
+            or not isinstance(issue.get("message"), str)
+            or not _is_path_locator(issue.get("path"))
+            or isinstance(issue.get("line"), bool)
+            or not isinstance(issue.get("line"), int | None)
+            or not (
+                issue.get("section_id") is None
+                or (
+                    isinstance(issue["section_id"], str)
+                    and is_valid_section_id(issue["section_id"])
+                )
+            )
+            or not isinstance(issue.get("symbol"), str | None)
+        ):
+            msg = (
+                f"{args.deterministic_report}: not a backstitch deterministic"
+                f" report (invalid `issues[{position}]`: expected a"
+                " deterministic issue record)"
+            )
+            raise ValueError(msg)
+        severity_counts[issue["severity"]] += 1
+    # Summary counts must agree with the report's own contents; the
+    # summary line is rendered from the counts, so a lying summary would
+    # print "0 errors" over a report full of them. Only well-formed count
+    # values are compared here -- type garbage is named by the renderer's
+    # own count validation instead.
+    expected_counts = {
+        "spec_sections": len(report_data["spec_sections"]),
+        "code_refs": len(report_data["code_refs"]),
+        "spec_mappings": len(report_data["spec_mappings"]),
+        "errors": severity_counts["error"],
+        "warnings": severity_counts["warning"],
+        "infos": severity_counts["info"],
+    }
+    summary_data = report_data["summary"]
+    disagreeing = [
+        key
+        for key, expected in expected_counts.items()
+        if isinstance(summary_data.get(key), int)
+        and not isinstance(summary_data.get(key), bool)
+        and summary_data[key] >= 0
+        and summary_data[key] != expected
+    ]
+    if disagreeing:
+        msg = (
+            f"{args.deterministic_report}: not a backstitch deterministic"
+            " report (summary counts disagree with report contents for:"
+            f" {', '.join(disagreeing)})"
+        )
+        raise ValueError(msg)
     load = load_analysis_results(
         args.analysis_results.read_text(encoding="utf-8"),
         packet_ids_from_report(report_data),
