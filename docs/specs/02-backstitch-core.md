@@ -405,10 +405,26 @@ model, not the target: exit `2`. Partial failure exits `0`: the output is
 usable, each failed packet carries its `ambiguous`/error record, and the
 failure messages reach stderr.
 
-Tests for semantic analysis must not call external models. They should use fake
-model adapters or equivalent local fakes to prove prompt construction, model
-selection, output parsing, malformed model-output handling, and result
+Default semantic-analysis tests must not call external models. They must use
+fake model adapters or equivalent local fakes to prove prompt construction,
+model selection, output parsing, malformed model-output handling, and result
 aggregation.
+
+Optional live semantic-analysis tests are permitted only under an explicit
+opt-in gate. A live test must use packets produced by deterministic mode,
+call the real `llm` adapter through the public `analyze` command, keep the
+packet set bounded, and validate structured result JSONL rather than exact
+model wording. Missing credentials must skip only when the live gate is not
+enabled; once the live gate is enabled, missing credentials, provider
+failures, malformed model output, and invalid result rows must fail the live
+test by assertion on per-row errors and analysis-load errors. This is stricter
+than `analyze`'s exit-code contract: per this section, `analyze` still exits
+`0` on partial failure and records one `ambiguous`/error row per failed packet.
+Automation may exit successfully without invoking the live test when provider
+credentials are not configured for that environment; once credentials are
+present and the live test is invoked, these failure assertions apply.
+Live semantic findings remain advisory and must not create CI failure based on
+classification unless a separate policy explicitly changes this section.
 
 _Implementation mapping_:
 - `backstitch/analysis_llm.py`
@@ -713,6 +729,7 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-07-03-live-llm-tests-plan.md` (implementing)
 - `docs/plans/2026-07-03-input-validation-invariants-plan.md` (implementing)
 - `docs/plans/2026-07-02-backstitch-four-way-reconciliation-plan.md` (implementing)
 - `docs/plans/2026-06-18-backstitch-style-spec-code-traceability-tool-plan.md` (superseded)

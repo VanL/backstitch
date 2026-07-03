@@ -488,7 +488,9 @@ Required proof:
 - `ruff` and `mypy` over new loader modules
 
 Do not call external LLMs in config tests. Use fake adapters for `analyze`
-integration tests.
+configuration integration tests. Optional live LLM tests belong to [SC-7]'s
+semantic-analysis verification path and must not be used as no-op-prevention
+proof for configuration keys.
 
 _Implementation mapping_:
 - `tests/test_settings.py`
@@ -511,6 +513,7 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-07-03-live-llm-tests-plan.md` (implementing)
 - `docs/plans/2026-07-02-backstitch-four-way-reconciliation-plan.md` (implementing)
 - `docs/plans/2026-07-01-backstitch-toml-configuration-plan.md`
 - `docs/plans/2026-07-02-backstitch-traceability-exclusions-plan.md`
