@@ -1,0 +1,210 @@
+name: local-llm
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: local-llm-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # llama3.2:3b chosen from local bake-off evidence (2026-07-06, Apple-silicon
+  # Docker, 16 vCPU / 16 GB): bounded + temperature-0 it passed the
+  # non-total-failure contract in 7/8 runs at ~25-40 s per run. qwen2.5:0.5b
+  # (the prior low-cost default) produced total invalid rows.
+  BACKSTITCH_LOCAL_LLM_BASE_MODEL: llama3.2:3b
+  BACKSTITCH_LOCAL_LLM_SERVED_MODEL: backstitch-local-model:latest
+  BACKSTITCH_LOCAL_LLM_ENDPOINT: http://127.0.0.1:11434/v1
+  BACKSTITCH_LOCAL_LLM_UPSTREAM: http://127.0.0.1:11434/v1
+  OLLAMA_CONTEXT_LENGTH: "4096"
+  # 256 provably truncates valid analysis rows (bake-off: 2/5 pass at 256,
+  # 4/5 at 512, 7/8 at 1024); 1024 keeps the output bounded without cutting
+  # borderline rows mid-JSON.
+  OLLAMA_NUM_PREDICT: "1024"
+  OLLAMA_IMAGE: ollama/ollama@sha256:f1a705f2bd113fb8d15f85f7c217f0dc5f6bebda6b0cc42b82c3ad165ffcb9dc
+  OLLAMA_CACHE_DIR: /home/runner/.ollama-cache
+  OLLAMA_CACHE_EPOCH: v1
+
+jobs:
+  local-llm:
+    name: local LLM
+    # GitHub-hosted ubuntu-latest is 4 vCPU / 16 GB for public repos and
+    # 2 vCPU / 8 GB for private repos as of 2026-07-03. This manual lane is
+    # designed against the smaller private-runner floor.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+
+      - name: Prepare Ollama cache directory
+        run: |
+          set -euo pipefail
+          mkdir -p "${OLLAMA_CACHE_DIR}"
+          df -h
+
+      - name: Restore Ollama model cache
+        id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.OLLAMA_CACHE_DIR }}
+          key: ollama-${{ runner.os }}-${{ runner.arch }}-${{ env.BACKSTITCH_LOCAL_LLM_BASE_MODEL }}-${{ env.OLLAMA_CONTEXT_LENGTH }}-${{ env.OLLAMA_IMAGE }}-${{ env.OLLAMA_CACHE_EPOCH }}
+
+      - name: Start Ollama
+        id: start
+        run: |
+          set -euo pipefail
+          docker run -d \
+            --name backstitch-llm \
+            -p 127.0.0.1:11434:11434 \
+            -v "${OLLAMA_CACHE_DIR}:/root/.ollama" \
+            "${OLLAMA_IMAGE}"
+
+      - name: Wait for Ollama readiness
+        id: server-ready
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:11434/" >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs backstitch-llm || true
+          exit 1
+
+      - name: Pull base model and create bounded served model
+        id: pull
+        run: |
+          set -euo pipefail
+          df -h
+          docker exec backstitch-llm ollama pull "${BACKSTITCH_LOCAL_LLM_BASE_MODEL}"
+          cat > "${RUNNER_TEMP}/BackstitchModelfile" <<EOF
+          FROM ${BACKSTITCH_LOCAL_LLM_BASE_MODEL}
+          PARAMETER num_ctx ${OLLAMA_CONTEXT_LENGTH}
+          PARAMETER num_predict ${OLLAMA_NUM_PREDICT}
+          PARAMETER temperature 0
+          EOF
+          docker cp "${RUNNER_TEMP}/BackstitchModelfile" backstitch-llm:/tmp/BackstitchModelfile
+          docker exec backstitch-llm ollama create "${BACKSTITCH_LOCAL_LLM_SERVED_MODEL}" -f /tmp/BackstitchModelfile
+          df -h
+
+      - name: Wait for served model
+        id: model-poll
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            if python - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.request
+
+          endpoint = os.environ["BACKSTITCH_LOCAL_LLM_ENDPOINT"].rstrip("/") + "/models"
+          served = os.environ["BACKSTITCH_LOCAL_LLM_SERVED_MODEL"]
+          try:
+              with urllib.request.urlopen(endpoint, timeout=5) as response:
+                  payload = json.load(response)
+          except Exception as exc:
+              print(f"waiting for model list: {exc}")
+              sys.exit(1)
+          ids = [
+              item.get("id")
+              for item in payload.get("data", [])
+              if isinstance(item, dict)
+          ]
+          if served in ids:
+              sys.exit(0)
+          print(f"waiting for {served!r}; saw ids: {ids}")
+          sys.exit(1)
+          PY
+            then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Log model digests and verify parameters
+        run: |
+          set -euo pipefail
+          docker exec backstitch-llm ollama show "${BACKSTITCH_LOCAL_LLM_BASE_MODEL}" --verbose || true
+          docker exec backstitch-llm ollama show "${BACKSTITCH_LOCAL_LLM_SERVED_MODEL}" --verbose || true
+          parameters="$(docker exec backstitch-llm ollama show "${BACKSTITCH_LOCAL_LLM_SERVED_MODEL}" --parameters)"
+          printf '%s\n' "${parameters}"
+          # Anchored at both ends so neither a prefixed key (foo_num_ctx) nor a
+          # longer value (40960 for 4096) can satisfy the check.
+          printf '%s\n' "${parameters}" | grep -Eq "^num_ctx[[:space:]]+${OLLAMA_CONTEXT_LENGTH}([[:space:]]|$)"
+          printf '%s\n' "${parameters}" | grep -Eq "^num_predict[[:space:]]+${OLLAMA_NUM_PREDICT}([[:space:]]|$)"
+          printf '%s\n' "${parameters}" | grep -Eq "^temperature[[:space:]]+0([[:space:]]|$)"
+          # Per-run weight-provenance evidence: the cache key is tag+image+epoch
+          # (tags are mutable), so these manifest checksums are the only trace
+          # of which weights actually ran. Must not be best-effort or empty.
+          manifests="$(sudo find "${OLLAMA_CACHE_DIR}/models/manifests" -type f -exec sha256sum {} +)"
+          printf '%s\n' "${manifests}"
+          test -n "${manifests}"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          uv sync --extra dev --locked
+          uv run python - <<'PY'
+          from importlib.metadata import version
+
+          print(f"llm {version('llm')}")
+          PY
+
+      - name: Run local live LLM tests
+        timeout-minutes: 15
+        # The BACKSTITCH_LOCAL_LLM_* and OLLAMA_* values are inherited from the
+        # workflow-level env block; only the live-gate opt-ins are step-scoped.
+        env:
+          BACKSTITCH_LIVE_LLM: "1"
+          BACKSTITCH_LIVE_LLM_KIND: local
+        run: uv run pytest tests/live/test_live_llm.py -q
+
+      - name: Local LLM diagnostics
+        if: always()
+        run: |
+          free -m || true
+          df -h || true
+          docker logs backstitch-llm 2>&1 | grep -Ei 'server|listen|model|pull|load|memory|error|ready' || true
+
+      - name: Stop Ollama
+        if: always()
+        run: docker stop backstitch-llm || true
+
+      - name: Normalize Ollama cache ownership
+        if: always()
+        run: |
+          sudo chown -R "$USER" "${OLLAMA_CACHE_DIR}" || true
+          df -h
+
+      - name: Save Ollama model cache
+        id: save
+        if: ${{ !cancelled() && steps.pull.outcome == 'success' && steps.model-poll.outcome == 'success' && steps.restore.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ${{ env.OLLAMA_CACHE_DIR }}
+          key: ollama-${{ runner.os }}-${{ runner.arch }}-${{ env.BACKSTITCH_LOCAL_LLM_BASE_MODEL }}-${{ env.OLLAMA_CONTEXT_LENGTH }}-${{ env.OLLAMA_IMAGE }}-${{ env.OLLAMA_CACHE_EPOCH }}
+
+      - name: Fail on broken cache save
+        # actions/cache/save@v4 does not fail on "key already exists" (a
+        # concurrent run winning the race logs a warning and succeeds), so a
+        # failure outcome means a real problem: permissions or unreadable
+        # files. Without this check, continue-on-error hides it and every
+        # trusted run re-downloads the weights forever.
+        if: ${{ !cancelled() && steps.save.outcome == 'failure' }}
+        run: |
+          echo "::error::actions/cache/save failed (permissions or unreadable files); trusted runs will re-download model weights every run until this is fixed."
+          exit 1

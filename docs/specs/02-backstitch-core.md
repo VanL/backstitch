@@ -415,14 +415,56 @@ opt-in gate. A live test must use packets produced by deterministic mode,
 call the real `llm` adapter through the public `analyze` command, keep the
 packet set bounded, and validate structured result JSONL rather than exact
 model wording. Missing credentials must skip only when the live gate is not
-enabled; once the live gate is enabled, missing credentials, provider
-failures, malformed model output, and invalid result rows must fail the live
-test by assertion on per-row errors and analysis-load errors. This is stricter
-than `analyze`'s exit-code contract: per this section, `analyze` still exits
-`0` on partial failure and records one `ambiguous`/error row per failed packet.
-Automation may exit successfully without invoking the live test when provider
-credentials are not configured for that environment; once credentials are
-present and the live test is invoked, these failure assertions apply.
+enabled. Once the live gate is enabled, missing credentials, invalid result rows
+(schema or packet id), and analysis-load errors must fail the live test by
+assertion. The two targets have distinct, non-overlapping contracts:
+
+- A **cloud-provider** live test asserts model success: no result row carries
+  an `error` field (unchanged from prior wording). This per-row assertion is
+  not relaxed for cloud targets.
+- A **local-endpoint** live test (below) instead asserts a reachability and
+  transport proof plus a total-failure guard, and tolerates *individual*
+  per-packet error records — malformed model output or a transient per-packet
+  call failure, which the adapter records identically — unless a stricter
+  opt-in demands model success.
+
+These assertions are stricter than `analyze`'s exit-code contract: per this
+section, `analyze` still exits `0` on partial failure and records one
+`ambiguous`/error row per failed packet. Automation may exit successfully
+without invoking the live test when provider credentials are not configured
+for that environment; once credentials are present and the live test is
+invoked, these failure assertions apply.
+
+An optional live test may target a local, self-hosted, OpenAI-compatible model
+endpoint instead of a paid cloud provider, reached through `llm`'s standard
+OpenAI-compatible model configuration (`api_base`) with no additional package
+dependency and no change to the runtime adapter. It needs no provider credential
+(`llm` sends only a placeholder key the server ignores). It must use packets
+produced by deterministic mode, call the real adapter through the public
+`analyze` command over a bounded set of **at least two** packets (so tolerating
+an individual error record is distinguishable from total failure), and validate
+structured result JSONL. It must prove the endpoint served a generation
+**through the same adapter registration and environment that `analyze`
+inherits** (a subprocess exercising the same adapter and `LLM_USER_PATH`
+registration, using a fixed transport-health-probe prompt that feeds the model
+no repository content and so does not breach the packet boundary), and must fail
+if the analyze run reports total failure (every packet produced an error
+record). It must additionally prove that the `analyze` command's own calls
+reached the local endpoint (e.g. a request-count check), so the proof is that
+`analyze`'s real adapter→HTTP path ran — not merely that a separate preflight
+generation succeeded and some non-error row exists. It does not assert that
+every per-packet call had healthy transport, since an individual transient call
+failure is recorded like malformed output and is tolerated in non-strict mode.
+Because small local models legitimately emit malformed output and per-packet
+calls can blip, a local-endpoint test must not treat individual per-packet error
+records as failures unless a stricter opt-in explicitly demands model success.
+An unreachable endpoint, a model absent from the endpoint, or a failed transport
+proof is a failure once the live gate is enabled, and a skip when it is not.
+Because it needs no repository secret, a local-endpoint test is eligible to run
+in credential-free automation contexts, including forked pull requests, **only
+after an explicit threat-model-gated workflow change**; it is not enabled on
+forked pull requests by default. This does not change `analyze`'s exit-code
+contract or the advisory status of semantic findings.
 Live semantic findings remain advisory and must not create CI failure based on
 classification unless a separate policy explicitly changes this section.
 
@@ -729,6 +771,7 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-07-03-local-llm-eval-lane-plan.md` (implementing)
 - `docs/plans/2026-07-03-live-llm-tests-plan.md` (implementing)
 - `docs/plans/2026-07-03-input-validation-invariants-plan.md` (implementing)
 - `docs/plans/2026-07-02-backstitch-four-way-reconciliation-plan.md` (implementing)

@@ -230,3 +230,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local Ollama weights cache for the live-LLM dev lane (see README)
+.ollama-cache/

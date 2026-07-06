@@ -326,6 +326,7 @@ def _precheck_env_overrides(command: tuple[str, ...]) -> dict[str, str] | None:
         env.update(PRECHECK_ENV_OVERRIDES)
     if command == LIVE_LLM_TEST_COMMAND:
         env["BACKSTITCH_LIVE_LLM"] = "1"
+        env["BACKSTITCH_LIVE_LLM_KIND"] = "openai"
     return env or None
 
 

@@ -108,6 +108,7 @@ def test_live_llm_precheck_opts_in_to_real_provider_path() -> None:
     assert env == {
         "PYTEST_ADDOPTS": "-x --maxfail=1",
         "BACKSTITCH_LIVE_LLM": "1",
+        "BACKSTITCH_LIVE_LLM_KIND": "openai",
     }
 
 
@@ -254,6 +255,7 @@ def test_dry_run_prints_commands_without_running(
             assert env_overrides == {
                 "PYTEST_ADDOPTS": "-x --maxfail=1",
                 "BACKSTITCH_LIVE_LLM": "1",
+                "BACKSTITCH_LIVE_LLM_KIND": "openai",
             }
         commands.append(command)
 

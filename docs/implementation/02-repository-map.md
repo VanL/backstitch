@@ -34,6 +34,7 @@ Quick pointers to the key guidance documents in this repository.
 | `tests/acceptance/` | The twelve [SC-10] acceptance probes |
 | `tests/live/` | Opt-in live LLM smoke/contract test ([SC-7], `BACKSTITCH_LIVE_LLM=1`) |
 | `.github/workflows/ci.yml` | Hermetic CI + post-merge/manual live-LLM job |
+| `.github/workflows/local-llm.yml` | Separate manual Ollama live-LLM canary outside the release-gated `CI` workflow |
 | `.github/workflows/release-gate.yml` | Tag-triggered PyPI/GitHub release gate |
 | `.github/scripts/require_green_workflows.py` | Release-gate helper that waits for required green workflow runs |
 

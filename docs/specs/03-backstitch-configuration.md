@@ -488,9 +488,17 @@ Required proof:
 - `ruff` and `mypy` over new loader modules
 
 Do not call external LLMs in config tests. Use fake adapters for `analyze`
-configuration integration tests. Optional live LLM tests belong to [SC-7]'s
+configuration integration tests. Optional live LLM tests — whether against a
+cloud provider or a local OpenAI-compatible endpoint — belong to [SC-7]'s
 semantic-analysis verification path and must not be used as no-op-prevention
-proof for configuration keys.
+proof for configuration keys. Local-endpoint model wiring (`api_base` and
+model registration via `llm`'s `extra-openai-models.yaml`) is `llm`/provider
+environment configuration, not a backstitch configuration key, and must not
+introduce provider-specific handling into backstitch's configuration loader or
+runtime modules. A local-endpoint live test uses an ephemeral per-test `llm`
+configuration directory (for example via `LLM_USER_PATH`) and does not read
+the global `llm` config; this wiring is outside Backstitch config and must not
+be treated as proof for any Backstitch config key.
 
 _Implementation mapping_:
 - `tests/test_settings.py`

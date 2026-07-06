@@ -28,16 +28,18 @@ uv run pytest tests -q
 
 ### Optional live LLM tests
 
-`tests/live/test_live_llm.py` drives the real CLI (`packets` → `analyze` →
-`check` → `summarize-analysis`) over this repository's own specs, calling a real
-provider through the production adapter. It is **skipped unless you opt in** with
+`tests/live/test_live_llm.py` drives the real CLI (`packets` -> `analyze` ->
+`check` -> `summarize-analysis`) over this repository's own specs through the
+production adapter. It is **skipped unless you opt in** with
 `BACKSTITCH_LIVE_LLM=1`, so it never runs in the default suite. It asserts
-structured contracts (one result row per packet, no error rows, schema-valid
-JSONL) — not model wording or classification, which are not API.
+structured contracts (one result row per packet, schema-valid JSONL, clean
+analysis loading), not model wording or classification, which are not API.
 
-Model choice is intentionally explicit: the test does not fall back to your
-global `llm` default, so CI and local runs are reproducible. Use a current
-GPT-5-series mini model; verify availability with `uv run llm models list`.
+Cloud-provider runs additionally assert model success: no result row may carry
+an `error` field. Model choice is intentionally explicit: the test does not fall
+back to your global `llm` default, so CI and local runs are reproducible. Use a
+current GPT-5-series mini model; verify availability with
+`uv run llm models list`.
 
 ```bash
 # Using a key stored by `llm` (run once):
@@ -50,13 +52,44 @@ OPENAI_API_KEY=... BACKSTITCH_LIVE_LLM=1 LLM_MODEL=gpt-5.4-mini \
   uv run pytest -m live_llm -q
 ```
 
-These tests **cost money** (real provider calls) and can be **flaky** for
-reasons unrelated to Backstitch — provider outages, rate limits, model
-retirement, and nondeterministic output. Keep the packet set small; the live
-test is a smoke and contract check, not an exhaustive semantic review. In CI the
-live job is part of the normal `CI` workflow: it runs when the repository
-`OPENAI_API_KEY` secret is available and skips without failure when secrets are
-unavailable, such as forked pull requests. See
+The same test also has a credential-free local lane for a loopback
+OpenAI-compatible endpoint, normally Ollama. It proves local transport and
+result handling, not judgment quality. Small CPU models often emit malformed
+JSON, so non-strict local runs tolerate individual per-packet `error` rows as
+long as `analyze` does not report total failure and at least one selected packet
+produces a non-error row.
+
+```bash
+docker run -d --name backstitch-llm \
+  -p 127.0.0.1:11434:11434 \
+  -v "$PWD/.ollama-cache:/root/.ollama" \
+  ollama/ollama
+docker exec backstitch-llm ollama pull llama3.2:3b
+BACKSTITCH_LIVE_LLM=1 BACKSTITCH_LIVE_LLM_KIND=local \
+  uv run pytest -m live_llm -q
+```
+
+The floating `ollama/ollama` tag above is for developer convenience. The
+separate manual `local-llm` workflow pins the image by digest, bounds
+context/output through an Ollama Modelfile, serves the bounded alias as
+`backstitch-local-model:latest`, binds only `127.0.0.1`, and caches model
+weights in an absolute runner path. On unconstrained local hardware (a 16 vCPU
+Docker VM) the gate passes with `llama3.2:3b` in under a minute; the workflow's
+Modelfile bounds (`num_ctx 4096`, `num_predict 1024`, `temperature 0`) passed
+7 of 8 local runs. Small-model output validity still flakes occasionally — a
+failed run is a rerun, not an alarm — and the lane stays a manual workflow
+until a passing run on the actual GitHub runner is recorded.
+
+Cloud-provider tests **cost money** and can be **flaky** for reasons unrelated
+to Backstitch: provider outages, rate limits, model retirement, and
+nondeterministic output. The local lane is also flaky in a different way: cold
+model pulls, CPU inference, and small-model output quality can dominate runtime.
+Keep the packet set small; live tests are smoke and contract checks, not
+exhaustive semantic review. In CI the cloud live job is part of the normal `CI`
+workflow: it runs when the repository `OPENAI_API_KEY` secret is available and
+skips without failure when secrets are unavailable, such as on forked pull
+requests. The local Ollama lane is a separate manual workflow and must not be a
+required status check until it has stable passing run history. See
 `docs/implementation/04-backstitch-style-traceability.md` for the boundary
 rationale.
 

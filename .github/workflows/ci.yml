@@ -51,6 +51,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       BACKSTITCH_LIVE_LLM: "1"
+      # Pin the cloud kind so a stray BACKSTITCH_LIVE_LLM_KIND=local (e.g. on a
+      # self-hosted runner) cannot flip this job into the local Ollama lane.
+      # bin/release.py pins the same value in the release precheck.
+      BACKSTITCH_LIVE_LLM_KIND: openai
       # MUST stay byte-identical to DEFAULT_BACKSTITCH_LIVE_LLM_MODEL in
       # tests/live/test_live_llm.py -- one canonical value in two places. Update
       # both together after re-checking `uv run llm models list` and OpenAI's

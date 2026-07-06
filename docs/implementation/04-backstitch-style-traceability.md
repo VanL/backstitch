@@ -124,18 +124,18 @@ diffing against `--no-config`.
   config keys, noqa hygiene, marker override, fence length)
 - Acceptance: `tests/acceptance/` — the twelve [SC-10] probes, black-box
 - Self-corpus: `tests/test_backstitch_corpus_traceability.py`
-- Optional live LLM: `tests/live/test_live_llm.py` — opt-in, real provider (see
-  below)
+- Optional live LLM: `tests/live/test_live_llm.py` — opt-in, real provider or
+  local OpenAI-compatible endpoint (see below)
 
 ## Optional Live LLM Verification
 
 The hermetic suite fakes the model boundary; it proves prompt construction,
 parsing, and aggregation, but never that the real `llm` adapter and a real
-provider actually work. `tests/live/test_live_llm.py` closes that gap under an
-explicit opt-in gate (`BACKSTITCH_LIVE_LLM=1`; a function-level
-`pytest.mark.skipif` otherwise, so the test is collected and reported skipped
-rather than the file exiting 5 on direct invocation), per [SC-7]'s live-test
-allowance.
+provider or OpenAI-compatible endpoint actually work. `tests/live/test_live_llm.py`
+closes that gap under an explicit opt-in gate (`BACKSTITCH_LIVE_LLM=1`; a
+function-level `pytest.mark.skipif` otherwise, so the test is collected and
+reported skipped rather than the file exiting 5 on direct invocation), per
+[SC-7]'s live-test allowance.
 
 Boundary and rationale:
 
@@ -148,18 +148,40 @@ Boundary and rationale:
   `docs/specs/02-backstitch-core.md` owned by a semantic-analysis module) so the
   proof stays a smoke/contract check, not an exhaustive review.
 - **Structure, not wording.** Assertions are on the result contract: one row per
-  packet, every row passes `validate_analysis_row`, `load_analysis_results`
-  reports zero errors, and — the load-bearing check — no row carries an `error`
-  field. `analysis_llm._error_record` deliberately emits a schema-valid
-  `ambiguous` row for a contained failure, and both `analyze` (partial failure)
-  and `summarize-analysis` (bad rows rendered as advisory text) exit `0`, so exit
-  codes prove command path and artifact health, not model success.
+  packet, every row passes `validate_analysis_row`, and
+  `load_analysis_results` reports zero errors. Cloud-provider runs also assert
+  no row carries an `error` field. `analysis_llm._error_record` deliberately
+  emits a schema-valid `ambiguous` row for a contained failure, and both
+  `analyze` (partial failure) and `summarize-analysis` (bad rows rendered as
+  advisory text) exit `0`, so exit codes prove command path and artifact health,
+  not model success.
+- **Local endpoint proof.** With `BACKSTITCH_LIVE_LLM_KIND=local`, the test writes
+  a temporary `llm` `extra-openai-models.yaml` entry pointing
+  `backstitch-local` at a loopback counting proxy. The proxy forwards to the
+  configured upstream Ollama endpoint, verifies `/v1/models` lists the served
+  model, and records only the `analyze` phase. The test requires a subprocess
+  transport probe through `default_adapter`, at least one non-error row, and
+  request bodies showing the selected packet IDs and served model. The CI
+  workflow uses `backstitch-local-model:latest` because Ollama exposes created
+  models with an explicit tag on `/v1/models`. The committed manual-workflow
+  base model is `llama3.2:3b`, bounded by the workflow Modelfile (`num_ctx
+  4096`, `num_predict 1024`, `temperature 0`); that configuration passed the
+  gate in 7 of 8 runs on a 16 vCPU / 16 GB local Docker environment on
+  2026-07-06. The earlier 2 CPU / 8 GB timeouts were an artifact of that
+  simulation, and `qwen2.5:0.5b` was abandoned after producing total invalid
+  rows. Individual per-packet `error` rows are
+  tolerated only for non-strict local runs because small CPU models commonly
+  return malformed output;
+  `BACKSTITCH_LIVE_LLM_STRICT=1` restores the cloud-style no-error-row
+  assertion.
 - **Advisory findings stay advisory.** Semantic classification never fails the
   deterministic checker, but the live provider path is part of the normal `CI`
   workflow when repository secrets are available. `.github/workflows/ci.yml`
   injects `OPENAI_API_KEY` from repository secrets and skips the live provider
   call without failure when secrets are unavailable, such as forked pull
-  requests.
+  requests. `.github/workflows/local-llm.yml` is a separate manual
+  `workflow_dispatch` canary for Ollama; it is deliberately outside the
+  release-gated `CI` workflow and outside fork pull requests.
 
 Local usage and the cost/flake tradeoff are documented in `README.md`.
 

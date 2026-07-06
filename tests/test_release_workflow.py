@@ -10,6 +10,22 @@ def _workflow_text(path: str) -> str:
     return (WORKFLOW_DIR / path).read_text(encoding="utf-8")
 
 
+def _active_workflow_text(path: str) -> str:
+    lines: list[str] = []
+    for raw in _workflow_text(path).splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        lines.append(raw.rstrip())
+    return "\n".join(lines)
+
+
+def _index(text: str, needle: str) -> int:
+    position = text.find(needle)
+    assert position != -1, f"missing expected workflow text: {needle}"
+    return position
+
+
 def test_ci_checks_release_helper_format_and_types() -> None:
     workflow = _workflow_text("ci.yml")
 
@@ -27,10 +43,93 @@ def test_ci_runs_live_llm_when_repository_secret_is_available() -> None:
 
     assert "name: live LLM" in live_section
     assert "OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}" in live_section
+    # The cloud job must pin the kind so an environment-leaked
+    # BACKSTITCH_LIVE_LLM_KIND=local cannot reroute it to the Ollama lane
+    # (bin/release.py pins the same value; see test_release_script.py).
+    assert "BACKSTITCH_LIVE_LLM_KIND: openai" in live_section
     assert 'if [ -z "${OPENAI_API_KEY}" ]; then' in live_section
     assert "skipping live LLM tests without failure" in live_section
     assert "uv run pytest tests/live/test_live_llm.py -q" in live_section
     assert "if: ${{ github.event_name" not in live_section
+
+
+def test_local_llm_workflow_is_separate_and_guarded() -> None:
+    workflow = _workflow_text("local-llm.yml")
+    active = _active_workflow_text("local-llm.yml")
+
+    assert "name: local-llm" in active
+    assert "workflow_dispatch:" in active
+    assert "push:" not in active
+    assert "branches: [main]" not in active
+    assert "pull_request:" not in active
+    assert "permissions:" in active
+    assert "contents: read" in active
+    assert "concurrency:" in active
+    assert "group: local-llm-${{ github.ref }}" in active
+    assert "cancel-in-progress: false" in active
+    assert "2 vCPU / 8 GB" in workflow
+
+    assert "uses: astral-sh/setup-uv@v5" in active
+    assert 'python-version: "3.14"' in active
+    assert "ollama/ollama@sha256:" in active
+    assert "ollama/ollama:latest" not in active
+    assert "timeout-minutes: 20" in active
+    assert "timeout-minutes: 15" in active
+    assert "OLLAMA_CONTEXT_LENGTH:" in active
+    assert "OLLAMA_NUM_PREDICT:" in active
+    assert "PARAMETER num_ctx ${OLLAMA_CONTEXT_LENGTH}" in workflow
+    assert "PARAMETER num_predict ${OLLAMA_NUM_PREDICT}" in workflow
+    assert "BACKSTITCH_LOCAL_LLM_BASE_MODEL:" in active
+    assert "BACKSTITCH_LOCAL_LLM_BASE_MODEL: llama3.2:3b" in active
+    assert "BACKSTITCH_LOCAL_LLM_SERVED_MODEL: backstitch-local-model:latest" in active
+    # Deterministic-output tuning from the local bake-off: temperature 0 in the
+    # Modelfile, proven server-side alongside num_ctx/num_predict.
+    assert "PARAMETER temperature 0" in workflow
+    assert 'grep -Eq "^temperature[[:space:]]+0([[:space:]]|$)"' in workflow
+    assert "BACKSTITCH_LIVE_LLM_KIND: local" in active
+    assert "BACKSTITCH_LOCAL_LLM_ALLOW_NONLOCAL" not in active
+    assert "127.0.0.1:11434:11434" in active
+
+    assert "id: restore" in active
+    assert "id: pull" in active
+    assert "id: model-poll" in active
+    assert "restore-keys" not in active
+    assert active.count("path: ${{ env.OLLAMA_CACHE_DIR }}") == 2
+    assert "continue-on-error: true" in active
+    assert (
+        "if: ${{ !cancelled() && steps.pull.outcome == 'success' && "
+        "steps.model-poll.outcome == 'success' && "
+        "steps.restore.outputs.cache-hit != 'true' && "
+        "github.ref == 'refs/heads/main' }}"
+    ) in active
+
+    # A failed save (permissions/unreadable files) must fail the job on
+    # trusted runs instead of hiding behind continue-on-error; "key already
+    # exists" does not produce a failure outcome in actions/cache/save@v4.
+    assert "if: ${{ !cancelled() && steps.save.outcome == 'failure' }}" in active
+    # The context-bound verification greps must be anchored at both ends so
+    # neither a prefixed key (foo_num_ctx) nor a longer value (40960 vs 4096)
+    # can satisfy the check.
+    assert (
+        'grep -Eq "^num_ctx[[:space:]]+${OLLAMA_CONTEXT_LENGTH}([[:space:]]|$)"'
+        in workflow
+    )
+    assert (
+        'grep -Eq "^num_predict[[:space:]]+${OLLAMA_NUM_PREDICT}([[:space:]]|$)"'
+        in workflow
+    )
+    # Per-run weight provenance: manifest checksums are the only trace of what
+    # actually ran (the cache key is tag-based and tags are mutable), and the
+    # evidence must be non-empty, not best-effort.
+    assert "sha256sum" in active
+    assert 'test -n "${manifests}"' in workflow
+
+    test_position = _index(active, "Run local live LLM tests")
+    chown_position = _index(active, "Normalize Ollama cache ownership")
+    save_position = _index(active, "Save Ollama model cache")
+    assert test_position < chown_position < save_position
+    save_check_position = _index(active, "Fail on broken cache save")
+    assert save_position < save_check_position
 
 
 def test_release_gate_waits_for_ci_before_publishing() -> None:
