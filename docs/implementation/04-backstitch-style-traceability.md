@@ -28,6 +28,12 @@ Load-bearing boundaries:
   of importing `llm`: the import lives inside `analysis_llm.default_adapter`
   and the `analyze` CLI handler, and a subprocess test asserts
   `llm ∉ sys.modules` for deterministic commands ([SC-8]).
+- **Constrained decoding when available.** `default_adapter` requests
+  provider-enforced JSON output (`json_object=True`) whenever the resolved
+  model's `Options` declares that field — a capability check, never a
+  provider name — so servers with constrained decoding cannot emit
+  syntactically invalid rows; models without the option get the unchanged
+  call (`docs/plans/2026-07-06-analyze-json-mode-plan.md`).
 - **Suppression is not filtering.** `reporting.py` renders; it never drops
   findings. Suppression happens once, in the CLI pipeline, after emission
   and before exit-code and render, through `exclusions.py` — and every
@@ -165,15 +171,18 @@ Boundary and rationale:
   workflow uses `backstitch-local-model:latest` because Ollama exposes created
   models with an explicit tag on `/v1/models`. The committed manual-workflow
   base model is `llama3.2:3b`, bounded by the workflow Modelfile (`num_ctx
-  4096`, `num_predict 1024`, `temperature 0`); that configuration passed the
-  gate in 7 of 8 runs on a 16 vCPU / 16 GB local Docker environment on
-  2026-07-06. The earlier 2 CPU / 8 GB timeouts were an artifact of that
-  simulation, and `qwen2.5:0.5b` was abandoned after producing total invalid
-  rows. Individual per-packet `error` rows are
-  tolerated only for non-strict local runs because small CPU models commonly
-  return malformed output;
-  `BACKSTITCH_LIVE_LLM_STRICT=1` restores the cloud-style no-error-row
-  assertion.
+  4096`, `num_predict 1024`, `temperature 0`); with the adapter's
+  constrained-decoding request (see "Constrained decoding when available"
+  above) that configuration passed the gate in 8 of 8 runs with zero
+  contained error rows on a 16 vCPU / 16 GB local Docker environment on
+  2026-07-06 (7 of 8 before JSON mode, when per-row syntax slips were the
+  dominant failure). The earlier 2 CPU / 8 GB timeouts were an artifact of
+  that simulation, and `qwen2.5:0.5b` was abandoned after producing total
+  invalid rows. Individual per-packet `error` rows are tolerated only for
+  non-strict local runs because content-level rejects (invalid evidence
+  paths or fields) remain possible from small models even when syntax is
+  decoder-enforced; `BACKSTITCH_LIVE_LLM_STRICT=1` restores the cloud-style
+  no-error-row assertion.
 - **Advisory findings stay advisory.** Semantic classification never fails the
   deterministic checker, but the live provider path is part of the normal `CI`
   workflow when repository secrets are available. `.github/workflows/ci.yml`

@@ -74,11 +74,14 @@ separate manual `local-llm` workflow pins the image by digest, bounds
 context/output through an Ollama Modelfile, serves the bounded alias as
 `backstitch-local-model:latest`, binds only `127.0.0.1`, and caches model
 weights in an absolute runner path. On unconstrained local hardware (a 16 vCPU
-Docker VM) the gate passes with `llama3.2:3b` in under a minute; the workflow's
-Modelfile bounds (`num_ctx 4096`, `num_predict 1024`, `temperature 0`) passed
-7 of 8 local runs. Small-model output validity still flakes occasionally — a
-failed run is a rerun, not an alarm — and the lane stays a manual workflow
-until a passing run on the actual GitHub runner is recorded.
+Docker VM) the gate passes with `llama3.2:3b` in under a minute; with the
+workflow's Modelfile bounds (`num_ctx 4096`, `num_predict 1024`,
+`temperature 0`) and the adapter's provider-enforced JSON output it passed
+8 of 8 local runs with no contained error rows
+(`docs/plans/2026-07-06-analyze-json-mode-plan.md`). Occasional content-level
+error rows remain possible — a failed run is a rerun, not an alarm — and the
+lane stays a manual workflow until a passing run on the actual GitHub runner
+is recorded.
 
 Cloud-provider tests **cost money** and can be **flaky** for reasons unrelated
 to Backstitch: provider outages, rate limits, model retirement, and

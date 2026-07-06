@@ -199,6 +199,155 @@ def test_default_adapter_without_name_uses_llm_default_model(
     assert calls == [()]
 
 
+def test_default_adapter_requests_json_mode_when_model_supports_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Constrained decoding: when the resolved model's Options declares the
+    # `json_object` field (llm's OpenAI-compatible models, cloud and
+    # api_base-registered alike), the adapter must request provider-enforced
+    # JSON output. The model boundary is the one acceptable fake.
+    import llm
+
+    from backstitch.analysis_llm import default_adapter
+
+    prompts: list[tuple[str, dict[str, object]]] = []
+
+    class _Response:
+        def text(self) -> str:
+            return "{}"
+
+    class _JsonCapableModel:
+        class Options:
+            model_fields = {"json_object": object()}
+
+        def prompt(self, text: str, **options: object) -> _Response:
+            prompts.append((text, options))
+            return _Response()
+
+    monkeypatch.setattr(llm, "get_model", lambda *a: _JsonCapableModel())
+    adapter = default_adapter("any-model")
+    assert adapter("hello") == "{}"
+    assert prompts == [("hello", {"json_object": True})]
+
+
+def test_default_adapter_omits_json_mode_when_model_lacks_the_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Provider-neutral capability gate: a model whose Options does not
+    # declare `json_object` (non-OpenAI plugins) must get the unchanged
+    # call — passing an unknown option would raise inside llm.
+    import llm
+
+    from backstitch.analysis_llm import default_adapter
+
+    prompts: list[tuple[str, dict[str, object]]] = []
+
+    class _Response:
+        def text(self) -> str:
+            return "plain"
+
+    class _PlainModel:
+        class Options:
+            model_fields = {"temperature": object()}
+
+        def prompt(self, text: str, **options: object) -> _Response:
+            if options:
+                raise AssertionError(f"unexpected options: {options}")
+            prompts.append((text, options))
+            return _Response()
+
+    monkeypatch.setattr(llm, "get_model", lambda *a: _PlainModel())
+    adapter = default_adapter("any-model")
+    assert adapter("hello") == "plain"
+    assert prompts == [("hello", {})]
+
+
+def test_default_adapter_falls_back_when_server_rejects_json_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The Options field proves the llm wrapper accepts `json_object`, not
+    # that the server accepts `response_format`. A rejecting server must not
+    # be worse off than before JSON mode existed: the failed JSON-mode call
+    # falls back to a bare call, and subsequent calls skip JSON mode.
+    import llm
+
+    from backstitch.analysis_llm import default_adapter
+
+    prompts: list[tuple[str, dict[str, object]]] = []
+
+    class _Response:
+        def text(self) -> str:
+            return "bare"
+
+    class _RejectingModel:
+        class Options:
+            model_fields = {"json_object": object()}
+
+        def prompt(self, text: str, **options: object) -> _Response:
+            prompts.append((text, options))
+            if options.get("json_object"):
+                raise RuntimeError("server rejected response_format")
+            return _Response()
+
+    monkeypatch.setattr(llm, "get_model", lambda *a: _RejectingModel())
+    adapter = default_adapter("any-model")
+    assert adapter("first") == "bare"
+    assert adapter("second") == "bare"
+    assert prompts == [
+        ("first", {"json_object": True}),  # attempted once
+        ("first", {}),  # fell back for the same prompt
+        ("second", {}),  # JSON mode disabled for the adapter
+    ]
+
+
+def test_default_adapter_error_propagates_when_bare_call_also_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The fallback must not swallow genuine model failures: when the bare
+    # retry also fails, the exception propagates so analyze contains it as a
+    # per-packet error record exactly as before JSON mode existed.
+    import llm
+
+    from backstitch.analysis_llm import default_adapter
+
+    class _BrokenModel:
+        class Options:
+            model_fields = {"json_object": object()}
+
+        def prompt(self, text: str, **options: object) -> object:
+            raise RuntimeError("model is down")
+
+    monkeypatch.setattr(llm, "get_model", lambda *a: _BrokenModel())
+    adapter = default_adapter("any-model")
+    with pytest.raises(RuntimeError, match="model is down"):
+        adapter("hello")
+
+
+def test_llm_chat_options_map_json_object_to_response_format() -> None:
+    # Dependency-contract pin against the installed llm (uv.lock pins 0.31):
+    # extra-openai-models registrations become Chat, whose Options must keep
+    # declaring `json_object` and mapping it to response_format json_object.
+    # If a future llm drops or renames this, the adapter silently loses
+    # constrained decoding — this test makes that loud. No network involved.
+    from llm.default_plugins.openai_models import Chat
+
+    model = Chat("backstitch-contract-probe", api_base="http://127.0.0.1:1/v1")
+    assert "json_object" in model.Options.model_fields
+
+    class _FakePrompt:
+        prompt = "respond in JSON"
+        system = None
+        attachments = ()
+        fragments = ()
+        system_fragments = ()
+        tools = ()
+        schema = None
+        options = model.Options(json_object=True)
+
+    kwargs = model.build_kwargs(_FakePrompt(), stream=False)
+    assert kwargs.get("response_format") == {"type": "json_object"}
+
+
 def test_cli_analyze_non_object_packet_line_exits_two(tmp_path: Path) -> None:
     packets = tmp_path / "packets.jsonl"
     packets.write_text("42\n", encoding="utf-8")

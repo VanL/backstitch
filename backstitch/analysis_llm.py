@@ -27,13 +27,37 @@ def default_adapter(model_name: str | None = None) -> ModelAdapter:
 
     With no name, ``llm``'s configured default model is used (whatever
     ``llm models default`` reports).
+
+    When the resolved model's ``Options`` declares ``json_object`` (llm's
+    OpenAI-compatible models, cloud and ``api_base``-registered alike), the
+    adapter requests provider-enforced JSON output: constrained decoding
+    makes syntactically invalid output impossible on servers that honor
+    ``response_format``, which measurably dominates small-model failure
+    rates. The gate is a capability check, never a provider name, and models
+    without the option get the unchanged call
+    (docs/plans/2026-07-06-analyze-json-mode-plan.md).
+
+    The Options field only proves the *wrapper* accepts the option — every
+    ``api_base`` registration is llm's OpenAI ``Chat`` class — not that the
+    server behind it accepts ``response_format``. A server that rejects it
+    must not be worse off than before this option existed: a failed JSON-mode
+    call falls back to the bare call for that prompt and stops requesting
+    JSON mode on this adapter. If the bare call also fails, the exception
+    propagates and is contained per packet exactly as before.
     """
 
     import llm
 
     model = llm.get_model(model_name) if model_name else llm.get_model()
+    option_fields = getattr(getattr(model, "Options", None), "model_fields", {})
+    state = {"json_mode": "json_object" in option_fields}
 
     def call(prompt: str) -> str:
+        if state["json_mode"]:
+            try:
+                return str(model.prompt(prompt, json_object=True).text())
+            except Exception:
+                state["json_mode"] = False
         return str(model.prompt(prompt).text())
 
     return call

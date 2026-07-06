@@ -6,8 +6,11 @@ Docker Desktop VM (2026-07-06), `num_ctx 4096` / `num_predict 1024` /
 `temperature 0` passed 7 of 8 gate runs at ~25-40 s each. The earlier
 2 CPU / 8 GB timeouts were an artifact of that simulated floor, not of the
 models. The workflow stays manual `workflow_dispatch` until a dispatch on
-the actual GitHub target runner (public repo, 4 vCPU / 16 GB) passes; the
-~1-in-8 borderline-output flake is a named residual risk.
+the actual GitHub target runner (public repo, 4 vCPU / 16 GB) passes. The
+~1-in-8 borderline-output flake originally named here was subsequently
+eliminated by adapter-level constrained decoding
+(`docs/plans/2026-07-06-analyze-json-mode-plan.md`): post-change, 8/8 gate
+runs with zero contained error rows on the same hardware.
 Plan type: implementation with spec revision
 Risk level: boundary-crossing — new CI execution context, Docker service
 lifecycle, network transport to a locally hosted model, `llm` provider
