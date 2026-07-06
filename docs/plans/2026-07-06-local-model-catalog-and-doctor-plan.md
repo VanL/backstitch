@@ -1,8 +1,9 @@
 # Local Model Catalog And `backstitch doctor`
 
-Status: plan reviewed (codex round incorporated, see Independent Review
-Incorporation); ready for the spec-promotion slice. No implementation has
-started.
+Status: plan reviewed through three codex rounds; final round-3 verdict on
+the current text: "If requested, could you implement this plan confidently
+and correctly as written? **Yes**" (see Independent Review Incorporation).
+Ready for the spec-promotion slice. No implementation has started.
 Plan type: implementation with spec revision.
 Risk level: moderate — a public CLI shape changes (new `doctor` subcommand),
 so the hardening checklist applies; the change is additive, has no async or
@@ -123,10 +124,13 @@ Comprehension checks before editing:
    deterministic statements about the **target repository**; doctor makes
    statements about the invocation environment and the tool, which is the
    exit-`2` side of the dichotomy.)
-2. Why does `_cmd_doctor` import `llm` inside the handler, and which
-   existing test would fail if it were imported at module level? (Answer:
-   [SC-8]; the [SC-10] subprocess quarantine test asserting
-   `llm ∉ sys.modules` for deterministic commands.)
+2. Why does `_cmd_doctor` import `llm` inside the handler, and what does
+   [SC-8] claim proves the boundary? (Answer: [SC-8] requires lazy import
+   and says "[SC-10] proves it with a subprocess test" — but **no such
+   test exists in `tests/` as of `cc1e41c`** (verified 2026-07-06; the
+   implementation doc repeats the claim). This plan's Task 5 adds the
+   missing test, closing a latent spec-compliance gap that predates
+   doctor.)
 3. Why does the model catalog live in `docs/` and not inside the `doctor`
    command? (Answer: [CFG-9] forbids provider-specific handling in runtime
    modules, and a shipped catalog becomes a bug the moment upstream tags
@@ -134,10 +138,13 @@ Comprehension checks before editing:
 
 ## Invariants And Constraints
 
-- **No provider names in `backstitch/` code.** Doctor's checks use only the
-  `llm` API surface (`get_model`, `needs_key`, `get_key`, `Options`,
-  `api_base`) and generic HTTP. Strings like "ollama" or "openai" may
-  appear in docs and remedies text pointing at docs, never in control flow.
+- **No provider names in `backstitch/` code — including remedy strings.**
+  Doctor's checks use only the `llm` API surface (`get_model`,
+  `needs_key`, `get_key`, `Options`, `api_base`) and generic HTTP. Remedy
+  text points at the catalog doc path generically
+  (`docs/implementation/06-choosing-a-local-model.md`), which is where
+  provider names live. This keeps the provider-name grep test over
+  `backstitch/doctor.py` unconditional — no carveout to fight it.
   ([CFG-9] invariant carried over from the local-lane plan.)
 - **Default doctor performs no network I/O and no model generation.**
   Reachability requires `--probe`. Generation probes are out of scope for
@@ -148,9 +155,12 @@ Comprehension checks before editing:
 - **Exit contract: `0` iff no check has status `fail` (skips never affect
   the exit code), `2` when any check fails or doctor itself cannot run.
   Never `1`.** ([SC-5] dichotomy.)
-- **Lazy `llm` import inside `_cmd_doctor` only.** `check`/`packets` stay
-  structurally incapable of importing `llm`; the existing [SC-10]
-  subprocess quarantine test must stay green unmodified.
+- **Lazy `llm` import: no top-level `llm` import in `cli.py` or
+  `doctor.py`.** `llm` may be imported only inside doctor
+  execution/check functions (the check engine lives in `doctor.py`, so
+  the boundary is function-level there, not "handler-only" in `cli.py`).
+  `check`/`packets` stay structurally incapable of importing `llm`,
+  proven by the quarantine test Task 5 adds.
 - **Doctor writes no backstitch state and creates no files itself** (v1:
   stdout only — no `--output` flag, YAGNI). Caveat, verified against llm
   0.31: `llm.get_model()`/`llm.get_key()` reach `llm.user_dir()`, which
@@ -174,10 +184,16 @@ Comprehension checks before editing:
 
 ## Hidden Couplings
 
-- **[SC-10] quarantine test.** It asserts `llm ∉ sys.modules` after
-  deterministic commands. Doctor is not deterministic and must not be added
-  to that test's command list; verify the test is parameterized by command
-  before assuming.
+- **[SC-10] quarantine test does not exist yet.** [SC-8] claims a
+  subprocess test proves `llm ∉ sys.modules` for deterministic commands,
+  and `docs/implementation/04-backstitch-style-traceability.md` repeats
+  the claim — but no such test exists in `tests/` (verified 2026-07-06,
+  found during this plan's adversarial review). Task 5 adds it: a
+  subprocess per deterministic command (`check`, `packets`) that invokes
+  the CLI in-process and asserts `"llm" not in sys.modules` afterward.
+  `doctor` and `analyze` are deliberately NOT in that list. Adding the
+  test makes the existing spec and doc claims true — no spec text change
+  needed for this item.
 - **`resolve_model_name` raises/returns on unknown models via
   `default_adapter`'s `KeyError` path in analyze.** Doctor must catch
   `llm.UnknownModelError` (a `KeyError` subclass) itself and convert it to
@@ -211,7 +227,7 @@ Promotion strategy per file:
 | Spec file | Strategy | Sections touched |
 |-----------|----------|------------------|
 | `docs/specs/02-backstitch-core.md` | A — in-file: [SC-5] and [SC-8] are text edits to already-mapped sections; new [SC-14] lands text-first without a mapping block (mapping + code + backlink land together in the doctor code slice) | [SC-5], [SC-8], new [SC-14], Related Plans |
-| `docs/specs/03-backstitch-configuration.md` | none — no CFG text change; doctor reuses [CFG-5] resolution unchanged | Related Plans only |
+| `docs/specs/03-backstitch-configuration.md` | A — in-file: one row added to [CFG-3]'s already-mapped discovery-anchor table | [CFG-3], Related Plans |
 
 ### [SC-5] — add after the `summarize-analysis` command block
 
@@ -252,7 +268,9 @@ with:
 > ## 14. Environment Doctor [SC-14]
 >
 > `backstitch doctor` reports the health of the semantic-analysis
-> environment as an ordered list of named checks. Each check yields
+> environment as an ordered list of named checks, emitted in exactly the
+> order they are defined below (output order is part of the contract for
+> both text and JSON formats). Each check yields
 > `pass`, `fail`, or `skip` with a one-line detail and, on failure, a
 > one-line remedy naming the required action. Checks are provider-neutral:
 > they consult only the `llm` library's public surface and generic HTTP,
@@ -283,7 +301,8 @@ with:
 >   unauthenticated `GET <api_base>/models` within a bounded timeout. A
 >   connection failure, timeout, or HTTP status other than `200`, `401`,
 >   or `403` is a failure. On `200`, the served model name — the model's
->   `model_name` attribute when present, otherwise the resolved name (an
+>   `model_name` attribute when present, otherwise its `model_id` (the
+>   identifier `llm`'s OpenAI wrapper actually sends to the server; an
 >   `api_base` registration resolves an alias while the server lists the
 >   served upstream name) — must appear in the returned OpenAI-style
 >   `data[].id` list, else the check fails with the ids seen. On `401` or
@@ -291,6 +310,15 @@ with:
 >   detail stating that the model list is authentication-gated and
 >   membership was not verified. No credential is ever sent; no generation
 >   is performed.
+>
+> Allowed statuses per check (an implementation must not emit others):
+> `llm-import` — `pass`/`fail`; `model` — `pass`/`fail`, `skip` when
+> `llm-import` failed; `credential` — `pass`/`fail`, `skip` when the model
+> is unresolved; `json-mode` — `pass` (the detail states whether
+> constrained decoding is available), `skip` when the model is unresolved;
+> `memory` — `pass` only (undetectable memory is a `pass` with an
+> "unknown" detail); `endpoint` — `pass`/`fail`, `skip` without `--probe`,
+> when the model is unresolved, or when the model has no `api_base`.
 >
 > `--format json` emits `{"checks": [{"name": ..., "status":
 > "pass"|"fail"|"skip", "detail": ..., "remedy": ...}], "ok": <bool>}`;
@@ -303,18 +331,23 @@ with:
 > `llm.user_dir()` behavior doctor inherits, not a doctor write), and
 > must not import `llm` at module import time ([SC-8]).
 
-### `docs/specs/03-backstitch-configuration.md`
+### `docs/specs/03-backstitch-configuration.md` [CFG-3] — add one row to the §3.1 discovery-anchor table
 
-`## Related Plans` gains this plan as `(implementing)`; no section text
-changes. Doctor introduces no config key: it reads the same `[analyze]`
-settings analyze reads, which [CFG-5] already governs.
+> | `doctor` | current working directory after `resolve()` |
+
+(The table currently lists `check`, `packets`, `analyze`, and
+`summarize-analysis`; [CFG-3] owns command discovery anchors, so doctor's
+cwd anchor must be recorded there, not only in [SC-5].) `## Related Plans`
+gains this plan as `(implementing)`. Doctor introduces no config key: it
+reads the same `[analyze]` settings analyze reads, which [CFG-5] already
+governs.
 
 ## Rollout And Rollback
 
 Rollout: slices below, dependency-ordered; everything is additive. The
 bake-off (Task 3) runs on the author's machine and touches no repo runtime;
-native Ollama installation is a machine change requiring the owner's
-go-ahead recorded in the task.
+the native lane uses the already-installed LM Studio (no new software), and
+the Docker Ollama container stays as the CI-shaped lane.
 
 Rollback: remove the `doctor` subparser/handler/tests and the catalog doc;
 revert the [SC-5]/[SC-8]/[SC-14] edits in a spec-revision slice. No
@@ -370,10 +403,13 @@ doctor rollback (it is independently useful).
      2026-07-06 via `os.sysconf` — so the 32B row is comfortably in
      scope). Baseline row: the recorded `llama3.2:3b` Docker evidence (do
      not re-run).
-   - Per candidate: 8 lenient gate runs + 3 strict runs via
-     `BACKSTITCH_LIVE_LLM=1 BACKSTITCH_LIVE_LLM_KIND=local
-     BACKSTITCH_LOCAL_LLM_SERVED_MODEL=<bounded-alias> uv run pytest
-     tests/live/test_live_llm.py -q`; record wall-clock per run, peak
+   - Per candidate: 8 lenient gate runs via `BACKSTITCH_LIVE_LLM=1
+     BACKSTITCH_LIVE_LLM_KIND=local
+     BACKSTITCH_LOCAL_LLM_SERVED_MODEL=<served-id> uv run pytest
+     tests/live/test_live_llm.py -q`, then 3 strict runs with
+     `BACKSTITCH_LIVE_LLM_STRICT=1` **added to the same command** (the
+     test only enters strict mode when that variable is set — omitting it
+     silently measures more lenient runs); record wall-clock per run, peak
      memory if observable, and keep one `analysis.jsonl` sample per model
      (pytest `--basetemp`) for the qualitative rationale note.
    - Stop-and-re-evaluate gate: if a candidate cannot finish a single run
@@ -421,7 +457,14 @@ doctor rollback (it is independently useful).
      surface only), `memory` (info-only). `endpoint` reports `skip`
      without `--probe`.
    - Reuse: `resolve_model_name` for precedence.
-   - Confirm the [SC-10] quarantine test still passes untouched.
+   - **Add the missing [SC-10] quarantine test** (it does not exist —
+     see Hidden Couplings): for each deterministic command (`check`,
+     `packets`), a subprocess runs
+     `python -c "import sys; from backstitch.cli import main; main([...]);
+     assert 'llm' not in sys.modules"` against a minimal fixture repo.
+     `doctor` and `analyze` are excluded by design. This closes a latent
+     [SC-8] compliance gap that predates this plan and makes the existing
+     claim in `04-backstitch-style-traceability.md` true.
    - Done: hermetic suite green; `uv run backstitch doctor` on this repo
      reports honestly (expected: pass rows for the pinned llm, model per
      config, keyless or keyed per environment).
@@ -436,9 +479,10 @@ doctor rollback (it is independently useful).
      `tests/test_live_llm_helpers.py`): listed model → pass; reachable but
      model absent → fail with ids in detail; connection refused → fail;
      `401` → reachable; no `api_base` on the model → skip.
-   - Done: suite green; manual proof against the running local Ollama
-     (`backstitch doctor --probe` with the lane env set) recorded in the
-     plan log.
+   - Done: suite green; manual proof recorded in the plan log against a
+     real local server — LM Studio natively (`127.0.0.1:1234/v1`) and/or
+     the Docker Ollama lane — via `backstitch doctor --probe` with the
+     lane env set.
 
 7. **Traceability reconciliation.**
    - Mappings/backlinks complete ([SC-14] ↔ `backstitch/doctor.py`,
@@ -467,14 +511,18 @@ doctor rollback (it is independently useful).
 - The `--probe` port of `_read_json_url` must special-case `401`/`403` as
   reachable-but-auth-gated; the live-lane helper deliberately fails all
   HTTP errors, so this is a divergence to implement and test, not copy.
-- Contract bias: the `--format json` shape, exit codes `0`/`2`, each
-  check's three statuses, and the no-traceback rule each have a named test.
-- Live proof (opt-in, not CI): `backstitch doctor --probe` against the
-  running local Ollama, and one deliberately broken env (unset model /
-  stopped server) showing fail rows + exit 2.
-- Invariants protected: [SC-8] quarantine (existing subprocess test),
-  [SC-5] exit dichotomy, [CFG-9] provider neutrality (a test greps
-  `backstitch/doctor.py` for provider-name strings — crude but firing).
+- Contract bias: the `--format json` shape, exit codes `0`/`2`, **each
+  allowed status of each check** (per the [SC-14] allowed-status table —
+  not all checks can validly reach all three statuses), and the
+  no-traceback rule each have a named test.
+- Live proof (opt-in, not CI): `backstitch doctor --probe` against a real
+  local server (LM Studio natively and/or the Docker Ollama lane), and one
+  deliberately broken env (unset model / stopped server) showing fail rows
+  + exit 2.
+- Invariants protected: [SC-8] quarantine (the subprocess test Task 5
+  adds — it does not exist before this plan), [SC-5] exit dichotomy,
+  [CFG-9] provider neutrality (a test greps `backstitch/doctor.py` for
+  provider-name strings — crude but firing).
 
 ## Verification And Gates
 
@@ -542,6 +590,43 @@ into `backstitch/` against [CFG-9] (dropped in favor of the hermetic
 test); the bake-off assumed native Ollama while the host actually runs LM
 Studio (Task 3 rewritten accordingly); host memory measured at 128 GB,
 putting the 32B row in scope.
+
+Codex round 2 (adversarial re-review of the revised plan, asked literally
+"If requested, could you implement this plan confidently and correctly as
+written?"): confirmed all five round-1 P1s resolved, verdict still **No**
+on four new P1s and two P2s — all folded in:
+
+- **P1 [CFG-3] owns command discovery anchors**, so "no CFG text change"
+  left two specs out of sync; the delta now adds a `doctor` row to the
+  [CFG-3] §3.1 anchor table.
+- **P1 the bake-off's "3 strict runs" omitted `BACKSTITCH_LIVE_LLM_STRICT=1`**
+  and would silently have measured more lenient runs; command fixed.
+- **P1 the [SC-10] `llm ∉ sys.modules` quarantine test this plan told the
+  implementer to "confirm" does not exist** — [SC-8] and the traceability
+  doc both claim it, but `tests/` has no such test (verified 2026-07-06).
+  Task 5 now adds it, closing a latent spec-compliance gap that predates
+  this plan.
+- **P1 "each check's three statuses" was unimplementable** (`memory` can
+  never fail; `llm-import` has no meaningful skip); [SC-14] now carries an
+  allowed-statuses-per-check table and the testing plan requires coverage
+  per allowed status.
+- **P2 stale Ollama references** in Rollout, Task 6, and the live-proof
+  lines after the LM Studio rewrite; all now name LM Studio natively with
+  Docker Ollama as the CI-shaped lane.
+- **P2 `/models` membership fallback**: `model_name` else `model_id` (what
+  `llm`'s wrapper actually sends), not the resolved alias.
+
+Codex round 3 (adversarial, same literal question): verified all round-2
+findings genuinely resolved in the text; **no P1 findings**; verdict —
+**"If requested, could you implement this plan confidently and correctly
+as written? Yes."** Three P2 refinements, all folded in: the lazy-import
+invariant restated as "no top-level `llm` import in `cli.py` or
+`doctor.py`; `llm` only inside doctor execution/check functions" (so the
+check engine is not forced into `cli.py`); provider names banned from
+runtime remedy strings outright so the [CFG-9] grep test has no carveout
+to fight (remedies point at the catalog doc path, where provider names
+live); and [SC-14] now states that check output order is the defined
+order, for both formats.
 
 ## Out Of Scope
 
