@@ -1442,6 +1442,18 @@ accept-and-close listener instead of assuming a closed host port.
   committed workflow default. `qwen2.5:0.5b` was abandoned after producing
   total invalid rows in every environment tested. The trigger stays
   manual-first pending target-runner evidence.
-- **Trigger — manual first.** Initial scope is `workflow_dispatch` only.
-  Graduating to `push: main`, broader push triggers, or fork PRs requires a
-  target-runner pass and, for fork PRs, the Threat-Model-gated step.
+- **Trigger — graduated to `push: main` + release gate (2026-07-07).** The
+  lane now runs on `workflow_dispatch` and every push to `main`, and
+  `release-gate.yml` requires the `local-llm` workflow green on the release
+  commit (via `require_green_workflows.py --workflow "local-llm"`), following
+  simplebroker's model of requiring a service-backed test workflow by name
+  before publishing. Still **not** on `pull_request`: fork-PR exposure remains
+  a separate Threat-Model-gated step.
+  **Open validation risk:** the graduation precondition in the original plan
+  was "target-runner evidence shows a model passes." That evidence is still
+  only from a 16 vCPU / 16 GB local box; `llama3.2:3b` on the actual public
+  GitHub runner (4 vCPU / 16 GB, CPU-only) is **unproven**. The first push to
+  `main` is that validation: if the bounded `llama3.2:3b` lenient gate does not
+  pass within the 15-minute step budget there, `main` goes red and releases
+  block until the model/timeout/packet budget is tuned. Treat the first main
+  run as the acceptance gate before relying on a release.

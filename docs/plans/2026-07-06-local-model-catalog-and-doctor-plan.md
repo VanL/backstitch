@@ -1,9 +1,22 @@
 # Local Model Catalog And `backstitch doctor`
 
-Status: plan reviewed through three codex rounds; final round-3 verdict on
-the current text: "If requested, could you implement this plan confidently
-and correctly as written? **Yes**" (see Independent Review Incorporation).
-Ready for the spec-promotion slice. No implementation has started.
+Status: doctor implemented (2026-07-06). Tasks 2 (spec promotion: [SC-5],
+[SC-8], new [SC-14] with mapping, [CFG-3] doctor anchor row), 5 and 6
+(`backstitch/doctor.py`, CLI wiring, `tests/test_doctor.py` — 21 hermetic
+tests; live proof against the running Docker Ollama lane: healthy `--probe`
+all-pass exit 0, broken env fail/skips exit 2 with remedies), and the
+doctor-scope parts of Task 7 (repo map, implementation index, traceability
+doc, README pointer) are complete. Task 4 is partial: the catalog doc
+exists with the one measured row (`llama3.2:3b` baseline) and explicit
+pending-sweep notes; Task 3 (LM Studio bake-off sweep) has not run. The
+Task 7 "twelve → thirteen probes" addendum was already fixed by the
+concurrent organization refactor (verified — no occurrences remain).
+Plan reviewed through three codex rounds pre-implementation (round-3
+verdict: "Yes"); post-implementation adversarial codex review ran two
+rounds (round 1: five P1s, all fixed with firing tests; round 2 verified
+every fix and answered "Does the implementation faithfully satisfy the
+promoted [SC-14]/[SC-5]/[SC-8]/[CFG-3] contracts as written? **Yes**" with
+no findings). Details in Independent Review Incorporation.
 Plan type: implementation with spec revision.
 Risk level: moderate — a public CLI shape changes (new `doctor` subcommand),
 so the hardening checklist applies; the change is additive, has no async or
@@ -80,7 +93,20 @@ measured rows and external users exist (see Out Of Scope).
   `docs/specs/03-backstitch-configuration.md`. Sections [SC-1]–[SC-13] are
   active; the new section lands as `## 14. Environment Doctor [SC-14]`
   between [SC-13] and `## Related Plans`.
-- Promotion baseline identifier: recorded after the spec-promotion slice.
+- Environment change at implementation start (2026-07-06, worktree over
+  `df320ab`): the organization-refactor plan landed in the working tree
+  concurrently — `cli.py` is now a thin dispatcher over
+  `check_pipeline.py`/`artifact_contracts.py`, and the [SC-10] `llm`
+  quarantine subprocess test this plan's Task 5 was going to add **now
+  exists** in `tests/test_cli.py` (covering exactly `check` and
+  `packets`). Task 5 therefore verifies doctor stays out of that command
+  list instead of creating the test. `_cmd_analyze`'s contract-relevant
+  shape (handler-level lazy imports, `resolve_model_name` precedence) is
+  unchanged; stale line numbers in Context are superseded by the refactor.
+- Promotion baseline identifier: worktree over `df320ab` with the
+  organization refactor present, after the spec-promotion edits below;
+  verified by `uv run backstitch check --repo-root .` (exit 0, zero
+  errors, zero warnings).
 
 ## Deviation Log
 
@@ -490,6 +516,13 @@ doctor rollback (it is independently useful).
      ([04]) updated to mention doctor next to the quarantine bullet;
      repository map row for `backstitch/doctor.py`; lessons captured if
      any; final gates below.
+   - While updating SC-10-adjacent docs, correct stale "twelve probes"
+     wording to the current thirteen-probe acceptance suite in
+     `tests/acceptance/README.md`, `docs/implementation/02-repository-map.md`,
+     and `docs/implementation/04-backstitch-style-traceability.md`. This is
+     existing doc drift, but this plan already touches the [SC-10] quarantine
+     proof and the same implementation docs, so it should not leave the stale
+     count behind.
 
 ## Testing Plan
 
@@ -616,10 +649,36 @@ on four new P1s and two P2s — all folded in:
 - **P2 `/models` membership fallback**: `model_name` else `model_id` (what
   `llm`'s wrapper actually sends), not the resolved alias.
 
-Codex round 3 (adversarial, same literal question): verified all round-2
-findings genuinely resolved in the text; **no P1 findings**; verdict —
-**"If requested, could you implement this plan confidently and correctly
-as written? Yes."** Three P2 refinements, all folded in: the lazy-import
+Post-implementation adversarial codex review (round 1, 2026-07-06):
+verdict on the initial implementation was **No** — five P1s, all fixed
+with firing tests in the same slice:
+
+- **Credential discovery diverged from analyze's path**: a key attached
+  to the resolved model (`model.key`, which llm 0.31 honors first at
+  execution) would have failed doctor's check; doctor now checks the
+  attached key before stored/env lookup.
+- **The probe silently followed redirects**, hiding non-200/401/403
+  statuses and probing a different URL than `<api_base>/models`; a
+  no-redirect opener now surfaces 3xx as a failure (tested with a real
+  302 server).
+- **Unbounded `response.read()`**: a huge or drip-fed body could stall
+  doctor past any budget; reads are now capped (`PROBE_MAX_BODY_BYTES`)
+  under a wall-clock deadline (tested with an oversized payload).
+- **The `extra-openai-models.yaml` remedy string plus a test carve-out
+  contradicted the provider-neutrality invariant as written**; the
+  filename is gone from runtime strings (remedies point at the README
+  local-lane section) and the grep test has no carve-outs.
+- **Hostile model names with newlines broke the one-line detail
+  contract**; all details/remedies are whitespace-normalized (tested).
+
+Its two P2 test-gap findings also landed: the loopback fixture now
+asserts the exact probe path and the absence of an Authorization header,
+plus new 302/403/oversized-body/llm-import-failure tests.
+
+Pre-implementation plan review history — codex round 3 (adversarial, same
+literal question): verified all round-2 findings genuinely resolved in
+the text; **no P1 findings**; verdict — **"If requested, could you
+implement this plan confidently and correctly as written? Yes."** Three P2 refinements, all folded in: the lazy-import
 invariant restated as "no top-level `llm` import in `cli.py` or
 `doctor.py`; `llm` only inside doctor execution/check functions" (so the
 check engine is not forced into `cli.py`); provider names banned from
