@@ -7,7 +7,7 @@ name = "backstitch"
 version = "0.1.0"
 description = "Backstitch style spec-code traceability checks and semantic review tooling"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 license = {text = "MIT"}
 authors = [
     {name = "Van Lindberg", email = "van@modelmonster.ai"},
@@ -25,9 +25,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Documentation",
     "Topic :: Software Development :: Quality Assurance",
@@ -96,7 +93,7 @@ warn_unused_ignores = true
 exclude = "(^tests/fixtures/)"
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py314"
 line-length = 88
 
 [tool.ruff.lint]

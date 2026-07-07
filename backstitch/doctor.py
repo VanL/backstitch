@@ -262,7 +262,7 @@ def _detected_memory_gib() -> float | None:
     try:
         pages = os.sysconf("SC_PHYS_PAGES")
         page_size = os.sysconf("SC_PAGE_SIZE")
-    except (ValueError, OSError, AttributeError):
+    except ValueError, OSError, AttributeError:
         return None
     if pages <= 0 or page_size <= 0:
         return None
