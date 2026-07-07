@@ -158,6 +158,263 @@ def test_tilde_fences_are_skipped(tmp_path: Path) -> None:
     assert [s.section_id for s in parsed.sections] == ["T-1"]
 
 
+def test_commonmark_heading_forms_define_sections(tmp_path: Path) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "# T\n\nSetext Section [T-1]\n====================\n\n## ATX Close [T-2] ##\n",
+        encoding="utf-8",
+    )
+    parsed = parse_markdown_spec(doc, tmp_path)
+    by_id = {s.section_id: s for s in parsed.sections}
+    assert by_id["T-1"].title == "Setext Section"
+    assert by_id["T-1"].anchor == "setext-section-t-1"
+    assert by_id["T-2"].title == "ATX Close"
+    assert by_id["T-2"].anchor == "atx-close-t-2"
+
+
+def test_commonmark_fence_closer_with_info_string_does_not_close(
+    tmp_path: Path,
+) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "# T\n\n"
+        "## Real [T-1]\n\n"
+        "```\n"
+        "```python\n"
+        "## Phantom [T-9]\n"
+        "_Implementation mapping_: `pkg/phantom.py`\n"
+        "```\n",
+        encoding="utf-8",
+    )
+    parsed = parse_markdown_spec(doc, tmp_path)
+    assert [s.section_id for s in parsed.sections] == ["T-1"]
+    assert parsed.mappings == ()
+
+
+def test_indented_code_blocks_define_no_traceability_constructs(
+    tmp_path: Path,
+) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "# T\n\n"
+        "## Real [T-1]\n\n"
+        "    _Implementation mapping_: `pkg/phantom.py`\n"
+        "    - **T-9**: Phantom invariant\n"
+        "    ```\n"
+        "    ## Phantom [T-10]\n"
+        "    ```\n",
+        encoding="utf-8",
+    )
+    parsed = parse_markdown_spec(doc, tmp_path)
+    assert [s.section_id for s in parsed.sections] == ["T-1"]
+    assert parsed.mappings == ()
+
+
+def test_standalone_html_traceability_markers_still_apply(
+    tmp_path: Path,
+) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "<!-- backstitch: ignore SPEC_SECTION_UNMAPPED -->\n"
+        "## Real [T-1]\n"
+        "<!-- backstitch: meta -->\n"
+        "Body text.\n",
+        encoding="utf-8",
+    )
+    parsed = parse_markdown_spec(doc, tmp_path)
+    assert parsed.file_ignores == frozenset({"SPEC_SECTION_UNMAPPED"})
+    assert parsed.section_markers == (("T-1", True, frozenset()),)
+
+
+def test_standalone_html_traceability_markers_are_case_insensitive(
+    tmp_path: Path,
+) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "<!-- BACKSTITCH: IGNORE SPEC_SECTION_UNMAPPED -->\n## Real [T-1]\n",
+        encoding="utf-8",
+    )
+    parsed = parse_markdown_spec(doc, tmp_path)
+    assert parsed.file_ignores == frozenset({"SPEC_SECTION_UNMAPPED"})
+
+
+def test_traceability_paragraph_markers_are_case_insensitive(
+    tmp_path: Path,
+) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "_traceability: ignore SPEC_SECTION_UNMAPPED_\n## Real [T-1]\n",
+        encoding="utf-8",
+    )
+    parsed = parse_markdown_spec(doc, tmp_path)
+    assert parsed.file_ignores == frozenset({"SPEC_SECTION_UNMAPPED"})
+
+
+def test_mapping_tokens_use_parser_inline_code_content_and_source_lines(
+    tmp_path: Path,
+) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "# T\n\n## Real [T-1]\n\n_Implementation mapping_: ` pkg/a.py `,\n`pkg/b.py`\n",
+        encoding="utf-8",
+    )
+    parsed = parse_markdown_spec(doc, tmp_path)
+    assert [(m.target, m.line) for m in parsed.mappings] == [
+        ("pkg/a.py", 5),
+        ("pkg/b.py", 6),
+    ]
+
+
+def test_duplicate_mapping_targets_on_later_lines_keep_source_lines(
+    tmp_path: Path,
+) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "# T\n\n## Real [T-1]\n\n_Implementation mapping_: `pkg/a.py`\n`pkg/a.py`\n",
+        encoding="utf-8",
+    )
+    parsed = parse_markdown_spec(doc, tmp_path)
+    assert [(m.target, m.line) for m in parsed.mappings] == [
+        ("pkg/a.py", 5),
+        ("pkg/a.py", 6),
+    ]
+
+
+def test_mapping_block_continues_through_tight_and_loose_lists(
+    tmp_path: Path,
+) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "# T\n\n"
+        "## Tight [T-1]\n\n"
+        "_Implementation mapping_:\n"
+        "- `pkg/tight-a.py`\n"
+        "- `pkg/tight-b.py`\n\n"
+        "## Loose [T-2]\n\n"
+        "_Implementation mapping_:\n\n"
+        "- `pkg/loose-a.py`\n\n"
+        "- `pkg/loose-b.py`\n",
+        encoding="utf-8",
+    )
+    parsed = parse_markdown_spec(doc, tmp_path)
+    assert [(m.section_id, m.target) for m in parsed.mappings] == [
+        ("T-1", "pkg/tight-a.py"),
+        ("T-1", "pkg/tight-b.py"),
+        ("T-2", "pkg/loose-a.py"),
+        ("T-2", "pkg/loose-b.py"),
+    ]
+
+
+def test_invariant_list_after_mapping_marker_is_not_mapping_continuation(
+    tmp_path: Path,
+) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "# T\n\n"
+        "### Invariants\n\n"
+        "_Implementation mapping_: `pkg/owner.py`\n\n"
+        "- **INV-1**: first invariant maps no target despite `pkg/example.py`\n"
+        "- **INV-2**: second invariant\n"
+        "  wraps to another source line\n",
+        encoding="utf-8",
+    )
+    parsed = parse_markdown_spec(doc, tmp_path)
+    assert [(s.section_id, s.title) for s in parsed.sections] == [
+        ("INV-1", "first invariant maps no target despite `pkg/example.py`"),
+        ("INV-2", "second invariant"),
+    ]
+    assert parsed.mappings == ()
+    assert [i.code for i in parsed.issues] == ["MAPPING_BLOCK_OWNERLESS"]
+
+
+def test_mapping_list_can_start_with_plain_item_then_mapping_item(
+    tmp_path: Path,
+) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "# T\n\n"
+        "## Real [T-1]\n\n"
+        "_Implementation mapping_:\n\n"
+        "- note for readers\n"
+        "- `pkg/owner.py`\n",
+        encoding="utf-8",
+    )
+    parsed = parse_markdown_spec(doc, tmp_path)
+    assert [(m.section_id, m.target) for m in parsed.mappings] == [
+        ("T-1", "pkg/owner.py"),
+    ]
+
+
+def test_wrapped_bracket_bullet_mapping_defines_subsection(
+    tmp_path: Path,
+) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "# T\n\n"
+        "## Real [T-1]\n\n"
+        "_Implementation mapping_:\n\n"
+        "- [T-1.1] Wrapped subsection —\n"
+        "  more detail `pkg/owned.py`\n",
+        encoding="utf-8",
+    )
+    parsed = parse_markdown_spec(doc, tmp_path)
+    assert [(s.section_id, s.kind, s.title) for s in parsed.sections] == [
+        ("T-1", "heading", "Real"),
+        ("T-1.1", "bullet", "Wrapped subsection"),
+    ]
+    assert [(m.section_id, m.target, m.line) for m in parsed.mappings] == [
+        ("T-1.1", "pkg/owned.py", 8),
+    ]
+
+
+def test_invariant_item_inside_mapping_list_is_not_mapping_content(
+    tmp_path: Path,
+) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "# T\n\n"
+        "## Real [T-1]\n\n"
+        "_Implementation mapping_:\n\n"
+        "- `pkg/owner.py`\n"
+        "- **INV-1**: invariant text is not a mapping `pkg/notmapping.py`\n",
+        encoding="utf-8",
+    )
+    parsed = parse_markdown_spec(doc, tmp_path)
+    assert [(s.section_id, s.kind) for s in parsed.sections] == [
+        ("T-1", "heading"),
+        ("INV-1", "invariant"),
+    ]
+    assert [(m.section_id, m.target) for m in parsed.mappings] == [
+        ("T-1", "pkg/owner.py"),
+    ]
+
+
+def test_blockquotes_and_ordered_lists_do_not_declare_traceability(
+    tmp_path: Path,
+) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "# T\n\n"
+        "## Real [T-1]\n\n"
+        "> ## Phantom [T-9]\n"
+        "> _Implementation mapping_: `pkg/quoted.py`\n\n"
+        "1. _Implementation mapping_: `pkg/ordered.py`\n"
+        "2. **T-10**: ordered invariant example\n",
+        encoding="utf-8",
+    )
+    parsed = parse_markdown_spec(doc, tmp_path)
+    assert [s.section_id for s in parsed.sections] == ["T-1"]
+    assert parsed.mappings == ()
+
+
+def test_fixture_mapping_line_numbers_come_from_source_tokens() -> None:
+    parsed = parse_markdown_spec(WEFT_STYLE, FIXTURE_ROOT)
+    route = sorted(m.line for m in parsed.mappings if m.section_id == "ROUTE-A1.1")
+    dirmap = sorted(m.line for m in parsed.mappings if m.section_id == "DIRMAP-1")
+    assert route == [11, 11, 11]
+    assert dirmap == [33, 33, 34]
+
+
 def test_deeper_idless_subheading_keeps_mapping_ownership(
     tmp_path: Path,
 ) -> None:

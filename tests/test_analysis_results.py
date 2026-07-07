@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from backstitch.analysis_results import (
     load_analysis_results,
@@ -21,8 +22,10 @@ CLEAN_PROFILE = get_profile("backstitch-style-v1").with_overrides(
     spec_roots=("docs/specs",), code_roots=("pkg",)
 )
 
-VALID_ROW = {
-    "packet_id": "docs/specs/01-Clean.md#CLEAN-1",
+PACKET_ID = "docs/specs/01-Clean.md#CLEAN-1"
+
+VALID_ROW: dict[str, Any] = {
+    "packet_id": PACKET_ID,
     "classification": "ok",
     "confidence": 0.9,
     "rationale": "snippet matches the spec",
@@ -38,7 +41,7 @@ def _row(**overrides: object) -> str:
 
 
 def test_valid_rows_load() -> None:
-    load = load_analysis_results(_row() + "\n", {VALID_ROW["packet_id"]})
+    load = load_analysis_results(_row() + "\n", {PACKET_ID})
     assert load.errors == ()
     assert len(load.results) == 1
     result = load.results[0]
@@ -56,7 +59,7 @@ def test_invalid_json_row_is_analysis_error_not_crash() -> None:
 def test_unknown_packet_id_is_analysis_error() -> None:
     load = load_analysis_results(
         _row(packet_id="docs/specs/01-Clean.md#NOPE-1") + "\n",
-        {VALID_ROW["packet_id"]},
+        {PACKET_ID},
     )
     assert load.results == ()
     assert any("unknown packet" in e for e in load.errors)

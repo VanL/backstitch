@@ -41,7 +41,7 @@ jobs:
           tests/test_release_workflow.py
           tests/test_release_workflow_gate.py
       - name: Types
-        run: uv run mypy backstitch bin/release.py --config-file pyproject.toml
+        run: uv run mypy backstitch bin/release.py tests --config-file pyproject.toml
       - name: Self-corpus gate
         run: uv run backstitch check --repo-root .
 

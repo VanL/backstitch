@@ -149,6 +149,43 @@ convergence; build floors that catch deficiency on any path:
 Divergence between attempts is often productive — harvest it. Deficiency is
 the failure mode, and it is orthogonal to which design was chosen.
 
+## 14. Cohesion Over File Size (Floors, Not Line Counts)
+
+Large cohesive files are deliberate, not neglected debt. Do not propose or
+perform a file split on size grounds alone, and do not treat file size by
+itself as a review finding.
+
+Agents navigate by grep and read by offset; a big well-named file is a
+pre-joined index. Every module boundary is a place an agent must correctly
+guess that relevant code lives elsewhere, and agents miss at boundaries far
+more often than they miss things in front of them — lazy imports and
+indirection are invisible walls. Splitting genuinely coupled code
+manufactures false seams, and false seams breed parallel-implementation
+drift.
+
+Two floors apply instead of a line count. Violating a floor is a finding,
+however small the file:
+
+1. **Every implicit coupling gets an explicit marker at the edit point** — a
+   blast-radius comment, an invariant note, or an enforcing helper for
+   groups that must change together. An agent should never need to already
+   know the file to edit it safely.
+2. **Every state machine gets a name and a contract test.** Live runtime
+   coupling (render timing, transaction ordering, queue semantics) must be a
+   named unit with its own firing test; unnamed state machines cannot be
+   contract-tested and silently diverge.
+
+Distinguish the two kinds of coupling. A wide flat method surface sharing a
+schema is structural coupling — safe at any size under floor 1. Pieces
+interacting through live state are behavioral coupling — floor 2 applies,
+and extraction is justified to create the testable boundary, not to shrink
+the file. `backstitch/resolver.py` is the local model: roughly 900 lines,
+one module docstring naming its five phases and its purity contract, no
+split.
+
+One cost to price in: a hot file serializes parallel agent write-slices.
+Keep fan-out write scopes disjoint or sequence them.
+
 ## Warning Signs
 
 Sessions usually go sideways when one of these happens:

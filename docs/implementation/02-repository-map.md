@@ -18,11 +18,13 @@ Quick pointers to the key guidance documents in this repository.
 | `backstitch/` | Python package for the backstitch CLI and traceability implementation |
 | `backstitch/grammar.py` | Single section-ID regex shared by both parsers ([SC-4]) |
 | `backstitch/models.py` | Frozen graph/issue datatypes; canonical `ISSUE_CODES` ([SC-11]) |
+| `backstitch/artifact_contracts.py` | Packet JSONL and deterministic-report validation at trust boundaries ([SC-6], [SC-13]) |
 | `backstitch/config.py` | `ProfileConfig` and overrides ([SC-3]) |
 | `backstitch/profiles.py` | Built-in `backstitch-style-v1` profile ([SC-3]) |
-| `backstitch/markdown_specs.py` | Spec parser: sections, mappings, markers ([SC-4], [EXC-4]) |
+| `backstitch/markdown_specs.py` | Traceability layer over `markdown-it-py` CommonMark tokens: sections, mappings, markers ([SC-4], [EXC-4]) |
 | `backstitch/python_refs.py` | Code parser: backlinks, noqa spans ([SC-4], [EXC-5]) |
 | `backstitch/resolver.py` | Pure `resolve()` + `scan_repository` ([SC-4], [SC-9]) |
+| `backstitch/check_pipeline.py` | Shared scan + suppression pipeline for deterministic command consumers ([SC-5], [EXC-6], [EXC-7]) |
 | `backstitch/reporting.py` | Text/JSON rendering, suppressed view ([SC-6], [EXC-7]) |
 | `backstitch/settings.py` | TOML discovery/validation ([CFG-*]) |
 | `backstitch/exclusions.py` | Suppression engine ([EXC-*]) |
@@ -30,8 +32,9 @@ Quick pointers to the key guidance documents in this repository.
 | `backstitch/analysis_packets.py` | Bounded packet generation ([SC-6], [SC-7]) |
 | `backstitch/analysis_results.py` | Result JSONL load/summarize ([SC-6]) |
 | `backstitch/analysis_llm.py` | Lazy-`llm` adapter boundary ([SC-7], [SC-8]) |
-| `backstitch/cli.py` | All subcommands, exit-code contract ([SC-5], [CFG-7]) |
-| `tests/acceptance/` | The twelve [SC-10] acceptance probes |
+| `backstitch/doctor.py` | Environment doctor checks ([SC-14]) |
+| `backstitch/cli.py` | Parser/dispatch, command option merging, output writes, and exit-code mapping ([SC-5], [CFG-7]) |
+| `tests/acceptance/` | The thirteen [SC-10] acceptance probes |
 | `tests/live/` | Opt-in live LLM smoke/contract test ([SC-7], `BACKSTITCH_LIVE_LLM=1`) |
 | `.github/workflows/ci.yml` | Hermetic CI + post-merge/manual live-LLM job |
 | `.github/workflows/local-llm.yml` | Separate manual Ollama live-LLM canary outside the release-gated `CI` workflow |

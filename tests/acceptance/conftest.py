@@ -11,6 +11,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -28,7 +29,9 @@ def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
     return result
 
 
-def check_json(repo: Path, *extra: str, expect_exit: int | None = None) -> dict:
+def check_json(
+    repo: Path, *extra: str, expect_exit: int | None = None
+) -> dict[str, Any]:
     result = run_cli(
         "check",
         "--repo-root",
@@ -39,7 +42,7 @@ def check_json(repo: Path, *extra: str, expect_exit: int | None = None) -> dict:
     )
     if expect_exit is not None:
         assert result.returncode == expect_exit, result.stderr
-    return json.loads(result.stdout)
+    return cast(dict[str, Any], json.loads(result.stdout))
 
 
 @pytest.fixture

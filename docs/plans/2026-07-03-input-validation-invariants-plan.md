@@ -45,8 +45,8 @@ log row and its own explicit fix, not a silent adjustment.
 
 ## Context and Key Files
 
-- `backstitch/cli.py` — `_packet_shape_error`, `_is_issue_record`,
-  `_is_path_locator`, the `_cmd_summarize` report validators
+- `backstitch/artifact_contracts.py` — packet JSONL validators,
+  issue-record validation helpers, and deterministic-report validators
 - `backstitch/analysis_results.py` — `validate_analysis_row`,
   `render_analysis_summary` count validation
 - `backstitch/analysis_llm.py` — `_packet_evidence_bounds`, `_error_record`
@@ -168,6 +168,7 @@ carry `CODE_BACKLINK_RECIPROCAL_MISSING` warnings between commits.
 > for analysis-result rows, consistent with [SC-7].
 >
 > _Implementation mapping_:
+> - `backstitch/artifact_contracts.py`
 > - `backstitch/cli.py`
 > - `backstitch/analysis_results.py`
 > - `backstitch/analysis_llm.py`
@@ -199,7 +200,7 @@ carry `CODE_BACKLINK_RECIPROCAL_MISSING` warnings between commits.
    d. Add probe 13 in `tests/acceptance/` per the [SC-10] text: generate a
       real self-corpus report, assert `summarize-analysis` exit 0 against
       an empty analysis-results file; generate real self-corpus packets,
-      assert `analyze`'s `_load_packets` accepts them; feed a garbage
+      assert `artifact_contracts.load_packets` accepts them; feed a garbage
       adapter response through `analyze_packets`, assert the rendered rows
       load with zero errors. (The round-18 negative-control test overlaps;
       keep both — the probe is the acceptance contract, the regression
@@ -250,8 +251,8 @@ contract ([SC-10] last bullet).
 
 - Reviewer: an agent from a different family than the plan author.
 - Read: this plan (especially the delta), `docs/specs/02-backstitch-core.md`
-  at the baseline, `tests/test_review_remediation.py`,
-  `backstitch/cli.py` validators.
+  at the baseline, `tests/test_review_remediation.py`, and
+  `backstitch/artifact_contracts.py` validators.
 - Prompt: "Read the plan at docs/plans/2026-07-03-input-validation-invariants-plan.md
   and its `## Proposed Spec Delta`, including the named promotion strategy.
   Carefully examine the plan, the proposed spec text, and the associated

@@ -536,11 +536,12 @@ def _unknown_key_messages(raw: dict[str, Any], config_path: Path) -> list[str]:
 
     messages: list[str] = []
     for key, value in raw.items():
-        if key in _TABLE_KEYS and isinstance(value, dict):
-            messages.extend(
-                f"unknown config key `{key}.{sub}` in {config_path}"
-                for sub in _unused_table_keys(value, _table_key_names(key))
-            )
+        if key in _TABLE_KEYS:
+            if isinstance(value, dict):
+                messages.extend(
+                    f"unknown config key `{key}.{sub}` in {config_path}"
+                    for sub in _unused_table_keys(value, _table_key_names(key))
+                )
             continue
         if key in _TOP_LEVEL_KEYS:
             continue

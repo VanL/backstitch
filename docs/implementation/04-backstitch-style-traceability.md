@@ -24,6 +24,12 @@ Load-bearing boundaries:
   filesystem truth (path existence, symbol inventories, scan file lists) is
   gathered by `scan_repository` and passed in, so graph policy is testable
   without IO and reruns are byte-stable.
+- **Markdown structure belongs to `markdown-it-py`.** `markdown_specs.py`
+  interprets Backstitch traceability constructs over CommonMark tokens; it
+  does not maintain an independent fence, indented-code, or block-boundary
+  parser. `fence` and `code_block` tokens are non-declarative content, while
+  recognized [EXC-4] HTML-comment marker tokens still feed the suppression
+  marker path.
 - **The llm quarantine.** `check` and `packets` are structurally incapable
   of importing `llm`: the import lives inside `analysis_llm.default_adapter`
   and the `analyze` CLI handler, and a subprocess test asserts
@@ -34,8 +40,16 @@ Load-bearing boundaries:
   provider name — so servers with constrained decoding cannot emit
   syntactically invalid rows; models without the option get the unchanged
   call (`docs/plans/2026-07-06-analyze-json-mode-plan.md`).
+- **The doctor shares the quarantine, not the pipeline.** `backstitch
+  doctor` ([SC-14], `doctor.py`) diagnoses the same environment `analyze`
+  depends on — model resolution via `resolve_model_name`, credentials,
+  `json_object` capability, endpoint reachability behind `--probe` — but
+  never generates, never mutates backstitch state, and imports `llm` only
+  inside check functions. Its remedies stay provider-neutral; provider
+  names live in `06-choosing-a-local-model.md`, which the memory check
+  points at.
 - **Suppression is not filtering.** `reporting.py` renders; it never drops
-  findings. Suppression happens once, in the CLI pipeline, after emission
+  findings. Suppression happens once, in `check_pipeline.py`, after emission
   and before exit-code and render, through `exclusions.py` — and every
   suppressed finding is recoverable with `--show-suppressions` ([EXC-7]).
   Fable's audit-free `filter_report` was deliberately not ported.
@@ -45,9 +59,12 @@ Load-bearing boundaries:
 - **Validation is total, bounded by self-acceptance.** Input validators
   mirror the *producer's* full record contract ([SC-13]), never the
   consuming code path's projection — that asymmetry is how nineteen review
-  rounds found the same rule broken one field at a time. The counterweight
-  is [SC-13.5]: everything the tool emits must pass its own validation
-  (acceptance probe 13), so tightening can never orphan real output.
+  rounds found the same rule broken one field at a time. Packet JSONL and
+  deterministic-report validators live in `artifact_contracts.py`; semantic
+  result and model-output validation stay with `analysis_results.py` and
+  `analysis_llm.py`. The counterweight is [SC-13.5]: everything the tool
+  emits must pass its own validation (acceptance probe 13), so tightening can
+  never orphan real output.
 - **Evidence locality is enforced where the packets are.** `analyze` holds
   the packets, so it is the boundary that rejects model evidence outside
   the packet's shown paths and line ranges ([SC-7]).
@@ -75,6 +92,10 @@ Load-bearing boundaries:
   `## 6 [CFG-6]`) do not clear mapping-block ownership; same-or-shallower
   ID-less headings do. Real specs put subsections between an ID heading and
   its mapping block.
+- Heading and code-span recognition follows `markdown-it-py` CommonMark
+  tokenization: setext headings and ATX headings with closing hashes can
+  define sections, and mapping tokens come from `code_inline` content rather
+  than Backstitch's own backtick scanner.
 - Mapping tokens resolve by the [SC-4] ladder: exact silently; unique
   suffix with `MAPPING_PATH_INEXACT` (edge kept); multiple candidates
   `TARGET_PATH_AMBIGUOUS` (no edge); none `MAPPING_PATH_MISSING` with the
@@ -128,7 +149,7 @@ diffing against `--no-config`.
 - Review remediation regressions: `tests/test_review_remediation.py` — one
   test per reproduced independent-review finding (heading markers, live
   config keys, noqa hygiene, marker override, fence length)
-- Acceptance: `tests/acceptance/` — the twelve [SC-10] probes, black-box
+- Acceptance: `tests/acceptance/` — the thirteen [SC-10] probes, black-box
 - Self-corpus: `tests/test_backstitch_corpus_traceability.py`
 - Optional live LLM: `tests/live/test_live_llm.py` — opt-in, real provider or
   local OpenAI-compatible endpoint (see below)

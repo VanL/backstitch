@@ -285,7 +285,7 @@ _Implementation mapping_:
 
 - `backstitch/exclusions.py`
 - `backstitch/settings.py`
-- `backstitch/cli.py`
+- `backstitch/check_pipeline.py`
 
 ## 7. Reporting And CLI [EXC-7]
 
@@ -304,6 +304,7 @@ Default output omits suppressed findings entirely.
 _Implementation mapping_:
 
 - `backstitch/reporting.py`
+- `backstitch/check_pipeline.py`
 - `backstitch/cli.py`
 
 ## 8. Failure Modes [EXC-8]
@@ -366,5 +367,6 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-07-06-backstitch-organization-refactor-plan.md` (implementing)
 - `docs/plans/2026-07-02-backstitch-four-way-reconciliation-plan.md` (implementing)
 - `docs/plans/2026-07-02-backstitch-traceability-exclusions-plan.md`

@@ -13,11 +13,12 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures/noqa_scope_project"
 
 
-def _check_json(*extra: str) -> dict:
+def _check_json(*extra: str) -> dict[str, Any]:
     result = subprocess.run(
         [
             sys.executable,
@@ -41,7 +42,7 @@ def _check_json(*extra: str) -> dict:
         check=False,
     )
     assert "Traceback" not in result.stderr, result.stderr
-    return json.loads(result.stdout)
+    return cast(dict[str, Any], json.loads(result.stdout))
 
 
 def test_comment_noqa_suppresses_next_statement_only() -> None:

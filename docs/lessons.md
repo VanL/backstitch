@@ -63,6 +63,11 @@ incident log; these are the durable rules distilled from it.
     comply uniformly with gates and unevenly with everything else. (Same rule,
     other homes: `docs/agent-context/engineering-principles.md` §12 for the
     durable statement, `runbooks/testing-patterns.md` Pattern 6 for the fix.)
+14. **Parser boundaries belong to the parser.** When a mature parser library is
+    already a dependency, keep local code as an interpretation layer over its
+    tokens. Do not reimplement block-boundary, fence, indentation, or delimiter
+    rules in parallel; pin the intentional handoff with tests for the edge cases
+    where the old local parser diverged.
 
 ## 2026-07-01: Four-Way Implementation Bake-Off
 
@@ -124,3 +129,27 @@ invites a sweep. Corollary, proved during promotion: rules drafted from
 memory overclaim — three codex review rounds each caught the delta claiming
 more than the validators enforced. Verify each codifying rule against the
 implementation before promotion, and point reviewers at rule-vs-code.
+
+## Cohesion over file size: floors, not line counts (2026-07-06)
+
+Do not flag or split a file for its size alone — size is not a review
+finding. Agents grep and read by offset, so a large well-named module like
+`backstitch/resolver.py` (~900 lines, docstring naming its phases and purity
+contract) is a pre-joined index; splitting coupled code creates false seams
+that breed parallel-implementation drift. What IS a finding, at any size:
+an implicit coupling with no marker at the edit point, or a state machine
+with no name and no contract test. Structural coupling (flat surface,
+shared schema) is safe when marked; behavioral coupling (live state)
+justifies extraction only to create the testable boundary. Durable
+statement: `docs/agent-context/engineering-principles.md` §14.
+
+## Markdown parsing boundary: delegate structure, test interpretation (2026-07-07)
+
+The old Markdown spec parser spent code and review attention deciding whether a
+line was inside a fence or indented code block. That is the wrong ownership
+boundary once `markdown-it-py` is already in the project: CommonMark block
+structure belongs to the parser, while Backstitch owns only the traceability
+syntax layered on parser tokens. The migration lesson is not "use this one
+library"; it is "do not keep a shadow parser beside the real parser." Future
+parser changes should name the handoff, then add edge fixtures for the exact
+legacy divergences before changing behavior.

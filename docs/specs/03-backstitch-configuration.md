@@ -70,6 +70,7 @@ _Implementation mapping_:
 | `packets` | `--repo-root` after `resolve()` |
 | `analyze` | parent directory of `--packets` after `resolve()` |
 | `summarize-analysis` | no discovery in v1; CLI args only |
+| `doctor` | current working directory after `resolve()` |
 
 If `--config` is provided ([CFG-5]), discovery is skipped and that file is the
 sole config source (still subject to CLI/env precedence above file values).
@@ -521,6 +522,8 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-07-06-local-model-catalog-and-doctor-plan.md` (implementing)
+- `docs/plans/2026-07-06-backstitch-organization-refactor-plan.md` (implementing)
 - `docs/plans/2026-07-03-live-llm-tests-plan.md` (implementing)
 - `docs/plans/2026-07-02-backstitch-four-way-reconciliation-plan.md` (implementing)
 - `docs/plans/2026-07-01-backstitch-toml-configuration-plan.md`

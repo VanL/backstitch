@@ -7,12 +7,13 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 from backstitch.analysis_llm import analyze_packets, build_prompt
 
-PACKET_A = {
+PACKET_A: dict[str, Any] = {
     "packet_id": "docs/specs/01-X.md#X-1",
     "spec_path": "docs/specs/01-X.md",
     "section_id": "X-1",
@@ -26,7 +27,9 @@ PACKET_A = {
     "warnings": [],
     "instructions": "Respond with JSON including packet_id and classification.",
 }
-PACKET_B = dict(PACKET_A, packet_id="docs/specs/01-X.md#X-2", section_id="X-2")
+PACKET_B: dict[str, Any] = dict(
+    PACKET_A, packet_id="docs/specs/01-X.md#X-2", section_id="X-2"
+)
 
 # [SC-7] hermetic testing: a name no local `llm` alias could plausibly
 # resolve, so CLI tests can never construct a real adapter or call a model.
@@ -60,7 +63,7 @@ def test_analyze_iterates_packets_and_collects_rows() -> None:
 
     def adapter(prompt: str) -> str:
         prompts_seen.append(prompt)
-        row = json.loads(prompt.split("\n\n", 1)[1])
+        row = cast(dict[str, Any], json.loads(prompt.split("\n\n", 1)[1]))
         return _ok_response(row["packet_id"])
 
     rows, errors = analyze_packets([PACKET_A, PACKET_B], adapter)
@@ -132,7 +135,7 @@ def test_adapter_exception_is_error_for_that_packet_only() -> None:
 
 def test_concurrency_preserves_packet_order() -> None:
     def adapter(prompt: str) -> str:
-        row = json.loads(prompt.split("\n\n", 1)[1])
+        row = cast(dict[str, Any], json.loads(prompt.split("\n\n", 1)[1]))
         return _ok_response(row["packet_id"])
 
     packets = [

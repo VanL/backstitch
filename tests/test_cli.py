@@ -89,3 +89,48 @@ def test_check_unwritable_output_exits_two(tmp_path: Path) -> None:
     assert result.returncode == 2
     assert "backstitch: error:" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_deterministic_commands_do_not_import_llm(tmp_path: Path) -> None:
+    output = tmp_path / "packets.jsonl"
+    commands = [
+        [
+            "check",
+            "--repo-root",
+            str(CLEAN),
+            "--spec-root",
+            "docs/specs",
+            "--plan-root",
+            "docs/plans",
+            "--code-root",
+            "pkg",
+        ],
+        [
+            "packets",
+            "--repo-root",
+            str(CLEAN),
+            "--spec-root",
+            "docs/specs",
+            "--plan-root",
+            "docs/plans",
+            "--code-root",
+            "pkg",
+            "--output",
+            str(output),
+        ],
+    ]
+    for command in commands:
+        snippet = (
+            "import sys\n"
+            "from backstitch.cli import main\n"
+            f"code = main({command!r})\n"
+            "assert 'llm' not in sys.modules, sorted(k for k in sys.modules if k == 'llm')\n"
+            "raise SystemExit(code)\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", snippet],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr

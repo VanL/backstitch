@@ -21,3 +21,4 @@ read order stay aligned instead of competing.
 3. `03-agent-inventory.md`
 4. `04-backstitch-style-traceability.md`
 5. `05-release-publishing.md`
+6. `06-choosing-a-local-model.md`

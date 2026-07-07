@@ -246,6 +246,22 @@ def test_unknown_nested_key_exits_two(tmp_path: Path) -> None:
     assert "check.color" in str(excinfo.value)
 
 
+@pytest.mark.parametrize(
+    "table_name", ["check", "packets", "analyze", "target_roots", "lint"]
+)
+def test_known_table_scalar_reports_type_error(
+    tmp_path: Path,
+    table_name: str,
+) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(f'{table_name} = "not-a-table"\n', encoding="utf-8")
+    with pytest.raises(ConfigLoadError) as excinfo:
+        load_settings(tmp_path, explicit=config)
+    message = str(excinfo.value)
+    assert f"[{table_name}] must be a table" in message
+    assert "unknown config key" not in message
+
+
 def test_top_level_profile_string_exits_two(tmp_path: Path) -> None:
     # CFG §6.1: the only profile-name spelling is [profile].name; a
     # top-level profile string is an unknown key.

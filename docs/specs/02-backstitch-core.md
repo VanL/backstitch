@@ -151,15 +151,28 @@ Spec parsing must support:
 - backticked mapping tokens for paths, explicit `path::symbol` references, and
   advisory bare symbols
 
-Markdown parsing must track fenced code blocks in both CommonMark forms: an
-opening fence is at least three backticks (```` ``` ````) or at least three
-tildes (`~~~`); the closing fence uses the same character and is at least as
-long as the opening fence. Headings, invariant bullets, and mapping markers
-inside either fence form are example content, not declarations: they must not
-create sections, must not receive mapping attribution, and must not shift
-attribution of the following mapping block. Both fence forms require
-fixtures ([SC-10]) — tilde fences are exactly the kind of ambiguity that gets
-mishandled when the spec only says "fenced code blocks".
+Backticked mapping tokens are Markdown inline-code tokens (`code_inline`)
+inside implementation mapping blocks. Their stored target text is the
+`markdown-it-py` inline-code content after Markdown normalization, while
+Backstitch still classifies that target as `path`, `path_symbol`, or `symbol`.
+Any heading token produced by `markdown-it-py` may define a section if its
+heading text ends in a valid section ID after CommonMark heading normalization,
+including setext headings and ATX headings with closing hashes.
+
+Markdown block structure is delegated to `markdown-it-py` using its CommonMark
+parser. Backstitch must not maintain an independent Markdown fence,
+indented-code, or block-boundary parser. Headings, invariant bullets,
+implementation mapping markers, and traceability markers are interpreted only
+from non-code Markdown tokens produced by `markdown-it-py`. `fence` and
+`code_block` tokens are example content, not declarations. Block-level HTML
+tokens are also non-declarative except when the token's source text is a
+recognized [EXC-4] `<!-- backstitch: ... -->` traceability marker; those marker
+tokens follow the same preamble and immediate-section placement rules as
+`_Traceability:` marker paragraphs. The enclosing block token's `map` source
+lines are the line-number source of truth for diagnostics. Backstitch may
+inspect the original source lines covered by a non-code token to interpret
+Backstitch-specific marker syntax, but it must not use those lines to override
+`markdown-it-py`'s block classification.
 
 Heading anchors must match what GitHub actually generates: computed from the
 full heading text including the bracketed section ID (for
@@ -268,6 +281,23 @@ backstitch analyze --packets packets.jsonl --model MODEL --output analysis.jsonl
 backstitch summarize-analysis --deterministic-report spec-trace.json --analysis-results analysis.jsonl
 ```
 
+Required environment-diagnosis command:
+
+```bash
+backstitch doctor
+backstitch doctor --probe --format json
+```
+
+`doctor` diagnoses the semantic-analysis environment (the `llm`
+installation, model resolution, credentials, constrained-decoding
+capability, and — with `--probe` — endpoint reachability) per [SC-14]. It
+accepts `--model`, `--config`, and `--no-config` with `analyze`'s
+semantics, anchoring config discovery at the current working directory.
+`doctor` exits `0` when no check reports `fail` (skipped checks never
+affect the exit code) and `2` when any check fails or doctor itself cannot
+run; it never exits `1`, which is reserved for statements about the target
+repository.
+
 Exit codes:
 
 - `0`: command completed without deterministic errors
@@ -299,6 +329,8 @@ presence of `llm` as a dependency does not permit model calls during
 
 _Implementation mapping_:
 - `backstitch/cli.py`
+- `backstitch/artifact_contracts.py`
+- `backstitch/check_pipeline.py`
 
 ## 6. Report And Data Contracts [SC-6]
 
@@ -365,6 +397,8 @@ Supported semantic classifications are:
 
 _Implementation mapping_:
 - `backstitch/models.py`
+- `backstitch/artifact_contracts.py`
+- `backstitch/check_pipeline.py`
 - `backstitch/reporting.py`
 - `backstitch/analysis_packets.py`
 - `backstitch/analysis_results.py`
@@ -489,7 +523,8 @@ The first implementation must not include:
 - LLM calls in deterministic checks
 - CI failures based on semantic findings
 
-`llm` must be imported lazily and only inside the `analyze` execution path.
+`llm` must be imported lazily and only inside the `analyze` and `doctor`
+execution paths.
 `check` and `packets` must be structurally incapable of importing it — the
 boundary is enforced by import placement, not by convention, and [SC-10]
 proves it with a subprocess test.
@@ -536,6 +571,7 @@ per-section ignores, inline `noqa`) is defined in
 `docs/specs/04-backstitch-traceability-exclusions.md` [EXC-*].
 
 _Implementation mapping_:
+- `backstitch/artifact_contracts.py`
 - `backstitch/resolver.py`
 
 ## 10. Verification Expectations [SC-10]
@@ -545,6 +581,13 @@ Verification must use real files and real subprocesses where practical.
 Required proof surfaces:
 
 - fixture-backed Markdown parser tests
+- Markdown parser tests that prove declarations inside `markdown-it-py`
+  `fence` and `code_block` tokens are ignored without a Backstitch-owned fence
+  state machine
+- Markdown parser tests that pin known parser-boundary divergences from the
+  legacy line parser: setext headings, ATX closing hashes, indented code
+  blocks, CommonMark fence closers, standalone HTML-comment traceability
+  markers, and inline-code normalization for mapping tokens
 - fixture-backed Python parser tests
 - resolver tests for clean and broken graphs
 - CLI subprocess tests for text, JSON, output file, and exit-code behavior
@@ -603,7 +646,8 @@ Required proof surfaces:
 - packet-generation tests that prove snippet bounds and truncation warnings
 - analysis-result tests with valid and malformed JSONL
 - semantic-analysis tests using fake model adapters, not external model calls
-- `ruff` and `mypy` over `backstitch`
+- `ruff` over the CI-listed source/test files, and `mypy` over `backstitch`,
+  `bin/release.py`, and tests (excluding fixture target repositories)
 
 Mocks must not replace the parser or resolver core path. Fakes are acceptable
 only for external model calls and intentionally absent target repositories.
@@ -680,6 +724,7 @@ Invariant-traceability issue codes (`INVARIANT_*`) are proposed in
 severity rationale.
 
 _Implementation mapping_:
+- `backstitch/artifact_contracts.py`
 - `backstitch/resolver.py`
 
 ## 12. Sibling Target Discovery [SC-12]
@@ -763,14 +808,87 @@ Severity of a validation failure is [SC-5] exit `2` for invocation inputs
 for analysis-result rows, consistent with [SC-7].
 
 _Implementation mapping_:
+- `backstitch/artifact_contracts.py`
 - `backstitch/cli.py`
 - `backstitch/analysis_results.py`
 - `backstitch/analysis_llm.py`
 - `backstitch/settings.py`
 - `backstitch/exclusions.py`
 
+## 14. Environment Doctor [SC-14]
+
+`backstitch doctor` reports the health of the semantic-analysis
+environment as an ordered list of named checks, emitted in exactly the
+order they are defined below (output order is part of the contract for
+both text and JSON formats). Each check yields `pass`, `fail`, or `skip`
+with a one-line detail and, on failure, a one-line remedy naming the
+required action. Checks are provider-neutral: they consult only the `llm`
+library's public surface and generic HTTP, never provider identities.
+
+Required checks:
+
+- `llm-import`: the `llm` package imports; its installed version is
+  reported. Failure to import is a failure; the version itself is
+  informational (the declared constraint is open-ended, so API drift is
+  guarded by the hermetic dependency-contract test, not by a version
+  comparison here).
+- `model`: the model resolves via the [CFG-5] precedence (`--model`,
+  then `LLM_MODEL`, then config, then the `llm` default — environment
+  overrides config), reporting which source won. An unresolvable model
+  is a failure naming the attempted name.
+- `credential`: when the resolved model declares a key requirement, a
+  credential is discoverable the same way `analyze` would find it; a
+  keyless model (local `api_base`) passes with that fact in the detail.
+- `json-mode`: reports whether the resolved model's options declare
+  `json_object` (constrained decoding available to `analyze`). Absence
+  is a reported fact, not a failure.
+- `memory` (informational, never a failure): best-effort detected
+  physical memory plus a pointer to the local-model catalog in the
+  implementation docs.
+- `endpoint` (only with `--probe`; skipped without it and skipped for
+  models with no `api_base`): the model's `api_base` answers an
+  unauthenticated `GET <api_base>/models` within a bounded timeout. A
+  connection failure, timeout, or HTTP status other than `200`, `401`,
+  or `403` is a failure. On `200`, the served model name — the model's
+  `model_name` attribute when present, otherwise its `model_id` (the
+  identifier `llm`'s OpenAI wrapper actually sends to the server; an
+  `api_base` registration resolves an alias while the server lists the
+  served upstream name) — must appear in the returned OpenAI-style
+  `data[].id` list, else the check fails with the ids seen. On `401` or
+  `403` the endpoint counts as reachable and the check passes with a
+  detail stating that the model list is authentication-gated and
+  membership was not verified. No credential is ever sent; no generation
+  is performed.
+
+Allowed statuses per check (an implementation must not emit others):
+`llm-import` — `pass`/`fail`; `model` — `pass`/`fail`, `skip` when
+`llm-import` failed; `credential` — `pass`/`fail`, `skip` when the model
+is unresolved; `json-mode` — `pass` (the detail states whether
+constrained decoding is available), `skip` when the model is unresolved;
+`memory` — `pass` only (undetectable memory is a `pass` with an
+"unknown" detail); `endpoint` — `pass`/`fail`, `skip` without `--probe`,
+when the model is unresolved, or when the model has no `api_base`.
+
+`--format json` emits `{"checks": [{"name": ..., "status":
+"pass"|"fail"|"skip", "detail": ..., "remedy": ...}], "ok": <bool>}`;
+`remedy` is empty for non-failures. `ok` is `true` and the exit code is
+`0` if and only if no check has status `fail`; otherwise the exit code is
+`2` — never `1` ([SC-5]). Skipped checks never affect the exit code.
+Doctor performs no model generation and no network I/O without
+`--probe`, mutates no backstitch state and writes nothing itself
+(consulting `llm` may create `llm`'s own user directory — that is
+`llm.user_dir()` behavior doctor inherits, not a doctor write), and
+must not import `llm` at module import time ([SC-8]).
+
+_Implementation mapping_:
+- `backstitch/doctor.py`
+- `backstitch/cli.py`
+- `tests/test_doctor.py`
+
 ## Related Plans
 
+- `docs/plans/2026-07-06-local-model-catalog-and-doctor-plan.md` (implementing)
+- `docs/plans/2026-07-06-backstitch-organization-refactor-plan.md` (implementing)
 - `docs/plans/2026-07-03-local-llm-eval-lane-plan.md` (implementing)
 - `docs/plans/2026-07-03-live-llm-tests-plan.md` (implementing)
 - `docs/plans/2026-07-03-input-validation-invariants-plan.md` (implementing)

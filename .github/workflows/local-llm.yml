@@ -1,7 +1,15 @@
 name: local-llm
 
+# Runs on every push to main so the release commit has a green local-llm run
+# for the release gate to require (require_green_workflows.py matches by the
+# release commit SHA). Deliberately NOT on pull_request: the fork-PR threat
+# model (arbitrary fork test code, cache poisoning, ~2 GB pull per push) is a
+# separate, later, threat-model-gated step — this graduation only trusts the
+# base branch.
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
 
 permissions:
   contents: read

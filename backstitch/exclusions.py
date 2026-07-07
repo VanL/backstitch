@@ -311,6 +311,28 @@ def _match_per_section_ignore(
     return None
 
 
+def _match_config_ignore_attempts(
+    issue: Issue,
+    index: SuppressionIndex,
+    *,
+    spec_file: str | None,
+    section_id: str | None,
+    code_file: str | None,
+) -> tuple[str | None, str | None]:
+    file_rule = _match_per_file_ignore(
+        spec_file or code_file or issue.path,
+        issue.code,
+        index.lint.per_file_ignores,
+    )
+    section_rule = _match_per_section_ignore(
+        spec_file,
+        section_id,
+        issue.code,
+        index.lint.per_section_ignores,
+    )
+    return file_rule, section_rule
+
+
 def should_suppress(
     issue: Issue,
     index: SuppressionIndex,
@@ -319,10 +341,6 @@ def should_suppress(
     section_id: str | None = None,
     code_file: str | None = None,
 ) -> tuple[bool, SuppressionReason | None]:
-    if _is_non_suppressible(issue):
-        _warn_error_code_suppression(issue, index)
-        return False, None
-
     resolved_spec_file = spec_file or (
         issue.path if issue.path and issue.path.endswith(".md") else None
     )
@@ -330,6 +348,23 @@ def should_suppress(
     resolved_code_file = code_file or (
         issue.path if issue.path and issue.path.endswith(".py") else None
     )
+    file_rule, section_rule = _match_config_ignore_attempts(
+        issue,
+        index,
+        spec_file=resolved_spec_file,
+        section_id=resolved_section_id,
+        code_file=resolved_code_file,
+    )
+
+    if _is_non_suppressible(issue):
+        index.record_config_usage(file_rule=file_rule, section_rule=section_rule)
+        _warn_error_code_suppression(
+            issue,
+            index,
+            file_rule=file_rule,
+            section_rule=section_rule,
+        )
+        return False, None
 
     suppressed = False
     reason: SuppressionReason | None = None
@@ -339,22 +374,11 @@ def should_suppress(
             suppressed = True
             reason = SuppressionReason.META
 
-    file_rule = _match_per_file_ignore(
-        resolved_spec_file or resolved_code_file or issue.path,
-        issue.code,
-        index.lint.per_file_ignores,
-    )
     if file_rule is not None:
         suppressed = True
         reason = SuppressionReason.CONFIG_FILE
         index.record_config_usage(file_rule=file_rule, section_rule=None)
 
-    section_rule = _match_per_section_ignore(
-        resolved_spec_file,
-        resolved_section_id,
-        issue.code,
-        index.lint.per_section_ignores,
-    )
     if section_rule is not None:
         suppressed = True
         reason = SuppressionReason.CONFIG_SECTION
@@ -512,12 +536,28 @@ def _warn_inline_error_code_attempts(index: SuppressionIndex) -> None:
             )
 
 
-def _warn_error_code_suppression(issue: Issue, index: SuppressionIndex) -> None:
+def _warn_error_code_suppression(
+    issue: Issue,
+    index: SuppressionIndex,
+    *,
+    file_rule: str | None = None,
+    section_rule: str | None = None,
+) -> None:
     # Always-error codes already warned unconditionally at index build
     # (_warn_inline_error_code_attempts); this per-issue path covers the
     # context-dependent codes whose severity is only known per instance.
     if issue.code in ERROR_SEVERITY_CODES:
         return
+    if file_rule is not None:
+        index.suppression_warnings.append(
+            f"suppression ignored for error-severity code {issue.code}"
+            f" in lint.per-file-ignores rule {file_rule}"
+        )
+    if section_rule is not None:
+        index.suppression_warnings.append(
+            f"suppression ignored for error-severity code {issue.code}"
+            f" in lint.per-section-ignores rule {section_rule}"
+        )
     for _location, codes in _iter_inline_ignore_code_sets(index):
         if issue.code in codes:
             index.suppression_warnings.append(

@@ -53,7 +53,10 @@ OPENAI_API_KEY=... BACKSTITCH_LIVE_LLM=1 LLM_MODEL=gpt-5.4-mini \
 ```
 
 The same test also has a credential-free local lane for a loopback
-OpenAI-compatible endpoint, normally Ollama. It proves local transport and
+OpenAI-compatible endpoint, normally Ollama. Verify any local (or cloud)
+setup with `backstitch doctor` (`--probe` adds endpoint reachability), and
+see `docs/implementation/06-choosing-a-local-model.md` for measured model
+guidance. It proves local transport and
 result handling, not judgment quality. Small CPU models often emit malformed
 JSON, so non-strict local runs tolerate individual per-packet `error` rows as
 long as `analyze` does not report total failure and at least one selected packet

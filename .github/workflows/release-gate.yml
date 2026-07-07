@@ -28,12 +28,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Require CI workflow to be green
+      - name: Require CI and local-llm workflows to be green
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           python .github/scripts/require_green_workflows.py \
-            --workflow "CI"
+            --workflow "CI" \
+            --workflow "local-llm"
 
   verify-tag-current:
     runs-on: ubuntu-latest

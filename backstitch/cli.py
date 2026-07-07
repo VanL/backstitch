@@ -12,25 +12,17 @@ prints a one-line ``backstitch: error: ...`` diagnostic.
 from __future__ import annotations
 
 import argparse
-import dataclasses
-import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from backstitch import __version__
+from backstitch.check_pipeline import build_check_report
 from backstitch.config import ProfileConfig
-from backstitch.exclusions import (
-    build_suppression_index,
-    collect_unused_ignore_warnings,
-    should_suppress,
-)
-from backstitch.grammar import is_valid_section_id
-from backstitch.models import ISSUE_CODES, Issue, Report
 from backstitch.profiles import get_profile
-from backstitch.reporting import SuppressedRecord, render_json, render_text
-from backstitch.resolver import ScanError, scan_repository_with_artifacts
+from backstitch.reporting import render_json, render_text
+from backstitch.resolver import ScanError
 from backstitch.settings import (
     BackstitchSettings,
     ConfigLoadError,
@@ -175,6 +167,28 @@ def _add_other_parsers(subparsers: argparse._SubParsersAction[Any]) -> None:
         "--analysis-results", type=Path, required=True, metavar="PATH"
     )
 
+    doctor = subparsers.add_parser(
+        "doctor",
+        help="diagnose the llm/model/endpoint environment analyze depends on",
+        description=(
+            "Diagnose the semantic-analysis environment per [SC-14]: llm"
+            " installation, model resolution, credentials,"
+            " constrained-decoding capability, and (with --probe) endpoint"
+            " reachability. Exits 0 when no check fails, 2 otherwise;"
+            " never 1."
+        ),
+    )
+    doctor.add_argument("--model", default=None, metavar="MODEL")
+    doctor.add_argument(
+        "--probe",
+        action="store_true",
+        help="also test endpoint reachability (the only network the command"
+        " ever performs; no credential is sent, nothing is generated)",
+    )
+    doctor.add_argument("--format", choices=("text", "json"), default="text")
+    doctor.add_argument("--config", type=Path, default=None, metavar="PATH")
+    doctor.add_argument("--no-config", action="store_true")
+
     config = subparsers.add_parser("config", help="inspect resolved configuration")
     config_sub = config.add_subparsers(dest="config_command", required=True)
     show = config_sub.add_parser("show", help="print effective settings as JSON")
@@ -275,41 +289,9 @@ def _profile_from(
 def _cmd_check(args: argparse.Namespace) -> int:
     settings = _resolve_settings(args)
     profile = _profile_from(args, settings)
-    report, artifacts = scan_repository_with_artifacts(
-        args.repo_root,
-        profile,
-        exclude_globs=settings.exclude,
-        allow_unknown_suppression_codes=settings.allow_unknown_keys,
-    )
+    pipeline = build_check_report(args.repo_root, profile, settings)
 
-    # [EXC-6] precedence: suppression runs after emission and before
-    # exit-code and render, so every view (text, JSON, exit code) agrees;
-    # suppressed findings stay recoverable via --show-suppressions ([EXC-7]).
-    index = build_suppression_index(
-        meta_spec_globs=profile.meta_spec_globs,
-        lint=settings.lint,
-        section_meta=artifacts.section_meta,
-        inline_file_ignores=artifacts.inline_file_ignores,
-        inline_spec_ignores=artifacts.inline_spec_ignores,
-        inline_code_ignores=artifacts.inline_code_ignores,
-        inline_code_span_ignores=artifacts.inline_code_span_ignores,
-        sections_with_markers=artifacts.sections_with_markers,
-        marker_warnings=list(artifacts.marker_warnings),
-        allow_unknown=settings.allow_unknown_keys,
-    )
-    kept: list[Issue] = []
-    suppressed: list[SuppressedRecord] = []
-    for issue in report.issues:
-        is_suppressed, reason = should_suppress(issue, index)
-        if is_suppressed and reason is not None:
-            suppressed.append((issue, reason.value))
-        else:
-            kept.append(issue)
-    report = dataclasses.replace(report, issues=tuple(kept))
-
-    for warning in index.suppression_warnings:
-        print(f"warning: {warning}", file=sys.stderr)
-    for warning in collect_unused_ignore_warnings(index):
+    for warning in pipeline.warnings:
         print(f"warning: {warning}", file=sys.stderr)
 
     # [CFG-5]/[CFG-9]: config-set check.format and check.output apply when
@@ -319,9 +301,11 @@ def _cmd_check(args: argparse.Namespace) -> int:
     if output is None and settings.check.output is not None:
         output = Path(settings.check.output)
 
-    shown = suppressed if args.show_suppressions else None
+    shown = pipeline.suppressed if args.show_suppressions else None
     rendered = (
-        render_json(report, shown) if fmt == "json" else render_text(report, shown)
+        render_json(pipeline.report, shown)
+        if fmt == "json"
+        else render_text(pipeline.report, shown)
     )
 
     if output is not None:
@@ -334,7 +318,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
     else:
         sys.stdout.write(rendered)
 
-    summary = report.summary()
+    summary = pipeline.report.summary()
     warnings_as_errors = args.warnings_as_errors
     if warnings_as_errors is None:
         warnings_as_errors = bool(settings.check.warnings_as_errors)
@@ -345,58 +329,15 @@ def _cmd_check(args: argparse.Namespace) -> int:
     return 0
 
 
-def _suppressed_report(
-    args: argparse.Namespace,
-    settings: BackstitchSettings,
-    profile: ProfileConfig,
-) -> Report:
-    """Scan + suppress, shared by check-style consumers (packets).
-
-    [CFG-1]: configuration is resolved once per command invocation -- the
-    caller resolves and passes it in, so load-time diagnostics (unknown-key
-    warnings) print exactly once.
-    """
-
-    report, artifacts = scan_repository_with_artifacts(
-        args.repo_root,
-        profile,
-        exclude_globs=settings.exclude,
-        allow_unknown_suppression_codes=settings.allow_unknown_keys,
-    )
-    index = build_suppression_index(
-        meta_spec_globs=profile.meta_spec_globs,
-        lint=settings.lint,
-        section_meta=artifacts.section_meta,
-        inline_file_ignores=artifacts.inline_file_ignores,
-        inline_spec_ignores=artifacts.inline_spec_ignores,
-        inline_code_ignores=artifacts.inline_code_ignores,
-        inline_code_span_ignores=artifacts.inline_code_span_ignores,
-        sections_with_markers=artifacts.sections_with_markers,
-        marker_warnings=list(artifacts.marker_warnings),
-        allow_unknown=settings.allow_unknown_keys,
-    )
-    kept = tuple(
-        issue for issue in report.issues if not should_suppress(issue, index)[0]
-    )
-    # [EXC-4]/[EXC-8]: suppression diagnostics reach stderr on EVERY command
-    # that suppresses, not only `check`. The unused-ignore audit must run
-    # AFTER the should_suppress pass above -- should_suppress is what
-    # records config-rule usage, so auditing first reports every used rule
-    # as stale.
-    for warning in index.suppression_warnings:
-        print(f"warning: {warning}", file=sys.stderr)
-    for warning in collect_unused_ignore_warnings(index):
-        print(f"warning: {warning}", file=sys.stderr)
-    return dataclasses.replace(report, issues=kept)
-
-
 def _cmd_packets(args: argparse.Namespace) -> int:
     from backstitch.analysis_packets import generate_packets, render_packets_jsonl
 
     settings = _resolve_settings(args)
     profile = _profile_from(args, settings)
-    report = _suppressed_report(args, settings, profile)
-    packets = generate_packets(args.repo_root, profile, report=report)
+    pipeline = build_check_report(args.repo_root, profile, settings)
+    for warning in pipeline.warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    packets = generate_packets(args.repo_root, profile, report=pipeline.report)
     try:
         args.output.write_text(render_packets_jsonl(packets), encoding="utf-8")
     except OSError as exc:
@@ -404,158 +345,7 @@ def _cmd_packets(args: argparse.Namespace) -> int:
     print(f"wrote {len(packets)} packets to {args.output}", file=sys.stderr)
     # [SC-5]: packets still reports the deterministic scan outcome -- the
     # packets were written either way, but exit 1 says findings exist.
-    return 1 if report.summary()["errors"] else 0
-
-
-# The [SC-6] packet record contract, as produced by generate_packets().
-# `packet_id` and `instructions` must additionally be non-empty: the
-# pipeline addresses results by the former and prompts with the latter.
-_PACKET_FIELDS: tuple[tuple[str, type], ...] = (
-    ("packet_id", str),
-    ("spec_path", str),
-    ("section_id", str),
-    ("title", str),
-    ("section_text", str),
-    ("section_start_line", int),
-    ("owners", list),
-    ("tests", list),
-    ("issues", list),
-    ("packet_warnings", list),
-    ("instructions", str),
-)
-
-
-def _is_issue_record(issue: object) -> bool:
-    """[SC-11] issue record: known code, real severity, path locator,
-    1-based optional line, grammar-valid optional section_id, typed symbol.
-
-    One validator for every place an issue record can arrive as untrusted
-    input (packet JSONL, deterministic reports)."""
-
-    return (
-        isinstance(issue, dict)
-        and issue.get("code") in ISSUE_CODES
-        and issue.get("severity") in ("error", "warning", "info")
-        and isinstance(issue.get("message"), str)
-        and _is_path_locator(issue.get("path"))
-        and not isinstance(issue.get("line"), bool)
-        and (
-            issue.get("line") is None
-            or (isinstance(issue["line"], int) and issue["line"] >= 1)
-        )
-        and (
-            issue.get("section_id") is None
-            or (
-                isinstance(issue["section_id"], str)
-                and is_valid_section_id(issue["section_id"])
-            )
-        )
-        and _is_optional_name(issue.get("symbol"))
-    )
-
-
-def _is_optional_name(value: object) -> bool:
-    """[SC-13] blank-means-absent: an optional symbol/anchor is null or non-blank -- present
-    means a real name; blank is neither a name nor an omission."""
-
-    return value is None or (isinstance(value, str) and bool(value.strip()))
-
-
-def _is_path_locator(value: object) -> bool:
-    """A path locator is a non-blank string; blank means absent.
-
-    One predicate for every path a packet or report can name (spec paths,
-    owner paths, test paths, issue paths, report-edge paths), so no
-    spelling of "no path" slips through one check but not another.
-    """
-
-    return isinstance(value, str) and bool(value.strip())
-
-
-def _packet_shape_error(row: dict[str, Any]) -> str | None:
-    """Return an [SC-6] contract violation description, or None if valid."""
-
-    for field_name, field_type in _PACKET_FIELDS:
-        value = row.get(field_name)
-        if isinstance(value, bool) or not isinstance(value, field_type):
-            return f"missing or invalid `{field_name}`"
-    if not row["packet_id"].strip() or not row["instructions"].strip():
-        return "`packet_id` and `instructions` must be non-empty"
-    if not _is_path_locator(row["spec_path"]):
-        # Empty or whitespace-only locators would leak into evidence
-        # paths and packet IDs -- blank means absent.
-        return "`spec_path` and `section_id` must be non-empty"
-    if not row["title"].strip():
-        # [SC-13] blank-means-absent: sections cannot be minted titleless, so a blank
-        # packet title is forged or corrupted input.
-        return "`title` must be non-empty"
-    if not is_valid_section_id(row["section_id"]):
-        return "invalid `section_id`; expected a spec section ID"
-    if row["packet_id"] != f"{row['spec_path']}#{row['section_id']}":
-        # [SC-6]: results are addressed by packet_id, which is defined as
-        # `spec_path#section_id`; a mismatch means the packet was edited.
-        return "`packet_id` does not match `spec_path#section_id`"
-    if row["section_start_line"] < 1:
-        # Line numbers are 1-based; zero or negative is malformed input.
-        return "invalid `section_start_line`; expected an integer >= 1"
-    for owner in row["owners"]:
-        if (
-            not isinstance(owner, dict)
-            or not _is_path_locator(owner.get("path"))
-            or not _is_optional_name(owner.get("symbol"))
-            or isinstance(owner.get("start_line"), bool)
-            or not isinstance(owner.get("start_line"), int)
-            or owner["start_line"] < 1
-            or not isinstance(owner.get("snippet"), str)
-        ):
-            return (
-                "invalid `owners` item; expected {non-empty path, symbol,"
-                " start_line >= 1, snippet}"
-            )
-    if not all(_is_path_locator(t) for t in row["tests"]):
-        return "invalid `tests` item; expected non-empty path strings"
-    for issue in row["issues"]:
-        # [SC-11]: string-shaped garbage is not an issue record.
-        if not _is_issue_record(issue):
-            return (
-                "invalid `issues` item; expected a deterministic issue"
-                " record (known code, severity, message, path, and typed"
-                " line/section_id/symbol)"
-            )
-    if not all(isinstance(w, str) for w in row["packet_warnings"]):
-        return "invalid `packet_warnings` item; expected strings"
-    return None
-
-
-def _load_packets(path: Path) -> list[dict[str, Any]]:
-    """Load and validate packet JSONL ([SC-6]).
-
-    A malformed packets file is an invocation error ([SC-5] exit 2), never
-    a model-analysis result: invalid packets must be rejected here, before
-    any of them can reach analyze_packets -- as an `ambiguous` row with an
-    invented packet ID, or as a prompt built from corrupted content.
-    """
-
-    packets: list[dict[str, Any]] = []
-    for line_no, line in enumerate(
-        path.read_text(encoding="utf-8").splitlines(), start=1
-    ):
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError as exc:
-            msg = f"{path}:{line_no}: malformed packet JSONL: {exc}"
-            raise ValueError(msg) from None
-        if not isinstance(row, dict):
-            msg = f"{path}:{line_no}: packet line is not a JSON object"
-            raise ValueError(msg)
-        problem = _packet_shape_error(row)
-        if problem is not None:
-            msg = f"{path}:{line_no}: malformed packet: {problem}"
-            raise ValueError(msg)
-        packets.append(row)
-    return packets
+    return 1 if pipeline.report.summary()["errors"] else 0
 
 
 def _cmd_analyze(args: argparse.Namespace) -> int:
@@ -568,6 +358,7 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         render_results_jsonl,
         resolve_model_name,
     )
+    from backstitch.artifact_contracts import load_packets
 
     # [CFG-3]: analyze anchors config discovery at the packets file's parent.
     if args.no_config and args.config is not None:
@@ -583,7 +374,7 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
         concurrency = settings.analyze.concurrency or 1
     if concurrency < 1:
         raise ValueError("--concurrency must be at least 1")
-    packets = _load_packets(args.packets)
+    packets = load_packets(args.packets)
     model = resolve_model_name(args.model, configured=settings.analyze.model)
     try:
         adapter = default_adapter(model)
@@ -614,199 +405,9 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
         packet_ids_from_report,
         render_analysis_summary,
     )
+    from backstitch.artifact_contracts import load_deterministic_report
 
-    try:
-        report_data = json.loads(args.deterministic_report.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        msg = f"{args.deterministic_report}: not valid JSON: {exc}"
-        raise ValueError(msg) from None
-    # [SC-6]/[SC-5]: the deterministic report contract has fixed top-level
-    # keys; a report missing any of them is malformed input, exit 2 -- not
-    # a valid report whose problems get blamed on the analysis file.
-    if not isinstance(report_data, dict):
-        msg = f"{args.deterministic_report}: not a backstitch deterministic report"
-        raise ValueError(msg)
-    report_keys = (
-        ("profile", str),
-        ("repo_root", str),
-        ("summary", dict),
-        ("spec_sections", list),
-        ("code_refs", list),
-        ("spec_mappings", list),
-        ("edges", list),
-        ("issues", list),
-    )
-    for key, key_type in report_keys:
-        if not isinstance(report_data.get(key), key_type):
-            msg = (
-                f"{args.deterministic_report}: not a backstitch deterministic"
-                f" report (missing or invalid `{key}`)"
-            )
-            raise ValueError(msg)
-    for position, edge in enumerate(report_data["edges"]):
-        # The packet-ID universe is derived from edges; a malformed edge is
-        # malformed input with a named location, never an internal error.
-        # The shape mirrors the full Edge model, not just the two fields
-        # the packet-ID derivation happens to read.
-        if (
-            not isinstance(edge, dict)
-            or edge.get("kind") not in ("mapping", "backlink")
-            or not _is_path_locator(edge.get("spec_path"))
-            or not isinstance(edge.get("section_id"), str)
-            or not is_valid_section_id(edge["section_id"])
-            or not _is_path_locator(edge.get("code_path"))
-            or not _is_optional_name(edge.get("code_symbol"))
-            or isinstance(edge.get("line"), bool)
-            or not isinstance(edge.get("line"), int)
-            or edge["line"] < 1
-        ):
-            msg = (
-                f"{args.deterministic_report}: not a backstitch deterministic"
-                f" report (invalid `edges[{position}]`: expected a full trace"
-                " edge record)"
-            )
-            raise ValueError(msg)
-    # Edges only authorize packet IDs for sections the report actually
-    # contains: `check` builds edges from resolved sections, so an edge
-    # naming a section absent from `spec_sections` is a forged or corrupted
-    # report, not a packet `backstitch packets` could have produced.
-    sections: set[tuple[str, str]] = set()
-    for position, section in enumerate(report_data["spec_sections"]):
-        # Full SpecSection record shape, same standard as edges and issues.
-        # A real heading cannot mint a section with a blank title (the
-        # heading grammar requires title text), so non-blank is safe.
-        if (
-            not isinstance(section, dict)
-            or not _is_path_locator(section.get("path"))
-            or not isinstance(section.get("section_id"), str)
-            or not is_valid_section_id(section["section_id"])
-            or not isinstance(section.get("title"), str)
-            or not section["title"].strip()
-            or isinstance(section.get("line"), bool)
-            or not isinstance(section.get("line"), int)
-            or section["line"] < 1
-            or not (
-                section.get("anchor") is None
-                or (isinstance(section["anchor"], str) and section["anchor"].strip())
-            )
-            or section.get("kind") not in ("heading", "invariant", "bullet")
-        ):
-            msg = (
-                f"{args.deterministic_report}: not a backstitch deterministic"
-                f" report (invalid `spec_sections[{position}]`: expected a"
-                " full section record)"
-            )
-            raise ValueError(msg)
-        sections.add((section["path"], section["section_id"]))
-    for position, edge in enumerate(report_data["edges"]):
-        if (edge["spec_path"], edge["section_id"]) not in sections:
-            msg = (
-                f"{args.deterministic_report}: not a backstitch deterministic"
-                f" report (`edges[{position}]` references"
-                f" `{edge['spec_path']}#{edge['section_id']}`, which is not"
-                " in `spec_sections`)"
-            )
-            raise ValueError(msg)
-    # code_refs and spec_mappings are counted by the summary and named by
-    # the schema; garbage items mirror the full record shapes.
-    for position, ref in enumerate(report_data["code_refs"]):
-        if (
-            not isinstance(ref, dict)
-            or not _is_path_locator(ref.get("path"))
-            or not isinstance(ref.get("owner_symbol"), str)
-            or not ref["owner_symbol"].strip()
-            or isinstance(ref.get("line"), bool)
-            or not isinstance(ref.get("line"), int)
-            or ref["line"] < 1
-            or not isinstance(ref.get("raw"), str)
-            # Optional paths follow the same blank-means-absent rule as
-            # required ones: present means a real locator.
-            or not (ref.get("spec_path") is None or _is_path_locator(ref["spec_path"]))
-            or not isinstance(ref.get("section_ids"), list)
-            or not all(
-                isinstance(s, str) and is_valid_section_id(s)
-                for s in ref["section_ids"]
-            )
-            or not _is_optional_name(ref.get("anchor"))
-            or not isinstance(ref.get("ranges"), list)
-            or not all(
-                isinstance(r, list)
-                and len(r) == 2
-                and all(isinstance(x, str) for x in r)
-                for r in ref["ranges"]
-            )
-            or ref.get("ref_context") not in ("asserted", "docstring", "comment")
-        ):
-            msg = (
-                f"{args.deterministic_report}: not a backstitch deterministic"
-                f" report (invalid `code_refs[{position}]`: expected a full"
-                " code reference record)"
-            )
-            raise ValueError(msg)
-    for position, mapping in enumerate(report_data["spec_mappings"]):
-        if (
-            not isinstance(mapping, dict)
-            or not _is_path_locator(mapping.get("spec_path"))
-            or not isinstance(mapping.get("section_id"), str)
-            or not is_valid_section_id(mapping["section_id"])
-            or isinstance(mapping.get("line"), bool)
-            or not isinstance(mapping.get("line"), int)
-            or mapping["line"] < 1
-            or not isinstance(mapping.get("target"), str)
-            or not mapping["target"].strip()
-            or mapping.get("kind") not in ("path", "path_symbol", "symbol")
-            or not (
-                mapping.get("target_path") is None
-                or _is_path_locator(mapping["target_path"])
-            )
-            or not _is_optional_name(mapping.get("target_symbol"))
-        ):
-            msg = (
-                f"{args.deterministic_report}: not a backstitch deterministic"
-                f" report (invalid `spec_mappings[{position}]`: expected a"
-                " full mapping record)"
-            )
-            raise ValueError(msg)
-    severity_counts = {"error": 0, "warning": 0, "info": 0}
-    for position, issue in enumerate(report_data["issues"]):
-        # Same record rules as packet issues ([SC-11]).
-        if not _is_issue_record(issue):
-            msg = (
-                f"{args.deterministic_report}: not a backstitch deterministic"
-                f" report (invalid `issues[{position}]`: expected a"
-                " deterministic issue record)"
-            )
-            raise ValueError(msg)
-        severity_counts[issue["severity"]] += 1
-    # Summary counts must agree with the report's own contents; the
-    # summary line is rendered from the counts, so a lying summary would
-    # print "0 errors" over a report full of them. Only well-formed count
-    # values are compared here -- type garbage is named by the renderer's
-    # own count validation instead.
-    expected_counts = {
-        "spec_sections": len(report_data["spec_sections"]),
-        "code_refs": len(report_data["code_refs"]),
-        "spec_mappings": len(report_data["spec_mappings"]),
-        "errors": severity_counts["error"],
-        "warnings": severity_counts["warning"],
-        "infos": severity_counts["info"],
-    }
-    summary_data = report_data["summary"]
-    disagreeing = [
-        key
-        for key, expected in expected_counts.items()
-        if isinstance(summary_data.get(key), int)
-        and not isinstance(summary_data.get(key), bool)
-        and summary_data[key] >= 0
-        and summary_data[key] != expected
-    ]
-    if disagreeing:
-        msg = (
-            f"{args.deterministic_report}: not a backstitch deterministic"
-            " report (summary counts disagree with report contents for:"
-            f" {', '.join(disagreeing)})"
-        )
-        raise ValueError(msg)
+    report_data = load_deterministic_report(args.deterministic_report)
     load = load_analysis_results(
         args.analysis_results.read_text(encoding="utf-8"),
         packet_ids_from_report(report_data),
@@ -842,6 +443,33 @@ def _cmd_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    # Lazy import in the handler only: doctor is an llm-touching command
+    # like analyze; check/packets stay structurally incapable of importing
+    # llm ([SC-8]), and doctor.py itself defers llm to check functions.
+    from backstitch.doctor import (
+        doctor_exit_code,
+        render_json,
+        render_text,
+        run_doctor,
+    )
+
+    # [CFG-3]: doctor anchors config discovery at the current working
+    # directory (it has no packets file or --repo-root to anchor on).
+    if args.no_config and args.config is not None:
+        raise ConfigLoadError("--config and --no-config are mutually exclusive")
+    if args.no_config:
+        settings = BackstitchSettings()
+    else:
+        settings = load_settings(Path.cwd(), explicit=args.config)
+    results = run_doctor(
+        args.model, configured=settings.analyze.model, probe=args.probe
+    )
+    rendered = render_json(results) if args.format == "json" else render_text(results)
+    sys.stdout.write(rendered)
+    return doctor_exit_code(results)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the backstitch CLI."""
 
@@ -857,6 +485,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "packets": _cmd_packets,
         "analyze": _cmd_analyze,
         "summarize-analysis": _cmd_summarize,
+        "doctor": _cmd_doctor,
         "config": _cmd_config,
     }
     try:

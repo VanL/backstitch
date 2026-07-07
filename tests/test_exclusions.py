@@ -97,6 +97,56 @@ def test_context_dependent_code_suppressibility_gates_on_instance_severity() -> 
     assert not suppressed
 
 
+def test_context_dependent_error_config_file_attempt_warns_and_records_usage() -> None:
+    # [EXC-8]: config attempts to suppress a context-dependent error instance
+    # are ignored, but they are still auditable and count as matched config
+    # rules rather than stale ignores.
+    index = build_suppression_index(
+        meta_spec_globs=(),
+        lint=LintSettings(
+            warn_unused_ignores=False,
+            per_file_ignores={"pkg/*.py": ("SPEC_SECTION_AMBIGUOUS",)},
+        ),
+    )
+    suppressed, reason = should_suppress(
+        _issue("SPEC_SECTION_AMBIGUOUS", severity="error", path="pkg/mod.py"),
+        index,
+    )
+    assert not suppressed and reason is None
+    assert index.used_config_file_rules == {"pkg/*.py"}
+    assert any(
+        "suppression ignored for error-severity code SPEC_SECTION_AMBIGUOUS" in warning
+        for warning in index.suppression_warnings
+    )
+    assert collect_unused_ignore_warnings(index) == []
+
+
+def test_context_dependent_error_config_section_attempt_warns() -> None:
+    index = build_suppression_index(
+        meta_spec_globs=(),
+        lint=LintSettings(
+            warn_unused_ignores=False,
+            per_section_ignores={"docs/specs/a.md::MAP-1": ("MAPPING_PATH_MISSING",)},
+        ),
+    )
+    suppressed, reason = should_suppress(
+        _issue(
+            "MAPPING_PATH_MISSING",
+            severity="error",
+            path="docs/specs/a.md",
+            section_id="MAP-1",
+        ),
+        index,
+    )
+    assert not suppressed and reason is None
+    assert index.used_config_section_rules == {"docs/specs/a.md::MAP-1"}
+    assert any(
+        "suppression ignored for error-severity code MAPPING_PATH_MISSING" in warning
+        for warning in index.suppression_warnings
+    )
+    assert collect_unused_ignore_warnings(index) == []
+
+
 def test_unknown_suppression_code_in_config_raises() -> None:
     with pytest.raises(UnknownSuppressionCodeError) as excinfo:
         build_suppression_index(

@@ -32,7 +32,8 @@ def test_ci_checks_release_helper_format_and_types() -> None:
     assert "uv run ruff format --check" in workflow
     assert "tests/test_release_workflow_gate.py" in workflow
     assert (
-        "uv run mypy backstitch bin/release.py --config-file pyproject.toml" in workflow
+        "uv run mypy backstitch bin/release.py tests --config-file pyproject.toml"
+        in workflow
     )
     assert "uv run backstitch check --repo-root ." in workflow
 
@@ -59,8 +60,11 @@ def test_local_llm_workflow_is_separate_and_guarded() -> None:
 
     assert "name: local-llm" in active
     assert "workflow_dispatch:" in active
-    assert "push:" not in active
-    assert "branches: [main]" not in active
+    # Graduated to run on push to main so the release commit has a green
+    # local-llm run for the release gate to require. Still NOT on
+    # pull_request: fork-PR exposure is a separate threat-model-gated step.
+    assert "push:" in active
+    assert "branches: [main]" in active
     assert "pull_request:" not in active
     assert "permissions:" in active
     assert "contents: read" in active
@@ -135,11 +139,15 @@ def test_local_llm_workflow_is_separate_and_guarded() -> None:
 def test_release_gate_waits_for_ci_before_publishing() -> None:
     workflow = _workflow_text("release-gate.yml")
 
-    require_position = workflow.index("Require CI workflow to be green")
+    require_position = workflow.index("Require CI and local-llm workflows to be green")
     publish_position = workflow.index("publish-to-pypi:")
 
     assert require_position < publish_position
     assert '--workflow "CI"' in workflow
+    # The Docker/Ollama local-llm lane (Linux-only) must be green on the
+    # release commit before publishing, following simplebroker's model of
+    # requiring the service-backed test workflow by name.
+    assert '--workflow "local-llm"' in workflow
     assert "verify-tag-current:" in workflow
     assert "expected: ${EXPECTED_SHA}" in workflow
 
