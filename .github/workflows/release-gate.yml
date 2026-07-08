@@ -83,7 +83,7 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           python-version: "3.11"
-          enable-cache: true
+          enable-cache: false
 
       - name: Verify checked out commit matches tested release commit
         run: |

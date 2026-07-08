@@ -53,6 +53,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.11"
+          enable-cache: false
 
       - name: Prepare Ollama cache directory
         run: |

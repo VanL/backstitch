@@ -29,6 +29,8 @@ def _index(text: str, needle: str) -> int:
 def test_ci_checks_release_helper_format_and_types() -> None:
     workflow = _workflow_text("ci.yml")
 
+    assert workflow.count("uses: astral-sh/setup-uv@v7") == 3
+    assert workflow.count("enable-cache: false") == 3
     assert "uv run ruff format --check" in workflow
     assert "tests\n" in workflow
     assert (
@@ -75,6 +77,7 @@ def test_local_llm_workflow_is_separate_and_guarded() -> None:
 
     assert "uses: astral-sh/setup-uv@v7" in active
     assert 'python-version: "3.11"' in active
+    assert "enable-cache: false" in active
     assert "ollama/ollama@sha256:" in active
     assert "ollama/ollama:latest" not in active
     assert "timeout-minutes: 20" in active
@@ -179,6 +182,7 @@ def test_release_gate_builds_with_backstitch_python_version() -> None:
 
     assert "uses: astral-sh/setup-uv@v7" in workflow
     assert 'python-version: "3.11"' in workflow
+    assert "enable-cache: false" in workflow
     assert "uv build" in workflow
 
 

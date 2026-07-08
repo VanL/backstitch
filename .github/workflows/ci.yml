@@ -25,6 +25,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
+          enable-cache: false
       - name: Install dependencies
         run: uv sync --extra dev
       - name: Hermetic tests (live LLM deselected)
@@ -79,6 +80,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
+          enable-cache: false
       - name: Prove dependencies install from wheels
         run: uv sync --locked --extra dev --no-build --no-install-project
 
@@ -108,6 +110,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.14"
+          enable-cache: false
       - name: Install dependencies
         run: uv sync --extra dev
       - name: Run live LLM tests
