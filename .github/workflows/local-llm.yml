@@ -45,12 +45,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.11"
 
@@ -62,7 +62,7 @@ jobs:
 
       - name: Restore Ollama model cache
         id: restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: ${{ env.OLLAMA_CACHE_DIR }}
           key: ollama-${{ runner.os }}-${{ runner.arch }}-${{ env.BACKSTITCH_LOCAL_LLM_BASE_MODEL }}-${{ env.OLLAMA_CONTEXT_LENGTH }}-${{ env.OLLAMA_IMAGE }}-${{ env.OLLAMA_CACHE_EPOCH }}
@@ -200,14 +200,14 @@ jobs:
       - name: Save Ollama model cache
         id: save
         if: ${{ !cancelled() && steps.pull.outcome == 'success' && steps.model-poll.outcome == 'success' && steps.restore.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         continue-on-error: true
         with:
           path: ${{ env.OLLAMA_CACHE_DIR }}
           key: ollama-${{ runner.os }}-${{ runner.arch }}-${{ env.BACKSTITCH_LOCAL_LLM_BASE_MODEL }}-${{ env.OLLAMA_CONTEXT_LENGTH }}-${{ env.OLLAMA_IMAGE }}-${{ env.OLLAMA_CACHE_EPOCH }}
 
       - name: Fail on broken cache save
-        # actions/cache/save@v4 does not fail on "key already exists" (a
+        # actions/cache/save@v5 does not fail on "key already exists" (a
         # concurrent run winning the race logs a warning and succeeds), so a
         # failure outcome means a real problem: permissions or unreadable
         # files. Without this check, continue-on-error hides it and every

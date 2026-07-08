@@ -73,7 +73,7 @@ def test_local_llm_workflow_is_separate_and_guarded() -> None:
     assert "cancel-in-progress: false" in active
     assert "2 vCPU / 8 GB" in workflow
 
-    assert "uses: astral-sh/setup-uv@v5" in active
+    assert "uses: astral-sh/setup-uv@v7" in active
     assert 'python-version: "3.11"' in active
     assert "ollama/ollama@sha256:" in active
     assert "ollama/ollama:latest" not in active
@@ -109,7 +109,7 @@ def test_local_llm_workflow_is_separate_and_guarded() -> None:
 
     # A failed save (permissions/unreadable files) must fail the job on
     # trusted runs instead of hiding behind continue-on-error; "key already
-    # exists" does not produce a failure outcome in actions/cache/save@v4.
+    # exists" does not produce a failure outcome in actions/cache/save@v5.
     assert "if: ${{ !cancelled() && steps.save.outcome == 'failure' }}" in active
     # The context-bound verification greps must be anchored at both ends so
     # neither a prefixed key (foo_num_ctx) nor a longer value (40960 vs 4096)
@@ -177,7 +177,7 @@ def test_release_gate_uses_trusted_publishing_and_attestations() -> None:
 def test_release_gate_builds_with_backstitch_python_version() -> None:
     workflow = _workflow_text("release-gate.yml")
 
-    assert "uses: astral-sh/setup-uv@v5" in workflow
+    assert "uses: astral-sh/setup-uv@v7" in workflow
     assert 'python-version: "3.11"' in workflow
     assert "uv build" in workflow
 
