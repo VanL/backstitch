@@ -4,6 +4,7 @@ Spec: docs/specs/02-backstitch-core.md [SC-1]–[SC-12]
 Spec: docs/specs/03-backstitch-configuration.md [CFG-1]–[CFG-10]
 Spec: docs/specs/04-backstitch-traceability-exclusions.md [EXC-1]–[EXC-10]
 Plan: docs/plans/2026-07-02-backstitch-four-way-reconciliation-plan.md
+Plan: docs/plans/2026-07-07-tree-sitter-code-parser-plan.md
 
 This document explains why the reconciled implementation is shaped the way
 it is — boundaries, tradeoffs, and provenance — not a narration of the code.
@@ -30,6 +31,20 @@ Load-bearing boundaries:
   parser. `fence` and `code_block` tokens are non-declarative content, while
   recognized [EXC-4] HTML-comment marker tokens still feed the suppression
   marker path.
+- **Python structure belongs to `tree-sitter-python`.** `code_parser.py`
+  owns the runtime-independent parser seam for owner spans, doc blocks,
+  comments, and statement spans; `python_refs.py` only interprets Backstitch
+  traceability syntax over that structure. No `ast` or `tokenize` path parses
+  target files. A malformed Python tree is all-or-nothing coverage loss:
+  `PYTHON_SYNTAX_ERROR` is emitted as a suppressible warning and inline noqa
+  inside that unparseable file cannot suppress it because no directives were
+  extracted. Line numbers are derived from byte offsets through Backstitch's
+  own line index rather than the binding `Point` accessors; the 0.26 binding
+  crashed under repeated traversal during migration testing, and byte offsets
+  are the stable source of truth. This boundary is a traceability parser, not
+  a Python validity checker: some invalid legacy forms can still produce a
+  tree, so ruff, mypy, and import/runtime tests remain responsible for code
+  validity.
 - **The llm quarantine.** `check` and `packets` are structurally incapable
   of importing `llm`: the import lives inside `analysis_llm.default_adapter`
   and the `analyze` CLI handler, and a subprocess test asserts
@@ -100,7 +115,7 @@ Load-bearing boundaries:
   suffix with `MAPPING_PATH_INEXACT` (edge kept); multiple candidates
   `TARGET_PATH_AMBIGUOUS` (no edge); none `MAPPING_PATH_MISSING` with the
   plan-`.md` warning predicate.
-- Comment-form `backstitch: noqa` attaches to the next statement's AST span
+- Comment-form `backstitch: noqa` attaches to the next tree-sitter statement span
   only ([EXC-5]); the docstring form is module-scoped. File-wide bleed of a
   comment directive is the [EXC-9] regression class and has a dedicated
   containment fixture.

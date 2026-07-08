@@ -94,11 +94,15 @@ def test_precheck_commands_match_release_contract() -> None:
     commands = release.build_precheck_commands()
     command_text = "\n".join(" ".join(command) for command in commands)
 
-    assert "pytest tests -q -m not live_llm" in command_text
+    assert "pytest tests -q -n auto --dist loadgroup -m not live_llm" in command_text
     assert "pytest tests/live/test_live_llm.py -q" in command_text
+    assert "pytest tests/live/test_live_llm.py -q --tb=short" in command_text
     assert "ruff check backstitch tests bin" in command_text
-    assert "ruff format --check backstitch bin .github/scripts" in command_text
-    assert "mypy backstitch bin/release.py --config-file pyproject.toml" in command_text
+    assert "ruff format --check backstitch bin .github/scripts tests" in command_text
+    assert (
+        "mypy backstitch bin/release.py tests --config-file pyproject.toml"
+        in command_text
+    )
     assert "backstitch check --repo-root ." in command_text
 
 
@@ -109,6 +113,34 @@ def test_live_llm_precheck_opts_in_to_real_provider_path() -> None:
         "PYTEST_ADDOPTS": "-x --maxfail=1",
         "BACKSTITCH_LIVE_LLM": "1",
         "BACKSTITCH_LIVE_LLM_KIND": "openai",
+    }
+
+
+def test_local_llm_precheck_opts_in_to_local_provider_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key in (
+        "BACKSTITCH_LOCAL_LLM_ENDPOINT",
+        "BACKSTITCH_LOCAL_LLM_UPSTREAM",
+        "BACKSTITCH_LOCAL_LLM_BASE_MODEL",
+        "BACKSTITCH_LOCAL_LLM_SERVED_MODEL",
+        "OLLAMA_CONTEXT_LENGTH",
+        "OLLAMA_NUM_PREDICT",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    env = release._precheck_env_overrides(release.LOCAL_LLM_TEST_COMMAND)
+
+    assert env == {
+        "PYTEST_ADDOPTS": "-x --maxfail=1",
+        "BACKSTITCH_LIVE_LLM": "1",
+        "BACKSTITCH_LIVE_LLM_KIND": "local",
+        "BACKSTITCH_LOCAL_LLM_ENDPOINT": "http://127.0.0.1:11434/v1",
+        "BACKSTITCH_LOCAL_LLM_UPSTREAM": "http://127.0.0.1:11434/v1",
+        "BACKSTITCH_LOCAL_LLM_BASE_MODEL": "llama3.2:3b",
+        "BACKSTITCH_LOCAL_LLM_SERVED_MODEL": "backstitch-local-model:latest",
+        "OLLAMA_CONTEXT_LENGTH": "4096",
+        "OLLAMA_NUM_PREDICT": "1024",
     }
 
 
@@ -236,6 +268,13 @@ def test_main_rejects_dirty_real_release(monkeypatch: pytest.MonkeyPatch) -> Non
         release.main(["--version", "0.2.0"])
 
 
+def test_all_target_rejects_explicit_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(release, "read_target_version", lambda target: "0.1.0")
+
+    with pytest.raises(RuntimeError, match="cannot be used with target 'all'"):
+        release.main(["all", "--version", "0.2.0"])
+
+
 def test_dry_run_prints_commands_without_running(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -274,6 +313,40 @@ def test_dry_run_prints_commands_without_running(
     output = capsys.readouterr().out
     assert "dry-run: would update pyproject.toml, backstitch/__init__.py" in output
     assert ("uv", "lock") in commands
+    assert ("git", "tag", "v0.2.0") in commands
+    assert ("git", "push", "origin", "v0.2.0") in commands
+
+
+def test_all_target_dry_run_reuses_current_unpublished_version(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    def fake_run_command(
+        command: tuple[str, ...],
+        *,
+        cwd: Path = release.PROJECT_ROOT,
+        dry_run: bool = False,
+        env_overrides: dict[str, str] | None = None,
+    ) -> None:
+        assert dry_run is True
+        commands.append(command)
+
+    monkeypatch.setattr(release, "read_target_version", lambda target: "0.2.0")
+    monkeypatch.setattr(release, "is_dirty_worktree", lambda: False)
+    monkeypatch.setattr(
+        release,
+        "inspect_release_state",
+        lambda version, *, target: _state(),
+    )
+    monkeypatch.setattr(release, "current_head_commit", lambda: "a" * 40)
+    monkeypatch.setattr(release, "run_command", fake_run_command)
+
+    assert release.main(["all", "--dry-run", "--skip-checks"]) == 0
+
+    output = capsys.readouterr().out
+    assert "dry-run: current backstitch version 0.2.0 is unpublished" in output
     assert ("git", "tag", "v0.2.0") in commands
     assert ("git", "push", "origin", "v0.2.0") in commands
 

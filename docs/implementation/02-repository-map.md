@@ -22,7 +22,8 @@ Quick pointers to the key guidance documents in this repository.
 | `backstitch/config.py` | `ProfileConfig` and overrides ([SC-3]) |
 | `backstitch/profiles.py` | Built-in `backstitch-style-v1` profile ([SC-3]) |
 | `backstitch/markdown_specs.py` | Traceability layer over `markdown-it-py` CommonMark tokens: sections, mappings, markers ([SC-4], [EXC-4]) |
-| `backstitch/python_refs.py` | Code parser: backlinks, noqa spans ([SC-4], [EXC-5]) |
+| `backstitch/code_parser.py` | Runtime-independent `tree-sitter-python` seam: owner spans, doc blocks, comments, statement spans ([SC-4], [SC-10]) |
+| `backstitch/python_refs.py` | Python traceability interpretation over the parser seam: backlinks, noqa spans ([SC-4], [EXC-5]) |
 | `backstitch/resolver.py` | Pure `resolve()` + `scan_repository` ([SC-4], [SC-9]) |
 | `backstitch/check_pipeline.py` | Shared scan + suppression pipeline for deterministic command consumers ([SC-5], [EXC-6], [EXC-7]) |
 | `backstitch/reporting.py` | Text/JSON rendering, suppressed view ([SC-6], [EXC-7]) |

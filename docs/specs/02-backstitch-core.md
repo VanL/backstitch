@@ -212,12 +212,19 @@ no discretion:
 Python parsing must support:
 
 - module, class, function, and method docstrings
-- comments parsed with `tokenize`
+- comments from the runtime-independent `tree-sitter-python` parse tree
 - file-qualified spec references
 - bare section references that resolve only when unique
 - same-prefix numeric ranges
 - comma-separated reference lists
 - Markdown-anchor references
+
+Python structure — owner symbols, doc blocks, statement spans, and comments —
+is derived from `tree-sitter-python`, not the running interpreter's `ast` or
+`tokenize`. Backstitch keeps a thin traceability layer over parser nodes and
+does not maintain its own Python grammar. Backlink extraction tracks the parser
+tree and is not limited to the syntax version of the interpreter running
+Backstitch.
 
 Bare bracketed tokens use a known-prefix rule: the parser emits every
 ID-shaped candidate, and the resolver keeps only candidates whose alphabetic
@@ -231,12 +238,16 @@ definition.
 The resolver must produce stable graph records and issue records. Re-running
 on identical inputs must yield byte-identical JSON output. Missing roots,
 missing files, missing sections, missing anchors, unsupported explicit ranges,
-explicit `path::symbol` references to missing symbols, unreadable files, and
-syntax errors in requested Python files are deterministic errors. Ambiguous
-bare references are context-dependent: in an asserted backlink (a docstring
-`Spec:` marker or a spec mapping) the reference claims a specific trace edge
-that cannot be established, so ambiguity is an error; in comments and prose
-it is a warning. Weak links, missing reciprocal backlinks, broad
+explicit `path::symbol` references to missing symbols, and unreadable files are
+deterministic errors. A Python file the code parser cannot parse is a coverage
+warning (`PYTHON_SYNTAX_ERROR`), suppressible by config/exclusion per-file
+rules and subject to `check --warnings-as-errors`; inline `# backstitch: noqa`
+inside the unparseable file cannot suppress it because no inline directives
+were extracted. Ambiguous bare references are context-dependent: in an asserted
+backlink (a docstring `Spec:` marker or a spec mapping) the reference claims a
+specific trace edge that cannot be established, so ambiguity is an error; in
+comments and prose it is a warning. Weak links, missing reciprocal backlinks,
+broad
 document-only references, planned/exploratory references from shipped code,
 ownerless mapping blocks, and unresolved advisory symbols are warnings unless
 a later policy explicitly promotes them.
@@ -248,6 +259,7 @@ repository, not for one bad file inside it.
 
 _Implementation mapping_:
 - `backstitch/markdown_specs.py`
+- `backstitch/code_parser.py`
 - `backstitch/python_refs.py`
 - `backstitch/resolver.py`
 - `backstitch/models.py`
@@ -589,6 +601,11 @@ Required proof surfaces:
   blocks, CommonMark fence closers, standalone HTML-comment traceability
   markers, and inline-code normalization for mapping tokens
 - fixture-backed Python parser tests
+- fixture-backed `tree-sitter` analyzer tests proving owner spans, doc-block
+  extraction with exact line numbers, statement spans, comment extraction,
+  all-or-nothing error recovery on malformed input, and runtime-version
+  independence for PEP 695 generics, PEP 695 `type` aliases, and PEP 701
+  f-strings
 - resolver tests for clean and broken graphs
 - CLI subprocess tests for text, JSON, output file, and exit-code behavior
 - a subprocess proof that deterministic commands (`check`, `packets`) never
@@ -670,6 +687,7 @@ but not painful.
 
 _Implementation mapping_:
 - `tests/test_markdown_specs.py`
+- `tests/test_code_parser.py`
 - `tests/test_python_refs.py`
 - `tests/test_resolver.py`
 - `tests/test_cli.py`
@@ -694,7 +712,7 @@ Deterministic issue codes and default severities:
 | `MAPPING_SYMBOL_MISSING` | error | Explicit `path::symbol` names a symbol absent from that file |
 | `MAPPING_SYMBOL_UNRESOLVED` | warning | Advisory bare symbol in mapping could not be resolved |
 | `MAPPING_BLOCK_OWNERLESS` | warning | Mapping block has no preceding ID-bearing heading; tokens ignored |
-| `PYTHON_SYNTAX_ERROR` | error | Python file could not be parsed |
+| `PYTHON_SYNTAX_ERROR` | warning | Python file could not be parsed |
 | `FILE_UNREADABLE` | error | File could not be read (missing permissions, non-UTF-8); scan continues |
 | `CODE_REF_BARE_UNRESOLVED` | warning | Known-prefix bare reference matches no section |
 | `SPEC_MAPPING_RECIPROCAL_MISSING` | warning | Code backlink without spec mapping |
@@ -722,6 +740,13 @@ citing file and line, so a human or agent can always navigate to the problem.
 Invariant-traceability issue codes (`INVARIANT_*`) are proposed in
 `docs/specs/05-backstitch-invariants.md` [INV-8] and follow this table's
 severity rationale.
+
+An unparseable code file is a coverage warning. It is suppressible by
+config/exclusion per-file rules, but not by inline noqa inside that same
+unparseable file because the parser did not extract its inline directives.
+Strict enforcement on `check` uses the existing `--warnings-as-errors` flag or
+`[check].warnings_as_errors`; `packets` has no warnings-as-errors flag and does
+not exit nonzero solely for `PYTHON_SYNTAX_ERROR`.
 
 _Implementation mapping_:
 - `backstitch/artifact_contracts.py`
@@ -887,6 +912,7 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-07-07-tree-sitter-code-parser-plan.md` (implementing)
 - `docs/plans/2026-07-06-local-model-catalog-and-doctor-plan.md` (implementing)
 - `docs/plans/2026-07-06-backstitch-organization-refactor-plan.md` (implementing)
 - `docs/plans/2026-07-03-local-llm-eval-lane-plan.md` (implementing)

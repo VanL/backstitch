@@ -3,8 +3,9 @@
 Spec: docs/specs/02-backstitch-core.md [SC-4]
 Grammar: docs/implementation/04-backstitch-style-traceability.md
 
-Docstrings are read through ``ast``; comments through ``tokenize`` so line
-numbers are real. The parser emits every ID-shaped bare bracket candidate;
+Python structure is read through ``tree-sitter-python`` so the parser is not
+locked to the running interpreter's grammar. The parser emits every ID-shaped
+bare bracket candidate;
 the resolver filters candidates whose alphabetic prefix is unknown to the
 spec corpus, so indexing noise like ``window[N-1]`` stays silent while
 prose references like ``see [MA-1.1]`` still resolve.
@@ -12,13 +13,11 @@ prose references like ``see [MA-1.1]`` still resolve.
 
 from __future__ import annotations
 
-import ast
-import io
 import re
-import tokenize
 from dataclasses import dataclass
 from pathlib import Path
 
+from backstitch.code_parser import parse_python_source
 from backstitch.exclusions import parse_noqa_text
 from backstitch.grammar import SECTION_ID
 from backstitch.models import CodeRef, Issue, RefContext
@@ -183,50 +182,17 @@ def _extract_line_refs(line_text: str) -> list[_LineRef]:
     return results
 
 
-def _iter_owner_spans(tree: ast.Module) -> list[tuple[str, int, int, ast.AST]]:
-    """Return ``(qualname, start, end, node)`` for classes and functions."""
-
-    spans: list[tuple[str, int, int, ast.AST]] = []
-
-    def visit(node: ast.AST, prefix: str) -> None:
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
-                qualname = f"{prefix}{child.name}"
-                end = child.end_lineno or child.lineno
-                spans.append((qualname, child.lineno, end, child))
-                visit(child, f"{qualname}.")
-            else:
-                visit(child, prefix)
-
-    visit(tree, "")
-    return spans
-
-
-def _docstring_node(node: ast.AST) -> ast.Constant | None:
-    body = getattr(node, "body", None)
-    if not body:
-        return None
-    first = body[0]
-    if (
-        isinstance(first, ast.Expr)
-        and isinstance(first.value, ast.Constant)
-        and isinstance(first.value.value, str)
-    ):
-        return first.value
-    return None
-
-
 def python_symbol_spans(file_path: Path) -> dict[str, tuple[int, int]] | None:
     """Return ``{qualname: (start_line, end_line)}``, or None on syntax error."""
 
     try:
-        tree = ast.parse(file_path.read_text(encoding="utf-8"))
-    except SyntaxError:
+        source = file_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
         return None
-    return {
-        qualname: (start, end)
-        for qualname, start, end, _node in _iter_owner_spans(tree)
-    }
+    parsed = parse_python_source(source.encode("utf-8"))
+    if not parsed.parse_ok:
+        return None
+    return {qualname: (start, end) for qualname, start, end in parsed.owner_spans}
 
 
 def python_symbol_inventory(file_path: Path) -> frozenset[str] | None:
@@ -234,22 +200,13 @@ def python_symbol_inventory(file_path: Path) -> frozenset[str] | None:
     syntax error."""
 
     try:
-        tree = ast.parse(file_path.read_text(encoding="utf-8"))
-    except SyntaxError:
+        source = file_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
         return None
-    return frozenset(qualname for qualname, _, _, _ in _iter_owner_spans(tree))
-
-
-def _statement_spans(tree: ast.Module) -> list[tuple[int, int]]:
-    """(start, end) line spans for every statement, sorted by start."""
-
-    spans = [
-        (node.lineno, node.end_lineno or node.lineno)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.stmt)
-    ]
-    spans.sort()
-    return spans
+    parsed = parse_python_source(source.encode("utf-8"))
+    if not parsed.parse_ok:
+        return None
+    return frozenset(qualname for qualname, _, _ in parsed.owner_spans)
 
 
 def _next_statement_span(
@@ -273,16 +230,14 @@ def parse_python_file(
 
     rel_path = file_path.resolve().relative_to(repo_root.resolve()).as_posix()
     source = file_path.read_text(encoding="utf-8")
-
-    try:
-        tree = ast.parse(source)
-    except SyntaxError as exc:
+    parsed = parse_python_source(source.encode("utf-8"))
+    if not parsed.parse_ok:
         issue = Issue(
             code="PYTHON_SYNTAX_ERROR",
-            severity="error",
+            severity="warning",
             path=rel_path,
-            line=exc.lineno,
-            message=f"could not parse requested Python file: {exc.msg}",
+            line=parsed.error_line,
+            message="could not analyze requested Python file: parser reported invalid syntax",
         )
         return ParsedPython(path=rel_path, refs=(), issues=(issue,))
 
@@ -304,30 +259,30 @@ def parse_python_file(
                 )
             )
 
-    owner_spans = _iter_owner_spans(tree)
-
-    # Docstrings: module first, then each class/function owner.
-    docstring_owners: list[tuple[str, ast.AST]] = [("module", tree)]
-    docstring_owners.extend((qualname, node) for qualname, _, _, node in owner_spans)
-    for owner, node in docstring_owners:
-        docstring = _docstring_node(node)
-        if docstring is None:
-            continue
-        for offset, text_line in enumerate(str(docstring.value).splitlines()):
+    # Doc blocks: module first, then each class/function owner.
+    for doc_block in parsed.doc_blocks:
+        for offset, text_line in enumerate(doc_block.text.splitlines()):
             # [SC-11] context: a `Spec:` marker line ASSERTS a trace edge;
             # any other docstring line is prose. The distinction is made
             # here, at parse time, never re-inferred downstream.
             context: RefContext = (
                 "asserted" if text_line.lstrip().startswith("Spec:") else "docstring"
             )
-            emit(owner, docstring.lineno + offset, text_line, context)
+            emit(
+                doc_block.owner_qualname,
+                doc_block.start_line + offset,
+                text_line,
+                context,
+            )
 
     # [EXC-5] module-docstring noqa: file-scoped suppression codes.
     noqa_warnings: list[str] = []
-    module_doc = _docstring_node(tree)
+    module_doc = next(
+        (doc for doc in parsed.doc_blocks if doc.owner_qualname == "module"), None
+    )
     if module_doc is not None:
         module_noqa, doc_warnings = parse_noqa_text(
-            str(module_doc.value),
+            module_doc.text,
             allow_unknown=allow_unknown_codes,
             location=f"{rel_path} module docstring",
         )
@@ -339,36 +294,34 @@ def parse_python_file(
     def owner_for_line(line_no: int) -> str:
         best: str | None = None
         best_size: int | None = None
-        for qualname, start, end, _node in owner_spans:
+        for qualname, start, end in parsed.owner_spans:
             if start <= line_no <= end:
                 size = end - start
                 if best_size is None or size < best_size:
                     best, best_size = qualname, size
         return best or "module"
 
-    statement_spans = _statement_spans(tree)
+    statement_spans = list(parsed.statement_spans)
     span_noqa: list[tuple[int, int, frozenset[str]]] = []
-    for token in tokenize.generate_tokens(io.StringIO(source).readline):
-        if token.type == tokenize.COMMENT:
-            comment_text = token.string.lstrip("#").strip()
-            codes, comment_warnings = parse_noqa_text(
-                comment_text,
-                allow_unknown=allow_unknown_codes,
-                location=f"{rel_path}:{token.start[0]}",
-            )
-            noqa_warnings.extend(comment_warnings)
-            if codes:
-                # [EXC-5] comment form: next statement only, never file-wide.
-                span = _next_statement_span(token.start[0], statement_spans)
-                if span is not None:
-                    span_noqa.append((span[0], span[1], codes))
-                continue
-            emit(
-                owner_for_line(token.start[0]),
-                token.start[0],
-                comment_text,
-                "comment",
-            )
+    for line_no, comment_text in parsed.comments:
+        codes, comment_warnings = parse_noqa_text(
+            comment_text,
+            allow_unknown=allow_unknown_codes,
+            location=f"{rel_path}:{line_no}",
+        )
+        noqa_warnings.extend(comment_warnings)
+        if codes:
+            # [EXC-5] comment form: next statement only, never file-wide.
+            span = _next_statement_span(line_no, statement_spans)
+            if span is not None:
+                span_noqa.append((span[0], span[1], codes))
+            continue
+        emit(
+            owner_for_line(line_no),
+            line_no,
+            comment_text,
+            "comment",
+        )
 
     return ParsedPython(
         path=rel_path,

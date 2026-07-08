@@ -372,6 +372,47 @@ def test_unreadable_file_is_error_finding_not_crash(tmp_path: Path) -> None:
     assert issues[0].path == "pkg/mod.py"
 
 
+def test_non_utf8_path_symbol_inside_code_roots_is_unreadable_and_unresolved(
+    tmp_path: Path,
+) -> None:
+    spec_dir = tmp_path / "docs" / "specs"
+    spec_dir.mkdir(parents=True)
+    (spec_dir / "01-X.md").write_text(
+        "# X\n\n## Thing [X-1]\n\n_Implementation mapping_:\n\n"
+        "- `pkg/binary.py::Thing`\n",
+        encoding="utf-8",
+    )
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "binary.py").write_bytes(b"\xff\xfe invalid utf-8 \xff")
+    report = scan_repository(tmp_path, CLEAN_PROFILE)
+    codes = {i.code for i in report.issues}
+    assert "FILE_UNREADABLE" in codes
+    assert "MAPPING_SYMBOL_UNRESOLVED" in codes
+    assert "PYTHON_SYNTAX_ERROR" not in codes
+
+
+def test_non_utf8_path_symbol_outside_code_roots_is_unresolved_not_crash(
+    tmp_path: Path,
+) -> None:
+    spec_dir = tmp_path / "docs" / "specs"
+    spec_dir.mkdir(parents=True)
+    (spec_dir / "01-X.md").write_text(
+        "# X\n\n## Thing [X-1]\n\n_Implementation mapping_:\n\n"
+        "- `external/binary.py::Thing`\n",
+        encoding="utf-8",
+    )
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "binary.py").write_bytes(b"\xff\xfe invalid utf-8 \xff")
+    (tmp_path / "pkg").mkdir()
+    report = scan_repository(tmp_path, CLEAN_PROFILE)
+    codes = {i.code for i in report.issues}
+    assert "FILE_UNREADABLE" not in codes
+    assert "MAPPING_SYMBOL_UNRESOLVED" in codes
+    assert "PYTHON_SYNTAX_ERROR" not in codes
+
+
 def test_directory_mapping_covers_contained_files(tmp_path: Path) -> None:
     spec_dir = tmp_path / "docs" / "specs"
     spec_dir.mkdir(parents=True)
@@ -432,7 +473,7 @@ def test_python_syntax_error_surfaces_in_report(tmp_path: Path) -> None:
     (pkg / "mod.py").write_text("def broken(:\n", encoding="utf-8")
     report = scan_repository(tmp_path, CLEAN_PROFILE)
     codes = {i.code: i.severity for i in report.issues}
-    assert codes.get("PYTHON_SYNTAX_ERROR") == "error"
+    assert codes.get("PYTHON_SYNTAX_ERROR") == "warning"
 
 
 def test_report_is_stable_across_runs(broken: Report) -> None:

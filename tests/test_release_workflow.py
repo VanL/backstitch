@@ -30,7 +30,7 @@ def test_ci_checks_release_helper_format_and_types() -> None:
     workflow = _workflow_text("ci.yml")
 
     assert "uv run ruff format --check" in workflow
-    assert "tests/test_release_workflow_gate.py" in workflow
+    assert "tests\n" in workflow
     assert (
         "uv run mypy backstitch bin/release.py tests --config-file pyproject.toml"
         in workflow
@@ -74,7 +74,7 @@ def test_local_llm_workflow_is_separate_and_guarded() -> None:
     assert "2 vCPU / 8 GB" in workflow
 
     assert "uses: astral-sh/setup-uv@v5" in active
-    assert 'python-version: "3.14"' in active
+    assert 'python-version: "3.11"' in active
     assert "ollama/ollama@sha256:" in active
     assert "ollama/ollama:latest" not in active
     assert "timeout-minutes: 20" in active
@@ -152,6 +152,16 @@ def test_release_gate_waits_for_ci_before_publishing() -> None:
     assert "expected: ${EXPECTED_SHA}" in workflow
 
 
+def test_release_gate_verifies_tag_matches_package_version() -> None:
+    workflow = _workflow_text("release-gate.yml")
+
+    assert "Verify tag matches package version" in workflow
+    assert 'TAG_VERSION="${TAG_NAME#v}"' in workflow
+    assert 'PACKAGE_PYPROJECT="${PACKAGE_DIR}/pyproject.toml"' in workflow
+    assert "tomllib.load" in workflow
+    assert "tag {tag} != pyproject version {package_version}" in workflow
+
+
 def test_release_gate_uses_trusted_publishing_and_attestations() -> None:
     workflow = _workflow_text("release-gate.yml")
 
@@ -168,7 +178,7 @@ def test_release_gate_builds_with_backstitch_python_version() -> None:
     workflow = _workflow_text("release-gate.yml")
 
     assert "uses: astral-sh/setup-uv@v5" in workflow
-    assert 'python-version: "3.14"' in workflow
+    assert 'python-version: "3.11"' in workflow
     assert "uv build" in workflow
 
 

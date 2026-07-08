@@ -153,3 +153,14 @@ syntax layered on parser tokens. The migration lesson is not "use this one
 library"; it is "do not keep a shadow parser beside the real parser." Future
 parser changes should name the handoff, then add edge fixtures for the exact
 legacy divergences before changing behavior.
+
+## Native parser bindings: prefer stable primitives over convenience accessors (2026-07-07)
+
+During the Python `tree-sitter` migration, repeated traversal that asked the
+0.26 binding for `Node.start_point` / `Node.end_point` caused native crashes
+after earlier parser work had apparently succeeded. The safer boundary is to
+treat parser byte offsets as the primitive contract and derive 1-indexed line
+numbers through one project-owned line index. Future parser integrations should
+smoke-test the binding API under repeated traversal and avoid making
+convenience accessors load-bearing when byte offsets can provide the same
+information deterministically.

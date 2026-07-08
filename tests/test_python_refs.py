@@ -138,5 +138,46 @@ def test_syntax_error_yields_issue_not_crash(tmp_path: Path) -> None:
     assert len(parsed.issues) == 1
     issue = parsed.issues[0]
     assert issue.code == "PYTHON_SYNTAX_ERROR"
-    assert issue.severity == "error"
+    assert issue.severity == "warning"
     assert issue.path == "broken.py"
+
+
+def test_modern_python_syntax_parses_without_runtime_ast(tmp_path: Path) -> None:
+    mod = tmp_path / "modern.py"
+    mod.write_text(
+        '''class Box[T]:
+    """Spec: [PEP-1]"""
+    pass
+
+type Alias[T] = list[T]
+
+def pep701(items):
+    """Spec: [PEP-2]"""
+    return f"{items["key"]}"
+''',
+        encoding="utf-8",
+    )
+    parsed = parse_python_file(mod, tmp_path)
+    assert parsed.issues == ()
+    assert [(ref.owner_symbol, ref.section_ids) for ref in parsed.refs] == [
+        ("Box", ("PEP-1",)),
+        ("pep701", ("PEP-2",)),
+    ]
+
+
+def test_comment_noqa_attaches_to_elif_statement_span(tmp_path: Path) -> None:
+    mod = tmp_path / "elif_noqa.py"
+    mod.write_text(
+        """def f(flag, other):
+    if flag:
+        pass
+    # backstitch: noqa CODE_REF_UNMAPPED_FROM_SPEC
+    elif other:  # see [X-1]
+        value = 1
+""",
+        encoding="utf-8",
+    )
+    parsed = parse_python_file(mod, tmp_path)
+    assert parsed.issues == ()
+    assert parsed.span_noqa == ((5, 6, frozenset({"CODE_REF_UNMAPPED_FROM_SPEC"})),)
+    assert [(ref.line, ref.section_ids) for ref in parsed.refs] == [(5, ("X-1",))]

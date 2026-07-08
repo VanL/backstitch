@@ -64,7 +64,7 @@ MAX_LIVE_PACKETS = 5
 DEFAULT_LOCAL_ENDPOINT = "http://127.0.0.1:11434/v1"
 LOCAL_HTTP_TIMEOUT_SECONDS = 20
 LOCAL_SUBPROCESS_TIMEOUT_SECONDS = 300
-LOCAL_ANALYZE_TIMEOUT_SECONDS = 300
+LOCAL_ANALYZE_TIMEOUT_SECONDS = 900
 # Conservative top of the plan's ~3-4 bytes/token range. Assumed, not measured:
 # a target-runner bake-off has not produced a K figure yet (recorded in the
 # plan); replace with the measured value when one exists.

@@ -34,7 +34,7 @@ implementation note for the operational process.
 
 ## Maintainer Flow
 
-Run a dry run first:
+Run a dry run first when the helper should update the version files:
 
 ```bash
 bin/release.py --version X.Y.Z --dry-run
@@ -46,12 +46,23 @@ For a real release, run from a clean worktree:
 bin/release.py --version X.Y.Z
 ```
 
+When the version files and `CHANGELOG.md` are already prepared and committed,
+use the SimpleBroker-compatible single-package target:
+
+```bash
+bin/release.py all --dry-run
+bin/release.py all
+```
+
 The helper:
 
 1. rejects a dirty real-release worktree
 2. verifies the requested version is unpublished on PyPI and GitHub Releases
-3. runs local prechecks unless `--skip-checks` is passed, including the live
-   LLM test with `BACKSTITCH_LIVE_LLM=1`
+3. runs local prechecks unless `--skip-checks` is passed, including cloud and
+   local live LLM tests with `BACKSTITCH_LIVE_LLM=1`; the helper starts a
+   background local-LLM setup/readiness/prewarm probe before the earlier
+   foreground checks, pulls the base Ollama model, recreates the bounded served
+   model, and waits for it before the local live test
 4. updates `pyproject.toml` and `backstitch/__init__.py` together
 5. runs `uv lock`, `backstitch --version`, and `uv build`
 6. commits changed release files
@@ -62,13 +73,16 @@ The helper never publishes directly. Pushing the tag starts
 
 ## GitHub Release Gate
 
-The release gate runs on `v*` tags. It waits for the `CI` workflow on the same
-commit SHA, verifies the tag still points at the tested commit, builds the
-package with Python 3.14, generates an artifact attestation, publishes to PyPI
-through Trusted Publishing, then creates the GitHub Release.
+The release gate runs on `v*` tags. It waits for the `CI` and `local-llm`
+workflows on the same commit SHA, verifies the tag still points at the tested
+commit, verifies the `vX.Y.Z` tag matches `pyproject.toml`, builds the package
+with the floor runtime (Python 3.11), generates an artifact attestation,
+publishes to PyPI through Trusted Publishing, then creates the GitHub Release.
+The `CI` workflow separately proves the hermetic suite on Python 3.11 and 3.14
+before the release gate publishes.
 
 The workflow-gate helper is executed with the runner's system `python` before
-the build job sets up Python 3.14. Keep `.github/scripts/require_green_workflows.py`
+the build job sets up Python 3.11. Keep `.github/scripts/require_green_workflows.py`
 portable to that interpreter, not only to the project runtime.
 
 Required external setup:
@@ -103,11 +117,11 @@ Local release process changes should prove:
 - `tests/test_release_script.py`
 - `tests/test_release_workflow.py`
 - `tests/test_release_workflow_gate.py`
-- `uv run ruff format --check backstitch bin .github/scripts tests/test_release_script.py tests/test_release_workflow.py tests/test_release_workflow_gate.py`
+- `uv run ruff format --check backstitch bin .github/scripts tests`
 - `uv run ruff check backstitch tests bin`
-- `uv run mypy backstitch bin/release.py --config-file pyproject.toml`
+- `uv run mypy backstitch bin/release.py tests --config-file pyproject.toml`
 - `python3 -m py_compile .github/scripts/require_green_workflows.py`
-- `uv run pytest tests -q -m "not live_llm"`
+- `uv run pytest tests -q -n auto --dist loadgroup -m "not live_llm"`
 - `uv run pytest tests/live/test_live_llm.py -q`
 - `BACKSTITCH_LIVE_LLM=1 uv run pytest tests/live/test_live_llm.py -q` when
   live-provider credentials are available

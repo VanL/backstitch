@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shlex
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -34,6 +37,15 @@ PACKAGE_INIT_VERSION_PATTERN: Final[re.Pattern[str]] = re.compile(
     r'(?m)^__version__(?::[^=]+)?\s*=\s*"([^"]+)"$'
 )
 PENDING_RELEASE_COMMIT: Final[str] = "<release-commit>"
+CORE_RELEASE_TARGET_KEY: Final[str] = "core"
+ALL_RELEASE_TARGET_KEY: Final[str] = "all"
+DEFAULT_LOCAL_LLM_ENDPOINT: Final[str] = "http://127.0.0.1:11434/v1"
+DEFAULT_LOCAL_LLM_BASE_MODEL: Final[str] = "llama3.2:3b"
+DEFAULT_LOCAL_LLM_SERVED_MODEL: Final[str] = "backstitch-local-model:latest"
+DEFAULT_LOCAL_LLM_CONTEXT_LENGTH: Final[str] = "4096"
+DEFAULT_LOCAL_LLM_NUM_PREDICT: Final[str] = "1024"
+LOCAL_LLM_PREWARM_TIMEOUT_SECONDS: Final[int] = 900
+LOCAL_LLM_PREWARM_POLL_SECONDS: Final[float] = 2.0
 
 HERMETIC_TEST_COMMAND: Final[tuple[str, ...]] = (
     "uv",
@@ -41,6 +53,10 @@ HERMETIC_TEST_COMMAND: Final[tuple[str, ...]] = (
     "pytest",
     "tests",
     "-q",
+    "-n",
+    "auto",
+    "--dist",
+    "loadgroup",
     "-m",
     "not live_llm",
 )
@@ -50,6 +66,14 @@ LIVE_LLM_TEST_COMMAND: Final[tuple[str, ...]] = (
     "pytest",
     "tests/live/test_live_llm.py",
     "-q",
+)
+LOCAL_LLM_TEST_COMMAND: Final[tuple[str, ...]] = (
+    "uv",
+    "run",
+    "pytest",
+    "tests/live/test_live_llm.py",
+    "-q",
+    "--tb=short",
 )
 RUFF_CHECK_COMMAND: Final[tuple[str, ...]] = (
     "uv",
@@ -69,9 +93,7 @@ RUFF_FORMAT_COMMAND: Final[tuple[str, ...]] = (
     "backstitch",
     "bin",
     ".github/scripts",
-    "tests/test_release_script.py",
-    "tests/test_release_workflow.py",
-    "tests/test_release_workflow_gate.py",
+    "tests",
 )
 MYPY_COMMAND: Final[tuple[str, ...]] = (
     "uv",
@@ -79,6 +101,7 @@ MYPY_COMMAND: Final[tuple[str, ...]] = (
     "mypy",
     "backstitch",
     "bin/release.py",
+    "tests",
     "--config-file",
     "pyproject.toml",
 )
@@ -132,6 +155,15 @@ class CommandStep:
     command: tuple[str, ...]
     cwd: Path = PROJECT_ROOT
     env_overrides: dict[str, str] | None = None
+
+
+@dataclass
+class BackgroundCheck:
+    """One background release precheck with delayed failure reporting."""
+
+    name: str
+    thread: threading.Thread
+    errors: list[BaseException]
 
 
 @dataclass(frozen=True)
@@ -311,6 +343,7 @@ def build_precheck_commands() -> tuple[tuple[str, ...], ...]:
     return (
         HERMETIC_TEST_COMMAND,
         LIVE_LLM_TEST_COMMAND,
+        LOCAL_LLM_TEST_COMMAND,
         RUFF_CHECK_COMMAND,
         RUFF_FORMAT_COMMAND,
         MYPY_COMMAND,
@@ -327,6 +360,33 @@ def _precheck_env_overrides(command: tuple[str, ...]) -> dict[str, str] | None:
     if command == LIVE_LLM_TEST_COMMAND:
         env["BACKSTITCH_LIVE_LLM"] = "1"
         env["BACKSTITCH_LIVE_LLM_KIND"] = "openai"
+    if command == LOCAL_LLM_TEST_COMMAND:
+        env["BACKSTITCH_LIVE_LLM"] = "1"
+        env["BACKSTITCH_LIVE_LLM_KIND"] = "local"
+        env["BACKSTITCH_LOCAL_LLM_ENDPOINT"] = os.environ.get(
+            "BACKSTITCH_LOCAL_LLM_ENDPOINT",
+            DEFAULT_LOCAL_LLM_ENDPOINT,
+        )
+        env["BACKSTITCH_LOCAL_LLM_UPSTREAM"] = os.environ.get(
+            "BACKSTITCH_LOCAL_LLM_UPSTREAM",
+            DEFAULT_LOCAL_LLM_ENDPOINT,
+        )
+        env["BACKSTITCH_LOCAL_LLM_BASE_MODEL"] = os.environ.get(
+            "BACKSTITCH_LOCAL_LLM_BASE_MODEL",
+            DEFAULT_LOCAL_LLM_BASE_MODEL,
+        )
+        env["BACKSTITCH_LOCAL_LLM_SERVED_MODEL"] = os.environ.get(
+            "BACKSTITCH_LOCAL_LLM_SERVED_MODEL",
+            DEFAULT_LOCAL_LLM_SERVED_MODEL,
+        )
+        env["OLLAMA_CONTEXT_LENGTH"] = os.environ.get(
+            "OLLAMA_CONTEXT_LENGTH",
+            DEFAULT_LOCAL_LLM_CONTEXT_LENGTH,
+        )
+        env["OLLAMA_NUM_PREDICT"] = os.environ.get(
+            "OLLAMA_NUM_PREDICT",
+            DEFAULT_LOCAL_LLM_NUM_PREDICT,
+        )
     return env or None
 
 
@@ -397,6 +457,171 @@ def run_command(
         check=True,
         env=_merge_command_env(env_overrides),
     )
+
+
+def _json_api_request(
+    url: str,
+    *,
+    payload: dict[str, object] | None = None,
+    timeout: float = HTTP_TIMEOUT_SECONDS,
+) -> dict[str, object]:
+    """Return a JSON object from a local OpenAI-compatible endpoint."""
+
+    data = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib_request.Request(url, data=data, headers=headers)
+    try:
+        with urllib_request.urlopen(request, timeout=timeout) as response:
+            decoded = json.load(response)
+    except urllib_error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"local LLM prewarm request failed: {exc.code} {detail}"
+        ) from exc
+    except urllib_error.URLError as exc:
+        raise RuntimeError(f"local LLM prewarm request failed: {exc}") from exc
+
+    if not isinstance(decoded, dict):
+        raise RuntimeError("local LLM prewarm response was not a JSON object")
+    return decoded
+
+
+def _local_llm_url(endpoint: str, suffix: str) -> str:
+    return f"{endpoint.rstrip('/')}/{suffix.lstrip('/')}"
+
+
+def _local_llm_origin(endpoint: str) -> str:
+    parsed = urllib_parse.urlparse(endpoint)
+    if not parsed.scheme or not parsed.netloc:
+        raise RuntimeError(f"invalid local LLM endpoint: {endpoint}")
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _prepare_ollama_model(env: dict[str, str]) -> None:
+    """Pull and recreate the bounded served model through Ollama's local API."""
+
+    origin = _local_llm_origin(env["BACKSTITCH_LOCAL_LLM_UPSTREAM"])
+    base_model = env["BACKSTITCH_LOCAL_LLM_BASE_MODEL"]
+    served_model = env["BACKSTITCH_LOCAL_LLM_SERVED_MODEL"]
+    context_length = env["OLLAMA_CONTEXT_LENGTH"]
+    num_predict = env["OLLAMA_NUM_PREDICT"]
+
+    _json_api_request(
+        f"{origin}/api/pull",
+        payload={"model": base_model, "stream": False},
+        timeout=LOCAL_LLM_PREWARM_TIMEOUT_SECONDS,
+    )
+    _json_api_request(
+        f"{origin}/api/create",
+        payload={
+            "model": served_model,
+            "from": base_model,
+            "parameters": {
+                "num_ctx": int(context_length),
+                "num_predict": int(num_predict),
+                "temperature": 0,
+            },
+            "stream": False,
+        },
+        timeout=LOCAL_LLM_PREWARM_TIMEOUT_SECONDS,
+    )
+
+
+def _prewarm_local_llm(env: dict[str, str]) -> None:
+    """Require and warm the local LLM endpoint before the live local test."""
+
+    _prepare_ollama_model(env)
+
+    endpoint = env["BACKSTITCH_LOCAL_LLM_ENDPOINT"]
+    model = env["BACKSTITCH_LOCAL_LLM_SERVED_MODEL"]
+    deadline = time.monotonic() + LOCAL_LLM_PREWARM_TIMEOUT_SECONDS
+    last_error = "model was not checked"
+
+    while time.monotonic() < deadline:
+        try:
+            payload = _json_api_request(_local_llm_url(endpoint, "models"), timeout=10)
+            raw_models = payload.get("data", [])
+            if not isinstance(raw_models, list):
+                raise RuntimeError("local LLM /models response data was not a list")
+            model_ids: list[str] = []
+            for item in raw_models:
+                if not isinstance(item, dict):
+                    continue
+                item_id = item.get("id")
+                if isinstance(item_id, str):
+                    model_ids.append(item_id)
+            if model in model_ids:
+                break
+            last_error = f"{model!r} not listed; saw {model_ids!r}"
+        except RuntimeError as exc:
+            last_error = str(exc)
+        time.sleep(LOCAL_LLM_PREWARM_POLL_SECONDS)
+    else:
+        raise RuntimeError(
+            f"local LLM model {model!r} was not ready before timeout: {last_error}"
+        )
+
+    _json_api_request(
+        _local_llm_url(endpoint, "chat/completions"),
+        payload={
+            "model": model,
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+            "temperature": 0,
+            "max_tokens": 4,
+            "stream": False,
+        },
+        timeout=LOCAL_LLM_PREWARM_TIMEOUT_SECONDS,
+    )
+
+
+def _start_local_llm_prewarm(*, dry_run: bool) -> BackgroundCheck | None:
+    """Start local LLM prewarm in parallel with earlier release checks."""
+
+    env_overrides = _precheck_env_overrides(LOCAL_LLM_TEST_COMMAND)
+    assert env_overrides is not None
+    prefix = _format_command_prefix(env_overrides)
+    print(f"$ {prefix} prewarm local LLM endpoint (background)")
+    if dry_run:
+        return None
+
+    merged = _merge_command_env(env_overrides)
+    assert merged is not None
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            _prewarm_local_llm(merged)
+        except BaseException as exc:  # noqa: BLE001 - report after foreground gates
+            errors.append(exc)
+
+    thread = threading.Thread(target=run, name="local-llm-prewarm", daemon=True)
+    thread.start()
+    return BackgroundCheck(name="local LLM prewarm", thread=thread, errors=errors)
+
+
+def _wait_for_background_check(check: BackgroundCheck | None) -> None:
+    if check is None:
+        return
+    check.thread.join()
+    if check.errors:
+        raise RuntimeError(f"{check.name} failed: {check.errors[0]}")
+
+
+def run_precheck_commands(*, dry_run: bool = False) -> None:
+    """Run release prechecks, warming the local LLM endpoint in parallel."""
+
+    local_prewarm = _start_local_llm_prewarm(dry_run=dry_run)
+    for command in build_precheck_commands():
+        if command == LOCAL_LLM_TEST_COMMAND:
+            _wait_for_background_check(local_prewarm)
+        run_command(
+            command,
+            dry_run=dry_run,
+            env_overrides=_precheck_env_overrides(command),
+        )
 
 
 def is_dirty_worktree() -> bool:
@@ -739,6 +964,16 @@ def _remote_tag_reuse_note(state: ReleaseState) -> str:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Create a local Backstitch release")
     parser.add_argument(
+        "target",
+        nargs="?",
+        choices=(CORE_RELEASE_TARGET_KEY, ALL_RELEASE_TARGET_KEY),
+        default=CORE_RELEASE_TARGET_KEY,
+        help=(
+            "Release target. Backstitch has one package, so 'all' is an alias "
+            "for releasing the current root package version. Defaults to core."
+        ),
+    )
+    parser.add_argument(
         "-v",
         "--version",
         help=(
@@ -842,6 +1077,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     target = ROOT_RELEASE_TARGET
 
+    if args.target == ALL_RELEASE_TARGET_KEY and args.version is not None:
+        raise RuntimeError(
+            "--version cannot be used with target 'all'. Update the package "
+            "version files first, then run `bin/release.py all`."
+        )
+
     current_version = read_target_version(target)
     dirty = is_dirty_worktree()
 
@@ -879,12 +1120,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.publish:
             _print_publish_note()
         if not args.skip_checks:
-            for command in build_precheck_commands():
-                run_command(
-                    command,
-                    dry_run=True,
-                    env_overrides=_precheck_env_overrides(command),
-                )
+            run_precheck_commands(dry_run=True)
         if version_changed:
             print(
                 "dry-run: would update "
@@ -936,8 +1172,7 @@ def main(argv: list[str] | None = None) -> int:
         _print_publish_note()
 
     if not args.skip_checks:
-        for command in build_precheck_commands():
-            run_command(command, env_overrides=_precheck_env_overrides(command))
+        run_precheck_commands()
 
     if version_changed:
         write_target_version(target, target_version)

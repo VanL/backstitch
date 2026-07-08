@@ -18,6 +18,15 @@ configuration (`backstitch config show|path`) are implemented per
 repository dogfoods itself: `uv run backstitch check` must pass with zero
 errors and zero warnings.
 
+## Runtime
+
+Backstitch requires Python 3.11 or newer. Runtime dependencies are pinned in
+`pyproject.toml`, including `llm`, `markdown-it-py`, `tree-sitter`, and
+`tree-sitter-python`. Python target-code structure is parsed with
+`tree-sitter-python`, so Backstitch running on Python 3.11 can analyze newer
+target syntax such as PEP 695 generics and PEP 701 f-strings without relying on
+the running interpreter's `ast` grammar.
+
 ## Testing
 
 The default suite is hermetic — no network, no provider credentials:
@@ -102,14 +111,18 @@ rationale.
 ## Release
 
 Backstitch releases use `bin/release.py` locally and a tag-triggered GitHub
-release gate. The helper updates `pyproject.toml` and `backstitch/__init__.py`
-together, runs local checks including the live LLM test, creates the release
-commit when needed, and pushes the `vX.Y.Z` tag. The GitHub workflow publishes
-to PyPI through Trusted Publishing and creates the GitHub Release.
+release gate. The helper runs local checks including the cloud and local live
+LLM tests, creates a release commit when version files changed, and pushes the
+`vX.Y.Z` tag. The GitHub workflow publishes to PyPI through Trusted Publishing
+and creates the GitHub Release.
 
 ```bash
 bin/release.py --version X.Y.Z --dry-run
 bin/release.py --version X.Y.Z
+
+# After version files and CHANGELOG.md are already prepared:
+bin/release.py all --dry-run
+bin/release.py all
 ```
 
 See `docs/implementation/05-release-publishing.md` for setup, rollback, and

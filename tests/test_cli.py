@@ -39,11 +39,132 @@ def check_clean(*extra: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def write_syntax_warning_repo(root: Path, *, inline_noqa: bool = False) -> None:
+    spec_dir = root / "docs" / "specs"
+    spec_dir.mkdir(parents=True)
+    spec_dir.joinpath("01-x.md").write_text(
+        "# X\n\n## Thing [X-1]\n\n_Implementation mapping_:\n\n- `pkg/good.py`\n",
+        encoding="utf-8",
+    )
+    pkg = root / "pkg"
+    pkg.mkdir()
+    pkg.joinpath("good.py").write_text(
+        '"""Spec: docs/specs/01-x.md [X-1]"""\n',
+        encoding="utf-8",
+    )
+    prefix = "# backstitch: noqa PYTHON_SYNTAX_ERROR\n" if inline_noqa else ""
+    pkg.joinpath("bad.py").write_text(f"{prefix}def broken(:\n", encoding="utf-8")
+
+
 def test_clean_repo_exits_zero() -> None:
     result = check_clean()
     assert result.returncode == 0, result.stderr
     assert "0 errors" in result.stdout
     assert "Traceback" not in result.stderr
+
+
+def test_python_syntax_warning_does_not_fail_check_by_default(tmp_path: Path) -> None:
+    write_syntax_warning_repo(tmp_path)
+    result = run_cli(
+        "check",
+        "--repo-root",
+        str(tmp_path),
+        "--spec-root",
+        "docs/specs",
+        "--code-root",
+        "pkg",
+        "--format",
+        "json",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    data = json.loads(result.stdout)
+    assert data["summary"]["warnings"] == 1
+    assert data["issues"][0]["code"] == "PYTHON_SYNTAX_ERROR"
+    assert data["issues"][0]["severity"] == "warning"
+
+
+def test_python_syntax_warning_fails_check_with_warnings_as_errors(
+    tmp_path: Path,
+) -> None:
+    write_syntax_warning_repo(tmp_path)
+    result = run_cli(
+        "check",
+        "--repo-root",
+        str(tmp_path),
+        "--spec-root",
+        "docs/specs",
+        "--code-root",
+        "pkg",
+        "--warnings-as-errors",
+        "--format",
+        "json",
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    data = json.loads(result.stdout)
+    assert data["issues"][0]["code"] == "PYTHON_SYNTAX_ERROR"
+
+
+def test_python_syntax_warning_does_not_fail_packets(tmp_path: Path) -> None:
+    write_syntax_warning_repo(tmp_path)
+    output = tmp_path / "packets.jsonl"
+    result = run_cli(
+        "packets",
+        "--repo-root",
+        str(tmp_path),
+        "--spec-root",
+        "docs/specs",
+        "--code-root",
+        "pkg",
+        "--output",
+        str(output),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert output.read_text(encoding="utf-8").strip()
+
+
+def test_python_syntax_warning_config_suppression_and_inline_noqa_boundary(
+    tmp_path: Path,
+) -> None:
+    write_syntax_warning_repo(tmp_path, inline_noqa=True)
+    unsuppressed = run_cli(
+        "check",
+        "--repo-root",
+        str(tmp_path),
+        "--spec-root",
+        "docs/specs",
+        "--code-root",
+        "pkg",
+        "--format",
+        "json",
+    )
+    unsuppressed_data = json.loads(unsuppressed.stdout)
+    assert any(i["code"] == "PYTHON_SYNTAX_ERROR" for i in unsuppressed_data["issues"])
+
+    (tmp_path / ".backstitch.toml").write_text(
+        '[lint.per-file-ignores]\n"pkg/bad.py" = ["PYTHON_SYNTAX_ERROR"]\n',
+        encoding="utf-8",
+    )
+    suppressed = run_cli(
+        "check",
+        "--repo-root",
+        str(tmp_path),
+        "--spec-root",
+        "docs/specs",
+        "--code-root",
+        "pkg",
+        "--show-suppressions",
+        "--format",
+        "json",
+    )
+    assert suppressed.returncode == 0, suppressed.stdout + suppressed.stderr
+    suppressed_data = json.loads(suppressed.stdout)
+    assert not any(
+        i["code"] == "PYTHON_SYNTAX_ERROR" for i in suppressed_data["issues"]
+    )
+    assert any(
+        i["code"] == "PYTHON_SYNTAX_ERROR" and i["reason"] == "config_file"
+        for i in suppressed_data["suppressed_issues"]
+    )
 
 
 def test_broken_repo_exits_one() -> None:

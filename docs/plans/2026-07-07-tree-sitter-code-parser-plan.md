@@ -1,9 +1,11 @@
 # Code Parser Migration To `tree-sitter`
 
-Status: **review-complete** — codex adversarial rounds 1–4, verdicts "No" →
-"No" → "No" → **"Yes, implementable"**, P1s narrowing 4→3→1→0. All findings
-incorporated below. Pre-first-release shaping; implementation gated on the
-Sequencing section (markdown-it-py lands + finished work committed first).
+Status: **implemented locally, uncommitted** — codex adversarial rounds 1–4,
+verdicts "No" → "No" → "No" → **"Yes, implementable"**, P1s narrowing
+4→3→1→0. Implementation review found one blocking statement-span parity issue
+(`elif` missing, `case` over-emitted); fixed with parser and end-to-end noqa
+fixtures. Pre-first-release shaping; implementation ran after the
+`markdown-it-py` base landed.
 Plan type: implementation with spec revision and a new runtime dependency.
 Risk level: boundary-crossing. This replaces the Python parsing engine that
 feeds the deterministic trace graph ([SC-4]), adds a native (wheel-shipped)
@@ -121,17 +123,19 @@ option: a polyglot roadmap requires a polyglot engine.
 
 ## Spec Baseline
 
-- Code baseline: `df320ab` plus the current dirty worktree (shared with the
-  in-flight `markdown-it-py` migration and the doctor / 3.11-floor /
-  release-process work — see Sequencing).
+- Code baseline: `7d85601` with a clean worktree. The `markdown-it-py`
+  migration has landed; the 3.11-floor and CI matrix finalization remain part
+  of this plan's later slices.
 - Governing spec: `docs/specs/02-backstitch-core.md` ([SC-4], [SC-10], [SC-11]).
-- Promotion baseline identifier: recorded after the spec-promotion slice.
+- Promotion baseline identifier: uncommitted worktree diff from `7d85601`
+  after applying the [SC-4]/[SC-10]/[SC-11] spec delta and dependency pins in
+  `docs/specs/02-backstitch-core.md`, `pyproject.toml`, and `uv.lock`.
 
 ## Deviation Log
 
 | Spec ref | Planned behavior | Actual behavior (pre-migration) | Rationale | Spec proposal |
 |----------|------------------|--------------------------------|-----------|---------------|
-| [SC-4]/[SC-11] `PYTHON_SYNTAX_ERROR` severity | A file the parser cannot parse yields a **warning** ("could not analyze this file"), not an error. Suppressible via **config/exclusion per-file rules** — but **not** via inline `# backstitch: noqa` inside the unparseable file (all-or-nothing recovery means its inline directives were never read). Strict escalation is **`check`-only** via the existing `--warnings-as-errors` / `[check].warnings_as_errors`; `packets` has no such flag, so on `packets` a parse failure simply no longer forces exit 1. No new knob. | `PYTHON_SYNTAX_ERROR` is always error-severity ([SC-11], in `ERROR_SEVERITY_CODES`), non-suppressible, and forces `check`/`packets` exit 1; it fires whenever the running interpreter's `ast` cannot parse the file, including on valid-but-newer target syntax. | A traceability checker reports *coverage* ("couldn't read this file"), not code correctness; version-independent parsing means a parse failure now signals a genuinely malformed file (or a construct the pinned grammar predates). | [SC-4] + [SC-11] delta below. |
+| [SC-4]/[SC-11] `PYTHON_SYNTAX_ERROR` severity | A file the parser cannot parse yields a **warning** ("could not analyze this file"), not an error. Suppressible via **config/exclusion per-file rules** — but **not** via inline `# backstitch: noqa` inside the unparseable file (all-or-nothing recovery means its inline directives were never read). Strict escalation is **`check`-only** via the existing `--warnings-as-errors` / `[check].warnings_as_errors`; `packets` has no such flag, so on `packets` a parse failure simply no longer forces exit 1. No new knob. | `PYTHON_SYNTAX_ERROR` is always error-severity ([SC-11], in `ERROR_SEVERITY_CODES`), non-suppressible, and forces `check`/`packets` exit 1; it fires whenever the running interpreter's `ast` cannot parse the file, including on valid-but-newer target syntax. | A traceability checker reports *coverage* ("couldn't read this file"), not code correctness; version-independent parsing means a parse failure now signals only that the pinned parser could not build a valid tree. It does **not** prove that every malformed Python file will be rejected; tree-sitter can accept some legacy-or-invalid forms that `ast` rejects, and static gates remain the code-validity check. | [SC-4] + [SC-11] delta below. |
 | [SC-4] Python structure source | Python structure (owners, doc blocks, statement spans, comments) comes from `tree-sitter-python`, runtime-independent; not bounded by the interpreter Backstitch runs on. | Docstrings via `ast`, comments via `tokenize` — both bound to the running interpreter's grammar. | Backstitch should not own Python grammar nor be limited to the runtime's syntax version — the `markdown-it-py` boundary argument for code. | [SC-4] delta below. |
 | [SC-10] proof surfaces | Fixture-backed `tree-sitter` analyzer tests are a required proof surface; anti-mocking forbids mocking the parser. | Required proof surfaces name `ast`-based tests. | The proof surface must track the real parser. | [SC-10] delta below. |
 
@@ -205,11 +209,14 @@ here so no local choices leak in:
   Only validated UTF-8 source, re-encoded to bytes, reaches the parser
   (`tree-sitter` parses bytes). Fixture: a non-UTF-8 `.py` that is also the
   target of a `path::symbol` mapping.
-- **Line numbers:** every line in `ParsedModule` is **1-indexed**
-  (`tree-sitter` `start_point.row + 1`). End lines are **inclusive**, matching
-  `ast.end_lineno` (`end_point` maps to the row of the last content byte;
-  reconcile the off-by-one so `python_symbol_spans` end lines are byte-identical
-  to `ast` — verified by fixtures).
+- **Line numbers:** every line in `ParsedModule` is **1-indexed** and derived
+  from parser byte offsets through a Backstitch-owned line index, not from the
+  binding `Point` accessors. End lines are **inclusive**, matching
+  `ast.end_lineno`; map `end_byte - 1` to the last content line so
+  `python_symbol_spans` end lines are byte-identical to `ast` — verified by
+  fixtures. The implementation must avoid making `Node.start_point` /
+  `Node.end_point` load-bearing; the 0.26 binding crashed under repeated
+  traversal during the implementation smoke tests.
 - **`parse_ok: bool` + `error_line: int | None`:** `parse_ok` is False iff the
   tree has any `ERROR` or `MISSING` node (`root.has_error`). `error_line` is
   the 1-indexed start line of the first such node (used for the
@@ -273,11 +280,14 @@ Building any language dispatch/registry now is out of scope.
   byte-identical logical value to `ast`. Fixtures cover raw strings, unicode/
   hex escapes, triple-quoted content, implicit concatenation, and the
   escaped-`\n`-in-one-line case.
-- **Statement-span node set for [EXC-5] is grammar-supertype-defined, not a
-  hand list.** The `ast.stmt` equivalent is **every node matching
-  `tree-sitter-python`'s `_simple_statement` or `_compound_statement`
-  supertypes** — matching the supertypes (not an enumerated list) so new
-  statement kinds are picked up automatically and cannot silently be omitted.
+- **Statement-span node set for [EXC-5] is grammar-shaped, not a hand list.**
+  The intended `ast.stmt` equivalent is every complete Python statement node
+  that occupies a body/module child position. The 0.26 binding does not expose
+  `_simple_statement` / `_compound_statement` as queryable node kinds, so the
+  implementation must derive statements from the real parse tree shape
+  (module/block/statement-list children, unwrapping decorated definitions to
+  the inner `def`/`class` line) and fixture-pin the statement-kind checklist
+  below. Do not replace this with a brittle catch-all over every named node.
   The enumeration is a *checklist* the fixtures must all cover, and it must
   include the two round-2 gaps: **`future_import_statement`** (a `from
   __future__` import) and **`type_alias_statement`** (PEP 695 `type X = …`,
@@ -305,10 +315,12 @@ Building any language dispatch/registry now is out of scope.
   0 warnings; the [SC-8]/[SC-10] `llm ∉ sys.modules` quarantine stays green.
 - **Pinned, wheel-covered dependency**, matrix-proven with source builds
   disabled (Task 2). A pin without matrix wheel coverage is a blocker.
-- **Grammar-lag is bounded, not eliminated.** A construct the pinned
-  `tree-sitter-python` predates parses as an `ERROR` node → the
-  `PYTHON_SYNTAX_ERROR` **warning**, never a crash. Strictly better than `ast`
-  (which fails on anything newer than the runtime), but not "parses everything."
+- **Grammar-lag and validity gaps are bounded, not eliminated.** A construct
+  the pinned `tree-sitter-python` predates parses as an `ERROR` node → the
+  `PYTHON_SYNTAX_ERROR` **warning**, never a crash. The reverse class also
+  exists: tree-sitter may accept a form that Python 3's `ast` rejects (for
+  example legacy `except X, Y` syntax). Backstitch is not a syntax validator;
+  ruff/mypy/import-time tests remain the gates for code validity.
 
 ## Hidden Couplings
 
@@ -341,10 +353,11 @@ Building any language dispatch/registry now is out of scope.
   Scope); the seam's only job today is to isolate `tree-sitter` so the
   traceability layer is parser-agnostic, and to be shaped (doc blocks, not
   docstrings) so JS/TS drop in later without reshaping it.
-- **Extraction via S-expression queries** where clean (definitions, doc
-  strings, comments) and node walks where queries are awkward (nested qualname
-  construction). Query strings are named constants documenting the grammar
-  node types they bind to (the version coupling to `tree-sitter-python`).
+- **Extraction via bounded node walks over the real parse tree shape.** The
+  0.26 binding API was smoke-tested, but the implementation avoids query and
+  `Point` convenience paths for load-bearing extraction. Node-type coupling is
+  concentrated in `code_parser.py`, and fixtures pin the grammar shapes that
+  matter to Backstitch.
 - **`ParsedPython` and the public function signatures are unchanged;** the seam
   sits below them; callers are untouched.
 
@@ -464,6 +477,31 @@ matrix. Drafting and reviewing this plan is collision-free and proceeds now.
 - Spec/plan/impl/test chain closed; docs updated.
 - Independent (codex) adversarial re-review returns "Yes" (below).
 
+## Implementation Verification (2026-07-07)
+
+- Independent Claude review (read-only) found one blocking issue: `elif`
+  statement spans were missing and `case_clause` spans were over-emitted,
+  which could misattach comment-form noqa. Fixed in `backstitch/code_parser.py`
+  and covered by `tests/test_code_parser.py` plus an end-to-end
+  `tests/test_python_refs.py` fixture.
+- Local AST-parity sweep over `backstitch/*.py` and `tests/test_*.py` reports
+  zero statement-span divergences after the fix.
+- Python 3.11: `uv run pytest tests -q -m "not live_llm"`, `uv run pytest
+  tests/acceptance -q`, `uv run pytest tests/test_weft_corpus_traceability.py
+  -q`, `uv run ruff check .`, configured `ruff format --check`, `uv run mypy
+  backstitch bin/release.py tests --config-file pyproject.toml`, and `uv run
+  backstitch check --repo-root . --format json` all passed. Self-corpus
+  summary: 57 sections, 86 mappings, 256 refs, 0 errors, 0 warnings, 39 infos.
+- Python 3.14: `uv run --python 3.14 --extra dev pytest tests -q -m "not
+  live_llm"` and `uv run --python 3.14 --extra dev backstitch check --repo-root
+  . --format json` passed with the same 0-error/0-warning self-corpus summary.
+- Binary-only local install proof passed: `uv sync --python 3.11 --locked
+  --extra dev --no-build --no-install-project`; editable dev mode was restored
+  with `uv sync --python 3.11 --locked --extra dev`.
+- CI binary-wheel proof is configured for Python 3.11-3.14 across Linux,
+  macOS, and Windows x64/arm64 runner labels. Local execution proves only the
+  current macOS arm64 leg; the remaining legs require GitHub Actions.
+
 ## Independent Review Incorporation
 
 Codex adversarial round 1 (read the real `python_refs.py`/`models.py`/specs;
@@ -505,9 +543,9 @@ all incorporated:
   parse failure just stops forcing `packets` exit 1 (stated as intended).
 - **[P1] Statement-span set omitted `future_import_statement` /
   `type_alias_statement`** (the latter exercised by this plan's own fixtures).
-  Fixed: the set is now defined by `tree-sitter-python`'s
-  `_simple_statement`/`_compound_statement` supertypes (not a drift-prone list),
-  with both nodes named and fixtured.
+  Fixed: the set is now defined by body/module child position in
+  `tree-sitter-python`'s parse tree (not a drift-prone arbitrary walk), with
+  both nodes named and fixtured.
 - **[P1] Docstring recognition missed parenthesized strings** (`ast` normalizes
   `("doc")` to `Constant[str]`). Fixed: unwrap `parenthesized_expression` to
   the inner string; fixtured.
