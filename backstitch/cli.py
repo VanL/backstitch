@@ -1,12 +1,15 @@
 """Command-line entry point for backstitch.
 
 Spec: docs/specs/02-backstitch-core.md [SC-1], [SC-5], [SC-13]
+Spec: docs/specs/05-backstitch-invariants.md [INV-5]
 
 Exit-code contract ([SC-5]): exit 1 is a statement about the target
 repository (deterministic findings exist); exit 2 is a statement about the
 invocation or the tool (bad arguments, unreadable target, unwritable output,
 internal failure). No invocation may surface a traceback: every failure path
 prints a one-line ``backstitch: error: ...`` diagnostic.
+
+Invariant: [INV.CLI.1] Deterministic commands never import ``llm``.
 """
 
 from __future__ import annotations
@@ -19,15 +22,18 @@ from typing import Any
 
 from backstitch import __version__
 from backstitch.check_pipeline import build_check_report
-from backstitch.config import ProfileConfig
+from backstitch.config import ProfileConfig, uncontained_test_root
 from backstitch.profiles import get_profile
 from backstitch.reporting import render_json, render_text
 from backstitch.resolver import ScanError
 from backstitch.settings import (
     BackstitchSettings,
     ConfigLoadError,
+    expand_root_value,
     load_settings,
 )
+
+NO_CONFIG_HELP = "skip repository configuration; packaged defaults still load"
 
 
 def _error(message: str) -> int:
@@ -73,6 +79,13 @@ def _add_check_parser(subparsers: argparse._SubParsersAction[Any]) -> None:
         help="override profile code roots (repeatable)",
     )
     check.add_argument(
+        "--test-root",
+        action="append",
+        dest="test_roots",
+        metavar="PATH",
+        help="override profile test-role roots within code roots (repeatable)",
+    )
+    check.add_argument(
         "--format",
         choices=("text", "json"),
         default=None,
@@ -95,7 +108,7 @@ def _add_check_parser(subparsers: argparse._SubParsersAction[Any]) -> None:
     check.add_argument(
         "--no-config",
         action="store_true",
-        help="ignore all configuration files",
+        help=NO_CONFIG_HELP,
     )
     check.add_argument(
         "--show-suppressions",
@@ -128,8 +141,17 @@ def _add_other_parsers(subparsers: argparse._SubParsersAction[Any]) -> None:
     packets.add_argument(
         "--code-root", action="append", dest="code_roots", metavar="PATH"
     )
+    packets.add_argument(
+        "--test-root", action="append", dest="test_roots", metavar="PATH"
+    )
     packets.add_argument("--config", type=Path, default=None, metavar="PATH")
-    packets.add_argument("--no-config", action="store_true")
+    packets.add_argument("--no-config", action="store_true", help=NO_CONFIG_HELP)
+    packets.add_argument(
+        "--kind",
+        choices=("section", "invariant", "all"),
+        default="section",
+        help="packet kind to emit (default: section)",
+    )
     packets.add_argument("--output", type=Path, required=True, metavar="PATH")
 
     analyze = subparsers.add_parser(
@@ -146,7 +168,7 @@ def _add_other_parsers(subparsers: argparse._SubParsersAction[Any]) -> None:
     )
     analyze.add_argument("--concurrency", type=int, default=None, metavar="N")
     analyze.add_argument("--config", type=Path, default=None, metavar="PATH")
-    analyze.add_argument("--no-config", action="store_true")
+    analyze.add_argument("--no-config", action="store_true", help=NO_CONFIG_HELP)
 
     summarize = subparsers.add_parser(
         "summarize-analysis",
@@ -187,20 +209,20 @@ def _add_other_parsers(subparsers: argparse._SubParsersAction[Any]) -> None:
     )
     doctor.add_argument("--format", choices=("text", "json"), default="text")
     doctor.add_argument("--config", type=Path, default=None, metavar="PATH")
-    doctor.add_argument("--no-config", action="store_true")
+    doctor.add_argument("--no-config", action="store_true", help=NO_CONFIG_HELP)
 
     config = subparsers.add_parser("config", help="inspect resolved configuration")
     config_sub = config.add_subparsers(dest="config_command", required=True)
     show = config_sub.add_parser("show", help="print effective settings as JSON")
     show.add_argument("--repo-root", type=Path, default=Path("."))
     show.add_argument("--config", type=Path, default=None, metavar="PATH")
-    show.add_argument("--no-config", action="store_true")
+    show.add_argument("--no-config", action="store_true", help=NO_CONFIG_HELP)
     path_cmd = config_sub.add_parser(
         "path", help="print the discovered config file path"
     )
     path_cmd.add_argument("--repo-root", type=Path, default=Path("."))
     path_cmd.add_argument("--config", type=Path, default=None, metavar="PATH")
-    path_cmd.add_argument("--no-config", action="store_true")
+    path_cmd.add_argument("--no-config", action="store_true", help=NO_CONFIG_HELP)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -233,7 +255,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-config",
         action="store_true",
         dest="global_no_config",
-        help="ignore all configuration files",
+        help=NO_CONFIG_HELP,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     _add_check_parser(subparsers)
@@ -248,7 +270,7 @@ def _resolve_settings(args: argparse.Namespace) -> BackstitchSettings:
         msg = "--config and --no-config are mutually exclusive"
         raise ConfigLoadError(msg)
     if args.no_config:
-        return BackstitchSettings()
+        return load_settings(args.repo_root.resolve(), use_repo_config=False)
     return load_settings(args.repo_root.resolve(), explicit=args.config)
 
 
@@ -265,6 +287,7 @@ def _profile_from(
         "spec_roots",
         "plan_roots",
         "code_roots",
+        "test_roots",
         "planned_spec_globs",
         "exploratory_spec_globs",
         "meta_spec_globs",
@@ -280,10 +303,34 @@ def _profile_from(
     if args.plan_roots is not None:
         cli_overrides["plan_roots"] = tuple(args.plan_roots)
     if args.code_roots is not None:
-        cli_overrides["code_roots"] = tuple(args.code_roots)
+        cli_overrides["code_roots"] = tuple(
+            expand_root_value(value) for value in args.code_roots
+        )
+    if args.test_roots is not None:
+        cli_overrides["test_roots"] = tuple(
+            expand_root_value(value) for value in args.test_roots
+        )
     if cli_overrides:
         profile = profile.with_overrides(**cli_overrides)
+    _validate_test_root_containment(args.repo_root.resolve(), profile)
     return profile
+
+
+def _validate_test_root_containment(
+    repo_root: Path,
+    profile: ProfileConfig,
+) -> None:
+    invalid_test_root = uncontained_test_root(
+        repo_root,
+        profile.code_roots,
+        profile.test_roots,
+    )
+    if invalid_test_root is not None:
+        msg = (
+            f"test root {invalid_test_root!r} must be equal to or nested under a"
+            " final effective code root"
+        )
+        raise ConfigLoadError(msg)
 
 
 def _cmd_check(args: argparse.Namespace) -> int:
@@ -294,7 +341,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
     for warning in pipeline.warnings:
         print(f"warning: {warning}", file=sys.stderr)
 
-    # [CFG-5]/[CFG-9]: config-set check.format and check.output apply when
+    # [CFG-5]: config-set check.format and check.output apply when
     # the CLI flag is omitted; a parsed-but-unconsulted key is dead schema.
     fmt = args.format or settings.check.format or "text"
     output = args.output
@@ -318,13 +365,13 @@ def _cmd_check(args: argparse.Namespace) -> int:
     else:
         sys.stdout.write(rendered)
 
-    summary = pipeline.report.summary()
+    fail_on = set(settings.diagnostics.fail_on)
     warnings_as_errors = args.warnings_as_errors
     if warnings_as_errors is None:
         warnings_as_errors = bool(settings.check.warnings_as_errors)
-    if summary["errors"]:
-        return 1
-    if warnings_as_errors and summary["warnings"]:
+    if warnings_as_errors:
+        fail_on.add("warning")
+    if any(issue.severity in fail_on for issue in pipeline.report.issues):
         return 1
     return 0
 
@@ -337,7 +384,12 @@ def _cmd_packets(args: argparse.Namespace) -> int:
     pipeline = build_check_report(args.repo_root, profile, settings)
     for warning in pipeline.warnings:
         print(f"warning: {warning}", file=sys.stderr)
-    packets = generate_packets(args.repo_root, profile, report=pipeline.report)
+    packets = generate_packets(
+        args.repo_root,
+        profile,
+        report=pipeline.report,
+        kind=args.kind,
+    )
     try:
         args.output.write_text(render_packets_jsonl(packets), encoding="utf-8")
     except OSError as exc:
@@ -345,7 +397,14 @@ def _cmd_packets(args: argparse.Namespace) -> int:
     print(f"wrote {len(packets)} packets to {args.output}", file=sys.stderr)
     # [SC-5]: packets still reports the deterministic scan outcome -- the
     # packets were written either way, but exit 1 says findings exist.
-    return 1 if pipeline.report.summary()["errors"] else 0
+    return (
+        1
+        if any(
+            issue.severity in set(settings.diagnostics.fail_on)
+            for issue in pipeline.report.issues
+        )
+        else 0
+    )
 
 
 def _cmd_analyze(args: argparse.Namespace) -> int:
@@ -364,7 +423,7 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     if args.no_config and args.config is not None:
         raise ConfigLoadError("--config and --no-config are mutually exclusive")
     if args.no_config:
-        settings = BackstitchSettings()
+        settings = load_settings(args.packets.resolve().parent, use_repo_config=False)
     else:
         settings = load_settings(args.packets.resolve().parent, explicit=args.config)
     # [CFG-5]: config-set analyze.concurrency applies when the flag is
@@ -402,7 +461,7 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
 def _cmd_summarize(args: argparse.Namespace) -> int:
     from backstitch.analysis_results import (
         load_analysis_results,
-        packet_ids_from_report,
+        packet_identities_from_report,
         render_analysis_summary,
     )
     from backstitch.artifact_contracts import load_deterministic_report
@@ -410,7 +469,7 @@ def _cmd_summarize(args: argparse.Namespace) -> int:
     report_data = load_deterministic_report(args.deterministic_report)
     load = load_analysis_results(
         args.analysis_results.read_text(encoding="utf-8"),
-        packet_ids_from_report(report_data),
+        packet_identities_from_report(report_data),
     )
     sys.stdout.write(render_analysis_summary(report_data["summary"], load))
     return 0
@@ -422,16 +481,16 @@ def _cmd_config(args: argparse.Namespace) -> int:
 
     if args.config_command == "show":
         if args.no_config:
-            settings = BackstitchSettings()
+            settings = load_settings(args.repo_root.resolve(), use_repo_config=False)
         else:
             settings = load_settings(args.repo_root.resolve(), explicit=args.config)
-        # [CFG-9]/[EXC-4]: `config show` follows load strictness -- an
+        # [EXC-4]: `config show` follows load strictness -- an
         # invalid suppression code that would fail `check` must not print
         # as effective configuration with exit 0.
-        for warning in validate_lint_codes(
+        for diagnostic in validate_lint_codes(
             settings.lint, allow_unknown=settings.allow_unknown_keys
         ):
-            print(f"warning: {warning}", file=sys.stderr)
+            print(f"warning: {diagnostic.message}", file=sys.stderr)
         sys.stdout.write(settings_to_json(settings))
         return 0
     if args.no_config:
@@ -459,7 +518,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     if args.no_config and args.config is not None:
         raise ConfigLoadError("--config and --no-config are mutually exclusive")
     if args.no_config:
-        settings = BackstitchSettings()
+        settings = load_settings(Path.cwd(), use_repo_config=False)
     else:
         settings = load_settings(Path.cwd(), explicit=args.config)
     results = run_doctor(

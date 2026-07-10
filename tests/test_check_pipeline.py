@@ -13,7 +13,7 @@ from backstitch.profiles import get_profile
 from backstitch.settings import BackstitchSettings, LintSettings
 
 
-def test_pipeline_returns_kept_report_suppressed_records_and_warnings(
+def test_pipeline_returns_suppressed_records_and_structured_hygiene_issues(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "docs/specs").mkdir(parents=True)
@@ -35,10 +35,11 @@ def test_pipeline_returns_kept_report_suppressed_records_and_warnings(
 
     result = build_check_report(tmp_path, profile, settings)
 
-    assert result.report.issues == ()
+    assert len(result.report.issues) == 1
+    assert result.report.issues[0].code == "SUPPRESSION_UNUSED"
+    assert "missing/*.py" in result.report.issues[0].message
     assert len(result.suppressed) == 1
     suppressed_issue, reason = result.suppressed[0]
     assert suppressed_issue.code == "SPEC_SECTION_UNMAPPED"
     assert reason == "meta"
-    assert result.warnings
-    assert "missing/*.py" in result.warnings[0]
+    assert result.warnings == ()

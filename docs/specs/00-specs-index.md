@@ -21,8 +21,11 @@ stay aligned instead of competing.
 2. `02-backstitch-core.md`
 3. `03-backstitch-configuration.md`
 4. `04-backstitch-traceability-exclusions.md`
-5. `05-backstitch-invariants.md` (Status: Proposed — not yet implementation
-   guidance)
+5. `05-backstitch-invariants.md` (Status: Active)
+
+Diagnostic identity, short codes, default policy, and the packaged defaults
+layer are governed by `02-backstitch-core.md` [SC-11]/[SC-15] and
+`03-backstitch-configuration.md` [CFG-5]/[CFG-6].
 
 ## Naming
 

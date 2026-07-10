@@ -1,6 +1,6 @@
 # Backstitch Invariant Traceability Specification
 
-Status: Proposed
+Status: Active
 
 This spec makes declared invariants first-class nodes in the backstitch trace
 graph. Deterministic mode checks that every declared invariant is cited by at
@@ -10,10 +10,12 @@ passes.
 
 Related specs:
 
-- `docs/specs/02-backstitch-core.md` [SC-2], [SC-4], [SC-6], [SC-7], [SC-10],
-  [SC-11]
-- `docs/specs/03-backstitch-configuration.md` [CFG-6]
-- `docs/specs/04-backstitch-traceability-exclusions.md` [EXC-6]
+- `docs/specs/02-backstitch-core.md` [SC-2] through [SC-7], [SC-10], [SC-11],
+  [SC-13], [SC-15]
+- `docs/specs/03-backstitch-configuration.md` [CFG-5], [CFG-6], [CFG-8],
+  [CFG-9]
+- `docs/specs/04-backstitch-traceability-exclusions.md` [EXC-4], [EXC-5],
+  [EXC-6], [EXC-8], [EXC-9], [EXC-10]
 
 ## 1. Purpose And Scope [INV-1]
 
@@ -38,6 +40,10 @@ The tool does not own:
 - mutation testing (a complementary, execution-based answer to the same
   question; see [INV-6])
 - generation or repair of tests
+
+_Implementation mapping_:
+- `backstitch/models.py`
+- `backstitch/resolver.py`
 
 ## 2. Mental Model [INV-2]
 
@@ -79,6 +85,21 @@ loophole: an implementer who simply omits the dangerous invariant does not
 escape it if the spec declares it, because the binding obligation attaches
 at declaration, wherever the declaration lives.
 
+First-class invariant declarations are distinct from spec sections. The
+existing report value `SpecSection.kind = "invariant"` continues to describe
+invariant-style Markdown bullets. Those bullets remain ordinary sections and
+create no binding obligation. `Invariant:` markers produce records in the
+report's `invariants` collection. Both record types share one ID uniqueness
+namespace. Invariant IDs use the existing [SC-4] ID grammar, whose exact
+unbracketed regular expression is `[A-Z][A-Za-z0-9.\-]*[0-9][A-Za-z0-9]*`.
+They are not required to start with `INV`, but authors should prefer
+`INV.<DOMAIN>.<N>` to avoid section-code collisions. Dotted IDs such as
+`INV.RES.1` are valid. For example, a first-class declaration `[INV-3]` in
+this file is invalid because section `[INV-3]` already exists.
+
+_Implementation mapping_:
+- `backstitch/models.py`
+
 ## 3. Invariant Grammar [INV-3]
 
 Declaration, in the docstring of the owning module, class, function, or
@@ -104,41 +125,52 @@ Invariant: [INV.RES.1] resolve() output is byte-identical across runs on
 identical inputs.
 ```
 
-Rules:
+Python invariant prefixes are reserved grammar when the prefix is the first
+non-whitespace content on a physical docstring-content line (after the opening
+quote delimiter when content shares that line). Recognize `Invariant:`,
+`Invariant (draft):`, and `Tests-invariant:` before generic bracket extraction.
+Consume a recognized marker, its declaration continuation, and a malformed
+line beginning with a reserved prefix; none emits an ordinary `CodeRef`. A
+separate `Spec:` line remains an asserted backlink.
 
-- Token sequence is `Invariant:` then a bracketed stable ID then the
-  statement. `Invariant (draft):` declares a draft-tier invariant (see
-  [INV-4]).
-- Statement termination is exact, not stylistic. In a code docstring, the
-  statement is the marker line plus any immediately following lines indented
-  deeper than the marker line; the first line at or below the marker's
-  indent ends it. In Markdown, the statement is the marker line plus
-  immediately following non-blank plain-text lines; a blank line, heading,
-  list bullet, fence, another marker, or HTML comment ends it. A parser must
-  never absorb the next paragraph into an invariant statement.
-- IDs use the existing section-ID shape ([SC-4]) and share the corpus-wide
-  uniqueness namespace with spec section IDs: an invariant ID must not
-  collide with a section ID or another invariant ID.
-- A code-declared invariant's owner is the enclosing docstring scope
-  (module, class, function, or method), recorded like any code backlink
-  owner. A spec-declared invariant's owner is the enclosing spec section;
-  its target code is that section's mapped implementation owners, so the
-  full triad — invariant statement, target code, binding test — resolves
-  through existing mapping machinery.
-- Invariant-style bullets ([SC-4], e.g. `- **OBS.13.10**: ...`) remain plain
-  spec sections and carry no binding obligation; only the `Invariant:`
-  marker creates one. Fenced-code-block content is ignored per [SC-4].
-- Plans do not declare invariants directly, because plans are execution
-  documents that go archival while invariants are durable contracts. A
-  plan's "invariants that must survive" section ([DOM-5], engineering
-  principle 9) names existing `[INV.*]` IDs or adds new `Invariant:`
-  declarations to the governing spec in the same change — the plan cites,
-  the spec declares, and the contract outlives the plan.
-- The `Invariant:` marker is the **entire** declaration grammar. There is no
-  `_Invariant mapping_:` block form and none should be invented: target-code
-  linkage comes from the enclosing docstring scope (code-declared) or the
-  section's existing `_Implementation mapping_:` block (spec-declared), and
-  test linkage comes only from `Tests-invariant:` references.
+A Python marker must begin on a physical source line in one non-interpolated
+string-literal docstring. Escaped newlines and implicitly concatenated
+docstrings do not create marker lines. A reserved prefix found only after
+evaluating either form emits `INVARIANT_MARKER_INVALID` at the physical
+docstring opening line and creates no record.
+
+A Python declaration statement starts with nonblank text after its closing
+`]`. It continues over immediately following nonblank physical content lines
+whose indentation column is strictly greater than the marker's, with tabs
+expanded to 8-column stops. A blank line, a reserved marker prefix, or the
+first physical content line at or below marker indentation terminates it.
+Strip each statement segment and join segments with `\n`. A Markdown
+declaration uses the same nonblank text-after-ID rule and includes immediately
+following nonblank plain-text source lines in the same top-level paragraph;
+another marker or any Markdown block boundary terminates it. Strip and
+`\n`-join those segments.
+
+`Invariant:` and `Invariant (draft):` declare only in module, class, function,
+or method docstrings. A declaration in a comment, a Markdown declaration
+outside an ID-bearing section, or a missing or invalid ID or statement emits
+`INVARIANT_MARKER_INVALID` and creates no record. A malformed
+`Tests-invariant:` ID list also emits `INVARIANT_MARKER_INVALID` and creates no
+binding reference. Markdown
+declarations are recognized only in top-level paragraph tokens in an
+ID-bearing section body. Fences, indented code, lists, blockquotes, HTML blocks,
+and examples are silent structural non-matches even when their text resembles
+a reserved marker; they do not emit marker-invalid findings.
+
+A reserved prefix at the start of a top-level Markdown paragraph is parsed as
+marker syntax and emits `INVARIANT_MARKER_INVALID` when its ID or statement is
+invalid. A mid-paragraph mention of `Invariant:` is ordinary prose and emits
+neither an invariant record nor a marker diagnostic.
+
+The `Invariant:` marker is the entire declaration grammar. There is no
+`_Invariant mapping_:` block. A code declaration is owned by its docstring
+scope; a spec declaration is owned by its enclosing section. Plans and
+`docs/agent-context` may cite invariant IDs as durable guidance but are not
+parsed declaration or binding sources.
 
 Binding, in a test docstring or comment, using the existing reference
 grammar with a dedicated marker:
@@ -148,19 +180,32 @@ def test_resolver_output_is_stable() -> None:
     """Tests-invariant: [INV.RES.1]"""
 ```
 
-- Token sequence is `Tests-invariant:` then one or more bracketed IDs,
-  comma-separated ([SC-4] comma-list rules apply).
-- Binding scope is exact, because semantic packets need a bounded
-  binding-test snippet. A `Tests-invariant:` marker binds as follows:
-  in a test function or method docstring, it binds that function; in a class
-  docstring under a test root, it binds every test method of that class; as
-  a comment immediately preceding a test function or class definition, it
-  binds that definition (next-statement scope, consistent with [EXC-5]).
-  Module docstrings do not bind — a module is too coarse a unit to package
-  as a binding snippet. A marker in any other position, or outside the
-  configured test roots, is reported (`INVARIANT_BINDING_NOT_TEST`) and does
-  not satisfy the invariant: production code asserting its own invariant is
-  not a test.
+`test_roots` classify Python paths already scanned through `code_roots`. A test
+definition is a function, async function, or method whose leaf name starts
+`test_`. A marker in its docstring binds it. A marker in a class docstring, or
+an attached comment on a class, expands only to directly defined `test_*`
+methods in that class body; inherited, nested-class, and cross-file methods are
+excluded. A comment marker attaches only when it is the final comment line
+immediately before the definition or its first decorator, at the same
+indentation. Blank lines, other comments, and statements break attachment; a
+contiguous decorator stack belongs to the definition. An attached comment on a
+`test_*` function or method binds that definition.
+
+Module markers, helper markers, comments inside bodies, comments attached to
+non-definitions, and markers outside effective test roots emit
+`INVARIANT_BINDING_NOT_TEST` and create no bind. One binding marker may name
+comma-separated IDs and emits one reference per ID and concrete test. A class
+marker with zero direct `test_*` methods also emits
+`INVARIANT_BINDING_NOT_TEST` and creates no references or binds. `test_symbol`
+is the existing source-qualified parser owner name: free functions use
+`test_name`; methods use `Class.test_name` with lexical outer qualifiers; sync
+and async definitions have the same form. Class expansion and a direct marker
+on the same method therefore deduplicate to one bind.
+
+_Implementation mapping_:
+- `backstitch/markdown_specs.py`
+- `backstitch/code_parser.py`
+- `backstitch/python_refs.py`
 
 ## 4. Deterministic Checks [INV-4]
 
@@ -177,92 +222,124 @@ Checks:
 - binding references outside test roots are reported
   (`INVARIANT_BINDING_NOT_TEST`) and do not satisfy the invariant
 
-`INVARIANT_UNTESTED` severity is tiered by declaration form. A plain
-`Invariant:` declaration is a required invariant: untested is an **error**,
-because a declared load-bearing contract with no enforcement is exactly the
-deficiency this spec exists to catch. An `Invariant (draft):` declaration is
-a stated intention whose test does not exist yet: untested is a **warning**,
-so declaring early is never punished harder than not declaring at all — the
-draft tier is the adoption ramp, and promoting a draft to required is a
-one-word edit.
+`INVARIANT_UNTESTED` has `required` and `draft` contexts. Packaged defaults set
+required to error and draft to warning. `INVARIANT_UNKNOWN`,
+`INVARIANT_DUPLICATE`, and `INVARIANT_MARKER_INVALID` default to error;
+`INVARIANT_BINDING_NOT_TEST` defaults to warning. Under [SC-15], repository
+policy may change effective level without changing identity, context, or
+`default_severity`.
 
-There is no per-code severity promotion in v1: the only promotion lever is
-the global `warnings_as_errors` / `--warnings-as-errors` ([CFG-6]), which
-affects draft-tier findings like any other warning. A per-code promotion
-table is a [CFG] revision to propose alongside activating this spec, not
-machinery this spec may assume.
+Suppression follows effective policy. Under packaged defaults, required
+untested is not suppressible and draft untested is suppressible. A repository
+policy change also changes suppressibility according to
+`diagnostics.suppressible_levels`. Suppressed or off invariant findings remain
+auditable through `--show-suppressions`.
 
-Suppression follows [EXC-*] unchanged, and the interaction is deliberate:
-`INVARIANT_UNTESTED` on a draft-tier invariant is a warning and is
-suppressible like any other (for example, `lint.per-file-ignores` on a
-work-in-progress module). On a required-tier invariant it is an error, and
-[EXC]'s severity policy makes errors non-suppressible — so a required
-invariant cannot be silenced, only satisfied with a binding test or
-explicitly demoted to draft in the declaration itself. The demotion is a
-visible, reviewable edit; that is the point.
+A duplicate invariant ID, including collision with a spec section ID, emits
+one `INVARIANT_DUPLICATE` root finding. It emits no binds, no unknown cascade,
+and no untested cascade. The root finding uses the smallest `(path, line)`
+among every colliding invariant declaration and section, comparing canonical
+repository-relative POSIX paths with normal Python string and tuple order.
+Binding references to the duplicated ID are intentionally discarded; the one
+duplicate root finding is their only diagnostic in v1.
 
-The JSON report ([SC-6]) gains an `invariants` collection (ID, statement,
-owner path/symbol/line, binding test references) and `binds` edges. Summary
-counts gain `invariants`.
+Reports add normalized `invariants` and `binds` collections plus
+`summary.invariants = len(invariants)`; duplicate declarations remain visible
+records and count individually. Existing `edges` remain mapping and backlink
+relations. Binds are unique by invariant ID, test path, and test symbol;
+duplicate markers retain the smallest marker line. `Issue` adds optional
+`invariant_id`. Invariant diagnostics always leave `section_id` null and set
+`invariant_id` when parsing produced a valid ID. A marker-invalid issue with no
+parseable ID leaves both ID locators null and uses mandatory path and physical
+line plus the syntactic owner in `symbol` when available. Non-invariant
+diagnostics leave `invariant_id` null.
+
+_Implementation mapping_:
+- `backstitch/resolver.py`
+- `backstitch/diagnostics.py`
+- `backstitch/reporting.py`
 
 ## 5. Semantic Binding Analysis [INV-5]
 
-Invariant packets ride the existing pipeline: `backstitch packets` emits them
-alongside section packets, each record carrying a `kind` field
-(`"section"` or `"invariant"`), and a `--kind` filter selects one stream.
-`analyze` and `summarize-analysis` need no new commands; the summary output
-reports invariant-binding classifications in their own block, separated from
-section findings.
+`backstitch packets` emits discriminated section and invariant records.
+`--kind {section,invariant,all}` defaults to `section`. `all` emits existing
+section order first, then invariant order. Filtering occurs after the full
+deterministic report, so diagnostics and exit status remain whole-repository.
+For one corpus and policy, every kind has the same policy-driven exit code.
 
-Invariant packets extend the [SC-6] packet contract. Each packet contains:
+New packets always carry `kind`. Loaders normalize the legacy section shape
+without kind. An invariant packet exists only for an invariant with a valid
+bind and contains `packet_id = "invariant::<ID>"`, kind, ID, tier, statement,
+declaration locator, bounded `targets`, bounded `binding_tests`, relevant
+issues, `packet_warnings`, instructions, and `content_hash`. A bound
+spec-declared invariant without a resolved target has `targets: []` plus a
+warning. An untested invariant has no semantic packet.
+Every named envelope key is required; array-valued fields may be empty but may
+not be omitted.
 
-- packet ID (`invariant::<ID>`)
-- the invariant ID and full statement text
-- the bounded target-code snippet: the enclosing docstring scope for a
-  code-declared invariant, or the declaring section's mapped implementation
-  owners for a spec-declared one — the packet always carries the full triad
-  of statement, target code, and test code
-- the bounded binding-test snippet(s), including directly referenced local
-  helpers when they fit the packet bounds
-- deterministic issues relevant to the invariant
-- truncation warnings ([SC-6] `packet_warnings`) whenever bounds trimmed
-  content
-- prompt instructions per the refutation contract below
+An invariant packet's `issues` are exactly report issues whose
+`invariant_id` equals that packet's invariant ID, ordered by path, nullable
+line (null before numbered lines), canonical code, and message.
 
-**Refutation contract.** The prompt must ask the refutation question, not
-the confirmation question:
+The invariant-only packet keys are `invariant_id`, `tier`, `statement`,
+`declaration`, `targets`, `binding_tests`, and `content_hash`. `declaration` is
+an object with `kind`, `path`, `line`, nullable `symbol`, and nullable
+`section_id`; exactly one of `symbol` and `section_id` is non-null.
 
-> Describe a concrete change to the target code that violates this
-> invariant while every shown test still passes. If no such change exists,
-> cite the specific assertion lines (packet-local file and line) that would
-> fail.
+For a code declaration, `targets` contains only the declaring path and symbol
+and never consults mappings. A module declaration uses the reserved symbol
+`<module>`, which cannot collide with a Python identifier, `start_line = 1`,
+and the first 120 lines of the whole file's UTF-8 replacement-decoded text read
+at packet generation. For a spec declaration,
+`targets` contains unique resolved mapping edges of the enclosing section;
+backlinks are excluded. A spec declaration with zero mapping targets uses
+`targets: []` and a warning containing
+`no target code resolved for spec-declared invariant`.
 
-A classification of `ok` is valid only when the result names binding
-assertion lines that exist in the packet. A result that affirms the test
-without citing binding assertions must be classified `weak_binding`.
+Targets and binding tests both sort by path, nullable symbol (null as empty
+string), and start line. Retain at most eight targets and eight binding tests.
+Each snippet is capped to its first 120 lines with no inserted ellipsis;
+omission and truncation are represented only in `packet_warnings`. Empty
+snippets require an explicit unreadable, missing-symbol, or file-race warning.
 
-Classifications extend the [SC-6] set for invariant packets:
+The prompt asks: "Describe a concrete target-code change that violates this
+invariant while every shown test still passes. If none exists, cite the
+specific assertion lines in shown binding-test snippets that would fail."
 
-- `ok` — binding assertions identified and cited
-- `weak_binding` — the test exercises the path but its assertions would not
-  fail if the invariant broke
-- `confirmed_mismatch` — the test does not exercise the invariant at all
-- `probable_mismatch`
-- `ambiguous`
+Invariant packets allow `ok`, `weak_binding`, `confirmed_mismatch`,
+`probable_mismatch`, and `ambiguous`. Section packets retain `ok`,
+`confirmed_mismatch`, `probable_mismatch`, `missing_trace`, and `ambiguous`.
+The result's existing `evidence` field is an array of `{path, line}` objects.
+A shown snippet's inclusive evidence range is `start_line` through
+`start_line + len(snippet.splitlines()) - 1`; an empty snippet has no valid
+line range. During `analyze`, invariant `ok` requires at least one evidence item
+inside a shown `binding_tests` range. If it has none, normalize it to
+`weak_binding`, even when it cites target-code evidence. V1 does not
+syntactically recognize all assertion idioms. Any evidence path or line outside
+the packet's shown target and binding-test ranges is malformed output. More
+precisely, zero evidence items are valid and evidence-deficient; every present
+item's path must equal the shown item's path and its line must fall in that
+item's range, or the whole result is malformed. This includes evidence for a
+binding test omitted by the eight-test packet cap.
 
-All [SC-7] rules apply unchanged: packets are the review boundary, model
-output is untrusted (packet IDs come from packets), results are advisory and
-never CI-failing, malformed output is contained per packet, and concurrent
-analysis emits results in packet order.
+The model must return the existing packet ID; a mismatch is malformed. Model
+output does not need `kind` or `content_hash`, and any supplied values are
+ignored. The canonical result copies packet ID, kind, and invariant hash from
+the packet. Hash the final ordered and truncated packet projection
+exactly as defined in [SC-6]. `summarize-analysis` validates identity, kind, row
+shape, and hash shape, but not snippet locality because it has no packet. It
+renders section and invariant advisory blocks separately. V1 adds no cache and
+no automatic test-helper expansion.
 
-**Re-evaluation economy.** Each result record must include a content hash
-over (invariant statement, target snippet, binding snippets), so unchanged
-packets are identifiable across runs. Skip-if-unchanged behavior is
-explicitly **not** a v1 requirement: a real caching contract needs a CLI
-surface, a storage location, an invalidation rule, and a trust decision
-about prior result files, and deserves its own spec revision. v1 only
-guarantees the hash is there so that revision (or an external wrapper) can
-build on it.
+`summarize-analysis` is not a trust boundary for evidence locality. Only
+`analyze`, while holding the source packet, can validate those ranges.
+
+_Implementation mapping_:
+- `backstitch/analysis_packets.py`
+- `backstitch/artifact_contracts.py`
+- `backstitch/analysis_llm.py`
+- `backstitch/analysis_results.py`
+- `backstitch/cli.py`
 
 ## 6. Boundaries And Non-Goals [INV-6]
 
@@ -279,6 +356,10 @@ The first implementation must not include:
 - cross-repository invariants
 - runtime assertion checking (this spec is about tests, not `assert`)
 
+_Implementation mapping_:
+- `backstitch/analysis_packets.py`
+- `backstitch/analysis_llm.py`
+
 ## 7. Failure Modes And Edge Cases [INV-7]
 
 The tool must handle these cases explicitly:
@@ -291,29 +372,34 @@ The tool must handle these cases explicitly:
 - binding references outside test roots
 - invariants whose owning code or binding tests exceed packet bounds
   (truncate with `packet_warnings`, never silently)
-- a spec-declared invariant in a section with no implementation mapping (the
-  binding obligation stands; the packet carries the statement and tests with
-  a `packet_warnings` note that no target code resolved, and the section's
-  `SPEC_SECTION_UNMAPPED` finding fires as usual)
+- a bound spec invariant with no resolved implementation mapping still emits a
+  packet with statement, bounded binding tests, `targets: []`, and an explicit
+  warning; its ordinary section-mapping finding remains
 - malformed model output for invariant packets (per-packet containment per
   [SC-7])
 - an invariant declared and bound in the same file (legal but reported as
   `INVARIANT_BINDING_NOT_TEST` when that file is not under a test root)
 
-## 8. Issue Codes [INV-8]
+_Implementation mapping_:
+- `backstitch/resolver.py`
+- `backstitch/artifact_contracts.py`
+- `backstitch/analysis_llm.py`
 
-Additions to the [SC-11] table, following its severity rationale (errors =
-asserted something false; warnings = weak or one-directional links):
+## 8. Diagnostic Codes And Default Policy [INV-8]
 
-| Code | Severity | Meaning |
-|------|----------|---------|
-| `INVARIANT_UNTESTED` | error/warning | Declared invariant has no binding test (required tier: error; draft tier: warning) |
-| `INVARIANT_UNKNOWN` | error | Test binds an invariant ID that is not declared |
-| `INVARIANT_DUPLICATE` | error | Invariant ID declared more than once or collides with a section ID — every `Tests-invariant:` edge to it is ambiguous |
-| `INVARIANT_BINDING_NOT_TEST` | warning | Binding reference outside test roots or in a position that cannot bind ([INV-3] scope rules) |
+| Code | Short | Default | Context | Meaning |
+|------|-------|---------|---------|---------|
+| `INVARIANT_UNTESTED` | `BSI001` | error/warning | `required`, `draft` | A unique declaration has no valid binding test |
+| `INVARIANT_UNKNOWN` | `BSI002` | error | none | A valid test binding names no declaration |
+| `INVARIANT_DUPLICATE` | `BSI003` | error | none | An invariant ID is duplicate or collides with a section ID |
+| `INVARIANT_BINDING_NOT_TEST` | `BSI004` | warning | none | A well-formed binding marker is outside valid test-definition scope |
+| `INVARIANT_MARKER_INVALID` | `BSI005` | error | none | Reserved marker syntax or owner is invalid |
 
-All four codes participate in the [SC-10] contract-coverage gate: each must
-have at least one test that proves it fires.
+Each code becomes implemented only in the same slice as its first emission and
+firing test. Short codes are never reused.
+
+_Implementation mapping_:
+- `backstitch/diagnostics.py`
 
 ## 9. Verification Expectations [INV-9]
 
@@ -325,56 +411,50 @@ Required proof:
   (prose containing the word "Invariant:", fenced-code-block content)
 - resolver tests proving each [INV-8] code fires, and that a bound
   invariant produces a `binds` edge and no finding
-- an **assertion-laundering fixture**: a test that cites an invariant but
-  asserts adjacent behavior, paired with a fake-adapter test proving the
-  refutation prompt is constructed, and that an `ok` verdict lacking cited
-  assertion lines is downgraded to `weak_binding` at **result validation**
-  (the analysis-results layer that parses and validates model output — not
-  the deterministic Markdown/Python parsers, which never see model output).
-  The downgrade is deterministic tool behavior, not model behavior, so it
-  is testable without a model
+- assertion-laundering fixture: fake-adapter tests prove the refutation prompt
+  and deterministic `ok` to `weak_binding` normalization when no evidence
+  falls inside a shown binding-test range
+- marker-isolation tests covering every documented marker position plus
+  adversarial CST fixtures and proving no ordinary `code_refs` or section
+  backlink edges for those cases
 - packet-bound tests for invariant packets, including truncation warnings
-- content-hash tests: every result record carries the hash, identical
-  triads hash identically across runs, and changing the statement, target
-  code, or binding tests changes the hash
+- content-hash tests: every invariant result carries a 64-character lowercase
+  hexadecimal `content_hash`, every section result omits that key, identical
+  triads hash identically across runs, and changing the statement, target code,
+  or binding tests changes the invariant hash
 - dogfood: `backstitch`'s own deterministic core declares its load-bearing
   invariants (at minimum: byte-stable resolver output, no guessed edges,
   deterministic commands never import `llm`) bound to the existing tests
   that enforce them, and the self-corpus check reports zero
   `INVARIANT_UNTESTED`
+- self-acceptance for new report, packet, and result forms and all three
+  documented legacy artifact forms: deterministic report without all three
+  invariant additions; section packet without `kind`; section result without
+  `kind`
+- both `INVARIANT_UNTESTED` contexts and every BSI code have firing coverage
 
 Fakes only at the model boundary, per [SC-10].
 
+_Implementation mapping_:
+- `tests/acceptance/test_probe_invariants.py`
+
 ## 10. Documentation And Traceability [INV-10]
 
-**Activation sequence.** This spec stays `Proposed` — and core work must not
-implement it — until each step lands, in order:
+This specification became Active after its dated, independently reviewed plan
+implemented the coordinated [SC-*], [CFG-*], and [EXC-*] changes and passed
+the deterministic, semantic, dogfood, and acceptance gates. Future changes
+must keep those contracts and their implementation docs aligned. Plans and
+`docs/agent-context` are not parsed invariant sources: naming an invariant ID
+there is durable human and agent guidance, not a machine bind or declaration.
 
-1. a dated implementation plan exists per [DOM-5], dogfooding first: the
-   initial declarations are backstitch's own core invariants (byte-stable
-   resolver output, no guessed edges, deterministic commands never import
-   `llm`), bound to the existing tests that already enforce them
-2. the status line flips to `Active` in the same change that applies the
-   coordinated core-spec delta, so the contract is never split
-   inconsistently across files: [SC-5] gains the `--kind` filter in its
-   usage examples, [SC-6] gains the `invariants` collection, `binds` edges,
-   the `invariants` summary count, and the packet `kind` field, and the
-   [SC-2]/[SC-11] pointers drop their "proposed" gating language
-3. `docs/specs/00-specs-index.md` drops the Proposed annotation
-4. if per-code severity promotion is wanted, it is proposed as a [CFG]
-   revision in the same change, not assumed
+Implementation must also update the style-traceability implementation doc,
+repository map as needed, engineering-principles citation guidance, and the
+reciprocal spec and code traceability chain.
 
-Implementation must also update:
-
-- `docs/implementation/04-backstitch-style-traceability.md` (invariant node
-  type, binding semantics, refutation contract rationale)
-- `docs/specs/04-backstitch-traceability-exclusions.md` [EXC-10] — add the
-  invariant-suppression example (draft-tier suppressible, required-tier not)
-- `docs/agent-context/engineering-principles.md` — principle 9's plan-level
-  invariants should name their `[INV.*]` IDs once this spec is implemented,
-  so a plan's "invariants that must survive" section becomes machine-traced
-  declarations rather than prose that dies with the plan
+_Implementation mapping_:
+- `tests/test_backstitch_corpus_traceability.py`
 
 ## Related Plans
 
-- (none yet — implementation requires a dated plan per [DOM-5])
+- `docs/plans/2026-07-09-backstitch-invariant-traceability-plan.md`
+  (implemented)

@@ -472,3 +472,77 @@ def test_script_extension_tokens_classify_as_paths() -> None:
     assert classify_mapping_token("deploy.sh")[0] == "path"
     assert classify_mapping_token("schema.sql")[0] == "path"
     assert classify_mapping_token("Runtime.save")[0] == "symbol"
+
+
+def test_markdown_invariant_markers_bind_to_enclosing_section(tmp_path: Path) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "# T\n\n## Contract [T-1]\n\n"
+        "Invariant: [INV.MD.1] first line\n"
+        "continued statement\n\n"
+        "Invariant (draft): [INV.MD.2] draft\n",
+        encoding="utf-8",
+    )
+    parsed = parse_markdown_spec(doc, tmp_path)
+    assert [
+        (item.invariant_id, item.tier, item.statement, item.section_id, item.line)
+        for item in parsed.invariants
+    ] == [
+        ("INV.MD.1", "required", "first line\ncontinued statement", "T-1", 5),
+        ("INV.MD.2", "draft", "draft", "T-1", 8),
+    ]
+
+
+def test_markdown_marker_outside_section_is_invalid_and_blocks_are_silent(
+    tmp_path: Path,
+) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "Invariant: [INV.OUT.1] ownerless\n\n"
+        "## Contract [T-1]\n\n"
+        "```text\nInvariant: [INV.FENCE.1] example\n```\n\n"
+        "- Invariant: [INV.LIST.1] example\n",
+        encoding="utf-8",
+    )
+    parsed = parse_markdown_spec(doc, tmp_path)
+    assert parsed.invariants == ()
+    assert [(issue.code, issue.line) for issue in parsed.issues] == [
+        ("INVARIANT_MARKER_INVALID", 1)
+    ]
+
+
+def test_adjacent_markdown_markers_terminate_each_other(tmp_path: Path) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "# T\n\n## Contract [T-1]\n\n"
+        "Invariant: [INV.MD.1] first\n"
+        "Invariant (draft): [INV.MD.2] second\n",
+        encoding="utf-8",
+    )
+
+    parsed = parse_markdown_spec(doc, tmp_path)
+
+    assert [
+        (item.invariant_id, item.statement, item.tier, item.line)
+        for item in parsed.invariants
+    ] == [
+        ("INV.MD.1", "first", "required", 5),
+        ("INV.MD.2", "second", "draft", 6),
+    ]
+
+
+def test_malformed_markdown_marker_under_section_keeps_parseable_id(
+    tmp_path: Path,
+) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "# T\n\n## Contract [T-1]\n\nInvariant: [INV.BAD.1]\n",
+        encoding="utf-8",
+    )
+
+    parsed = parse_markdown_spec(doc, tmp_path)
+
+    assert parsed.invariants == ()
+    assert [
+        (issue.code, issue.line, issue.invariant_id) for issue in parsed.issues
+    ] == [("INVARIANT_MARKER_INVALID", 5, "INV.BAD.1")]

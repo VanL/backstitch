@@ -1,6 +1,7 @@
 """Markdown spec parsing for the backstitch-style-v1 grammar.
 
 Spec: docs/specs/02-backstitch-core.md [SC-4]
+Spec: docs/specs/05-backstitch-invariants.md [INV-3]
 Grammar: docs/implementation/04-backstitch-style-traceability.md
 
 Backstitch interprets traceability constructs over ``markdown-it-py`` CommonMark
@@ -17,9 +18,15 @@ from pathlib import Path
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
-from backstitch.exclusions import parse_traceability_marker_line
+from backstitch.exclusions import SuppressionDiagnostic, parse_traceability_marker_line
 from backstitch.grammar import SECTION_ID
-from backstitch.models import Issue, MappingKind, SpecMapping, SpecSection
+from backstitch.models import (
+    InvariantDeclaration,
+    Issue,
+    MappingKind,
+    SpecMapping,
+    SpecSection,
+)
 
 _MARKDOWN = MarkdownIt("commonmark")
 _HEADING_ID_RE = re.compile(rf"^(?P<title>.+?)\s*\[(?P<id>{SECTION_ID})\]\s*$")
@@ -30,6 +37,15 @@ _MAPPING_MARKER_TEXT_RE = re.compile(r"^_Implementation mapping[^_]*_\s*:\s*")
 _BULLET_DEF_TEXT_RE = re.compile(rf"^\[(?P<id>{SECTION_ID})\]\s+(?P<title>\S.*)$")
 _TRAILING_HTML_COMMENT_RE = re.compile(r"\s*<!--.*?-->\s*$")
 _ANCHOR_STRIP_RE = re.compile(r"[^\w\s-]", re.UNICODE)
+_INVARIANT_DECLARATION_RE = re.compile(
+    rf"^(?P<prefix>Invariant(?: \(draft\))?):\s*"
+    rf"\[(?P<id>{SECTION_ID})\]\s+(?P<statement>\S.*)$"
+)
+_RESERVED_INVARIANT_PREFIXES = (
+    "Invariant:",
+    "Invariant (draft):",
+    "Tests-invariant:",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,10 +63,11 @@ class ParsedSpec:
     mappings: tuple[SpecMapping, ...]
     anchors: tuple[str, ...]
     issues: tuple[Issue, ...] = ()
+    invariants: tuple[InvariantDeclaration, ...] = ()
     file_meta: bool = False
     file_ignores: frozenset[str] = frozenset()
     section_markers: tuple[tuple[str, bool, frozenset[str]], ...] = ()
-    marker_warnings: tuple[str, ...] = ()
+    marker_diagnostics: tuple[SuppressionDiagnostic, ...] = ()
 
 
 def github_anchor(heading_text: str, seen: dict[str, int]) -> str:
@@ -249,13 +266,17 @@ def _strip_recognized_trailing_html_marker(
     *,
     allow_unknown_codes: bool,
     location: str,
-) -> tuple[str, bool, frozenset[str], list[str]]:
+    path: str,
+    line: int,
+) -> tuple[str, bool, frozenset[str], list[SuppressionDiagnostic]]:
     if "<!--" not in text:
         return text, False, frozenset(), []
     is_meta, marker_codes, warnings = parse_traceability_marker_line(
         text,
         allow_unknown=allow_unknown_codes,
         location=location,
+        path=path,
+        line=line,
     )
     if is_meta or marker_codes or warnings:
         return (
@@ -282,13 +303,14 @@ def parse_markdown_spec(
 
     sections: list[SpecSection] = []
     mappings: list[SpecMapping] = []
+    invariants: list[InvariantDeclaration] = []
     anchors: list[str] = []
     issues: list[Issue] = []
     anchor_seen: dict[str, int] = {}
     file_meta = False
     file_ignores: set[str] = set()
     section_markers: dict[str, tuple[bool, set[str]]] = {}
-    marker_warnings: list[str] = []
+    marker_diagnostics: list[SuppressionDiagnostic] = []
 
     # Mapping blocks attach to the nearest preceding heading section.
     # Invariant bullets define sections but never own mapping blocks: a
@@ -316,10 +338,17 @@ def parse_markdown_spec(
         # or invariant bullet, before body text. A misplaced marker never
         # applies -- and silently not applying is fake protection, so warn.
         if not marker_window_open:
-            marker_warnings.append(
-                f"{rel_path}:{line_no}: traceability marker after body text"
-                " is ignored ([EXC-4]: markers go immediately after the"
-                " heading)"
+            marker_diagnostics.append(
+                SuppressionDiagnostic(
+                    code="SUPPRESSION_INVALID_SYNTAX",
+                    path=rel_path,
+                    line=line_no,
+                    message=(
+                        f"{rel_path}:{line_no}: traceability marker after body text"
+                        " is ignored ([EXC-4]: markers go immediately after the"
+                        " heading)"
+                    ),
+                )
             )
             return
         target = sections[-1].section_id
@@ -334,8 +363,10 @@ def parse_markdown_spec(
             text,
             allow_unknown=allow_unknown_codes,
             location=f"{rel_path}:{line_no}",
+            path=rel_path,
+            line=line_no,
         )
-        marker_warnings.extend(warnings)
+        marker_diagnostics.extend(warnings)
         if is_meta or marker_codes:
             record_marker(is_meta, marker_codes, line_no)
             return True
@@ -374,6 +405,72 @@ def parse_markdown_spec(
             )
         )
 
+    def process_invariant_paragraph(inline: Token, line_no: int) -> bool:
+        source_lines = inline.content.splitlines()
+        if not source_lines or not source_lines[0].lstrip().startswith(
+            _RESERVED_INVARIANT_PREFIXES
+        ):
+            return False
+
+        cursor = 0
+        while cursor < len(source_lines):
+            marker_text = source_lines[cursor].lstrip()
+            if not marker_text.startswith(_RESERVED_INVARIANT_PREFIXES):
+                break
+            next_marker = cursor + 1
+            while next_marker < len(source_lines) and not source_lines[
+                next_marker
+            ].lstrip().startswith(_RESERVED_INVARIANT_PREFIXES):
+                next_marker += 1
+
+            declaration = _INVARIANT_DECLARATION_RE.fullmatch(marker_text)
+            parsed_id = None
+            bracket = re.search(r"\[([^\[\]]+)\]", marker_text)
+            if bracket is not None and re.fullmatch(
+                SECTION_ID, bracket.group(1).strip()
+            ):
+                parsed_id = bracket.group(1).strip()
+            marker_line = line_no + cursor
+            if declaration is None or current_heading_section is None:
+                issues.append(
+                    Issue(
+                        code="INVARIANT_MARKER_INVALID",
+                        severity="error",
+                        path=rel_path,
+                        line=marker_line,
+                        message=(
+                            "Markdown invariant declaration requires one valid ID"
+                            " and statement under an ID-bearing heading"
+                        ),
+                        invariant_id=parsed_id,
+                    )
+                )
+                cursor = next_marker
+                continue
+
+            statement_lines = [declaration.group("statement").strip()]
+            statement_lines.extend(
+                line.strip() for line in source_lines[cursor + 1 : next_marker]
+            )
+            invariants.append(
+                InvariantDeclaration(
+                    invariant_id=declaration.group("id"),
+                    statement="\n".join(statement_lines),
+                    tier=(
+                        "draft"
+                        if declaration.group("prefix") == "Invariant (draft)"
+                        else "required"
+                    ),
+                    declaration_kind="spec",
+                    path=rel_path,
+                    line=marker_line,
+                    owner_symbol=None,
+                    section_id=current_heading_section.section_id,
+                )
+            )
+            cursor = next_marker
+        return True
+
     def define_mapping_bullet_section(token: Token) -> SpecSection | None:
         bullet_def = _BULLET_DEF_TEXT_RE.match(_first_inline_line(token))
         if bullet_def is None:
@@ -408,9 +505,11 @@ def parse_markdown_spec(
                 inline.content,
                 allow_unknown_codes=allow_unknown_codes,
                 location=f"{rel_path}:{line_no}",
+                path=rel_path,
+                line=line_no,
             )
         )
-        marker_warnings.extend(warnings)
+        marker_diagnostics.extend(warnings)
 
         mapping_section = None
         last_non_marker_block = "other"
@@ -452,6 +551,11 @@ def parse_markdown_spec(
         if stripped.lower().startswith("_traceability:") and parse_marker_text(
             stripped, line_no
         ):
+            return
+        if process_invariant_paragraph(inline, line_no):
+            marker_window_open = False
+            mapping_section = None
+            last_non_marker_block = "other"
             return
         if _MAPPING_MARKER_TEXT_RE.match(inline.content):
             marker_window_open = False
@@ -587,11 +691,12 @@ def parse_markdown_spec(
         mappings=tuple(mappings),
         anchors=tuple(anchors),
         issues=tuple(issues),
+        invariants=tuple(invariants),
         file_meta=file_meta,
         file_ignores=frozenset(file_ignores),
         section_markers=tuple(
             (section_id, meta_flag, frozenset(codes))
             for section_id, (meta_flag, codes) in sorted(section_markers.items())
         ),
-        marker_warnings=tuple(marker_warnings),
+        marker_diagnostics=tuple(marker_diagnostics),
     )

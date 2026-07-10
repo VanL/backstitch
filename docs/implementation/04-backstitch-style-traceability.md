@@ -1,8 +1,11 @@
 # Backstitch Style Traceability — Implementation
 
-Spec: docs/specs/02-backstitch-core.md [SC-1]–[SC-12]
+Spec: docs/specs/02-backstitch-core.md [SC-1]–[SC-15]
 Spec: docs/specs/03-backstitch-configuration.md [CFG-1]–[CFG-10]
 Spec: docs/specs/04-backstitch-traceability-exclusions.md [EXC-1]–[EXC-10]
+Spec: docs/specs/05-backstitch-invariants.md [INV-1]–[INV-10]
+Plan: docs/plans/2026-07-08-configurable-diagnostics-plan.md
+Plan: docs/plans/2026-07-09-backstitch-invariant-traceability-plan.md
 Plan: docs/plans/2026-07-02-backstitch-four-way-reconciliation-plan.md
 Plan: docs/plans/2026-07-07-tree-sitter-code-parser-plan.md
 
@@ -45,6 +48,31 @@ Load-bearing boundaries:
   a Python validity checker: some invalid legacy forms can still produce a
   tree, so ruff, mypy, and import/runtime tests remain responsible for code
   validity.
+- **Test roots are role labels inside code roots.** The scanner walks
+  `code_roots` once; `test_roots` only decides where `Tests-invariant:` may
+  create binds. Code-root and test-root overrides are therefore paired. An
+  explicit code-root override without a test-root override resets test roots,
+  while a lone test-root override retains inherited code roots. This avoids
+  scanning a second filesystem universe and makes omitted tests surface as
+  BSI001 instead of silently inheriting stale role roots ([INV-3], [CFG-6]).
+- **Invariant markers are consumed before ordinary refs.** `markdown_specs.py`
+  and `python_refs.py` produce declaration and binding records from physical
+  marker lines, then prevent those IDs from leaking into ordinary section
+  references. `resolve()` owns shared-namespace uniqueness, valid binds,
+  unknown references, no-cascade duplicates, and untested findings. It does
+  not inspect snippets or semantic state ([INV-3], [INV-4]).
+- **Packets and results are discriminated unions.** New section and invariant
+  artifacts carry `kind`; only the three exact pre-invariant legacy shapes are
+  normalized. Invariant packets bound targets and test definitions to eight
+  records and 120 lines each, then hash only the final statement/target/test
+  projection. The hash is comparison metadata, not a cache key or persistence
+  feature ([INV-5], [SC-6]).
+- **Binding quality stays at the model boundary.** `analyze` validates every
+  cited path and line against shown target/test snippets, injects trusted
+  packet kind/hash metadata, and converts evidence-deficient invariant `ok`
+  results to `weak_binding`. `summarize-analysis` has no packet snippets, so it
+  validates row identity and shape but deliberately does not re-prove locality
+  ([INV-5], [SC-7]).
 - **The llm quarantine.** `check` and `packets` are structurally incapable
   of importing `llm`: the import lives inside `analysis_llm.default_adapter`
   and the `analyze` CLI handler, and a subprocess test asserts
@@ -63,14 +91,26 @@ Load-bearing boundaries:
   inside check functions. Its remedies stay provider-neutral; provider
   names live in `06-choosing-a-local-model.md`, which the memory check
   points at.
+- **Diagnostic identity is not severity.** `diagnostics.py` owns the packaged
+  registry, short-code aliases, context-aware default policy, and effective
+  policy evaluation. Resolver/parser emission sites provide canonical code and
+  context. `check_pipeline.py` applies packaged-default policy for
+  `default_severity`, then layered repository policy for effective `severity`.
+  This keeps resolver behavior independent of CLI/config state while making
+  all-error, all-info, mixed, and `off` policies use the same path.
 - **Suppression is not filtering.** `reporting.py` renders; it never drops
-  findings. Suppression happens once, in `check_pipeline.py`, after emission
-  and before exit-code and render, through `exclusions.py` — and every
-  suppressed finding is recoverable with `--show-suppressions` ([EXC-7]).
-  Fable's audit-free `filter_report` was deliberately not ported.
-- **Severity gates on the instance.** [SC-11] has context-dependent codes;
-  non-suppressibility checks `issue.severity == "error"`, never bare code
-  membership, so a warning-context finding stays suppressible.
+  findings. Suppression happens once, in `check_pipeline.py`, after effective
+  policy application and before exit-code/render, through `exclusions.py`.
+  Every suppressed finding is recoverable with `--show-suppressions` ([EXC-7]).
+  Findings hidden by `level = "off"` use the same audit view with reason
+  `diagnostic level off`. Fable's audit-free `filter_report` was deliberately
+  not ported.
+- **Suppressibility gates on effective level.** [SC-11] has
+  context-dependent codes and [SC-15] makes level configurable. The
+  suppression gate checks the issue's effective `severity` against
+  `diagnostics.suppressible_levels`, never bare code membership. A warning
+  context remains suppressible unless policy promotes it; a promoted error
+  becomes non-suppressible by policy.
 - **Validation is total, bounded by self-acceptance.** Input validators
   mirror the *producer's* full record contract ([SC-13]), never the
   consuming code path's projection — that asymmetry is how nineteen review
@@ -85,8 +125,9 @@ Load-bearing boundaries:
   the packet's shown paths and line ranges ([SC-7]).
   `summarize-analysis` never sees packets: it validates result-row schema
   (classification, confidence in [0, 1], non-blank evidence paths) and
-  rejects packet IDs no report section could have produced, and trusts
-  that the rows came from `analyze`. Its `--help` says so; verifying a
+  rejects packet IDs no report packet could have produced (edge-bearing
+  sections or bound invariants), and trusts that the rows came from `analyze`.
+  Its `--help` says so; verifying a
   hand-edited results file requires rerunning `analyze`.
 
 ## Grammar Decisions Worth Knowing
@@ -129,10 +170,12 @@ Load-bearing boundaries:
 
 ## Dogfood Configuration And Suppression Audit
 
-`pyproject.toml` carries the committed configuration. Choices and their
-reasons:
+`backstitch/defaults.toml` is the lowest-precedence configuration layer and the
+behavioral source of truth for built-in profile defaults, default excludes, the
+diagnostic registry, and diagnostic policy. `pyproject.toml` carries the
+committed repository overlay. Choices and their reasons:
 
-- `extend_exclude` (never bare `exclude`): the defaults already exclude
+- `extend_exclude` (never bare `exclude`): the packaged defaults already exclude
   `.worktrees`; replacing them would scan four archived bake-off
   implementations into the corpus.
 - Exclusion has exactly one authority: `settings.is_excluded`
@@ -143,6 +186,15 @@ reasons:
 - `tests` stays in `code_roots` because test-to-spec edges are part of the
   graph; the fixture corpora inside `tests/` are intentionally broken
   mini-projects and are excluded as scan boundaries, not suppressed.
+- `tests` is also explicit in `test_roots`. The pairing is intentional:
+  production-only `--code-root backstitch` remains a valid partial scan and
+  reports the three dogfood declarations as BSI001, while `--test-root tests`
+  retains the committed code roots and restores their binds.
+- The repository declares exactly three initial required invariants:
+  byte-stable resolver JSON, ambiguity never guessed into an edge, and no
+  `llm` import from deterministic commands. Each binds to the existing test
+  that directly enforces it; the default self-scan requires three binds and
+  zero invariant findings.
 - `meta_spec_globs` classifies the DOM operating-model spec as process
   documentation: parsed, citable, mapping not required.
 - The only lint suppressions are on `tests/*` for citation-inventory codes
@@ -150,6 +202,10 @@ reasons:
   files cite the sections they exercise without being implementation
   owners. Both are recoverable via `--show-suppressions` and asserted
   auditable by `tests/test_backstitch_corpus_traceability.py`.
+- `diagnostics.levels` appends across config layers. Repository rules can
+  override defaults with a later `select = ["*"]` rule, and
+  `config show` exposes both the config layer list and the resolved
+  per-diagnostic policy so this behavior is inspectable.
 
 The self-corpus gate requires exit 0 with zero errors AND zero warnings on
 the default invocation; the dogfood-delta test proves the config is live by
@@ -157,34 +213,40 @@ diffing against `--no-config`.
 
 ## Verification Map
 
-- Unit/contract: `tests/test_*.py` (parsers, resolver, ladder, settings,
-  exclusions, target roots, analysis pipeline)
-- Contract coverage: `tests/test_issue_code_coverage.py` — every [SC-11]
-  code fires, context-dependent severities fire both ways
+- Unit/contract: `tests/test_*.py` (parsers, resolver, ladder, diagnostics,
+  settings, exclusions, target roots, analysis pipeline)
+- Diagnostic registry/policy: `tests/test_diagnostics.py` — registry shape,
+  short-code uniqueness, selector matching, ordered policy, `off`, and
+  reserved-code rejection
+- Contract coverage: `tests/test_issue_code_coverage.py` and suppression
+  hygiene tests — every implemented [SC-11]/[SC-15] diagnostic has a firing
+  proof, and context-dependent severities fire both ways
 - Review remediation regressions: `tests/test_review_remediation.py` — one
   test per reproduced independent-review finding (heading markers, live
   config keys, noqa hygiene, marker override, fence length)
-- Acceptance: `tests/acceptance/` — the thirteen [SC-10] probes, black-box
+- Acceptance: `tests/acceptance/` — the [SC-10] black-box probes, including
+  invariant diagnostics, role roots, packet unions, hashes, dogfood, and
+  new/legacy artifact self-acceptance
 - Self-corpus: `tests/test_backstitch_corpus_traceability.py`
-- Optional live LLM: `tests/live/test_live_llm.py` — opt-in, real provider or
-  local OpenAI-compatible endpoint (see below)
+- Live LLM: `tests/live/test_live_llm.py` — enabled by repository pytest config
+  for local runs; real provider or local OpenAI-compatible endpoint (see below)
 
-## Optional Live LLM Verification
+## Live LLM Verification
 
 The hermetic suite fakes the model boundary; it proves prompt construction,
 parsing, and aggregation, but never that the real `llm` adapter and a real
 provider or OpenAI-compatible endpoint actually work. `tests/live/test_live_llm.py`
-closes that gap under an explicit opt-in gate (`BACKSTITCH_LIVE_LLM=1`; a
-function-level `pytest.mark.skipif` otherwise, so the test is collected and
-reported skipped rather than the file exiting 5 on direct invocation), per
-[SC-7]'s live-test allowance.
+closes that gap under the [SC-7] pytest policy gate. `pyproject.toml` enables
+the gate for ordinary local runs; `tests/conftest.py` applies a collection-time
+skip when automation overrides `run_live_llm=false`. The environment opt-in
+remains available for dedicated lanes whose ini policy is off.
 
 Boundary and rationale:
 
 - **Real path only.** It drives the CLI (`packets` → `analyze` → `check` →
   `summarize-analysis`) as subprocesses through the production `default_adapter`.
-  Nothing inside the live test is mocked; the only allowed skip is the opt-in
-  gate being unset.
+  Nothing inside the live test is mocked; the only allowed skip is the explicit
+  pytest policy being disabled.
 - **Bounded dogfood corpus.** It generates packets from this repository, then
   selects a small deterministic subset (smallest matching packets from
   `docs/specs/02-backstitch-core.md` owned by a semantic-analysis module) so the
@@ -220,11 +282,11 @@ Boundary and rationale:
   decoder-enforced; `BACKSTITCH_LIVE_LLM_STRICT=1` restores the cloud-style
   no-error-row assertion.
 - **Advisory findings stay advisory.** Semantic classification never fails the
-  deterministic checker, but the live provider path is part of the normal `CI`
-  workflow when repository secrets are available. `.github/workflows/ci.yml`
-  injects `OPENAI_API_KEY` from repository secrets and skips the live provider
-  call without failure when secrets are unavailable, such as forked pull
-  requests. `.github/workflows/local-llm.yml` is a separate manual
+  deterministic checker. Current hermetic CI explicitly disables the local
+  pytest default. `.github/workflows/ci.yml` retains a cloud provider job behind
+  `BACKSTITCH_CI_LIVE_LLM=1`, restricted to main-branch push or manual-main
+  events with read-only repository permissions, then injects `OPENAI_API_KEY`
+  from repository secrets. `.github/workflows/local-llm.yml` is a separate manual
   `workflow_dispatch` canary for Ollama; it is deliberately outside the
   release-gated `CI` workflow and outside fork pull requests.
 

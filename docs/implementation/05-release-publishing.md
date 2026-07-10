@@ -122,9 +122,9 @@ Local release process changes should prove:
 - `uv run mypy backstitch bin/release.py tests --config-file pyproject.toml`
 - `python3 -m py_compile .github/scripts/require_green_workflows.py`
 - `uv run pytest tests -q -n auto --dist loadgroup -m "not live_llm"`
-- `uv run pytest tests/live/test_live_llm.py -q`
-- `BACKSTITCH_LIVE_LLM=1 uv run pytest tests/live/test_live_llm.py -q` when
-  live-provider credentials are available
+- `env -u BACKSTITCH_LIVE_LLM uv run pytest tests/live/test_live_llm.py -q -o run_live_llm=false`
+- `uv run pytest tests/live/test_live_llm.py -q` with the configured live
+  provider; the repository pytest policy enables this locally
 - `uv run pytest tests/acceptance -q`
 - `uv build`
 - `uv run backstitch check --repo-root .`

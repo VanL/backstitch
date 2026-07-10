@@ -138,7 +138,7 @@ table as a `meta_spec_globs` file match, not a shorthand for one code.
 
 | Situation | Use |
 |-----------|-----|
-| Whole spec not yet adopted (e.g. invariants spec) | Prose `Status: Proposed` + [SC-2] out-of-scope; accept info-level `SPEC_SECTION_UNMAPPED`, **`_Traceability: meta_` file preamble** ([EXC-4.1], lighter than editing `meta_spec_globs`), or `meta_spec_globs` in committed config |
+| Whole spec not yet adopted | Prose `Status: Proposed` + governing-spec out-of-scope text; accept info-level `SPEC_SECTION_UNMAPPED`, **`_Traceability: meta_` file preamble** ([EXC-4.1], lighter than editing `meta_spec_globs`), or `meta_spec_globs` in committed config |
 | Substantial in-flight behavior in a **new** file | New file path matching `planned_spec_globs` or `exploratory_spec_globs` |
 | Paragraph edit inside an existing active file | Promotion strategy A or B in `runbooks/writing-plans.md` §4d — not a glob on the parent file |
 | Control one in-flight section's unmapped/backlink debt **without a config change** | Inline `_Traceability: ignore …` or `_Traceability: meta_` on that section ([EXC-4.2]); remove or narrow when the graph is closed in the final slice |

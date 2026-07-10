@@ -92,7 +92,9 @@ change, where state crosses boundaries, and which proof must stay real.
 
 For risky work, name up front:
 
-- invariants and existing contracts that must survive
+- invariants and existing contracts that must survive, citing durable
+  invariant IDs when available; plan citations are human and agent guidance,
+  not parsed declarations or bindings
 - hidden couplings or lifecycle dependencies
 - what must not be mocked
 - rollback or rollout sequencing

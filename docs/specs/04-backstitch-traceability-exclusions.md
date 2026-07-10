@@ -38,6 +38,7 @@ This spec does not own:
 
 _Implementation mapping_:
 
+- `backstitch/diagnostics.py`
 - `backstitch/exclusions.py`
 
 ## 2. Mental Model [EXC-2]
@@ -50,8 +51,10 @@ Think in three layers, mirroring common Python tooling:
 | Classification | rule sets / profiles | `meta_spec_globs`, `process_spec_globs` | Parsed; policy skips mapping requirements |
 | Targeted suppression | `# noqa`, `per-file-ignores`, `# type: ignore[code]` | inline directives + `lint` config | Parsed; named issue codes suppressed for a scope |
 
-**Issue code** is the suppression unit. Examples: `SPEC_SECTION_UNMAPPED`,
-`SPEC_MAPPING_RECIPROCAL_MISSING`.
+**Diagnostic code** is the suppression unit. The canonical long code is
+preferred. Stable short codes are accepted as aliases and canonicalized.
+Examples: `SPEC_SECTION_UNMAPPED`, `BSS007`,
+`SPEC_MAPPING_RECIPROCAL_MISSING`, `BSC003`.
 
 **Scope** is where a suppression applies:
 
@@ -61,7 +64,7 @@ Think in three layers, mirroring common Python tooling:
 - Python module path
 - Python line (future v2; not required in first implementation)
 
-A valid suppression must name at least one issue code. Blanket “ignore
+A valid suppression must name at least one diagnostic code. Blanket “ignore
 everything” is not allowed except through explicit `meta` classification on a
 file or section.
 
@@ -83,7 +86,7 @@ may be cited from code. Default policy for sections in meta files:
 | `SPEC_SECTION_UNMAPPED` | suppressed |
 | `CODE_BACKLINK_RECIPROCAL_MISSING` for mappings to non-`.py` paths | suppressed |
 | `SPEC_MAPPING_RECIPROCAL_MISSING` | not suppressed |
-| error-severity codes ([SC-11]) | never suppressed |
+| non-suppressible effective levels ([SC-11], [SC-15]) | never suppressed |
 
 Meta classification does not exempt a section from broken references,
 duplicate IDs, or malformed mappings.
@@ -176,22 +179,27 @@ both.
   scope — the same suppression table as a `meta_spec_globs` match, not a
   shorthand for ignoring `SPEC_SECTION_UNMAPPED` alone. One word, one
   meaning, wherever it appears.
-- `ignore` accepts a comma-separated list of issue codes.
-- Unknown issue codes — in config tables or inline markers — are validation
+- `ignore` accepts a comma-separated list of diagnostic codes.
+- Unknown diagnostic codes — in config tables or inline markers — are validation
   errors: exit `2` naming the code and its location, by default. A
   suppression naming a code that does not exist is the same fake affordance
   as a typo'd config key ([CFG-8]): it looks like protection and does
-  nothing. `allow_unknown_keys = true` downgrades unknown codes to stderr
-  warnings, the same forward-compatibility hatch with the same scope.
+  nothing. `allow_unknown_keys = true` downgrades unknown codes to structured
+  suppression-hygiene diagnostics, the same forward-compatibility hatch with
+  the same scope.
   `warn_unused_ignores` is a different check entirely: it governs **stale**
   ignores — codes that are real but currently match no finding — and stays a
-  warning.
-- Markers must not suppress error-severity issue codes.
+  warning-level diagnostic.
+- Markers must not suppress diagnostics whose effective level is outside
+  `diagnostics.suppressible_levels`.
 
 _Implementation mapping_:
 
+- `backstitch/cli.py`
+- `backstitch/diagnostics.py`
 - `backstitch/exclusions.py`
 - `backstitch/markdown_specs.py`
+- `backstitch/resolver.py`
 
 ## 5. Inline Directives In Python [EXC-5]
 
@@ -259,9 +267,9 @@ Path keys are repo-relative globs or exact paths. Section keys use
 
 ### 6.2 Precedence
 
-Later steps override earlier steps for the same issue code and location:
+Later steps override earlier steps for the same diagnostic code and location:
 
-1. built-in severity policy (errors not suppressible)
+1. effective diagnostic policy decides suppressible levels
 2. `meta_spec_globs` / section `meta` marker
 3. `lint.per-file-ignores` and `lint.per-section-ignores`
 4. inline `_Traceability:` / `backstitch: noqa` markers
@@ -269,6 +277,17 @@ Later steps override earlier steps for the same issue code and location:
 
 Inline markers win over config so local intent beats central config, matching
 `# noqa` behavior in Ruff.
+
+Suppressibility is based on the effective diagnostic level after policy
+application and the configured `diagnostics.suppressible_levels`. By default,
+`warning` and `info` diagnostics are suppressible and `error` diagnostics are
+not. Attempts to suppress a non-suppressible effective level emit
+`SUPPRESSION_UNSUPPRESSIBLE_CODE`.
+
+Invariant diagnostics use normal canonical and short-code policy and the audit
+stream. Under packaged defaults, required untested is error-level and not
+suppressible; draft untested is warning-level and suppressible. Repository
+effective policy controls suppressibility, and `off` remains auditable.
 
 ### 6.3 `extend_exclude` vs exclusions
 
@@ -299,7 +318,8 @@ When set, text/JSON output includes suppressed findings in a separate
 `suppressed_issues` collection with reason (`meta`, `config`, `inline`) and
 scope.
 
-Default output omits suppressed findings entirely.
+Default output omits suppressed findings entirely. Findings disabled by
+`level = "off"` use the same audit view with reason `diagnostic level off`.
 
 _Implementation mapping_:
 
@@ -309,19 +329,35 @@ _Implementation mapping_:
 
 ## 8. Failure Modes [EXC-8]
 
-Exit code `2` when:
+Exit code `2` when strict loading sees:
 
-- a suppression names an unknown issue code and `warn_unused_ignores` is
-  promoted via future policy
+- a suppression names an unknown diagnostic code
 - malformed `_Traceability:` syntax
 
-Warnings on stderr when:
+Under `allow_unknown_keys = true`, unknown or malformed suppressions that arise
+from repository files or repository configuration are downgraded into
+structured suppression-hygiene diagnostics.
 
-- `warn_unused_ignores = true` and a configured suppression never matches
-- a suppression names an error-severity code (ignored + warned)
+Suppression-hygiene diagnostics use stable codes:
+
+- `SUPPRESSION_UNUSED`
+- `SUPPRESSION_UNKNOWN_CODE`
+- `SUPPRESSION_INVALID_SYNTAX`
+- `SUPPRESSION_UNSUPPRESSIBLE_CODE`
+- future reserved codes listed in [SC-15]
+
+These diagnostics enter the same report stream as other target diagnostics
+when they arise from repository files or repository configuration. Invocation
+failures while loading a requested config file still follow [SC-5] exit `2`.
+
+Invariant findings follow the same lifecycle. Required untested cannot be
+suppressed under packaged defaults; draft untested can. A repository policy
+override may change that result only through the ordinary effective-level and
+`suppressible_levels` rules, never through an invariant-specific bypass.
 
 _Implementation mapping_:
 
+- `backstitch/diagnostics.py`
 - `backstitch/exclusions.py`
 
 ## 9. Verification Expectations [EXC-9]
@@ -345,6 +381,8 @@ Required proof:
 - an unknown issue code in a suppression (config or inline) exits `2` by
   default and downgrades to a warning under `allow_unknown_keys = true`
 - precedence tests: inline beats config; meta does not suppress errors
+- invariant tests prove required and draft untested under packaged defaults,
+  plus an explicit policy override and `off` audit recovery
 - DOM fixture: zero `SPEC_SECTION_UNMAPPED` with `meta_spec_globs`, sections
   still parsed
 
@@ -360,6 +398,8 @@ Update on implementation:
 - `docs/specs/03-backstitch-configuration.md` — cross-link `lint` tables
 - `docs/specs/02-backstitch-core.md` — note exclusions in [SC-9]
 - `docs/implementation/04-backstitch-style-traceability.md`
+- invariant documentation must show draft-tier suppressibility,
+  required-tier non-suppressibility, policy override behavior, and audit output
 
 _Implementation mapping_:
 
@@ -367,6 +407,9 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-07-09-backstitch-invariant-traceability-plan.md`
+  (implemented)
+- `docs/plans/2026-07-08-configurable-diagnostics-plan.md` (implementing)
 - `docs/plans/2026-07-06-backstitch-organization-refactor-plan.md` (implementing)
 - `docs/plans/2026-07-02-backstitch-four-way-reconciliation-plan.md` (implementing)
 - `docs/plans/2026-07-02-backstitch-traceability-exclusions-plan.md`

@@ -163,4 +163,16 @@ treat parser byte offsets as the primitive contract and derive 1-indexed line
 numbers through one project-owned line index. Future parser integrations should
 smoke-test the binding API under repeated traversal and avoid making
 convenience accessors load-bearing when byte offsets can provide the same
-information deterministically.
+information deterministically. Materialize owner/docstring metadata into plain
+value records before later traversals; do not retain native nodes as parsed
+output or repeatedly query point metadata while walking child collections.
+
+## Role roots must be overridden as a pair (2026-07-10)
+
+When one scan tree contains both production and test code, `test_roots` are a
+role classification inside `code_roots`, not a second discovery universe. An
+explicit code-root override must therefore reset inherited test roots unless
+the caller also supplies them; a lone test-root override can retain inherited
+code roots. Dogfood this rule with real declarations and binds. Otherwise a
+committed production/test code-root list can appear healthy while every bind is
+silently parsed outside test scope as soon as an override changes one side.

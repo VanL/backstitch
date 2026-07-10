@@ -12,7 +12,7 @@ from backstitch.exclusions import (
     SuppressionReason,
     UnknownSuppressionCodeError,
     build_suppression_index,
-    collect_unused_ignore_warnings,
+    collect_unused_ignore_diagnostics,
     parse_noqa_text,
     parse_traceability_marker_line,
     should_suppress,
@@ -115,10 +115,11 @@ def test_context_dependent_error_config_file_attempt_warns_and_records_usage() -
     assert not suppressed and reason is None
     assert index.used_config_file_rules == {"pkg/*.py"}
     assert any(
-        "suppression ignored for error-severity code SPEC_SECTION_AMBIGUOUS" in warning
-        for warning in index.suppression_warnings
+        "suppression ignored for non-suppressible code SPEC_SECTION_AMBIGUOUS"
+        in diagnostic.message
+        for diagnostic in index.suppression_diagnostics
     )
-    assert collect_unused_ignore_warnings(index) == []
+    assert collect_unused_ignore_diagnostics(index) == []
 
 
 def test_context_dependent_error_config_section_attempt_warns() -> None:
@@ -141,10 +142,11 @@ def test_context_dependent_error_config_section_attempt_warns() -> None:
     assert not suppressed and reason is None
     assert index.used_config_section_rules == {"docs/specs/a.md::MAP-1"}
     assert any(
-        "suppression ignored for error-severity code MAPPING_PATH_MISSING" in warning
-        for warning in index.suppression_warnings
+        "suppression ignored for non-suppressible code MAPPING_PATH_MISSING"
+        in diagnostic.message
+        for diagnostic in index.suppression_diagnostics
     )
-    assert collect_unused_ignore_warnings(index) == []
+    assert collect_unused_ignore_diagnostics(index) == []
 
 
 def test_unknown_suppression_code_in_config_raises() -> None:
@@ -168,30 +170,52 @@ def test_unknown_suppression_code_in_inline_marker_raises() -> None:
     assert "docs/specs/01-x.md:3" in str(excinfo.value)
 
 
+def test_reserved_suppression_code_in_inline_marker_raises() -> None:
+    with pytest.raises(UnknownSuppressionCodeError) as excinfo:
+        parse_traceability_marker_line(
+            "_Traceability: ignore CONFIG_TOML_INVALID_",
+            location="docs/specs/01-x.md:3",
+        )
+    assert "CONFIG_TOML_INVALID" in str(excinfo.value)
+
+
+def test_reserved_suppression_code_in_config_raises() -> None:
+    with pytest.raises(UnknownSuppressionCodeError) as excinfo:
+        build_suppression_index(
+            meta_spec_globs=(),
+            lint=LintSettings(
+                per_file_ignores={"docs/specs/*": ("CONFIG_TOML_INVALID",)}
+            ),
+        )
+    assert "CONFIG_TOML_INVALID" in str(excinfo.value)
+
+
 def test_allow_unknown_downgrades_unknown_suppression_code() -> None:
     index = build_suppression_index(
         meta_spec_globs=(),
         lint=LintSettings(per_file_ignores={"docs/specs/*": ("SPEC_SECTON_UNMAPPED",)}),
         allow_unknown=True,
     )
-    assert any(
-        "SPEC_SECTON_UNMAPPED" in warning for warning in index.suppression_warnings
-    )
+    assert [diagnostic.code for diagnostic in index.suppression_diagnostics] == [
+        "SUPPRESSION_UNKNOWN_CODE"
+    ]
+    assert "SPEC_SECTON_UNMAPPED" in index.suppression_diagnostics[0].message
 
 
-def test_error_severity_code_in_config_warns_and_does_not_suppress() -> None:
+def test_non_suppressible_code_in_config_warns_when_matching_issue() -> None:
     index = build_suppression_index(
         meta_spec_globs=(),
         lint=LintSettings(per_file_ignores={"docs/specs/*": ("SPEC_FILE_MISSING",)}),
-    )
-    assert any(
-        "cannot suppress error-severity" in warning
-        for warning in index.suppression_warnings
     )
     suppressed, _ = should_suppress(
         _issue("SPEC_FILE_MISSING", severity="error"), index
     )
     assert not suppressed
+    assert any(
+        "suppression ignored for non-suppressible code SPEC_FILE_MISSING"
+        in diagnostic.message
+        for diagnostic in index.suppression_diagnostics
+    )
 
 
 def test_unused_ignores_warn_when_enabled() -> None:
@@ -201,8 +225,9 @@ def test_unused_ignores_warn_when_enabled() -> None:
             per_file_ignores={"docs/specs/99-*.md": ("SPEC_SECTION_UNMAPPED",)}
         ),
     )
-    warnings = collect_unused_ignore_warnings(index)
-    assert warnings and "docs/specs/99-*.md" in warnings[0]
+    diagnostics = collect_unused_ignore_diagnostics(index)
+    assert [diagnostic.code for diagnostic in diagnostics] == ["SUPPRESSION_UNUSED"]
+    assert diagnostics[0].path == "docs/specs/99-*.md"
     quiet = build_suppression_index(
         meta_spec_globs=(),
         lint=LintSettings(
@@ -210,7 +235,7 @@ def test_unused_ignores_warn_when_enabled() -> None:
             per_file_ignores={"docs/specs/99-*.md": ("SPEC_SECTION_UNMAPPED",)},
         ),
     )
-    assert collect_unused_ignore_warnings(quiet) == []
+    assert collect_unused_ignore_diagnostics(quiet) == []
 
 
 def test_noqa_parsing_accepts_alias_and_comma_lists() -> None:
@@ -223,3 +248,18 @@ def test_noqa_parsing_accepts_alias_and_comma_lists() -> None:
     assert codes == frozenset({"CODE_REF_BROAD"})
     assert warnings == []
     assert parse_noqa_text("nothing here") == (frozenset(), [])
+
+
+def test_short_suppression_codes_canonicalize_to_long_codes() -> None:
+    codes, warnings = parse_noqa_text("backstitch: noqa BSC005")
+    assert codes == frozenset({"CODE_REF_BROAD"})
+    assert warnings == []
+    index = build_suppression_index(
+        meta_spec_globs=(),
+        lint=LintSettings(per_file_ignores={"pkg/*.py": ("BSC005",)}),
+    )
+    suppressed, reason = should_suppress(
+        _issue("CODE_REF_BROAD", severity="warning", path="pkg/mod.py"),
+        index,
+    )
+    assert suppressed and reason is SuppressionReason.CONFIG_FILE

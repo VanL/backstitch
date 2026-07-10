@@ -1,6 +1,7 @@
 """Text and JSON rendering for deterministic reports.
 
 Spec: docs/specs/02-backstitch-core.md [SC-5], [SC-6]
+Spec: docs/specs/05-backstitch-invariants.md [INV-4]
 
 Rendering only: suppression is `backstitch.exclusions`' job ([EXC-*]) and
 happens before reports reach this module. There is deliberately no
@@ -25,8 +26,14 @@ _GROUP_TITLES = {"error": "errors", "warning": "warnings", "info": "infos"}
 
 def _issue_line(issue: Issue) -> str:
     location = issue.path if issue.line is None else f"{issue.path}:{issue.line}"
-    suffix = f" (section [{issue.section_id}])" if issue.section_id else ""
-    return f"  {location} [{issue.code}] {issue.message}{suffix}"
+    if issue.section_id:
+        suffix = f" (section [{issue.section_id}])"
+    elif issue.invariant_id:
+        suffix = f" (invariant [{issue.invariant_id}])"
+    else:
+        suffix = ""
+    code = f"{issue.short_code} {issue.code}" if issue.short_code else issue.code
+    return f"  {location} [{code}] {issue.message}{suffix}"
 
 
 def render_text(
@@ -47,7 +54,9 @@ def render_text(
             f"summary: {summary['spec_sections']} spec sections,"
             f" {summary['spec_mappings']} mappings,"
             f" {summary['code_refs']} code refs,"
-            f" {len(report.edges)} edges"
+            f" {len(report.edges)} edges,"
+            f" {summary['invariants']} invariants,"
+            f" {len(report.binds)} binds"
         ),
         (
             f"issues: {summary['errors']} errors,"

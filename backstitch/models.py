@@ -1,6 +1,7 @@
 """Core value types for trace graphs, issues, and reports.
 
 Spec: docs/specs/02-backstitch-core.md [SC-2], [SC-4], [SC-6], [SC-11]
+Spec: docs/specs/05-backstitch-invariants.md [INV-1], [INV-2]
 """
 
 from __future__ import annotations
@@ -9,7 +10,16 @@ import dataclasses
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from backstitch.diagnostics import (
+    always_error_codes,
+    default_level_for,
+    implemented_codes,
+    short_code_for,
+)
+
 Severity = Literal["error", "warning", "info"]
+InvariantTier = Literal["required", "draft"]
+InvariantDeclarationKind = Literal["code", "spec"]
 
 SectionKind = Literal["heading", "invariant", "bullet"]
 
@@ -22,53 +32,10 @@ EdgeKind = Literal["mapping", "backlink"]
 # an error only in asserted context ([SC-11]).
 RefContext = Literal["asserted", "docstring", "comment"]
 
-# Canonical inventory of deterministic issue codes -- exactly the [SC-11]
-# table. Configuration validates suppression lists against this set, and
-# tests/test_models.py parses the spec table to keep the two in lockstep.
-ISSUE_CODES = frozenset(
-    {
-        "CODE_BACKLINK_RECIPROCAL_MISSING",
-        "CODE_REF_BARE_UNRESOLVED",
-        "CODE_REF_BROAD",
-        "CODE_REF_EXPLORATORY_SPEC",
-        "CODE_REF_PLANNED_SPEC",
-        "CODE_REF_UNMAPPED_FROM_SPEC",
-        "FILE_UNREADABLE",
-        "MAPPING_BLOCK_OWNERLESS",
-        "MAPPING_PATH_INEXACT",
-        "MAPPING_PATH_MISSING",
-        "MAPPING_SYMBOL_MISSING",
-        "MAPPING_SYMBOL_UNRESOLVED",
-        "PYTHON_SYNTAX_ERROR",
-        "REF_RANGE_UNSUPPORTED",
-        "SCAN_ROOT_MISSING",
-        "SPEC_ANCHOR_MISSING",
-        "SPEC_FILE_MISSING",
-        "SPEC_MAPPING_RECIPROCAL_MISSING",
-        "SPEC_SECTION_AMBIGUOUS",
-        "SPEC_SECTION_DUPLICATE",
-        "SPEC_SECTION_MISSING",
-        "SPEC_SECTION_UNMAPPED",
-        "TARGET_PATH_AMBIGUOUS",
-    }
-)
-
-# Codes that are ALWAYS error-severity per [SC-11]. Context-dependent codes
-# (SPEC_SECTION_AMBIGUOUS, MAPPING_PATH_MISSING) are deliberately excluded:
-# their severity varies per instance, so non-suppressibility decisions must
-# gate on ``issue.severity == "error"``, never on membership in this set.
-ERROR_SEVERITY_CODES = frozenset(
-    {
-        "FILE_UNREADABLE",
-        "MAPPING_SYMBOL_MISSING",
-        "REF_RANGE_UNSUPPORTED",
-        "SCAN_ROOT_MISSING",
-        "SPEC_ANCHOR_MISSING",
-        "SPEC_FILE_MISSING",
-        "SPEC_SECTION_MISSING",
-        "TARGET_PATH_AMBIGUOUS",
-    }
-)
+# Compatibility inventories derived from the packaged diagnostic registry
+# ([SC-11], [SC-15]). The TOML registry is the source of truth.
+ISSUE_CODES = implemented_codes()
+ERROR_SEVERITY_CODES = always_error_codes()
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +102,32 @@ class Edge:
 
 
 @dataclass(frozen=True, slots=True)
+class InvariantDeclaration:
+    """A first-class invariant declaration owned by code or a spec section."""
+
+    invariant_id: str
+    statement: str
+    tier: InvariantTier
+    declaration_kind: InvariantDeclarationKind
+    path: str
+    line: int
+    owner_symbol: str | None
+    section_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class InvariantBind:
+    """One concrete test definition claiming to bind an invariant."""
+
+    invariant_id: str
+    test_path: str
+    test_symbol: str
+    marker_line: int
+    start_line: int
+    end_line: int
+
+
+@dataclass(frozen=True, slots=True)
 class Issue:
     """A deterministic finding with a stable code and location metadata."""
 
@@ -145,6 +138,20 @@ class Issue:
     message: str
     section_id: str | None = None
     symbol: str | None = None
+    short_code: str | None = None
+    context: str | None = None
+    default_severity: Severity | None = None
+    invariant_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.short_code is None:
+            object.__setattr__(self, "short_code", short_code_for(self.code))
+        if self.default_severity is None:
+            object.__setattr__(
+                self,
+                "default_severity",
+                default_level_for(self.code, self.context),
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,12 +165,15 @@ class Report:
     spec_mappings: tuple[SpecMapping, ...]
     edges: tuple[Edge, ...]
     issues: tuple[Issue, ...]
+    invariants: tuple[InvariantDeclaration, ...] = ()
+    binds: tuple[InvariantBind, ...] = ()
 
     def summary(self) -> dict[str, int]:
         return {
             "spec_sections": len(self.spec_sections),
             "code_refs": len(self.code_refs),
             "spec_mappings": len(self.spec_mappings),
+            "invariants": len(self.invariants),
             "errors": sum(1 for i in self.issues if i.severity == "error"),
             "warnings": sum(1 for i in self.issues if i.severity == "warning"),
             "infos": sum(1 for i in self.issues if i.severity == "info"),
@@ -178,5 +188,7 @@ class Report:
             "code_refs": [dataclasses.asdict(r) for r in self.code_refs],
             "spec_mappings": [dataclasses.asdict(m) for m in self.spec_mappings],
             "edges": [dataclasses.asdict(e) for e in self.edges],
+            "invariants": [dataclasses.asdict(item) for item in self.invariants],
+            "binds": [dataclasses.asdict(item) for item in self.binds],
             "issues": [dataclasses.asdict(i) for i in self.issues],
         }

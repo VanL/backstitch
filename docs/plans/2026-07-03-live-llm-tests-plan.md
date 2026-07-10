@@ -1,6 +1,7 @@
 # Live LLM Tests
 
-Status: draft (four review passes incorporated; awaiting spec-promotion)
+Status: implemented; local/CI gate policy revised by
+`docs/plans/2026-07-10-local-default-live-llm-tests-plan.md`.
 Plan type: implementation with spec revision
 Risk level: boundary-crossing; external provider, network, CI secret handling
 
@@ -60,6 +61,7 @@ setting a repository secret.
 
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |----------|------------------|-----------------|-----------|---------------|
+| [SC-7], [SC-10] | Default local and CI suites stay hermetic; environment opt-in only | Repository pytest config enables local live tests; current CI explicitly disables them, with future CI opt-in behind a repository variable | User correction on 2026-07-10: local completion must exercise the live lane; current CI disablement is not permanent | Promoted by `2026-07-10-local-default-live-llm-tests-plan.md` |
 
 ## Context and Key Files
 

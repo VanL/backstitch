@@ -11,6 +11,12 @@ principle 12).
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, cast
+
 import pytest
 
 from backstitch.models import ERROR_SEVERITY_CODES, ISSUE_CODES, Report
@@ -38,6 +44,15 @@ _FILES: dict[str, str | bytes] = {
     ),
     "docs/specs/02-planned-p.md": "# P\n\n## Planned [PP-1]\n",
     "docs/specs/03-exploratory-x.md": "# X\n\n## Expl [XX-1]\n",
+    "docs/specs/04-invariants.md": (
+        "# Invariants\n\n"
+        "## Contract [IV-1]\n\n"
+        "Invariant: [INV.REQUIRED.1] required invariant\n\n"
+        "Invariant (draft): [INV.DRAFT.1] draft invariant\n\n"
+        "Invariant: [INV.DUPLICATE.1] first declaration\n\n"
+        "Invariant: [INV.DUPLICATE.1] second declaration\n\n"
+        "Invariant: [INV.INVALID.1]\n"
+    ),
     "pkg/impl.py": (
         '"""Spec: docs/specs/01-a.md [AA-1]"""\n'
         "\n"
@@ -74,6 +89,14 @@ _FILES: dict[str, str | bytes] = {
     "pkg/t2/twin.py": '"""Twin two."""\n',
     "pkg/broken.py": "def broken(:\n",
     "pkg/binary.py": b"\xff\xfe not utf8 \xff",
+    "pkg/tests/test_invariants.py": (
+        "def helper() -> None:\n"
+        '    """Tests-invariant: [INV.REQUIRED.1]"""\n'
+        "    pass\n\n"
+        "def test_unknown() -> None:\n"
+        '    """Tests-invariant: [INV.UNKNOWN.1]"""\n'
+        "    pass\n"
+    ),
     "docs/plans/.keep": "",
 }
 
@@ -81,8 +104,16 @@ PROFILE = get_profile("backstitch-style-v1").with_overrides(
     spec_roots=("docs/specs",),
     plan_roots=("docs/plans",),
     code_roots=("pkg",),
+    test_roots=("pkg/tests",),
     planned_spec_globs=("docs/specs/02-planned-*.md",),
     exploratory_spec_globs=("docs/specs/03-exploratory-*.md",),
+)
+
+TRACE_DIAGNOSTIC_CODES = frozenset(
+    code for code in ISSUE_CODES if not code.startswith("SUPPRESSION_")
+)
+SUPPRESSION_DIAGNOSTIC_CODES = frozenset(
+    code for code in ISSUE_CODES if code.startswith("SUPPRESSION_")
 )
 
 
@@ -108,7 +139,7 @@ def missing_root_report(
     return scan_repository(root, PROFILE)
 
 
-@pytest.mark.parametrize("code", sorted(ISSUE_CODES))
+@pytest.mark.parametrize("code", sorted(TRACE_DIAGNOSTIC_CODES))
 def test_every_issue_code_fires(
     code: str, everything: Report, missing_root_report: Report
 ) -> None:
@@ -135,3 +166,113 @@ def test_context_dependent_severities_fire_both_ways(
     # error; the comment reference is a warning ([SC-11] context split).
     ambiguous = [i for i in everything.issues if i.code == "SPEC_SECTION_AMBIGUOUS"]
     assert {i.severity for i in ambiguous} == {"error", "warning"}
+    untested = [i for i in everything.issues if i.code == "INVARIANT_UNTESTED"]
+    assert {(i.context, i.severity) for i in untested} == {
+        ("required", "error"),
+        ("draft", "warning"),
+    }
+
+
+def _run_check_json(path: Path) -> dict[str, Any]:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "backstitch",
+            "check",
+            "--repo-root",
+            str(path),
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode in {0, 1}, result.stdout + result.stderr
+    return cast("dict[str, Any]", json.loads(result.stdout))
+
+
+def _write_base_repo(
+    root: Path,
+    *,
+    top_config_extra: str = "",
+    config_extra: str = "",
+    spec_text: str = "# X\n\n## One [SX-1]\n",
+    python_text: str = '"""Mod."""\n',
+) -> None:
+    docs = root / "docs/specs"
+    pkg = root / "pkg"
+    docs.mkdir(parents=True)
+    pkg.mkdir()
+    (docs / "01-x.md").write_text(spec_text, encoding="utf-8")
+    (pkg / "mod.py").write_text(python_text, encoding="utf-8")
+    (root / ".backstitch.toml").write_text(
+        "\n".join(
+            [
+                top_config_extra,
+                "[profile]",
+                'spec_roots = ["docs/specs"]',
+                "plan_roots = []",
+                'code_roots = ["pkg"]',
+                config_extra,
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _suppression_fixture(tmp_path_factory: pytest.TempPathFactory, code: str) -> dict:
+    root = tmp_path_factory.mktemp(code.lower())
+    if code == "SUPPRESSION_UNUSED":
+        _write_base_repo(
+            root,
+            config_extra=(
+                '[lint.per-file-ignores]\n"missing/*.py" = ["CODE_REF_BROAD"]'
+            ),
+        )
+    elif code == "SUPPRESSION_UNKNOWN_CODE":
+        _write_base_repo(
+            root,
+            top_config_extra="allow_unknown_keys = true",
+            python_text=(
+                '"""Mod."""\n\n# backstitch: noqa NOT_A_REAL_CODE_9\n'
+                "def f() -> None:\n    pass\n"
+            ),
+        )
+    elif code == "SUPPRESSION_INVALID_SYNTAX":
+        _write_base_repo(
+            root,
+            top_config_extra="allow_unknown_keys = true",
+            spec_text="# X\n\n## One [SX-1]\n\nBody.\n\n_Traceability: meta_\n",
+        )
+    elif code == "SUPPRESSION_UNSUPPRESSIBLE_CODE":
+        _write_base_repo(
+            root,
+            python_text=(
+                '"""Mod."""\n\n# backstitch: noqa SPEC_FILE_MISSING\n'
+                'def f() -> None:\n    """Spec: docs/specs/missing.md [SX-1]"""\n'
+            ),
+        )
+    else:
+        raise AssertionError(f"missing suppression firing fixture for {code}")
+    return _run_check_json(root)
+
+
+def test_suppression_firing_fixtures_cover_registry() -> None:
+    assert SUPPRESSION_DIAGNOSTIC_CODES == {
+        "SUPPRESSION_UNUSED",
+        "SUPPRESSION_UNKNOWN_CODE",
+        "SUPPRESSION_INVALID_SYNTAX",
+        "SUPPRESSION_UNSUPPRESSIBLE_CODE",
+    }
+
+
+@pytest.mark.parametrize("code", sorted(SUPPRESSION_DIAGNOSTIC_CODES))
+def test_every_suppression_issue_code_fires(
+    code: str,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    data = _suppression_fixture(tmp_path_factory, code)
+    assert any(issue["code"] == code for issue in data["issues"]), code

@@ -5,6 +5,7 @@ Spec: docs/specs/03-backstitch-configuration.md [CFG-5], [CFG-7], [CFG-9]
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -70,6 +71,50 @@ def test_no_config_flag_restores_builtin_behavior(config_repo: Path) -> None:
     # was live in the other test (dogfood-delta pattern, [CFG-9]).
     assert result.returncode == 1
     assert "SCAN_ROOT_MISSING" in result.stdout
+
+
+def test_config_show_includes_packaged_defaults_and_resolved_policy(
+    config_repo: Path,
+) -> None:
+    result = run_cli("config", "show", "--repo-root", str(config_repo))
+    assert result.returncode == 0, result.stdout + result.stderr
+    data = json.loads(result.stdout)
+    assert data["config_layers"][0] == "packaged:backstitch/defaults.toml"
+    assert "resolved_diagnostics" in data
+    assert data["resolved_diagnostics"]["PYTHON_SYNTAX_ERROR"]["short_code"] == "BSC001"
+    assert data["profile_overrides"]["test_roots"] == []
+
+
+def test_test_root_must_be_contained_by_final_code_roots(config_repo: Path) -> None:
+    result = run_cli(
+        "check",
+        "--repo-root",
+        str(config_repo),
+        "--code-root",
+        "pkg",
+        "--test-root",
+        "qa",
+    )
+    assert result.returncode == 2
+    assert "test root" in result.stderr
+    assert "qa" in result.stderr
+
+
+def test_lone_cli_test_root_retains_inherited_code_roots(config_repo: Path) -> None:
+    result = run_cli(
+        "check",
+        "--repo-root",
+        str(config_repo),
+        "--test-root",
+        "pkg",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_config_path_no_config_prints_no_packaged_path(config_repo: Path) -> None:
+    result = run_cli("config", "path", "--repo-root", str(config_repo), "--no-config")
+    assert result.returncode == 0
+    assert result.stdout == ""
 
 
 def test_unknown_config_key_exits_two(tmp_path: Path) -> None:

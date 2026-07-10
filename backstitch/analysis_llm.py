@@ -1,6 +1,7 @@
 """Semantic analysis over packets through the ``llm`` Python API.
 
 Spec: docs/specs/02-backstitch-core.md [SC-7], [SC-13]
+Spec: docs/specs/05-backstitch-invariants.md [INV-5], [INV-6], [INV-7]
 
 The adapter boundary exists so tests prove prompt construction, iteration,
 parsing, and malformed-output handling with fakes; only the default adapter
@@ -13,9 +14,13 @@ import json
 import re
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from typing import Any
 
-from backstitch.analysis_results import validate_analysis_row
+from backstitch.analysis_results import (
+    analysis_result_to_row,
+    validate_analysis_row,
+)
 
 ModelAdapter = Callable[[str], str]
 
@@ -81,6 +86,11 @@ def _packet_evidence_bounds(
     known to the packet but cannot carry line evidence.
     """
 
+    if packet.get("kind", "section") == "invariant":
+        return _snippet_evidence_bounds(
+            (*packet.get("targets", ()), *packet.get("binding_tests", ()))
+        )
+
     bounds: dict[str, list[tuple[int, int]]] = {}
     spec_path = packet.get("spec_path")
     # Blank paths never name a packet member: an empty or whitespace-only
@@ -112,6 +122,36 @@ def _packet_evidence_bounds(
     return {path: tuple(ranges) for path, ranges in bounds.items()}
 
 
+def _snippet_evidence_bounds(
+    items: Iterable[object],
+) -> dict[str, tuple[tuple[int, int], ...]]:
+    bounds: dict[str, list[tuple[int, int]]] = {}
+    for item in items:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("path"), str)
+            or not item["path"].strip()
+        ):
+            continue
+        ranges = bounds.setdefault(item["path"], [])
+        start = item.get("start_line")
+        snippet = item.get("snippet")
+        if isinstance(start, int) and isinstance(snippet, str) and snippet.splitlines():
+            ranges.append((start, start + len(snippet.splitlines()) - 1))
+    return {path: tuple(ranges) for path, ranges in bounds.items()}
+
+
+def _has_binding_test_evidence(
+    packet: dict[str, Any],
+    evidence: tuple[tuple[str, int], ...],
+) -> bool:
+    bounds = _snippet_evidence_bounds(packet.get("binding_tests", ()))
+    return any(
+        any(start <= line <= end for start, end in bounds.get(path, ()))
+        for path, line in evidence
+    )
+
+
 def _parse_model_output(raw: str, packet: dict[str, Any]) -> dict[str, Any] | str:
     packet_id = packet["packet_id"]
     text = raw.strip()
@@ -122,32 +162,53 @@ def _parse_model_output(raw: str, packet: dict[str, Any]) -> dict[str, Any] | st
         row = json.loads(text)
     except json.JSONDecodeError:
         return "model output is not valid JSON"
+    if not isinstance(row, dict):
+        return "model output invalid: row is not a JSON object"
+    if row.get("packet_id") != packet_id:
+        return (
+            f"model output packet_id `{row.get('packet_id')}` does not match the packet"
+        )
+
+    kind = packet.get("kind", "section")
+    candidate = dict(row)
+    candidate["kind"] = kind
+    if kind == "invariant":
+        candidate["content_hash"] = packet.get("content_hash")
+    else:
+        candidate.pop("content_hash", None)
     validated = validate_analysis_row(
-        row, None, allowed_evidence=_packet_evidence_bounds(packet)
+        candidate, None, allowed_evidence=_packet_evidence_bounds(packet)
     )
     if isinstance(validated, str):
         return f"model output invalid: {validated}"
-    if validated.packet_id != packet_id:
-        return (
-            f"model output packet_id `{validated.packet_id}` does not match the packet"
-        )
-    assert isinstance(row, dict)
-    return row
+    if (
+        validated.kind == "invariant"
+        and validated.classification == "ok"
+        and not _has_binding_test_evidence(packet, validated.evidence)
+    ):
+        validated = replace(validated, classification="weak_binding")
+    return analysis_result_to_row(validated)
 
 
-def _error_record(packet_id: str, message: str) -> dict[str, Any]:
+def _error_record(packet: dict[str, Any], message: str) -> dict[str, Any]:
     # [SC-7]: one bad response yields one `ambiguous`/error record for the
     # packet -- a consumer of the results JSONL never loses a packet-level
-    # result to a model failure. `packet_id` comes from the packet, never
-    # the response, and the record passes validate_analysis_row.
-    return {
+    # result to a model failure. Packet identity and kind come from packet
+    # metadata, never the response.
+    packet_id = packet.get("packet_id", "<missing packet_id>")
+    kind = packet.get("kind", "section")
+    row = {
         "packet_id": packet_id,
+        "kind": kind,
         "classification": "ambiguous",
         "summary": f"analysis error: {message}",
         "rationale": message,
         "evidence": [],
         "error": message,
     }
+    if kind == "invariant":
+        row["content_hash"] = packet.get("content_hash")
+    return row
 
 
 def analyze_packets(
@@ -169,15 +230,19 @@ def analyze_packets(
         packet_id = packet.get("packet_id", "<missing packet_id>")
         if "instructions" not in packet:
             message = "packet has no `instructions` field"
-            return _error_record(packet_id, message), f"{packet_id}: {message}"
+            return _error_record(packet, message), f"{packet_id}: {message}"
         try:
             raw = adapter(build_prompt(packet))
         except Exception as exc:  # noqa: BLE001 - adapter is an external boundary
             message = f"model call failed: {exc}"
-            return _error_record(packet_id, message), f"{packet_id}: {message}"
-        parsed = _parse_model_output(raw, packet)
+            return _error_record(packet, message), f"{packet_id}: {message}"
+        try:
+            parsed = _parse_model_output(raw, packet)
+        except Exception as exc:  # noqa: BLE001 - contain one packet boundary
+            message = f"model output processing failed: {exc}"
+            return _error_record(packet, message), f"{packet_id}: {message}"
         if isinstance(parsed, str):
-            return _error_record(packet_id, parsed), f"{packet_id}: {parsed}"
+            return _error_record(packet, parsed), f"{packet_id}: {parsed}"
         return parsed, None
 
     if concurrency <= 1:

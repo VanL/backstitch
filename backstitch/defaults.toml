@@ -1,0 +1,401 @@
+exclude = [
+  ".git",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  "dist",
+  "build",
+  ".worktrees",
+]
+
+[defaults]
+schema_version = 1
+
+[profile]
+name = "backstitch-style-v1"
+spec_roots = ["docs/specs"]
+plan_roots = ["docs/plans"]
+code_roots = ["backstitch", "tests"]
+test_roots = ["tests"]
+planned_spec_globs = []
+exploratory_spec_globs = []
+meta_spec_globs = []
+process_spec_globs = []
+
+[check]
+format = "text"
+warnings_as_errors = false
+
+[analyze]
+concurrency = 1
+
+[diagnostics]
+default_level = "warning"
+fail_on = ["error"]
+suppressible_levels = ["warning", "info"]
+
+[[diagnostics.levels]]
+select = [
+  "SCAN_ROOT_MISSING",
+  "FILE_UNREADABLE",
+  "SPEC_FILE_MISSING",
+  "SPEC_SECTION_MISSING",
+  "SPEC_ANCHOR_MISSING",
+  "REF_RANGE_UNSUPPORTED",
+  "TARGET_PATH_AMBIGUOUS",
+  "MAPPING_SYMBOL_MISSING",
+  "SPEC_SECTION_AMBIGUOUS:asserted",
+  "MAPPING_PATH_MISSING:required",
+  "INVARIANT_UNTESTED:required",
+  "INVARIANT_UNKNOWN",
+  "INVARIANT_DUPLICATE",
+  "INVARIANT_MARKER_INVALID",
+]
+level = "error"
+
+[[diagnostics.levels]]
+select = [
+  "SPEC_SECTION_UNMAPPED",
+  "CODE_REF_UNMAPPED_FROM_SPEC",
+]
+level = "info"
+
+[[diagnostics.levels]]
+select = [
+  "SPEC_SECTION_AMBIGUOUS:weak",
+  "MAPPING_PATH_MISSING:plan-artifact",
+  "INVARIANT_UNTESTED:draft",
+  "INVARIANT_BINDING_NOT_TEST",
+]
+level = "warning"
+
+[diagnostics.registry.SCAN_ROOT_MISSING]
+short = "BST001"
+status = "implemented"
+summary = "Configured spec, plan, or code root was not found"
+
+[diagnostics.registry.FILE_UNREADABLE]
+short = "BST002"
+status = "implemented"
+summary = "File could not be read while scanning"
+
+[diagnostics.registry.CONFIG_TOML_INVALID]
+short = "BST003"
+status = "reserved"
+summary = "Configuration TOML could not be parsed"
+
+[diagnostics.registry.CONFIG_FILE_MISSING]
+short = "BST004"
+status = "reserved"
+summary = "Requested configuration file was not found"
+
+[diagnostics.registry.CONFIG_EXTEND_MISSING]
+short = "BST005"
+status = "reserved"
+summary = "Extended configuration file was not found"
+
+[diagnostics.registry.CONFIG_EXTEND_CYCLE]
+short = "BST006"
+status = "reserved"
+summary = "Configuration extend chain contains a cycle"
+
+[diagnostics.registry.CONFIG_UNKNOWN_KEY]
+short = "BST007"
+status = "reserved"
+summary = "Configuration contains an unknown key"
+
+[diagnostics.registry.CONFIG_TYPE_INVALID]
+short = "BST008"
+status = "reserved"
+summary = "Configuration value has the wrong type"
+
+[diagnostics.registry.CONFIG_VALUE_INVALID]
+short = "BST009"
+status = "reserved"
+summary = "Configuration value is outside the allowed vocabulary"
+
+[diagnostics.registry.CONFIG_PROFILE_UNKNOWN]
+short = "BST010"
+status = "reserved"
+summary = "Configuration names an unknown built-in profile"
+
+[diagnostics.registry.REPORT_JSON_INVALID]
+short = "BST011"
+status = "reserved"
+summary = "Deterministic report JSON could not be parsed"
+
+[diagnostics.registry.REPORT_SHAPE_INVALID]
+short = "BST012"
+status = "reserved"
+summary = "Deterministic report does not match the expected shape"
+
+[diagnostics.registry.REPORT_SUMMARY_MISMATCH]
+short = "BST013"
+status = "reserved"
+summary = "Deterministic report summary disagrees with report contents"
+
+[diagnostics.registry.OUTPUT_WRITE_FAILED]
+short = "BST014"
+status = "reserved"
+summary = "Requested output file could not be written"
+
+[diagnostics.registry.REPO_ROOT_INVALID]
+short = "BST015"
+status = "reserved"
+summary = "Repository root is invalid"
+
+[diagnostics.registry.INTERNAL_ERROR]
+short = "BST016"
+status = "reserved"
+summary = "Backstitch hit an internal failure"
+
+[diagnostics.registry.SPEC_FILE_MISSING]
+short = "BSS001"
+status = "implemented"
+summary = "Referenced spec file does not exist"
+
+[diagnostics.registry.SPEC_SECTION_MISSING]
+short = "BSS002"
+status = "implemented"
+summary = "File-qualified section reference was not found in that file"
+
+[diagnostics.registry.SPEC_SECTION_AMBIGUOUS]
+short = "BSS003"
+status = "implemented"
+summary = "Bare section ID matches multiple sections"
+contexts = ["asserted", "weak"]
+
+[diagnostics.registry.SPEC_SECTION_DUPLICATE]
+short = "BSS004"
+status = "implemented"
+summary = "Section ID is defined more than once"
+
+[diagnostics.registry.SPEC_ANCHOR_MISSING]
+short = "BSS005"
+status = "implemented"
+summary = "File anchor reference was not found"
+
+[diagnostics.registry.REF_RANGE_UNSUPPORTED]
+short = "BSS006"
+status = "implemented"
+summary = "Section range could not be expanded"
+
+[diagnostics.registry.SPEC_SECTION_UNMAPPED]
+short = "BSS007"
+status = "implemented"
+summary = "Spec section has no implementation mapping"
+
+[diagnostics.registry.MAPPING_PATH_MISSING]
+short = "BSM001"
+status = "implemented"
+summary = "Mapping path does not exist"
+contexts = ["required", "plan-artifact"]
+
+[diagnostics.registry.MAPPING_PATH_INEXACT]
+short = "BSM002"
+status = "implemented"
+summary = "Mapping token resolved through a unique suffix or basename match"
+
+[diagnostics.registry.TARGET_PATH_AMBIGUOUS]
+short = "BSM003"
+status = "implemented"
+summary = "Mapping token matches multiple paths"
+
+[diagnostics.registry.MAPPING_SYMBOL_MISSING]
+short = "BSM004"
+status = "implemented"
+summary = "Explicit path-symbol mapping names a missing symbol"
+
+[diagnostics.registry.MAPPING_SYMBOL_UNRESOLVED]
+short = "BSM005"
+status = "implemented"
+summary = "Advisory mapping symbol could not be resolved"
+
+[diagnostics.registry.MAPPING_BLOCK_OWNERLESS]
+short = "BSM006"
+status = "implemented"
+summary = "Mapping block has no preceding ID-bearing heading"
+
+[diagnostics.registry.PYTHON_SYNTAX_ERROR]
+short = "BSC001"
+status = "implemented"
+summary = "Python file could not be parsed"
+
+[diagnostics.registry.CODE_REF_BARE_UNRESOLVED]
+short = "BSC002"
+status = "implemented"
+summary = "Known-prefix bare reference matches no section"
+
+[diagnostics.registry.SPEC_MAPPING_RECIPROCAL_MISSING]
+short = "BSC003"
+status = "implemented"
+summary = "Code backlink exists without a reciprocal spec mapping"
+
+[diagnostics.registry.CODE_BACKLINK_RECIPROCAL_MISSING]
+short = "BSC004"
+status = "implemented"
+summary = "Spec mapping exists without a reciprocal code backlink"
+
+[diagnostics.registry.CODE_REF_BROAD]
+short = "BSC005"
+status = "implemented"
+summary = "Document-only code reference should cite a specific section"
+
+[diagnostics.registry.CODE_REF_PLANNED_SPEC]
+short = "BSC006"
+status = "implemented"
+summary = "Shipped code cites a planned spec"
+
+[diagnostics.registry.CODE_REF_EXPLORATORY_SPEC]
+short = "BSC007"
+status = "implemented"
+summary = "Shipped code cites an exploratory spec"
+
+[diagnostics.registry.CODE_REF_UNMAPPED_FROM_SPEC]
+short = "BSC008"
+status = "implemented"
+summary = "Code cites a spec section whose mapping does not cover that code"
+
+[diagnostics.registry.INVARIANT_UNTESTED]
+short = "BSI001"
+status = "implemented"
+summary = "Unique invariant declaration has no valid binding test"
+contexts = ["required", "draft"]
+
+[diagnostics.registry.INVARIANT_UNKNOWN]
+short = "BSI002"
+status = "implemented"
+summary = "Valid test binding names no invariant declaration"
+
+[diagnostics.registry.INVARIANT_DUPLICATE]
+short = "BSI003"
+status = "implemented"
+summary = "Invariant ID is duplicate or collides with a section ID"
+
+[diagnostics.registry.INVARIANT_BINDING_NOT_TEST]
+short = "BSI004"
+status = "implemented"
+summary = "Invariant binding marker is outside valid test scope"
+
+[diagnostics.registry.INVARIANT_MARKER_INVALID]
+short = "BSI005"
+status = "implemented"
+summary = "Reserved invariant marker syntax or owner is invalid"
+
+[diagnostics.registry.SUPPRESSION_UNUSED]
+short = "BSX001"
+status = "implemented"
+summary = "Suppression matched no diagnostic"
+
+[diagnostics.registry.SUPPRESSION_WITHOUT_CODE]
+short = "BSX002"
+status = "reserved"
+summary = "Suppression did not name a diagnostic code"
+
+[diagnostics.registry.SUPPRESSION_UNKNOWN_CODE]
+short = "BSX003"
+status = "implemented"
+summary = "Suppression names an unknown diagnostic code"
+
+[diagnostics.registry.SUPPRESSION_INVALID_SYNTAX]
+short = "BSX004"
+status = "implemented"
+summary = "Suppression directive has invalid syntax"
+
+[diagnostics.registry.SUPPRESSION_UNSUPPRESSIBLE_CODE]
+short = "BSX005"
+status = "implemented"
+summary = "Suppression attempted to hide a non-suppressible diagnostic"
+
+[diagnostics.registry.SUPPRESSION_REDIRECTED_CODE]
+short = "BSX006"
+status = "reserved"
+summary = "Suppression used a redirected diagnostic code"
+
+[diagnostics.registry.SUPPRESSION_DEPRECATED_CODE]
+short = "BSX007"
+status = "reserved"
+summary = "Suppression used a deprecated diagnostic code"
+
+[diagnostics.registry.SUPPRESSION_DUPLICATE_CODE]
+short = "BSX008"
+status = "reserved"
+summary = "Suppression named the same diagnostic code more than once"
+
+[diagnostics.registry.SUPPRESSION_BROAD_CODE]
+short = "BSX009"
+status = "reserved"
+summary = "Suppression uses a broad selector"
+
+[diagnostics.registry.SUPPRESSION_REASON_MISSING]
+short = "BSX010"
+status = "reserved"
+summary = "Suppression lacks a required reason"
+
+[diagnostics.registry.PACKET_JSON_INVALID]
+short = "BSP001"
+status = "reserved"
+summary = "Packet JSONL could not be parsed"
+
+[diagnostics.registry.PACKET_SHAPE_INVALID]
+short = "BSP002"
+status = "reserved"
+summary = "Packet row does not match the expected shape"
+
+[diagnostics.registry.PACKET_SECTION_TRUNCATED]
+short = "BSP003"
+status = "reserved"
+summary = "Packet section text was truncated"
+
+[diagnostics.registry.PACKET_OWNER_TRUNCATED]
+short = "BSP004"
+status = "reserved"
+summary = "Packet owner snippet was truncated"
+
+[diagnostics.registry.PACKET_OWNER_OMITTED]
+short = "BSP005"
+status = "reserved"
+summary = "Packet owner was omitted"
+
+[diagnostics.registry.PACKET_OWNER_NOT_FILE]
+short = "BSP006"
+status = "reserved"
+summary = "Packet owner path is not a file"
+
+[diagnostics.registry.PACKET_OWNER_UNREADABLE]
+short = "BSP007"
+status = "reserved"
+summary = "Packet owner file could not be read"
+
+[diagnostics.registry.PACKET_SYMBOL_NOT_FOUND]
+short = "BSP008"
+status = "reserved"
+summary = "Packet owner symbol could not be found"
+
+[diagnostics.registry.ANALYSIS_ROW_INVALID]
+short = "BSP009"
+status = "reserved"
+summary = "Analysis result row is invalid"
+
+[diagnostics.registry.ANALYSIS_PACKET_UNKNOWN]
+short = "BSP010"
+status = "reserved"
+summary = "Analysis result names an unknown packet"
+
+[diagnostics.registry.MODEL_OUTPUT_INVALID]
+short = "BSP011"
+status = "reserved"
+summary = "Model output could not be parsed"
+
+[diagnostics.registry.MODEL_PACKET_ID_MISMATCH]
+short = "BSP012"
+status = "reserved"
+summary = "Model output packet ID does not match the requested packet"
+
+[diagnostics.registry.MODEL_CALL_FAILED]
+short = "BSP013"
+status = "reserved"
+summary = "Model call failed"

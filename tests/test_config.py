@@ -31,6 +31,7 @@ def test_builtin_profile_defaults_match_sc3() -> None:
     assert profile.spec_roots == ("docs/specs",)
     assert profile.plan_roots == ("docs/plans",)
     assert profile.code_roots == ("backstitch", "tests")
+    assert profile.test_roots == ("tests",)
     assert profile.meta_spec_globs == ()
 
 
@@ -38,6 +39,7 @@ def test_with_overrides_supports_weft_shape() -> None:
     weft = get_profile("backstitch-style-v1").with_overrides(
         spec_roots=("docs/specifications",),
         code_roots=("weft", "tests"),
+        test_roots=("tests",),
         planned_spec_globs=("docs/specifications/*A-*.md",),
         exploratory_spec_globs=(
             "docs/specifications/13B-*.md",
@@ -46,6 +48,23 @@ def test_with_overrides_supports_weft_shape() -> None:
     )
     assert weft.spec_roots == ("docs/specifications",)
     assert weft.plan_roots == ("docs/plans",)
+    assert weft.test_roots == ("tests",)
+
+
+def test_code_root_override_without_test_roots_resets_test_roots() -> None:
+    profile = get_profile("backstitch-style-v1").with_overrides(
+        code_roots=("pkg",),
+    )
+    assert profile.code_roots == ("pkg",)
+    assert profile.test_roots == ()
+
+
+def test_test_root_override_retains_inherited_code_roots() -> None:
+    profile = get_profile("backstitch-style-v1").with_overrides(
+        test_roots=("tests/unit",),
+    )
+    assert profile.code_roots == ("backstitch", "tests")
+    assert profile.test_roots == ("tests/unit",)
 
 
 def test_unknown_profile_raises_value_error() -> None:

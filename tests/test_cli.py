@@ -29,6 +29,7 @@ def check_clean(*extra: str) -> subprocess.CompletedProcess[str]:
         "check",
         "--repo-root",
         str(CLEAN),
+        "--no-config",
         "--spec-root",
         "docs/specs",
         "--plan-root",
@@ -102,6 +103,279 @@ def test_python_syntax_warning_fails_check_with_warnings_as_errors(
     assert result.returncode == 1, result.stdout + result.stderr
     data = json.loads(result.stdout)
     assert data["issues"][0]["code"] == "PYTHON_SYNTAX_ERROR"
+    assert data["issues"][0]["severity"] == "warning"
+    assert data["issues"][0]["default_severity"] == "warning"
+
+
+def test_all_info_policy_exits_zero_and_preserves_default_severity(
+    tmp_path: Path,
+) -> None:
+    write_syntax_warning_repo(tmp_path)
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(
+        "\n".join(
+            [
+                "[profile]",
+                'name = "backstitch-style-v1"',
+                'spec_roots = ["docs/specs"]',
+                "plan_roots = []",
+                'code_roots = ["pkg"]',
+                "",
+                "[diagnostics]",
+                "fail_on = []",
+                "",
+                "[[diagnostics.levels]]",
+                'select = ["*"]',
+                'level = "info"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result = run_cli("check", "--repo-root", str(tmp_path), "--format", "json")
+    assert result.returncode == 0, result.stdout + result.stderr
+    data = json.loads(result.stdout)
+    issue = data["issues"][0]
+    assert issue["code"] == "PYTHON_SYNTAX_ERROR"
+    assert issue["severity"] == "info"
+    assert issue["default_severity"] == "warning"
+
+
+def test_all_error_policy_exits_one_for_former_warning(tmp_path: Path) -> None:
+    write_syntax_warning_repo(tmp_path)
+    (tmp_path / ".backstitch.toml").write_text(
+        "\n".join(
+            [
+                "[profile]",
+                'name = "backstitch-style-v1"',
+                'spec_roots = ["docs/specs"]',
+                "plan_roots = []",
+                'code_roots = ["pkg"]',
+                "",
+                "[[diagnostics.levels]]",
+                'select = ["*"]',
+                'level = "error"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result = run_cli("check", "--repo-root", str(tmp_path), "--format", "json")
+    assert result.returncode == 1, result.stdout + result.stderr
+    data = json.loads(result.stdout)
+    assert data["issues"][0]["severity"] == "error"
+    assert data["issues"][0]["default_severity"] == "warning"
+
+
+def test_off_policy_hides_issue_but_show_suppressions_audits_it(
+    tmp_path: Path,
+) -> None:
+    write_syntax_warning_repo(tmp_path)
+    (tmp_path / ".backstitch.toml").write_text(
+        "\n".join(
+            [
+                "[profile]",
+                'name = "backstitch-style-v1"',
+                'spec_roots = ["docs/specs"]',
+                "plan_roots = []",
+                'code_roots = ["pkg"]',
+                "",
+                "[diagnostics]",
+                "fail_on = []",
+                "",
+                "[[diagnostics.levels]]",
+                'select = ["PYTHON_SYNTAX_ERROR"]',
+                'level = "off"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result = run_cli(
+        "check",
+        "--repo-root",
+        str(tmp_path),
+        "--show-suppressions",
+        "--format",
+        "json",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    data = json.loads(result.stdout)
+    assert data["issues"] == []
+    assert data["summary"]["warnings"] == 0
+    assert data["suppressed_issues"][0]["code"] == "PYTHON_SYNTAX_ERROR"
+    assert data["suppressed_issues"][0]["reason"] == "diagnostic level off"
+
+
+def test_packets_obeys_diagnostic_fail_on_policy(tmp_path: Path) -> None:
+    write_syntax_warning_repo(tmp_path)
+    (tmp_path / ".backstitch.toml").write_text(
+        "\n".join(
+            [
+                "[profile]",
+                'name = "backstitch-style-v1"',
+                'spec_roots = ["docs/specs"]',
+                "plan_roots = []",
+                'code_roots = ["pkg"]',
+                "",
+                "[diagnostics]",
+                'fail_on = ["warning"]',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "packets.jsonl"
+    result = run_cli(
+        "packets",
+        "--repo-root",
+        str(tmp_path),
+        "--output",
+        str(output),
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert output.read_text(encoding="utf-8").strip()
+
+
+def test_packets_obeys_all_error_all_info_and_off_policy(tmp_path: Path) -> None:
+    write_syntax_warning_repo(tmp_path)
+    config = tmp_path / ".backstitch.toml"
+    output = tmp_path / "packets.jsonl"
+    profile = "\n".join(
+        [
+            "[profile]",
+            'name = "backstitch-style-v1"',
+            'spec_roots = ["docs/specs"]',
+            "plan_roots = []",
+            'code_roots = ["pkg"]',
+            "",
+        ]
+    )
+
+    cases = (
+        ("error", "error", 1),
+        ("info", "info", 1),
+        ("off", "warning", 0),
+    )
+    for level, fail_on, expected_exit in cases:
+        config.write_text(
+            profile
+            + "\n".join(
+                [
+                    "[diagnostics]",
+                    f'fail_on = ["{fail_on}"]',
+                    "",
+                    "[[diagnostics.levels]]",
+                    'select = ["PYTHON_SYNTAX_ERROR"]',
+                    f'level = "{level}"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        result = run_cli(
+            "packets",
+            "--repo-root",
+            str(tmp_path),
+            "--output",
+            str(output),
+        )
+        assert result.returncode == expected_exit, (
+            level,
+            result.stdout,
+            result.stderr,
+        )
+        assert output.read_text(encoding="utf-8").strip()
+
+
+def test_default_level_config_changes_real_check_output(tmp_path: Path) -> None:
+    write_syntax_warning_repo(tmp_path)
+    (tmp_path / ".backstitch.toml").write_text(
+        "\n".join(
+            [
+                "[profile]",
+                'name = "backstitch-style-v1"',
+                'spec_roots = ["docs/specs"]',
+                "plan_roots = []",
+                'code_roots = ["pkg"]',
+                "",
+                "[diagnostics]",
+                'default_level = "error"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli("check", "--repo-root", str(tmp_path), "--format", "json")
+    assert result.returncode == 1, result.stdout + result.stderr
+    issue = next(
+        item
+        for item in json.loads(result.stdout)["issues"]
+        if item["code"] == "PYTHON_SYNTAX_ERROR"
+    )
+    assert issue["severity"] == "error"
+    assert issue["default_severity"] == "warning"
+
+
+def test_suppressible_levels_config_changes_real_suppression_output(
+    tmp_path: Path,
+) -> None:
+    write_syntax_warning_repo(tmp_path)
+    (tmp_path / ".backstitch.toml").write_text(
+        "\n".join(
+            [
+                "[profile]",
+                'name = "backstitch-style-v1"',
+                'spec_roots = ["docs/specs"]',
+                "plan_roots = []",
+                'code_roots = ["pkg"]',
+                "",
+                "[diagnostics]",
+                "suppressible_levels = []",
+                "",
+                "[lint.per-file-ignores]",
+                '"pkg/bad.py" = ["PYTHON_SYNTAX_ERROR"]',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "check",
+        "--repo-root",
+        str(tmp_path),
+        "--show-suppressions",
+        "--format",
+        "json",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    data = json.loads(result.stdout)
+    assert any(i["code"] == "PYTHON_SYNTAX_ERROR" for i in data["issues"])
+    assert any(i["code"] == "SUPPRESSION_UNSUPPRESSIBLE_CODE" for i in data["issues"])
+    assert not any(
+        i["code"] == "PYTHON_SYNTAX_ERROR" for i in data["suppressed_issues"]
+    )
+
+
+def test_no_config_help_names_packaged_defaults() -> None:
+    help_commands = (
+        ("--help",),
+        ("check", "--help"),
+        ("packets", "--help"),
+        ("analyze", "--help"),
+        ("doctor", "--help"),
+        ("config", "show", "--help"),
+        ("config", "path", "--help"),
+    )
+    for args in help_commands:
+        result = run_cli(*args)
+        assert result.returncode == 0, result.stderr
+        assert (
+            "skip repository configuration; packaged defaults still load"
+            in " ".join(result.stdout.split())
+        )
 
 
 def test_python_syntax_warning_does_not_fail_packets(tmp_path: Path) -> None:
@@ -213,12 +487,15 @@ def test_check_unwritable_output_exits_two(tmp_path: Path) -> None:
 
 
 def test_deterministic_commands_do_not_import_llm(tmp_path: Path) -> None:
+    """Tests-invariant: [INV.CLI.1]"""
+
     output = tmp_path / "packets.jsonl"
     commands = [
         [
             "check",
             "--repo-root",
             str(CLEAN),
+            "--no-config",
             "--spec-root",
             "docs/specs",
             "--plan-root",
@@ -230,6 +507,7 @@ def test_deterministic_commands_do_not_import_llm(tmp_path: Path) -> None:
             "packets",
             "--repo-root",
             str(CLEAN),
+            "--no-config",
             "--spec-root",
             "docs/specs",
             "--plan-root",

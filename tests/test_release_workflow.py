@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,11 +41,30 @@ def test_ci_checks_release_helper_format_and_types() -> None:
     assert "uv run backstitch check --repo-root ." in workflow
 
 
-def test_ci_runs_live_llm_when_repository_secret_is_available() -> None:
+def test_local_pytest_enables_live_while_ci_explicitly_disables_it() -> None:
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        pytest_options = tomllib.load(handle)["tool"]["pytest"]["ini_options"]
+    assert pytest_options["run_live_llm"] is True
+
+    workflow = _workflow_text("ci.yml")
+    assert '-m "not live_llm"' in workflow
+    assert (
+        "env -u BACKSTITCH_LIVE_LLM uv run pytest "
+        "tests/live/test_live_llm.py -q -o run_live_llm=false" in workflow
+    )
+    assert "grep -Eq 'SKIPPED \\[1\\]'" in workflow
+
+
+def test_ci_live_llm_requires_explicit_repository_opt_in() -> None:
     workflow = _workflow_text("ci.yml")
     live_section = workflow.split("  live-llm:", 1)[1]
 
     assert "name: live LLM" in live_section
+    assert "vars.BACKSTITCH_CI_LIVE_LLM == '1'" in live_section
+    assert "github.ref == 'refs/heads/main'" in live_section
+    assert "github.event_name == 'push'" in live_section
+    assert "github.event_name == 'workflow_dispatch'" in live_section
+    assert "github.event_name == 'pull_request'" not in live_section
     assert "OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}" in live_section
     # The cloud job must pin the kind so an environment-leaked
     # BACKSTITCH_LIVE_LLM_KIND=local cannot reroute it to the Ollama lane
@@ -53,7 +73,7 @@ def test_ci_runs_live_llm_when_repository_secret_is_available() -> None:
     assert 'if [ -z "${OPENAI_API_KEY}" ]; then' in live_section
     assert "skipping live LLM tests without failure" in live_section
     assert "uv run pytest tests/live/test_live_llm.py -q" in live_section
-    assert "if: ${{ github.event_name" not in live_section
+    assert "permissions:\n  contents: read" in workflow
 
 
 def test_local_llm_workflow_is_separate_and_guarded() -> None:

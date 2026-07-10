@@ -1,6 +1,7 @@
 """Self-corpus gate: this repository passes its own check, clean.
 
 Spec: docs/specs/02-backstitch-core.md [SC-10]
+Spec: docs/specs/05-backstitch-invariants.md [INV-10]
 
 Success criteria per [SC-10]: exit 0, zero error-severity and zero
 warning-severity findings in the default output, and every suppression

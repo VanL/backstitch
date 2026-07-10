@@ -58,6 +58,8 @@ def test_ladder_unique_suffix_resolves_with_inexact_warning(
 def test_ladder_multiple_candidates_ambiguous_error_no_edge(
     ladder: Report,
 ) -> None:
+    """Tests-invariant: [INV.RES.2]"""
+
     assert _mapping_edges(ladder, "LAD-3") == []
     ambiguous = [i for i in ladder.issues if i.code == "TARGET_PATH_AMBIGUOUS"]
     assert len(ambiguous) == 1

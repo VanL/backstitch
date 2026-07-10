@@ -1,6 +1,7 @@
 """Deterministic trace-graph construction and issue classification.
 
 Spec: docs/specs/02-backstitch-core.md [SC-4], [SC-9]
+Spec: docs/specs/05-backstitch-invariants.md [INV-1], [INV-4], [INV-7]
 Grammar and strictness table:
 docs/implementation/04-backstitch-style-traceability.md
 
@@ -23,10 +24,13 @@ from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
 
 from backstitch.config import ProfileConfig
+from backstitch.exclusions import SuppressionDiagnostic
 from backstitch.markdown_specs import ParsedSpec, parse_markdown_spec
 from backstitch.models import (
     CodeRef,
     Edge,
+    InvariantBind,
+    InvariantDeclaration,
     Issue,
     Report,
     Severity,
@@ -136,6 +140,8 @@ def _emit(
     *,
     section_id: str | None = None,
     symbol: str | None = None,
+    context: str | None = None,
+    invariant_id: str | None = None,
 ) -> None:
     issues.append(
         Issue(
@@ -146,6 +152,8 @@ def _emit(
             message=message,
             section_id=section_id,
             symbol=symbol,
+            context=context,
+            invariant_id=invariant_id,
         )
     )
 
@@ -180,11 +188,21 @@ def ladder_candidates(token: str, scan_files: Sequence[str]) -> list[str]:
 def _missing_path_severity(token: str, plan_roots: tuple[str, ...]) -> Severity:
     """[SC-11] predicate: `.md` under a configured plan root is a warning."""
 
+    return (
+        "warning"
+        if _missing_path_context(token, plan_roots) == "plan-artifact"
+        else "error"
+    )
+
+
+def _missing_path_context(token: str, plan_roots: tuple[str, ...]) -> str:
+    """Diagnostic policy context for missing mapping paths ([SC-11])."""
+
     if token.endswith(".md") and any(
         token.startswith(root.rstrip("/") + "/") for root in plan_roots
     ):
-        return "warning"
-    return "error"
+        return "plan-artifact"
+    return "required"
 
 
 def _resolve_mappings(
@@ -254,6 +272,7 @@ def _resolve_mappings(
                     f"mapping path `{target_path}` does not exist",
                     section_id=mapping.section_id,
                     symbol=mapping.target_symbol,
+                    context=_missing_path_context(target_path, plan_roots),
                 )
                 continue
         if mapping.kind == "path":
@@ -361,6 +380,7 @@ def _resolve_bare(
         # bare ID in docstring prose or a comment is a weak link (warning).
         # Context comes from CodeRef.ref_context, set at parse time.
         severity: Severity = "error" if ref.ref_context == "asserted" else "warning"
+        context = "asserted" if ref.ref_context == "asserted" else "weak"
         _emit(
             issues,
             "SPEC_SECTION_AMBIGUOUS",
@@ -370,6 +390,7 @@ def _resolve_bare(
             f"bare reference [{section_id}] is ambiguous: {locations}",
             section_id=section_id,
             symbol=ref.owner_symbol,
+            context=context,
         )
     return None
 
@@ -633,6 +654,124 @@ def _reciprocal_and_inventory_issues(
             )
 
 
+def _resolve_invariants(
+    declarations: Sequence[InvariantDeclaration],
+    binding_refs: Sequence[InvariantBind],
+    sections: Sequence[SpecSection],
+    test_roots: Sequence[str],
+    issues: list[Issue],
+) -> tuple[list[InvariantDeclaration], list[InvariantBind]]:
+    ordered_declarations = sorted(
+        declarations,
+        key=lambda item: (
+            item.path,
+            item.line,
+            item.invariant_id,
+            item.declaration_kind,
+            item.owner_symbol or "",
+            item.section_id or "",
+        ),
+    )
+    declarations_by_id: dict[str, list[InvariantDeclaration]] = {}
+    for declaration in ordered_declarations:
+        declarations_by_id.setdefault(declaration.invariant_id, []).append(declaration)
+
+    sections_by_id: dict[str, list[SpecSection]] = {}
+    for section in sections:
+        sections_by_id.setdefault(section.section_id, []).append(section)
+
+    duplicate_ids = {
+        invariant_id
+        for invariant_id, items in declarations_by_id.items()
+        if len(items) > 1 or invariant_id in sections_by_id
+    }
+    for invariant_id in sorted(duplicate_ids):
+        declaration_locations = [
+            (item.path, item.line) for item in declarations_by_id[invariant_id]
+        ]
+        section_locations = [
+            (item.path, item.line) for item in sections_by_id.get(invariant_id, ())
+        ]
+        root_path, root_line = min(declaration_locations + section_locations)
+        locations = sorted(declaration_locations + section_locations)
+        rendered = ", ".join(f"{path}:{line}" for path, line in locations)
+        _emit(
+            issues,
+            "INVARIANT_DUPLICATE",
+            "error",
+            root_path,
+            root_line,
+            f"invariant ID [{invariant_id}] is not unique: {rendered}",
+            invariant_id=invariant_id,
+        )
+
+    deduplicated_refs: dict[tuple[str, str, str], InvariantBind] = {}
+    for binding in binding_refs:
+        if binding.invariant_id in duplicate_ids:
+            continue
+        if not _is_under(binding.test_path, test_roots):
+            _emit(
+                issues,
+                "INVARIANT_BINDING_NOT_TEST",
+                "warning",
+                binding.test_path,
+                binding.marker_line,
+                "invariant binding record is outside configured test roots",
+                symbol=binding.test_symbol,
+                invariant_id=binding.invariant_id,
+            )
+            continue
+        key = (binding.invariant_id, binding.test_path, binding.test_symbol)
+        existing = deduplicated_refs.get(key)
+        if existing is None or binding.marker_line < existing.marker_line:
+            deduplicated_refs[key] = binding
+
+    resolved_binds: list[InvariantBind] = []
+    for binding in sorted(
+        deduplicated_refs.values(),
+        key=lambda item: (
+            item.invariant_id,
+            item.test_path,
+            item.start_line,
+            item.test_symbol,
+        ),
+    ):
+        if binding.invariant_id in duplicate_ids:
+            continue
+        if binding.invariant_id not in declarations_by_id:
+            _emit(
+                issues,
+                "INVARIANT_UNKNOWN",
+                "error",
+                binding.test_path,
+                binding.marker_line,
+                f"binding names undeclared invariant [{binding.invariant_id}]",
+                symbol=binding.test_symbol,
+                invariant_id=binding.invariant_id,
+            )
+            continue
+        resolved_binds.append(binding)
+
+    bound_ids = {binding.invariant_id for binding in resolved_binds}
+    for invariant_id, items in sorted(declarations_by_id.items()):
+        if invariant_id in duplicate_ids or invariant_id in bound_ids:
+            continue
+        declaration = items[0]
+        _emit(
+            issues,
+            "INVARIANT_UNTESTED",
+            "error" if declaration.tier == "required" else "warning",
+            declaration.path,
+            declaration.line,
+            f"{declaration.tier} invariant [{invariant_id}] has no binding test",
+            symbol=declaration.owner_symbol,
+            context=declaration.tier,
+            invariant_id=invariant_id,
+        )
+
+    return ordered_declarations, resolved_binds
+
+
 def _sort_report_parts(issues: list[Issue], edges: list[Edge]) -> None:
     severity_rank = {"error": 0, "warning": 1, "info": 2}
     issues.sort(
@@ -667,7 +806,11 @@ def resolve(
     python_symbols: Mapping[str, frozenset[str] | None],
     scan_files: Sequence[str] = (),
 ) -> Report:
-    """Combine parsed records into a trace graph with deterministic issues."""
+    """Combine parsed records into a trace graph with deterministic issues.
+
+    Invariant: [INV.RES.1] Identical resolver inputs produce byte-stable output.
+    Invariant: [INV.RES.2] Ambiguity is reported and never guessed into an edge.
+    """
 
     issues: list[Issue] = list(scan_issues)
     edges: list[Edge] = []
@@ -675,6 +818,10 @@ def resolve(
     sections: list[SpecSection] = [s for spec in parsed_specs for s in spec.sections]
     mappings = [m for spec in parsed_specs for m in spec.mappings]
     refs: list[CodeRef] = [r for parsed in parsed_python for r in parsed.refs]
+    invariant_declarations = [
+        item for spec in parsed_specs for item in spec.invariants
+    ] + [item for parsed in parsed_python for item in parsed.invariants]
+    binding_refs = [item for parsed in parsed_python for item in parsed.binding_refs]
     issues.extend(i for parsed in parsed_specs for i in parsed.issues)
     issues.extend(i for parsed in parsed_python for i in parsed.issues)
 
@@ -691,6 +838,13 @@ def resolve(
     )
     _resolve_code_refs(refs, index, profile, issues, edges)
     _reciprocal_and_inventory_issues(sections, mappings, edges, issues)
+    invariants, binds = _resolve_invariants(
+        invariant_declarations,
+        binding_refs,
+        sections,
+        profile.test_roots,
+        issues,
+    )
     _sort_report_parts(issues, edges)
 
     return Report(
@@ -701,6 +855,8 @@ def resolve(
         spec_mappings=tuple(mappings),
         edges=tuple(edges),
         issues=tuple(issues),
+        invariants=tuple(invariants),
+        binds=tuple(binds),
     )
 
 
@@ -718,7 +874,7 @@ class ScanArtifacts:
     inline_code_ignores: dict[str, frozenset[str]]
     inline_code_span_ignores: dict[str, tuple[tuple[int, int, frozenset[str]], ...]]
     sections_with_markers: frozenset[tuple[str, str]]
-    marker_warnings: tuple[str, ...]
+    marker_diagnostics: tuple[SuppressionDiagnostic, ...]
 
 
 def scan_repository(
@@ -835,6 +991,9 @@ def scan_repository_with_artifacts(
                     path,
                     root,
                     allow_unknown_codes=allow_unknown_suppression_codes,
+                    is_test_file=_is_under(
+                        path.relative_to(root).as_posix(), profile.test_roots
+                    ),
                 )
             )
         except (OSError, UnicodeDecodeError) as exc:
@@ -889,9 +1048,9 @@ def scan_repository_with_artifacts(
     inline_file_ignores: dict[str, frozenset[str]] = {}
     inline_spec_ignores: dict[tuple[str, str], frozenset[str]] = {}
     sections_with_markers: set[tuple[str, str]] = set()
-    marker_warnings: list[str] = []
+    marker_diagnostics: list[SuppressionDiagnostic] = []
     for spec in parsed_specs:
-        marker_warnings.extend(spec.marker_warnings)
+        marker_diagnostics.extend(spec.marker_diagnostics)
         marked = {section_id for section_id, _, _ in spec.section_markers}
         sections_with_markers.update((spec.path, sid) for sid in marked)
         if spec.file_meta:
@@ -913,7 +1072,7 @@ def scan_repository_with_artifacts(
     inline_code_span_ignores = {
         p.path: p.span_noqa for p in parsed_python if p.span_noqa
     }
-    marker_warnings.extend(w for p in parsed_python for w in p.noqa_warnings)
+    marker_diagnostics.extend(d for p in parsed_python for d in p.noqa_diagnostics)
 
     return report, ScanArtifacts(
         section_meta=section_meta,
@@ -922,5 +1081,5 @@ def scan_repository_with_artifacts(
         inline_code_ignores=inline_code_ignores,
         inline_code_span_ignores=inline_code_span_ignores,
         sections_with_markers=frozenset(sections_with_markers),
-        marker_warnings=tuple(marker_warnings),
+        marker_diagnostics=tuple(marker_diagnostics),
     )

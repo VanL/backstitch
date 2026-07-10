@@ -8,8 +8,7 @@ Suppression is auditable by contract: a suppressed finding moves to the
 report's ``suppressed_issues`` with a reason, it never silently disappears
 from every view. Non-suppressibility gates on the ISSUE INSTANCE severity
 (``issue.severity == "error"``), never on bare code membership, because
-[SC-11] has context-dependent codes whose warning-context instances must
-stay suppressible.
+diagnostic codes can have context-dependent severity.
 """
 
 from __future__ import annotations
@@ -20,7 +19,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from backstitch.models import ERROR_SEVERITY_CODES, ISSUE_CODES, Issue
+from backstitch.diagnostics import canonicalize_code, is_ordinary_diagnostic_code
+from backstitch.models import Issue, Severity
 from backstitch.settings import LintSettings
 
 META_DEFAULT_SUPPRESSED: frozenset[str] = frozenset({"SPEC_SECTION_UNMAPPED"})
@@ -79,6 +79,40 @@ class SuppressedIssue:
     reason: SuppressionReason
 
 
+@dataclass(frozen=True, slots=True)
+class SuppressionDiagnostic:
+    """Structured suppression-hygiene finding emitted at the parse boundary."""
+
+    code: str
+    path: str
+    line: int | None
+    message: str
+
+    def to_issue(self) -> Issue:
+        return Issue(
+            code=self.code,
+            severity="warning",
+            path=self.path,
+            line=self.line,
+            message=self.message,
+        )
+
+
+def _suppression_diagnostic(
+    code: str,
+    message: str,
+    *,
+    path: str | None,
+    line: int | None,
+) -> SuppressionDiagnostic:
+    return SuppressionDiagnostic(
+        code=code,
+        path=path or "<suppression>",
+        line=line,
+        message=message,
+    )
+
+
 @dataclass
 class SuppressionIndex:
     meta_spec_globs: tuple[str, ...] = ()
@@ -97,7 +131,7 @@ class SuppressionIndex:
     sections_with_markers: frozenset[tuple[str, str]] = frozenset()
     used_config_file_rules: set[str] = field(default_factory=set)
     used_config_section_rules: set[str] = field(default_factory=set)
-    suppression_warnings: list[str] = field(default_factory=list)
+    suppression_diagnostics: list[SuppressionDiagnostic] = field(default_factory=list)
 
     def record_config_usage(
         self, *, file_rule: str | None, section_rule: str | None
@@ -109,8 +143,13 @@ class SuppressionIndex:
 
 
 def parse_traceability_codes(
-    raw: str, *, allow_unknown: bool = False, location: str = "inline marker"
-) -> tuple[frozenset[str], list[str]]:
+    raw: str,
+    *,
+    allow_unknown: bool = False,
+    location: str = "inline marker",
+    path: str | None = None,
+    line: int | None = None,
+) -> tuple[frozenset[str], list[SuppressionDiagnostic]]:
     """Split a comma list of issue codes, enforcing [EXC-4] strictness.
 
     Unknown codes raise ``UnknownSuppressionCodeError`` naming the code and
@@ -119,55 +158,89 @@ def parse_traceability_codes(
     """
 
     codes: set[str] = set()
-    warnings: list[str] = []
+    diagnostics: list[SuppressionDiagnostic] = []
     for part in raw.split(","):
         code = part.strip()
         if not code:
             continue
-        if code not in ISSUE_CODES:
+        if not is_ordinary_diagnostic_code(code):
             message = f"unknown issue code `{code}` in {location}"
             if not allow_unknown:
                 raise UnknownSuppressionCodeError(message)
-            warnings.append(message)
+            diagnostics.append(
+                _suppression_diagnostic(
+                    "SUPPRESSION_UNKNOWN_CODE", message, path=path, line=line
+                )
+            )
             continue
-        codes.add(code)
-    return frozenset(codes), warnings
+        codes.add(canonicalize_code(code))
+    return frozenset(codes), diagnostics
 
 
 def _parse_ignore_codes(
-    raw: str, *, allow_unknown: bool, location: str
-) -> tuple[bool, frozenset[str], list[str]]:
-    codes, warnings = parse_traceability_codes(
-        raw, allow_unknown=allow_unknown, location=location
+    raw: str,
+    *,
+    allow_unknown: bool,
+    location: str,
+    path: str | None,
+    line: int | None,
+) -> tuple[bool, frozenset[str], list[SuppressionDiagnostic]]:
+    codes, diagnostics = parse_traceability_codes(
+        raw,
+        allow_unknown=allow_unknown,
+        location=location,
+        path=path,
+        line=line,
     )
-    if not codes and not warnings:
+    if not codes and not diagnostics:
         # [EXC-4]: an ignore marker with no codes (`_Traceability: ignore_`,
         # `<!-- backstitch: ignore -->`) is malformed -- fake protection,
         # same strictness and hatch as an unknown code.
         message = f"malformed traceability marker in {location}: ignore with no codes"
         if not allow_unknown:
             raise UnknownSuppressionCodeError(message)
-        return False, frozenset(), [message]
-    return False, codes, warnings
+        return (
+            False,
+            frozenset(),
+            [
+                _suppression_diagnostic(
+                    "SUPPRESSION_INVALID_SYNTAX", message, path=path, line=line
+                )
+            ],
+        )
+    return False, codes, diagnostics
 
 
 def parse_traceability_marker_line(
-    line: str, *, allow_unknown: bool = False, location: str = "inline marker"
-) -> tuple[bool, frozenset[str], list[str]]:
-    stripped = line.strip()
+    text: str,
+    *,
+    allow_unknown: bool = False,
+    location: str = "inline marker",
+    path: str | None = None,
+    line: int | None = None,
+) -> tuple[bool, frozenset[str], list[SuppressionDiagnostic]]:
+    stripped = text.strip()
     if TRACEABILITY_META_RE.match(stripped):
         return True, META_DEFAULT_SUPPRESSED, []
     match = TRACEABILITY_IGNORE_RE.match(stripped)
     if match:
         return _parse_ignore_codes(
-            match.group(1), allow_unknown=allow_unknown, location=location
+            match.group(1),
+            allow_unknown=allow_unknown,
+            location=location,
+            path=path,
+            line=line,
         )
     if HTML_META_RE.search(stripped):
         return True, META_DEFAULT_SUPPRESSED, []
     match = HTML_IGNORE_RE.search(stripped)
     if match:
         return _parse_ignore_codes(
-            match.group(1), allow_unknown=allow_unknown, location=location
+            match.group(1),
+            allow_unknown=allow_unknown,
+            location=location,
+            path=path,
+            line=line,
         )
     # [EXC-4]: a line that STARTS like a marker but parses as neither form
     # (`_Traceability: ignore_` with no codes, `_Traceability: bogus_`) is
@@ -177,14 +250,27 @@ def parse_traceability_marker_line(
         message = f"malformed traceability marker in {location}: {stripped!r}"
         if not allow_unknown:
             raise UnknownSuppressionCodeError(message)
-        return False, frozenset(), [message]
+        return (
+            False,
+            frozenset(),
+            [
+                _suppression_diagnostic(
+                    "SUPPRESSION_INVALID_SYNTAX", message, path=path, line=line
+                )
+            ],
+        )
     return False, frozenset(), []
 
 
 def parse_noqa_text(
-    text: str, *, allow_unknown: bool = False, location: str = "inline noqa"
-) -> tuple[frozenset[str], list[str]]:
-    """Parse ``backstitch: noqa`` directives; returns (codes, warnings).
+    text: str,
+    *,
+    allow_unknown: bool = False,
+    location: str = "inline noqa",
+    path: str | None = None,
+    line: int | None = None,
+) -> tuple[frozenset[str], list[SuppressionDiagnostic]]:
+    """Parse ``backstitch: noqa`` directives into codes and diagnostics.
 
     Only lines that START with the marker are directives ([EXC-5] grammar).
     Malformed directives (no codes, or unparseable tokens) always warn;
@@ -194,40 +280,60 @@ def parse_noqa_text(
     """
 
     codes: set[str] = set()
-    warnings: list[str] = []
-    for raw_line in text.splitlines():
+    diagnostics: list[SuppressionDiagnostic] = []
+    for offset, raw_line in enumerate(text.splitlines()):
+        diagnostic_line = line + offset if line is not None else None
         match = NOQA_LINE_RE.match(raw_line.strip())
         if match is None:
             continue
         rest = match.group("rest").strip()
         if not rest:
-            warnings.append(
+            message = (
                 f"malformed `backstitch: noqa` directive in {location}: no issue codes"
+            )
+            diagnostics.append(
+                _suppression_diagnostic(
+                    "SUPPRESSION_INVALID_SYNTAX",
+                    message,
+                    path=path,
+                    line=diagnostic_line,
+                )
             )
             continue
         tokens = [t for t in re.split(r"[,\s]+", rest) if t]
         bad = sorted({t for t in tokens if not CODE_TOKEN_RE.match(t)})
         if bad:
-            warnings.append(
+            message = (
                 f"malformed `backstitch: noqa` directive in {location}:"
                 f" unparseable token(s) {', '.join(bad)}"
                 " -- codes are comma-separated issue codes"
             )
+            diagnostics.append(
+                _suppression_diagnostic(
+                    "SUPPRESSION_INVALID_SYNTAX",
+                    message,
+                    path=path,
+                    line=diagnostic_line,
+                )
+            )
         idents = ",".join(t for t in tokens if CODE_TOKEN_RE.match(t))
-        parsed, parse_warnings = parse_traceability_codes(
-            idents, allow_unknown=allow_unknown, location=location
+        parsed, parse_diagnostics = parse_traceability_codes(
+            idents,
+            allow_unknown=allow_unknown,
+            location=location,
+            path=path,
+            line=diagnostic_line,
         )
         codes.update(parsed)
-        warnings.extend(parse_warnings)
-    return frozenset(codes), warnings
+        diagnostics.extend(parse_diagnostics)
+    return frozenset(codes), diagnostics
 
 
-def _is_non_suppressible(issue: Issue) -> bool:
-    # Per-instance severity is the gate: [SC-11]'s context-dependent codes
-    # (SPEC_SECTION_AMBIGUOUS, MAPPING_PATH_MISSING) are errors only when
-    # this instance is an error. ERROR_SEVERITY_CODES members are always
-    # errors, so the severity check alone is sufficient and authoritative.
-    return issue.severity == "error"
+def _is_non_suppressible(
+    issue: Issue,
+    suppressible_levels: tuple[Severity, ...],
+) -> bool:
+    return issue.severity not in suppressible_levels
 
 
 def _path_matches_glob(path: str, pattern: str) -> bool:
@@ -340,6 +446,7 @@ def should_suppress(
     spec_file: str | None = None,
     section_id: str | None = None,
     code_file: str | None = None,
+    suppressible_levels: tuple[Severity, ...] = ("warning", "info"),
 ) -> tuple[bool, SuppressionReason | None]:
     resolved_spec_file = spec_file or (
         issue.path if issue.path and issue.path.endswith(".md") else None
@@ -356,9 +463,9 @@ def should_suppress(
         code_file=resolved_code_file,
     )
 
-    if _is_non_suppressible(issue):
+    if _is_non_suppressible(issue, suppressible_levels):
         index.record_config_usage(file_rule=file_rule, section_rule=section_rule)
-        _warn_error_code_suppression(
+        _warn_unsuppressible_code_attempt(
             issue,
             index,
             file_rule=file_rule,
@@ -435,12 +542,13 @@ def build_suppression_index(
     inline_code_span_ignores: dict[str, tuple[tuple[int, int, frozenset[str]], ...]]
     | None = None,
     sections_with_markers: frozenset[tuple[str, str]] = frozenset(),
-    marker_warnings: list[str] | None = None,
+    marker_diagnostics: list[SuppressionDiagnostic] | None = None,
     allow_unknown: bool = False,
 ) -> SuppressionIndex:
+    canonical_lint = _canonicalize_lint_settings(lint)
     index = SuppressionIndex(
         meta_spec_globs=meta_spec_globs,
-        lint=lint,
+        lint=canonical_lint,
         section_meta=dict(section_meta or {}),
         inline_spec_ignores=dict(inline_spec_ignores or {}),
         inline_file_ignores=dict(inline_file_ignores or {}),
@@ -448,27 +556,44 @@ def build_suppression_index(
         inline_code_span_ignores=dict(inline_code_span_ignores or {}),
         sections_with_markers=sections_with_markers,
     )
-    if marker_warnings:
-        index.suppression_warnings.extend(marker_warnings)
+    if marker_diagnostics:
+        index.suppression_diagnostics.extend(marker_diagnostics)
     _validate_config_codes(index, allow_unknown=allow_unknown)
-    _warn_inline_error_code_attempts(index)
     return index
 
 
-def collect_unused_ignore_warnings(index: SuppressionIndex) -> list[str]:
+def collect_unused_ignore_diagnostics(
+    index: SuppressionIndex,
+) -> list[SuppressionDiagnostic]:
     if not index.lint.warn_unused_ignores:
         return []
-    warnings: list[str] = []
+    diagnostics: list[SuppressionDiagnostic] = []
     for pattern in index.lint.per_file_ignores:
         if pattern not in index.used_config_file_rules:
-            warnings.append(f"unused per-file-ignore: {pattern}")
+            diagnostics.append(
+                _suppression_diagnostic(
+                    "SUPPRESSION_UNUSED",
+                    f"unused per-file-ignore: {pattern}",
+                    path=pattern,
+                    line=None,
+                )
+            )
     for pattern in index.lint.per_section_ignores:
         if pattern not in index.used_config_section_rules:
-            warnings.append(f"unused per-section-ignore: {pattern}")
-    return warnings
+            diagnostics.append(
+                _suppression_diagnostic(
+                    "SUPPRESSION_UNUSED",
+                    f"unused per-section-ignore: {pattern}",
+                    path=pattern,
+                    line=None,
+                )
+            )
+    return diagnostics
 
 
-def validate_lint_codes(lint: LintSettings, *, allow_unknown: bool) -> list[str]:
+def validate_lint_codes(
+    lint: LintSettings, *, allow_unknown: bool
+) -> list[SuppressionDiagnostic]:
     """Validate suppression codes in config lint tables ([EXC-4]).
 
     Raises ``UnknownSuppressionCodeError`` by default; ``allow_unknown``
@@ -476,14 +601,14 @@ def validate_lint_codes(lint: LintSettings, *, allow_unknown: bool) -> list[str]
     pipeline and `config show` so both apply the same load strictness.
     """
 
-    warnings: list[str] = []
+    diagnostics: list[SuppressionDiagnostic] = []
     for table_name, table in (
         ("lint.per-file-ignores", lint.per_file_ignores),
         ("lint.per-section-ignores", lint.per_section_ignores),
     ):
         for path_key, codes in table.items():
             for code in codes:
-                if code not in ISSUE_CODES:
+                if not is_ordinary_diagnostic_code(code):
                     # [EXC-4]: unknown suppression codes fail load by
                     # default -- same hatch, same scope as [CFG-8].
                     message = (
@@ -491,76 +616,105 @@ def validate_lint_codes(lint: LintSettings, *, allow_unknown: bool) -> list[str]
                     )
                     if not allow_unknown:
                         raise UnknownSuppressionCodeError(message)
-                    warnings.append(message)
-                elif code in ERROR_SEVERITY_CODES:
-                    warnings.append(
-                        f"cannot suppress error-severity code {code} in {table_name}"
+                    diagnostics.append(
+                        _suppression_diagnostic(
+                            "SUPPRESSION_UNKNOWN_CODE",
+                            message,
+                            path=path_key,
+                            line=None,
+                        )
                     )
-    return warnings
+    return diagnostics
+
+
+def _canonicalize_lint_settings(lint: LintSettings) -> LintSettings:
+    def canonicalize_table(
+        table: dict[str, tuple[str, ...]],
+    ) -> dict[str, tuple[str, ...]]:
+        return {
+            key: tuple(
+                canonicalize_code(code) if is_ordinary_diagnostic_code(code) else code
+                for code in codes
+            )
+            for key, codes in table.items()
+        }
+
+    return LintSettings(
+        warn_unused_ignores=lint.warn_unused_ignores,
+        per_file_ignores=canonicalize_table(lint.per_file_ignores),
+        per_section_ignores=canonicalize_table(lint.per_section_ignores),
+    )
 
 
 def _validate_config_codes(index: SuppressionIndex, *, allow_unknown: bool) -> None:
-    index.suppression_warnings.extend(
+    index.suppression_diagnostics.extend(
         validate_lint_codes(index.lint, allow_unknown=allow_unknown)
     )
 
 
 def _iter_inline_ignore_code_sets(
     index: SuppressionIndex,
-) -> Iterator[tuple[str, frozenset[str]]]:
+) -> Iterator[tuple[str, int | None, frozenset[str]]]:
     for path, codes in index.inline_file_ignores.items():
-        yield path, codes
+        yield path, None, codes
     for (spec_path, section_id), codes in index.inline_spec_ignores.items():
-        yield f"{spec_path}::{section_id}", codes
+        yield f"{spec_path}::{section_id}", None, codes
     for path, codes in index.inline_code_ignores.items():
-        yield path, codes
+        yield path, None, codes
     # [EXC-5]/[EXC-8]: statement-scoped Python noqa spans are suppression
     # attempts too -- an error-severity code in a span must warn, not be
     # silently ignored.
     for path, spans in index.inline_code_span_ignores.items():
         for start, _end, codes in spans:
-            yield f"{path}:{start}", codes
+            yield path, start, codes
 
 
-def _warn_inline_error_code_attempts(index: SuppressionIndex) -> None:
-    """[EXC-8]: warn on EVERY inline attempt to suppress an always-error
-    code, whether or not a matching finding was emitted this run -- a stale
-    directive that only warns when the error fires is silent exactly when
-    the author believes it works."""
-
-    for location, codes in _iter_inline_ignore_code_sets(index):
-        for code in sorted(codes & ERROR_SEVERITY_CODES):
-            index.suppression_warnings.append(
-                f"cannot suppress error-severity code {code} in inline"
-                f" marker at {location}"
-            )
-
-
-def _warn_error_code_suppression(
+def _warn_unsuppressible_code_attempt(
     issue: Issue,
     index: SuppressionIndex,
     *,
     file_rule: str | None = None,
     section_rule: str | None = None,
 ) -> None:
-    # Always-error codes already warned unconditionally at index build
-    # (_warn_inline_error_code_attempts); this per-issue path covers the
-    # context-dependent codes whose severity is only known per instance.
-    if issue.code in ERROR_SEVERITY_CODES:
-        return
     if file_rule is not None:
-        index.suppression_warnings.append(
-            f"suppression ignored for error-severity code {issue.code}"
+        message = (
+            f"suppression ignored for non-suppressible code {issue.code}"
             f" in lint.per-file-ignores rule {file_rule}"
         )
+        index.suppression_diagnostics.append(
+            _suppression_diagnostic(
+                "SUPPRESSION_UNSUPPRESSIBLE_CODE",
+                message,
+                path=file_rule,
+                line=None,
+            )
+        )
     if section_rule is not None:
-        index.suppression_warnings.append(
-            f"suppression ignored for error-severity code {issue.code}"
+        message = (
+            f"suppression ignored for non-suppressible code {issue.code}"
             f" in lint.per-section-ignores rule {section_rule}"
         )
-    for _location, codes in _iter_inline_ignore_code_sets(index):
+        index.suppression_diagnostics.append(
+            _suppression_diagnostic(
+                "SUPPRESSION_UNSUPPRESSIBLE_CODE",
+                message,
+                path=section_rule,
+                line=None,
+            )
+        )
+    for path, line, codes in _iter_inline_ignore_code_sets(index):
         if issue.code in codes:
-            index.suppression_warnings.append(
-                f"suppression ignored for error-severity code {issue.code}"
+            location = f"{path}:{line}" if line is not None else path
+            message = (
+                f"suppression ignored for non-suppressible code {issue.code}"
+                f" in inline marker at {location}"
+            )
+            index.suppression_diagnostics.append(
+                _suppression_diagnostic(
+                    "SUPPRESSION_UNSUPPRESSIBLE_CODE",
+                    message,
+                    path=path,
+                    line=line,
+                )
             )
             return

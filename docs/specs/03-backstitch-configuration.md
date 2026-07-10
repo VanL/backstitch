@@ -49,13 +49,19 @@ Important concepts:
 - **Config directory**: the directory containing the selected config file. Path
   values in config are resolved relative to this directory unless they are
   absolute.
-- **Effective settings**: the merged result of `extend` inheritance, discovered
-  file values, environment overrides where applicable, and CLI flags.
+- **Effective settings**: the merged result of packaged defaults, `extend`
+  inheritance, discovered file values, environment overrides where applicable,
+  and CLI flags.
 - **Profile overlay**: config may set a built-in profile name and override
   profile fields such as roots and globs without defining a new parser profile.
 
 Configuration must reduce repetition. It must not hide behavior that changes
 deterministic outcomes without an explicit, inspectable source.
+
+Effective settings always start with Backstitch's packaged default TOML. A
+repository may have no discovered config, but there is never "no config" at
+runtime; there is at least the packaged default layer. `--no-config` skips
+repository discovery and explicit repository config, not packaged defaults.
 
 _Implementation mapping_:
 - `backstitch/settings.py`
@@ -117,6 +123,7 @@ Nested inheritance across directories is supported only through the `extend`
 field inside a config file ([CFG-6]).
 
 _Implementation mapping_:
+- `backstitch/cli.py`
 - `backstitch/settings.py`
 
 ## 4. File Formats [CFG-4]
@@ -186,10 +193,10 @@ _Implementation mapping_:
 
 ## 5. Precedence [CFG-5]
 
-Effective settings are assembled in this order (later sources override earlier
-ones):
+Effective settings are assembled in this order (later sources override or
+append after earlier sources according to each key's merge rules):
 
-1. built-in profile defaults from `backstitch/profiles.py`
+1. packaged default TOML
 2. discovered config file, after `extend` merge ([CFG-6])
 3. environment variables where this spec defines them
 4. explicit CLI flags and options
@@ -203,13 +210,22 @@ Environment variables in v1:
 
 CLI flags always beat config and environment for the same setting.
 
+`code_roots` and `test_roots` form one ordered override pair. A layer that
+replaces `code_roots` and omits `test_roots` resets test roots to empty. A
+layer that supplies `test_roots` replaces them and otherwise retains effective
+code roots. After all configuration and CLI layers, validate test-root
+containment against the final effective code roots.
+
 `--config PATH` selects a specific file and bypasses upward discovery. Relative
 `PATH` values are resolved against the process working directory.
 
 _Implementation mapping_:
+- `backstitch/defaults.toml`
+- `backstitch/diagnostics.py`
 - `backstitch/settings.py`
 - `backstitch/cli.py`
 - `backstitch/analysis_llm.py`
+- `backstitch/doctor.py`
 - `backstitch/target_roots.py`
 
 ## 6. Schema [CFG-6]
@@ -247,12 +263,24 @@ Overrides fields for the selected built-in profile:
 | `spec_roots` | array of strings | CLI `--spec-root` |
 | `plan_roots` | array of strings | future CLI |
 | `code_roots` | array of strings | CLI `--code-root` |
+| `test_roots` | array of strings | Test-role classifiers within effective code roots; CLI `--test-root` |
 | `planned_spec_globs` | array of strings | Weft-style planned docs |
 | `exploratory_spec_globs` | array of strings | Weft-style exploratory docs |
 
 Array overrides replace the built-in profile lists; they do not append unless
 `extend` already established a base list and the child file repeats the full
 intended list.
+
+Test roots use normal path expansion. A configuration layer that explicitly
+replaces `code_roots` and omits `test_roots` resets test roots to empty. A layer
+that supplies `test_roots` replaces them and otherwise retains effective code
+roots. After all configuration and CLI layers, each nonempty effective test
+root must be equal to or nested under a final effective code root; invalid
+containment is exit `2`. The CLI applies the same rule: `--code-root` without
+`--test-root` resets test roots, while explicit `--test-root` values are
+validated after all overrides. `--test-root` without `--code-root` retains
+inherited code roots and validates against them. Empty effective test roots do
+not suppress invariant diagnostics.
 
 ### 6.3 `[check]` / `[tool.backstitch.check]`
 
@@ -348,7 +376,16 @@ When `extend = "../other.toml"` is present:
 5. Resolve `extend` paths relative to the directory of the file that contains
    the `extend` key.
 
+`diagnostics.levels` arrays append across config layers rather than replacing
+earlier rules. Other arrays keep their replace semantics unless this spec says
+otherwise.
+
 Circular `extend` chains must error.
+
+`exclude`, `extend_exclude`, `[profile]`, `[check]`, `[packets]`, `[analyze]`,
+`[target_roots]`, `[lint]`, and `[diagnostics]` all have defaults in the
+packaged default TOML. Python dataclass defaults may mirror those values for
+type construction, but the packaged TOML is the behavioral source of truth.
 
 ### 6.9 Traceability exclusions
 
@@ -372,7 +409,43 @@ The following mypy/ruff options do **not** have v1 analogues:
 
 These may be proposed in a later spec revision with separate reference codes.
 
+### 6.11 `[diagnostics]` / `[tool.backstitch.diagnostics]`
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `default_level` | `"error"` \| `"warning"` \| `"info"` \| `"off"` | Base level before matching rules |
+| `fail_on` | array of levels | Levels that make target-diagnostic commands exit `1` |
+| `suppressible_levels` | array of levels | Effective levels eligible for suppression |
+
+Diagnostic levels are configured by ordered array-of-table rules:
+
+```toml
+[[tool.backstitch.diagnostics.levels]]
+select = ["MAPPING_PATH_INEXACT", "BSS007", "BSX*"]
+level = "warning"
+```
+
+Rule selectors support canonical long codes, short codes, `*`, family prefixes
+ending in `*`, and context selectors such as
+`MAPPING_PATH_MISSING:plan-artifact`. Later matching rules win. Rules from
+higher-precedence config layers are evaluated after packaged default rules, so
+a repository can make every target diagnostic advisory with:
+
+```toml
+[tool.backstitch.diagnostics]
+fail_on = []
+
+[[tool.backstitch.diagnostics.levels]]
+select = ["*"]
+level = "info"
+```
+
+`off` hides the diagnostic from normal output but keeps it visible in the
+suppression/audit view.
+
 _Implementation mapping_:
+- `backstitch/defaults.toml`
+- `backstitch/diagnostics.py`
 - `backstitch/settings.py`
 - `backstitch/config.py`
 - `backstitch/profiles.py`
@@ -392,10 +465,10 @@ backstitch config show [--repo-root PATH]
 backstitch config path [--repo-root PATH]
 ```
 
-`--no-config` skips discovery entirely and runs with built-in defaults plus
-CLI/env overrides. It exists so behavior with and without repository
-configuration can be compared and tested in isolation; `--config` and
-`--no-config` together are a usage error (exit `2`).
+`--no-config` skips repository discovery and explicit repository config, then
+runs with packaged defaults plus CLI/env overrides. It exists so behavior with
+and without repository configuration can be compared and tested in isolation;
+`--config` and `--no-config` together are a usage error (exit `2`).
 
 Boolean config keys that have CLI equivalents must expose **both** flag
 polarities — for example `--warnings-as-errors | --no-warnings-as-errors` on
@@ -410,8 +483,11 @@ and exit `2` (there are no "effective settings" to show for a config that
 does not load); under `allow_unknown_keys = true` it prints the effective
 settings, warns about the unknown keys on stderr, and exits `0`.
 
-`config path` prints the absolute path of the discovered config file, or prints
-nothing and exits `0` when no config is found.
+`config path` continues to report only the discovered or explicit repository
+configuration path. It does not print the packaged default resource path. When
+no repository config is found, or when `--no-config` is used, it prints nothing
+and exits `0`. `config show` is the command that displays the packaged default
+layer and the full effective settings.
 
 Existing commands keep their flags. When a flag is provided, it overrides config
 for that invocation.
@@ -439,6 +515,14 @@ The loader must fail with exit code `2` and a clear message when:
 - a required typed field has the wrong type
 - `profile` names an unknown built-in profile
 - `check.format` or `analyze.concurrency` is outside supported values
+- duplicate short diagnostic codes in the packaged registry
+- implemented diagnostics missing a default level rule
+- diagnostic selectors that match no known implemented, deprecated, or
+  redirected code, unless `allow_unknown_keys = true`
+- invalid diagnostic level values
+- reserved diagnostic codes used as ordinary suppressions
+- a nonempty effective `test_root` is not equal to or nested under any final
+  effective `code_root`
 
 For `analyze.concurrency`: values below `1` are invalid (exit `2`). Support
 for values above `1` is optional in v1 — an implementation that declines must
@@ -457,10 +541,16 @@ never suppress type errors on *known* keys. `config show` follows the same
 rule — exit `2` with diagnostics in strict mode, settings plus stderr
 warnings under the hatch ([CFG-7]).
 
-When no config file is discovered, commands behave as they do today using
-built-in defaults plus CLI/env overrides.
+When no repository config file is discovered, commands still load the packaged
+default TOML and then apply CLI/env overrides.
+
+An empty effective test-root set is a valid partial scan, not a switch that
+disables invariant diagnostics. Required declarations found in the selected
+code roots remain untested when their tests were intentionally omitted.
 
 _Implementation mapping_:
+- `backstitch/diagnostics.py`
+- `backstitch/exclusions.py`
 - `backstitch/settings.py`
 
 ## 9. Verification Expectations [CFG-9]
@@ -476,6 +566,18 @@ Required proof:
   `analyze` model selection
 - tests proving CLI flags and `BACKSTITCH_WEFT_ROOT` override config
 - `config show` / `config path` subprocess tests
+- `config show` must include the packaged default config layer and resolved
+  diagnostic policy
+- `config path` must keep its repository-config meaning: it prints no path for
+  packaged defaults and prints nothing under `--no-config`
+- tests must prove `--no-config` still loads packaged defaults
+- tests must prove a repo-level `select = ["*"]` rule can override packaged
+  default specific rules
+- tests must prove short codes and long codes canonicalize to the same
+  diagnostic identity
+- tests cover packaged `test_roots`, paired config and CLI overrides, a lone
+  `--test-root`, containment failure, production-only code-root overrides, and
+  a custom test path not named `tests`
 - a dogfood-delta test: this repository's committed configuration must produce
   an observable difference against `--no-config`, asserted by a test, so a
   regression that makes config loading silently no-op fails CI instead of
@@ -522,6 +624,9 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-07-09-backstitch-invariant-traceability-plan.md`
+  (implemented)
+- `docs/plans/2026-07-08-configurable-diagnostics-plan.md` (implementing)
 - `docs/plans/2026-07-06-local-model-catalog-and-doctor-plan.md` (implementing)
 - `docs/plans/2026-07-06-backstitch-organization-refactor-plan.md` (implementing)
 - `docs/plans/2026-07-03-live-llm-tests-plan.md` (implementing)

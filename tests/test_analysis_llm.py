@@ -30,6 +30,40 @@ PACKET_A: dict[str, Any] = {
 PACKET_B: dict[str, Any] = dict(
     PACKET_A, packet_id="docs/specs/01-X.md#X-2", section_id="X-2"
 )
+INVARIANT_PACKET: dict[str, Any] = {
+    "packet_id": "invariant::INV.X.1",
+    "kind": "invariant",
+    "invariant_id": "INV.X.1",
+    "tier": "required",
+    "statement": "The result remains one.",
+    "declaration": {
+        "kind": "code",
+        "path": "pkg/mod.py",
+        "line": 10,
+        "symbol": "run",
+        "section_id": None,
+    },
+    "targets": [
+        {
+            "path": "pkg/mod.py",
+            "symbol": "run",
+            "start_line": 10,
+            "snippet": "def run():\n    return 1",
+        }
+    ],
+    "binding_tests": [
+        {
+            "path": "tests/test_mod.py",
+            "symbol": "test_run",
+            "start_line": 20,
+            "snippet": "def test_run():\n    assert run() == 1",
+        }
+    ],
+    "issues": [],
+    "packet_warnings": [],
+    "instructions": "Respond with JSON including a rationale.",
+    "content_hash": "a" * 64,
+}
 
 # [SC-7] hermetic testing: a name no local `llm` alias could plausibly
 # resolve, so CLI tests can never construct a real adapter or call a model.
@@ -104,6 +138,14 @@ def test_malformed_model_output_yields_ambiguous_record() -> None:
     assert not isinstance(validated, str), validated
 
 
+def test_unexpected_model_output_type_is_contained_per_packet() -> None:
+    rows, errors = analyze_packets(
+        [PACKET_A], lambda prompt: cast(str, {"not": "text"})
+    )
+    assert rows[0]["classification"] == "ambiguous"
+    assert any("output processing failed" in error for error in errors)
+
+
 def test_wrong_packet_id_in_output_is_error_record() -> None:
     # [SC-7]: the record's packet_id comes from the packet, never from the
     # (hallucinated) model response.
@@ -145,6 +187,170 @@ def test_concurrency_preserves_packet_order() -> None:
     rows, errors = analyze_packets(packets, adapter, concurrency=4)
     assert errors == []
     assert [r["packet_id"] for r in rows] == [p["packet_id"] for p in packets]
+
+
+def _invariant_response(
+    *,
+    classification: str = "ok",
+    evidence: list[dict[str, object]] | None = None,
+    **extra: object,
+) -> str:
+    row: dict[str, object] = {
+        "packet_id": INVARIANT_PACKET["packet_id"],
+        "classification": classification,
+        "summary": "binding reviewed",
+        "rationale": "shown evidence supports the result",
+        "evidence": evidence if evidence is not None else [],
+    }
+    row.update(extra)
+    return json.dumps(row)
+
+
+def test_invariant_ok_requires_binding_test_evidence() -> None:
+    target_only = [{"path": "pkg/mod.py", "line": 11}]
+    rows, errors = analyze_packets(
+        [INVARIANT_PACKET],
+        lambda prompt: _invariant_response(evidence=target_only),
+    )
+    assert errors == []
+    assert rows[0]["classification"] == "weak_binding"
+
+    rows, errors = analyze_packets(
+        [INVARIANT_PACKET],
+        lambda prompt: _invariant_response(
+            evidence=[{"path": "tests/test_mod.py", "line": 21}]
+        ),
+    )
+    assert errors == []
+    assert rows[0]["classification"] == "ok"
+
+
+def test_invariant_zero_evidence_normalizes_ok_to_weak_binding() -> None:
+    rows, errors = analyze_packets(
+        [INVARIANT_PACKET], lambda prompt: _invariant_response()
+    )
+    assert errors == []
+    assert rows[0]["classification"] == "weak_binding"
+
+
+def test_model_cannot_launder_invariant_kind_or_hash() -> None:
+    from backstitch.analysis_llm import render_results_jsonl
+    from backstitch.analysis_results import load_analysis_results
+
+    rows, errors = analyze_packets(
+        [INVARIANT_PACKET],
+        lambda prompt: _invariant_response(
+            classification="weak_binding",
+            kind="section",
+            content_hash="f" * 64,
+        ),
+    )
+    assert errors == []
+    assert rows[0]["kind"] == "invariant"
+    assert rows[0]["content_hash"] == INVARIANT_PACKET["content_hash"]
+    load = load_analysis_results(
+        render_results_jsonl(rows),
+        {INVARIANT_PACKET["packet_id"]: "invariant"},
+    )
+    assert load.errors == ()
+
+
+@pytest.mark.parametrize(
+    ("packet", "classification"),
+    [(PACKET_A, "weak_binding"), (INVARIANT_PACKET, "missing_trace")],
+)
+def test_wrong_kind_classification_is_contained_per_packet(
+    packet: dict[str, Any],
+    classification: str,
+) -> None:
+    packet_id = packet["packet_id"]
+    response = json.dumps(
+        {
+            "packet_id": packet_id,
+            "classification": classification,
+            "summary": "wrong vocabulary",
+            "rationale": "wrong vocabulary",
+            "evidence": [],
+        }
+    )
+    rows, errors = analyze_packets([packet], lambda prompt: response)
+    assert rows[0]["classification"] == "ambiguous"
+    assert len(errors) == 1
+
+
+def test_invariant_evidence_must_be_inside_shown_target_or_test_range() -> None:
+    rows, errors = analyze_packets(
+        [INVARIANT_PACKET],
+        lambda prompt: _invariant_response(
+            evidence=[{"path": "tests/test_mod.py", "line": 999}]
+        ),
+    )
+    assert rows[0]["classification"] == "ambiguous"
+    assert any("outside the packet's shown content" in error for error in errors)
+
+    rows, errors = analyze_packets(
+        [INVARIANT_PACKET],
+        lambda prompt: _invariant_response(
+            evidence=[{"path": "tests/omitted.py", "line": 1}]
+        ),
+    )
+    assert rows[0]["classification"] == "ambiguous"
+    assert any("not part of the packet" in error for error in errors)
+
+
+def test_empty_invariant_binding_snippet_has_no_citable_range() -> None:
+    packet = dict(
+        INVARIANT_PACKET,
+        binding_tests=[
+            {
+                "path": "tests/test_mod.py",
+                "symbol": "test_run",
+                "start_line": 20,
+                "snippet": "",
+            }
+        ],
+    )
+    rows, errors = analyze_packets(
+        [packet],
+        lambda prompt: _invariant_response(
+            evidence=[{"path": "tests/test_mod.py", "line": 20}]
+        ),
+    )
+    assert rows[0]["classification"] == "ambiguous"
+    assert any("fabricated" in error for error in errors)
+
+
+def test_mixed_kind_concurrency_preserves_packet_and_metadata_order() -> None:
+    packets = [PACKET_A, INVARIANT_PACKET, PACKET_B]
+
+    def adapter(prompt: str) -> str:
+        packet = cast(dict[str, Any], json.loads(prompt.split("\n\n", 1)[1]))
+        if packet.get("kind") == "invariant":
+            return _invariant_response(classification="weak_binding")
+        return _ok_response(packet["packet_id"])
+
+    rows, errors = analyze_packets(packets, adapter, concurrency=3)
+
+    assert errors == []
+    assert [row["packet_id"] for row in rows] == [
+        packet["packet_id"] for packet in packets
+    ]
+    assert [row["kind"] for row in rows] == ["section", "invariant", "section"]
+    assert "content_hash" not in rows[0]
+    assert rows[1]["content_hash"] == INVARIANT_PACKET["content_hash"]
+
+
+def test_invariant_error_record_keeps_trusted_metadata_and_self_validates() -> None:
+    from backstitch.analysis_llm import render_results_jsonl
+    from backstitch.analysis_results import load_analysis_results
+
+    rows, errors = analyze_packets([INVARIANT_PACKET], lambda prompt: "not json")
+    load = load_analysis_results(render_results_jsonl(rows), None)
+
+    assert len(errors) == 1
+    assert load.errors == ()
+    assert load.results[0].kind == "invariant"
+    assert load.results[0].content_hash == INVARIANT_PACKET["content_hash"]
 
 
 def test_missing_instructions_field_is_error_record_not_crash() -> None:

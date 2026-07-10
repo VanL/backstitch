@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "backstitch"
-version = "0.2.0"
+version = "0.3.0"
 description = "Backstitch style spec-code traceability checks and semantic review tooling"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -70,7 +70,17 @@ name = "backstitch-style-v1"
 spec_roots = ["docs/specs"]
 plan_roots = ["docs/plans"]
 code_roots = ["backstitch", "tests"]
+test_roots = ["tests"]
 meta_spec_globs = ["docs/specs/01-development-documentation-operating-model.md"]
+
+[tool.backstitch.diagnostics]
+# This project dogfoods strict mode: every reported Backstitch diagnostic is a
+# violation, including diagnostics that the packaged defaults classify as info.
+suppressible_levels = ["error", "warning", "info"]
+
+[[tool.backstitch.diagnostics.levels]]
+select = ["*"]
+level = "error"
 
 [tool.backstitch.lint.per-file-ignores]
 # Test files legitimately cite spec sections without being implementation
@@ -81,9 +91,10 @@ meta_spec_globs = ["docs/specs/01-development-documentation-operating-model.md"]
 minversion = "7.0"
 testpaths = ["tests"]
 addopts = "-ra -q --strict-markers"
+run_live_llm = true
 markers = [
     "integration: tests that exercise an external command or package boundary",
-    "live_llm: tests that call a real LLM provider when explicitly enabled",
+    "live_llm: tests that call a real LLM provider under the configured live policy",
 ]
 
 [tool.mypy]

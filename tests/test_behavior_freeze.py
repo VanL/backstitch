@@ -49,6 +49,7 @@ def test_broken_fixture_summary_and_histogram_are_frozen(
         "spec_sections": 13,
         "code_refs": 19,
         "spec_mappings": 12,
+        "invariants": 0,
         "errors": 2,
         "warnings": 21,
         "infos": 11,

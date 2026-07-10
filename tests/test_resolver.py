@@ -7,9 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from backstitch.models import Report
+from backstitch.config import ProfileConfig
+from backstitch.models import InvariantBind, InvariantDeclaration, Report
 from backstitch.profiles import get_profile
-from backstitch.resolver import ScanError, scan_repository
+from backstitch.python_refs import ParsedPython
+from backstitch.reporting import render_json
+from backstitch.resolver import ScanError, resolve, scan_repository
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -477,5 +480,205 @@ def test_python_syntax_error_surfaces_in_report(tmp_path: Path) -> None:
 
 
 def test_report_is_stable_across_runs(broken: Report) -> None:
+    """Tests-invariant: [INV.RES.1]"""
+
     again = scan_repository(FIXTURES / "traceability_project", BROKEN_PROFILE)
-    assert again.to_dict() == broken.to_dict()
+    assert render_json(again).encode("utf-8") == render_json(broken).encode("utf-8")
+
+
+def _invariant_profile() -> ProfileConfig:
+    return get_profile("backstitch-style-v1").with_overrides(
+        spec_roots=("docs/specs",),
+        plan_roots=(),
+        code_roots=("pkg", "tests"),
+        test_roots=("tests",),
+    )
+
+
+def test_invariant_resolver_builds_unique_binds_and_reports_unknown(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "docs/specs").mkdir(parents=True)
+    (tmp_path / "docs/specs/01-x.md").write_text(
+        "# X\n\n## Contract [X-1]\n", encoding="utf-8"
+    )
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg/mod.py").write_text(
+        '"""Invariant: [INV.CODE.1] value stays stable."""\n', encoding="utf-8"
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_mod.py").write_text(
+        "class TestValue:\n"
+        '    """Tests-invariant: [INV.CODE.1]"""\n\n'
+        "    def test_value(self) -> None:\n"
+        '        """Tests-invariant: [INV.CODE.1]"""\n'
+        "        assert True\n\n"
+        "def test_unknown() -> None:\n"
+        '    """Tests-invariant: [INV.UNKNOWN.1]"""\n'
+        "    assert True\n",
+        encoding="utf-8",
+    )
+
+    report = scan_repository(tmp_path, _invariant_profile())
+
+    assert [item.invariant_id for item in report.invariants] == ["INV.CODE.1"]
+    assert [
+        (bind.invariant_id, bind.test_path, bind.test_symbol, bind.marker_line)
+        for bind in report.binds
+    ] == [("INV.CODE.1", "tests/test_mod.py", "TestValue.test_value", 2)]
+    invariant_issues = [issue for issue in report.issues if issue.invariant_id]
+    assert [(issue.code, issue.invariant_id) for issue in invariant_issues] == [
+        ("INVARIANT_UNKNOWN", "INV.UNKNOWN.1")
+    ]
+    assert invariant_issues[0].section_id is None
+
+
+def test_invariant_resolver_reports_tiers_duplicates_and_collisions(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "docs/specs").mkdir(parents=True)
+    (tmp_path / "docs/specs/01-x.md").write_text(
+        "# X\n\n## Contract [COLLIDE-1]\n\n"
+        "Invariant: [INV.REQ.1] required\n\n"
+        "Invariant (draft): [INV.DRAFT.1] draft\n\n"
+        "Invariant: [INV.DUP.1] first\n\n"
+        "Invariant: [INV.DUP.1] second\n\n"
+        "Invariant: [COLLIDE-1] collision\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg/mod.py").write_text('"""Module."""\n', encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_mod.py").write_text(
+        "def test_duplicate() -> None:\n"
+        '    """Tests-invariant: [INV.DUP.1], [COLLIDE-1]"""\n'
+        "    assert True\n",
+        encoding="utf-8",
+    )
+
+    report = scan_repository(tmp_path, _invariant_profile())
+    findings = [
+        (issue.code, issue.invariant_id, issue.context, issue.severity, issue.line)
+        for issue in report.issues
+        if issue.code.startswith("INVARIANT_")
+    ]
+
+    assert findings == [
+        ("INVARIANT_DUPLICATE", "COLLIDE-1", None, "error", 3),
+        ("INVARIANT_UNTESTED", "INV.REQ.1", "required", "error", 5),
+        ("INVARIANT_DUPLICATE", "INV.DUP.1", None, "error", 9),
+        ("INVARIANT_UNTESTED", "INV.DRAFT.1", "draft", "warning", 7),
+    ]
+    assert report.binds == ()
+    assert [item.invariant_id for item in report.invariants] == [
+        "INV.REQ.1",
+        "INV.DRAFT.1",
+        "INV.DUP.1",
+        "INV.DUP.1",
+        "COLLIDE-1",
+    ]
+
+
+def test_test_named_definition_outside_test_roots_does_not_bind(tmp_path: Path) -> None:
+    (tmp_path / "docs/specs").mkdir(parents=True)
+    (tmp_path / "docs/specs/01-x.md").write_text(
+        "# X\n\n## Contract [X-1]\n", encoding="utf-8"
+    )
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg/mod.py").write_text(
+        '"""Invariant: [INV.CODE.1] value stays stable."""\n\n'
+        "def test_looks_like_a_test() -> None:\n"
+        '    """Tests-invariant: [INV.CODE.1]"""\n'
+        "    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests").mkdir()
+
+    report = scan_repository(tmp_path, _invariant_profile())
+
+    assert report.binds == ()
+    assert {(issue.code, issue.invariant_id) for issue in report.issues} >= {
+        ("INVARIANT_BINDING_NOT_TEST", "INV.CODE.1"),
+        ("INVARIANT_UNTESTED", "INV.CODE.1"),
+    }
+
+
+def test_resolver_rejects_synthetic_binding_outside_test_roots() -> None:
+    declaration = InvariantDeclaration(
+        invariant_id="INV.FAILCLOSED.1",
+        statement="Only configured test roots can bind.",
+        tier="required",
+        declaration_kind="code",
+        path="pkg/mod.py",
+        line=1,
+        owner_symbol="run",
+        section_id=None,
+    )
+    binding = InvariantBind(
+        invariant_id=declaration.invariant_id,
+        test_path="pkg/mod.py",
+        test_symbol="test_looks_valid",
+        marker_line=4,
+        start_line=3,
+        end_line=5,
+    )
+
+    report = resolve(
+        profile=_invariant_profile(),
+        repo_root="/repo",
+        parsed_specs=(),
+        parsed_python=(
+            ParsedPython(
+                path="pkg/mod.py",
+                refs=(),
+                issues=(),
+                invariants=(declaration,),
+                binding_refs=(binding,),
+            ),
+        ),
+        scan_issues=(),
+        mapping_path_exists={},
+        python_symbols={},
+    )
+
+    assert report.binds == ()
+    assert [issue.code for issue in report.issues] == [
+        "INVARIANT_UNTESTED",
+        "INVARIANT_BINDING_NOT_TEST",
+    ]
+
+
+def test_unknown_invariant_fires_once_per_unique_binding() -> None:
+    bindings = tuple(
+        InvariantBind(
+            invariant_id="INV.UNKNOWN.1",
+            test_path="tests/test_mod.py",
+            test_symbol=symbol,
+            marker_line=line,
+            start_line=line - 1,
+            end_line=line + 1,
+        )
+        for symbol, line in (("test_one", 2), ("test_two", 6))
+    )
+    report = resolve(
+        profile=_invariant_profile(),
+        repo_root="/repo",
+        parsed_specs=(),
+        parsed_python=(
+            ParsedPython(
+                path="tests/test_mod.py",
+                refs=(),
+                issues=(),
+                binding_refs=bindings,
+            ),
+        ),
+        scan_issues=(),
+        mapping_path_exists={},
+        python_symbols={},
+    )
+
+    unknown = [issue for issue in report.issues if issue.code == "INVARIANT_UNKNOWN"]
+    assert [(issue.symbol, issue.line) for issue in unknown] == [
+        ("test_one", 2),
+        ("test_two", 6),
+    ]

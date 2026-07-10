@@ -4,6 +4,7 @@
     "spec_sections": 13,
     "code_refs": 19,
     "spec_mappings": 12,
+    "invariants": 0,
     "errors": 2,
     "warnings": 21,
     "infos": 11
@@ -693,6 +694,8 @@
       "line": 11
     }
   ],
+  "invariants": [],
+  "binds": [],
   "issues": [
     {
       "code": "MAPPING_PATH_MISSING",
@@ -701,7 +704,11 @@
       "line": 24,
       "message": "mapping path `src/missing_module.py` does not exist",
       "section_id": "CORE-2",
-      "symbol": null
+      "symbol": null,
+      "short_code": "BSM001",
+      "context": "required",
+      "default_severity": "error",
+      "invariant_id": null
     },
     {
       "code": "REF_RANGE_UNSUPPORTED",
@@ -710,7 +717,11 @@
       "line": 26,
       "message": "range [CORE-1]-[LAYER-1] does not share a common prefix",
       "section_id": null,
-      "symbol": "bad_range"
+      "symbol": "bad_range",
+      "short_code": "BSS006",
+      "context": null,
+      "default_severity": "error",
+      "invariant_id": null
     },
     {
       "code": "MAPPING_SYMBOL_UNRESOLVED",
@@ -719,7 +730,11 @@
       "line": 25,
       "message": "bare mapping symbol `Runtime.save` is advisory; v1 does not infer its file",
       "section_id": "CORE-2",
-      "symbol": "Runtime.save"
+      "symbol": "Runtime.save",
+      "short_code": "BSM005",
+      "context": null,
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "SPEC_SECTION_DUPLICATE",
@@ -728,7 +743,11 @@
       "line": 32,
       "message": "section ID [DUP-1] is defined more than once: docs/specifications/01-Core.md:32, docs/specifications/02-Weft_Style.md:36",
       "section_id": "DUP-1",
-      "symbol": null
+      "symbol": null,
+      "short_code": "BSS004",
+      "context": null,
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "CODE_BACKLINK_RECIPROCAL_MISSING",
@@ -737,7 +756,11 @@
       "line": 9,
       "message": "section [ROUTE-A1.1] is mapped to code but no code backlink points to it",
       "section_id": "ROUTE-A1.1",
-      "symbol": null
+      "symbol": null,
+      "short_code": "BSC004",
+      "context": null,
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "MAPPING_SYMBOL_UNRESOLVED",
@@ -746,7 +769,11 @@
       "line": 11,
       "message": "bare mapping symbol `Runtime.frobnicate` is advisory; v1 does not infer its file",
       "section_id": "ROUTE-A1.1",
-      "symbol": "Runtime.frobnicate"
+      "symbol": "Runtime.frobnicate",
+      "short_code": "BSM005",
+      "context": null,
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "MAPPING_SYMBOL_UNRESOLVED",
@@ -755,7 +782,11 @@
       "line": 11,
       "message": "bare mapping symbol `Runtime` is advisory; v1 does not infer its file",
       "section_id": "ROUTE-A1.1",
-      "symbol": "Runtime"
+      "symbol": "Runtime",
+      "short_code": "BSM005",
+      "context": null,
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "CODE_BACKLINK_RECIPROCAL_MISSING",
@@ -764,7 +795,11 @@
       "line": 13,
       "message": "section [LAYER-1] is mapped to code but no code backlink points to it",
       "section_id": "LAYER-1",
-      "symbol": null
+      "symbol": null,
+      "short_code": "BSC004",
+      "context": null,
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "CODE_BACKLINK_RECIPROCAL_MISSING",
@@ -773,7 +808,11 @@
       "line": 18,
       "message": "section [LAYER-1.1] is mapped to code but no code backlink points to it",
       "section_id": "LAYER-1.1",
-      "symbol": null
+      "symbol": null,
+      "short_code": "BSC004",
+      "context": null,
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "CODE_BACKLINK_RECIPROCAL_MISSING",
@@ -782,7 +821,11 @@
       "line": 31,
       "message": "section [DIRMAP-1] is mapped to code but no code backlink points to it",
       "section_id": "DIRMAP-1",
-      "symbol": null
+      "symbol": null,
+      "short_code": "BSC004",
+      "context": null,
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "MAPPING_SYMBOL_UNRESOLVED",
@@ -791,7 +834,11 @@
       "line": 34,
       "message": "bare mapping symbol `frobnicate_all()` is advisory; v1 does not infer its file",
       "section_id": "DIRMAP-1",
-      "symbol": "frobnicate_all"
+      "symbol": "frobnicate_all",
+      "short_code": "BSM005",
+      "context": null,
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "SPEC_MAPPING_RECIPROCAL_MISSING",
@@ -800,7 +847,11 @@
       "line": 3,
       "message": "code backlink cites [CORE.2.1] but that section declares no implementation mapping",
       "section_id": "CORE.2.1",
-      "symbol": "module"
+      "symbol": "module",
+      "short_code": "BSC003",
+      "context": null,
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "SPEC_MAPPING_RECIPROCAL_MISSING",
@@ -809,7 +860,11 @@
       "line": 3,
       "message": "code backlink cites [CORE.2.2] but that section declares no implementation mapping",
       "section_id": "CORE.2.2",
-      "symbol": "module"
+      "symbol": "module",
+      "short_code": "BSC003",
+      "context": null,
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "SPEC_MAPPING_RECIPROCAL_MISSING",
@@ -818,7 +873,11 @@
       "line": 11,
       "message": "code backlink cites [CORE.2.1] but that section declares no implementation mapping",
       "section_id": "CORE.2.1",
-      "symbol": "compact_range"
+      "symbol": "compact_range",
+      "short_code": "BSC003",
+      "context": null,
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "SPEC_MAPPING_RECIPROCAL_MISSING",
@@ -827,7 +886,11 @@
       "line": 11,
       "message": "code backlink cites [CORE.2.2] but that section declares no implementation mapping",
       "section_id": "CORE.2.2",
-      "symbol": "compact_range"
+      "symbol": "compact_range",
+      "short_code": "BSC003",
+      "context": null,
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "SPEC_SECTION_AMBIGUOUS",
@@ -836,7 +899,11 @@
       "line": 21,
       "message": "bare reference [DUP-1] is ambiguous: docs/specifications/01-Core.md:32, docs/specifications/02-Weft_Style.md:36",
       "section_id": "DUP-1",
-      "symbol": "ambiguous"
+      "symbol": "ambiguous",
+      "short_code": "BSS003",
+      "context": "weak",
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "CODE_REF_BARE_UNRESOLVED",
@@ -845,7 +912,11 @@
       "line": 31,
       "message": "bare reference [CORE-99] matches no known section",
       "section_id": "CORE-99",
-      "symbol": "ghost"
+      "symbol": "ghost",
+      "short_code": "BSC002",
+      "context": null,
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "SPEC_MAPPING_RECIPROCAL_MISSING",
@@ -854,7 +925,11 @@
       "line": 36,
       "message": "code backlink cites [CORE-3] but that section declares no implementation mapping",
       "section_id": "CORE-3",
-      "symbol": "prose_reference"
+      "symbol": "prose_reference",
+      "short_code": "BSC003",
+      "context": null,
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "SPEC_MAPPING_RECIPROCAL_MISSING",
@@ -863,7 +938,11 @@
       "line": 41,
       "message": "code backlink cites [CORE.2.1] but that section declares no implementation mapping",
       "section_id": "CORE.2.1",
-      "symbol": "endash_range"
+      "symbol": "endash_range",
+      "short_code": "BSC003",
+      "context": null,
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "SPEC_MAPPING_RECIPROCAL_MISSING",
@@ -872,7 +951,11 @@
       "line": 41,
       "message": "code backlink cites [CORE.2.2] but that section declares no implementation mapping",
       "section_id": "CORE.2.2",
-      "symbol": "endash_range"
+      "symbol": "endash_range",
+      "short_code": "BSC003",
+      "context": null,
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "CODE_REF_PLANNED_SPEC",
@@ -881,7 +964,11 @@
       "line": 26,
       "message": "shipped code references planned spec `docs/specifications/01A-Core_Planned.md`",
       "section_id": "CORE-P1",
-      "symbol": "plan_shards"
+      "symbol": "plan_shards",
+      "short_code": "BSC006",
+      "context": null,
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "SPEC_MAPPING_RECIPROCAL_MISSING",
@@ -890,7 +977,11 @@
       "line": 26,
       "message": "code backlink cites [CORE-P1] but that section declares no implementation mapping",
       "section_id": "CORE-P1",
-      "symbol": "plan_shards"
+      "symbol": "plan_shards",
+      "short_code": "BSC003",
+      "context": null,
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "CODE_REF_BROAD",
@@ -899,7 +990,11 @@
       "line": 33,
       "message": "document-only reference to `docs/specifications/01-Core.md`; prefer an exact section ID",
       "section_id": null,
-      "symbol": "broad_reader"
+      "symbol": "broad_reader",
+      "short_code": "BSC005",
+      "context": null,
+      "default_severity": "warning",
+      "invariant_id": null
     },
     {
       "code": "SPEC_SECTION_UNMAPPED",
@@ -908,7 +1003,11 @@
       "line": 19,
       "message": "section [CORE.2.1] has no implementation mapping",
       "section_id": "CORE.2.1",
-      "symbol": null
+      "symbol": null,
+      "short_code": "BSS007",
+      "context": null,
+      "default_severity": "info",
+      "invariant_id": null
     },
     {
       "code": "SPEC_SECTION_UNMAPPED",
@@ -917,7 +1016,11 @@
       "line": 20,
       "message": "section [CORE.2.2] has no implementation mapping",
       "section_id": "CORE.2.2",
-      "symbol": null
+      "symbol": null,
+      "short_code": "BSS007",
+      "context": null,
+      "default_severity": "info",
+      "invariant_id": null
     },
     {
       "code": "SPEC_SECTION_UNMAPPED",
@@ -926,7 +1029,11 @@
       "line": 27,
       "message": "section [CORE-3] has no implementation mapping",
       "section_id": "CORE-3",
-      "symbol": null
+      "symbol": null,
+      "short_code": "BSS007",
+      "context": null,
+      "default_severity": "info",
+      "invariant_id": null
     },
     {
       "code": "SPEC_SECTION_UNMAPPED",
@@ -935,7 +1042,11 @@
       "line": 32,
       "message": "section [DUP-1] has no implementation mapping",
       "section_id": "DUP-1",
-      "symbol": null
+      "symbol": null,
+      "short_code": "BSS007",
+      "context": null,
+      "default_severity": "info",
+      "invariant_id": null
     },
     {
       "code": "SPEC_SECTION_UNMAPPED",
@@ -944,7 +1055,11 @@
       "line": 5,
       "message": "section [CORE-P1] has no implementation mapping",
       "section_id": "CORE-P1",
-      "symbol": null
+      "symbol": null,
+      "short_code": "BSS007",
+      "context": null,
+      "default_severity": "info",
+      "invariant_id": null
     },
     {
       "code": "SPEC_SECTION_UNMAPPED",
@@ -953,7 +1068,11 @@
       "line": 36,
       "message": "section [DUP-1] has no implementation mapping",
       "section_id": "DUP-1",
-      "symbol": null
+      "symbol": null,
+      "short_code": "BSS007",
+      "context": null,
+      "default_severity": "info",
+      "invariant_id": null
     },
     {
       "code": "SPEC_SECTION_UNMAPPED",
@@ -962,7 +1081,11 @@
       "line": 40,
       "message": "section [FENCE-1] has no implementation mapping",
       "section_id": "FENCE-1",
-      "symbol": null
+      "symbol": null,
+      "short_code": "BSS007",
+      "context": null,
+      "default_severity": "info",
+      "invariant_id": null
     },
     {
       "code": "CODE_REF_UNMAPPED_FROM_SPEC",
@@ -971,7 +1094,11 @@
       "line": 6,
       "message": "code cites [CORE-1] but is not in that section's implementation mapping",
       "section_id": "CORE-1",
-      "symbol": "module"
+      "symbol": "module",
+      "short_code": "BSC008",
+      "context": null,
+      "default_severity": "info",
+      "invariant_id": null
     },
     {
       "code": "CODE_REF_UNMAPPED_FROM_SPEC",
@@ -980,7 +1107,11 @@
       "line": 16,
       "message": "code cites [CORE-1] but is not in that section's implementation mapping",
       "section_id": "CORE-1",
-      "symbol": "comma_list"
+      "symbol": "comma_list",
+      "short_code": "BSC008",
+      "context": null,
+      "default_severity": "info",
+      "invariant_id": null
     },
     {
       "code": "CODE_REF_UNMAPPED_FROM_SPEC",
@@ -989,7 +1120,11 @@
       "line": 3,
       "message": "code cites [CORE-1] but is not in that section's implementation mapping",
       "section_id": "CORE-1",
-      "symbol": "module"
+      "symbol": "module",
+      "short_code": "BSC008",
+      "context": null,
+      "default_severity": "info",
+      "invariant_id": null
     },
     {
       "code": "CODE_REF_UNMAPPED_FROM_SPEC",
@@ -998,7 +1133,11 @@
       "line": 10,
       "message": "code cites [CORE-1] but is not in that section's implementation mapping",
       "section_id": "CORE-1",
-      "symbol": "test_frobnicate"
+      "symbol": "test_frobnicate",
+      "short_code": "BSC008",
+      "context": null,
+      "default_severity": "info",
+      "invariant_id": null
     }
   ],
   "repo_root": "<regenerated>"

@@ -1,10 +1,12 @@
-"""Optional live LLM smoke and contract test ([SC-7] live path).
+"""Live LLM smoke and contract test ([SC-7], [SC-10] live path).
 
 Spec: docs/specs/02-backstitch-core.md [SC-7]
 Plan: docs/plans/2026-07-03-live-llm-tests-plan.md
 Plan: docs/plans/2026-07-03-local-llm-eval-lane-plan.md
 
-Skipped unless ``BACKSTITCH_LIVE_LLM=1``. When enabled it drives the real CLI
+Enabled by this repository's ``run_live_llm`` pytest setting for ordinary local
+runs. Current hermetic CI overrides that setting off; dedicated lanes may still
+enable it with ``BACKSTITCH_LIVE_LLM=1``. When enabled it drives the real CLI
 (``packets`` -> ``analyze`` -> ``check`` -> ``summarize-analysis``) over this
 repository's own specs, calling a real provider or a local OpenAI-compatible
 endpoint through the production ``default_adapter``. It asserts structured
@@ -35,18 +37,10 @@ import pytest
 from backstitch.analysis_llm import build_prompt
 from backstitch.analysis_results import load_analysis_results, validate_analysis_row
 
-# Function-level skip (not a module-level `pytest.skip(allow_module_level=True)`)
-# so the test is COLLECTED and reported as skipped. A module-level skip makes
-# `pytest tests/live/test_live_llm.py` collect nothing and exit 5 (no tests
-# ran), which would fail the hermetic CI step that proves the gate skips.
+# The root collection hook applies policy skips after collecting this marker,
+# so a disabled direct invocation reports one skip instead of exiting 5.
 # Collection stays hermetic: `import llm` lives inside the test body, not here.
-pytestmark = [
-    pytest.mark.live_llm,
-    pytest.mark.skipif(
-        os.environ.get("BACKSTITCH_LIVE_LLM") != "1",
-        reason="live LLM tests are opt-in; set BACKSTITCH_LIVE_LLM=1 to run",
-    ),
-]
+pytestmark = pytest.mark.live_llm
 
 # Canonical default model. MUST stay byte-identical to
 # DEFAULT_BACKSTITCH_LIVE_LLM_MODEL in .github/workflows/ci.yml -- treat the two

@@ -7,7 +7,7 @@ Diagnoses the `llm`/model/endpoint environment `analyze` depends on, as an
 ordered list of named checks with statuses, details, and remedies. Checks
 are provider-neutral: only the `llm` library's public surface and generic
 HTTP are consulted, never provider identities — remedies point at the
-local-model catalog doc, which is where provider names live ([CFG-9]).
+local-model catalog doc, which is where provider names live.
 `llm` is imported only inside check functions, never at module import
 ([SC-8]); the `check`/`packets` quarantine is proven by the subprocess
 test in tests/test_cli.py.

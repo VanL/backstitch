@@ -143,6 +143,7 @@ def test_load_settings_from_fixture_project() -> None:
     assert settings.profile == "backstitch-style-v1"
     assert settings.profile_overrides.spec_roots == ("docs/specifications",)
     assert settings.profile_overrides.code_roots == ("src",)
+    assert settings.profile_overrides.test_roots == ()
     assert settings.check.format == "json"
     assert settings.check.warnings_as_errors is True
     assert settings.analyze.model == "gpt-configured"
@@ -156,9 +157,32 @@ def test_no_config_returns_defaults(tmp_path: Path) -> None:
     anchor.mkdir(parents=True)
     settings = load_settings(anchor, home=home)
     assert settings.config_path is None
-    assert settings.profile is None
+    assert settings.profile == "backstitch-style-v1"
     assert settings.exclude == DEFAULT_EXCLUDES
     assert settings.allow_unknown_keys is False
+    assert settings.config_layers == ("packaged:backstitch/defaults.toml",)
+    assert settings.diagnostics.fail_on == ("error",)
+    assert settings.profile_overrides.test_roots == ("tests",)
+
+
+def test_profile_test_roots_without_code_roots_retain_packaged_code_roots(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text('[profile]\ntest_roots = ["tests/unit"]\n', encoding="utf-8")
+    settings = load_settings(tmp_path, explicit=config)
+    assert settings.profile_overrides.code_roots == ("backstitch", "tests")
+    assert settings.profile_overrides.test_roots == ("tests/unit",)
+
+
+def test_profile_test_root_outside_code_roots_is_invalid(tmp_path: Path) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(
+        '[profile]\ncode_roots = ["pkg"]\ntest_roots = ["qa"]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigLoadError, match="test root 'qa'"):
+        load_settings(tmp_path, explicit=config)
 
 
 def test_profile_table_name_loads(tmp_path: Path) -> None:
@@ -364,6 +388,82 @@ def test_extend_merge_overrides_parent(tmp_path: Path) -> None:
     settings = load_settings(tmp_path, explicit=child)
     assert settings.profile_overrides.spec_roots == ("docs/base",)
     assert settings.analyze.model == "gpt-child"
+
+
+def test_extend_code_roots_without_test_roots_resets_parent_test_roots(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base.toml"
+    base.write_text(
+        '[profile]\ncode_roots = ["src", "qa"]\ntest_roots = ["qa"]\n',
+        encoding="utf-8",
+    )
+    child = tmp_path / "child.toml"
+    child.write_text(
+        'extend = "base.toml"\n[profile]\ncode_roots = ["pkg"]\n',
+        encoding="utf-8",
+    )
+    settings = load_settings(tmp_path, explicit=child)
+    assert settings.profile_overrides.code_roots == ("pkg",)
+    assert settings.profile_overrides.test_roots == ()
+
+
+def test_diagnostics_levels_append_across_extend(tmp_path: Path) -> None:
+    base = tmp_path / "base.toml"
+    base.write_text(
+        "\n".join(
+            [
+                "[[diagnostics.levels]]",
+                'select = ["PYTHON_SYNTAX_ERROR"]',
+                'level = "info"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    child = tmp_path / "child.toml"
+    child.write_text(
+        "\n".join(
+            [
+                'extend = "base.toml"',
+                "[[diagnostics.levels]]",
+                'select = ["PYTHON_SYNTAX_ERROR"]',
+                'level = "error"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    settings = load_settings(tmp_path, explicit=child)
+    assert settings.diagnostics.levels[-2].level == "info"
+    assert settings.diagnostics.levels[-1].level == "error"
+
+
+def test_diagnostics_rejects_off_in_fail_on(tmp_path: Path) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text('[diagnostics]\nfail_on = ["off"]\n', encoding="utf-8")
+    with pytest.raises(ConfigLoadError) as excinfo:
+        load_settings(tmp_path, explicit=config)
+    assert "fail_on" in str(excinfo.value)
+
+
+def test_repo_config_cannot_define_diagnostic_registry(tmp_path: Path) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(
+        "\n".join(
+            [
+                "[diagnostics.registry.MY_CODE]",
+                'short = "BST999"',
+                'status = "implemented"',
+                'summary = "not allowed here"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigLoadError) as excinfo:
+        load_settings(tmp_path, explicit=config)
+    assert "diagnostics.registry" in str(excinfo.value)
 
 
 def test_extend_resolves_relative_to_containing_file(tmp_path: Path) -> None:

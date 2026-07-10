@@ -18,31 +18,52 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
-DEFAULT_EXCLUDES: tuple[str, ...] = (
-    ".git",
-    ".venv",
-    "venv",
-    "__pycache__",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    "dist",
-    "build",
-    ".worktrees",
+from backstitch.config import uncontained_test_root
+from backstitch.diagnostics import (
+    DiagnosticConfigError,
+    DiagnosticsSettings,
+    default_policy,
+    default_registry,
+    load_default_config_raw,
+    parse_policy,
+    policy_to_dict,
+    resolved_policy_to_dict,
 )
 
+DEFAULT_EXCLUDES: tuple[str, ...] = tuple(load_default_config_raw()["exclude"])
+PACKAGED_DEFAULTS_LAYER = "packaged:backstitch/defaults.toml"
+
 _TOP_LEVEL_KEYS = frozenset(
-    {"profile", "extend", "allow_unknown_keys", "exclude", "extend_exclude", "lint"}
+    {
+        "defaults",
+        "profile",
+        "extend",
+        "allow_unknown_keys",
+        "exclude",
+        "extend_exclude",
+        "lint",
+    }
 )
 _TABLE_KEYS = frozenset(
-    {"profile", "check", "packets", "analyze", "target_roots", "lint"}
+    {
+        "defaults",
+        "profile",
+        "check",
+        "packets",
+        "analyze",
+        "target_roots",
+        "lint",
+        "diagnostics",
+    }
 )
+_DEFAULTS_KEYS = frozenset({"schema_version"})
 _PROFILE_KEYS = frozenset(
     {
         "name",
         "spec_roots",
         "plan_roots",
         "code_roots",
+        "test_roots",
         "planned_spec_globs",
         "exploratory_spec_globs",
         "meta_spec_globs",
@@ -56,6 +77,9 @@ _CHECK_KEYS = frozenset({"format", "warnings_as_errors", "output"})
 _PACKETS_KEYS = frozenset({"output"})
 _ANALYZE_KEYS = frozenset({"model", "concurrency"})
 _TARGET_ROOT_KEYS = frozenset({"weft"})
+_DIAGNOSTICS_KEYS = frozenset(
+    {"default_level", "fail_on", "suppressible_levels", "levels"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +87,7 @@ class ProfileSettings:
     spec_roots: tuple[str, ...] | None = None
     plan_roots: tuple[str, ...] | None = None
     code_roots: tuple[str, ...] | None = None
+    test_roots: tuple[str, ...] | None = None
     planned_spec_globs: tuple[str, ...] | None = None
     exploratory_spec_globs: tuple[str, ...] | None = None
     meta_spec_globs: tuple[str, ...] | None = None
@@ -118,8 +143,10 @@ class BackstitchSettings:
     packets: PacketsSettings = field(default_factory=PacketsSettings)
     analyze: AnalyzeSettings = field(default_factory=AnalyzeSettings)
     target_roots: TargetRootSettings = field(default_factory=TargetRootSettings)
+    diagnostics: DiagnosticsSettings = field(default_factory=default_policy)
     config_path: Path | None = None
     config_dir: Path | None = None
+    config_layers: tuple[str, ...] = (PACKAGED_DEFAULTS_LAYER,)
 
 
 def discover_config_path(
@@ -158,14 +185,39 @@ def load_settings(
     *,
     home: Path | None = None,
     explicit: Path | None = None,
+    use_repo_config: bool = True,
 ) -> BackstitchSettings:
-    config_path = discover_config_path(anchor, home=home, explicit=explicit)
-    if config_path is None:
-        return BackstitchSettings()
-    raw, warnings = _load_config_chain(config_path, set())
-    for warning in warnings:
-        print(f"warning: {warning}", file=sys.stderr)
-    return _parse_settings(raw, config_path=config_path)
+    raw = dict(load_default_config_raw())
+    layers = [PACKAGED_DEFAULTS_LAYER]
+    config_path: Path | None = None
+    if use_repo_config:
+        config_path = discover_config_path(anchor, home=home, explicit=explicit)
+        if config_path is not None:
+            repo_raw, warnings = _load_config_chain(config_path, set())
+            for warning in warnings:
+                print(f"warning: {warning}", file=sys.stderr)
+            _validate_unknown_keys(repo_raw, config_path)
+            raw = _merge_config_layers(raw, repo_raw)
+            layers.append(str(config_path))
+    settings = _parse_settings(
+        raw,
+        source_path=config_path or Path("backstitch/defaults.toml"),
+        effective_config_path=config_path,
+        config_layers=tuple(layers),
+        validate_unknown_keys=config_path is None,
+    )
+    invalid_test_root = uncontained_test_root(
+        anchor.resolve(),
+        settings.profile_overrides.code_roots or (),
+        settings.profile_overrides.test_roots or (),
+    )
+    if invalid_test_root is not None:
+        msg = (
+            f"test root {invalid_test_root!r} must be equal to or nested under a"
+            " final effective code root"
+        )
+        raise ConfigLoadError(msg)
+    return settings
 
 
 def settings_to_json(settings: BackstitchSettings) -> str:
@@ -192,6 +244,9 @@ def settings_to_json(settings: BackstitchSettings) -> str:
         "packets": asdict(settings.packets),
         "analyze": asdict(settings.analyze),
         "target_roots": asdict(settings.target_roots),
+        "diagnostics": policy_to_dict(settings.diagnostics),
+        "resolved_diagnostics": resolved_policy_to_dict(settings.diagnostics),
+        "config_layers": list(settings.config_layers),
     }
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
@@ -276,11 +331,42 @@ def _extract_config_body(path: Path) -> dict[str, Any]:
     return data
 
 
-def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+def _merge_config_layers(
+    base: dict[str, Any],
+    overlay: dict[str, Any],
+    *,
+    path: tuple[str, ...] = (),
+) -> dict[str, Any]:
     merged = dict(base)
     for key, value in overlay.items():
-        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
-            merged[key] = _deep_merge(merged[key], value)
+        current_path = (*path, key)
+        if (
+            current_path == ("diagnostics", "levels")
+            and isinstance(merged.get(key), list)
+            and isinstance(value, list)
+        ):
+            merged[key] = [*merged[key], *value]
+        elif (
+            current_path == ("profile",)
+            and isinstance(merged.get(key), dict)
+            and isinstance(value, dict)
+        ):
+            profile_overlay = dict(value)
+            if "code_roots" in profile_overlay and "test_roots" not in profile_overlay:
+                profile_overlay["test_roots"] = []
+            merged[key] = _merge_config_layers(
+                merged[key],
+                profile_overlay,
+                path=current_path,
+            )
+        elif (
+            key in merged and isinstance(merged[key], dict) and isinstance(value, dict)
+        ):
+            merged[key] = _merge_config_layers(
+                merged[key],
+                value,
+                path=current_path,
+            )
         else:
             merged[key] = value
     return merged
@@ -336,34 +422,37 @@ def _load_config_chain(
 
     parent_body, parent_warnings = _load_config_chain(parent_path, seen)
     warnings.extend(parent_warnings)
-    merged = _deep_merge(parent_body, body)
+    merged = _merge_config_layers(parent_body, body)
     merged.pop("extend", None)
     return merged, warnings
 
 
-def _parse_settings(raw: dict[str, Any], *, config_path: Path) -> BackstitchSettings:
+def _parse_settings(
+    raw: dict[str, Any],
+    *,
+    source_path: Path,
+    effective_config_path: Path | None,
+    config_layers: tuple[str, ...],
+    validate_unknown_keys: bool,
+) -> BackstitchSettings:
     allow_unknown = raw.get("allow_unknown_keys", False)
     if not isinstance(allow_unknown, bool):
-        msg = f"allow_unknown_keys must be a boolean in {config_path}"
+        msg = f"allow_unknown_keys must be a boolean in {source_path}"
         raise ConfigLoadError(msg)
 
     # [CFG-8]: unknown keys are load errors by default -- a typo'd key that
     # silently does nothing is a fake affordance. allow_unknown_keys = true
     # is the forward-compatibility hatch and downgrades to stderr warnings;
     # it never suppresses type errors on known keys.
-    unknown = _unknown_key_messages(raw, config_path)
-    if unknown:
-        if not allow_unknown:
-            raise ConfigLoadError(unknown[0])
-        for message in unknown:
-            print(f"warning: {message}", file=sys.stderr)
+    if validate_unknown_keys:
+        _validate_unknown_keys(raw, source_path)
 
     profile_value = raw.get("profile")
     if isinstance(profile_value, dict):
         profile_table = profile_value
         profile_name = profile_value.get("name")
         if profile_name is not None and not isinstance(profile_name, str):
-            msg = f"profile.name must be a string in {config_path}"
+            msg = f"profile.name must be a string in {source_path}"
             raise ConfigLoadError(msg)
         if profile_name is not None:
             # [CFG-8]: an unknown built-in profile name fails at load.
@@ -372,7 +461,7 @@ def _parse_settings(raw: dict[str, Any], *, config_path: Path) -> BackstitchSett
             try:
                 get_profile(profile_name)
             except ValueError as exc:
-                msg = f"{exc} in {config_path}"
+                msg = f"{exc} in {source_path}"
                 raise ConfigLoadError(msg) from exc
     elif profile_value is None:
         profile_name = None
@@ -382,7 +471,7 @@ def _parse_settings(raw: dict[str, Any], *, config_path: Path) -> BackstitchSett
         # cannot represent both a top-level string and a [profile] table, so
         # the string form is rejected rather than given a "wins" rule.
         msg = (
-            f"unknown config key `profile` in {config_path}: the profile"
+            f"unknown config key `profile` in {source_path}: the profile"
             ' name is spelled [profile] name = "..."'
         )
         raise ConfigLoadError(msg)
@@ -394,16 +483,17 @@ def _parse_settings(raw: dict[str, Any], *, config_path: Path) -> BackstitchSett
     analyze_table = _expect_table(raw.get("analyze"), "analyze")
     target_table = _expect_table(raw.get("target_roots"), "target_roots")
     lint_table = _expect_table(raw.get("lint"), "lint")
+    diagnostics_table = _expect_table(raw.get("diagnostics"), "diagnostics")
 
     # CFG §6.4: [packets].output is stored for forward compatibility; the
     # CLI still requires --output in v1 -- parsed here so the schema key is
     # never silently dead.
     packets_output = packets_table.get("output")
     if packets_output is not None and not isinstance(packets_output, str):
-        msg = f"packets.output must be a string in {config_path}"
+        msg = f"packets.output must be a string in {source_path}"
         raise ConfigLoadError(msg)
     if packets_output is not None:
-        packets_output = expand_path_value(packets_output, base_dir=config_path.parent)
+        packets_output = expand_path_value(packets_output, base_dir=source_path.parent)
 
     def _roots(key: str) -> tuple[str, ...] | None:
         # CFG §4.3: roots support `~` and env expansion (but stay
@@ -417,6 +507,7 @@ def _parse_settings(raw: dict[str, Any], *, config_path: Path) -> BackstitchSett
         spec_roots=_roots("spec_roots"),
         plan_roots=_roots("plan_roots"),
         code_roots=_roots("code_roots"),
+        test_roots=_roots("test_roots"),
         planned_spec_globs=_optional_str_tuple(
             profile_table.get("planned_spec_globs"),
             "profile.planned_spec_globs",
@@ -466,14 +557,24 @@ def _parse_settings(raw: dict[str, Any], *, config_path: Path) -> BackstitchSett
         if not isinstance(weft_root, str):
             msg = "target_roots.weft must be a string"
             raise ConfigLoadError(msg)
-        weft_root = expand_path_value(weft_root, base_dir=config_path.parent)
+        weft_root = expand_path_value(weft_root, base_dir=source_path.parent)
 
     check_output = check_table.get("output")
     if check_output is not None and not isinstance(check_output, str):
         msg = "check.output must be a string"
         raise ConfigLoadError(msg)
     if check_output is not None:
-        check_output = expand_path_value(check_output, base_dir=config_path.parent)
+        check_output = expand_path_value(check_output, base_dir=source_path.parent)
+
+    try:
+        diagnostics = parse_policy(
+            diagnostics_table,
+            registry=default_registry(),
+            source=str(source_path),
+            allow_unknown=allow_unknown,
+        )
+    except DiagnosticConfigError as exc:
+        raise ConfigLoadError(str(exc)) from exc
 
     return BackstitchSettings(
         profile=profile_name,
@@ -492,8 +593,10 @@ def _parse_settings(raw: dict[str, Any], *, config_path: Path) -> BackstitchSett
             concurrency=analyze_concurrency,
         ),
         target_roots=TargetRootSettings(weft=weft_root),
-        config_path=config_path,
-        config_dir=config_path.parent,
+        diagnostics=diagnostics,
+        config_path=effective_config_path,
+        config_dir=effective_config_path.parent if effective_config_path else None,
+        config_layers=config_layers,
     )
 
 
@@ -531,6 +634,19 @@ def _require_str_list(value: Any, field_name: str) -> list[str]:
     return value
 
 
+def _validate_unknown_keys(raw: dict[str, Any], config_path: Path) -> None:
+    allow_unknown = raw.get("allow_unknown_keys", False)
+    if not isinstance(allow_unknown, bool):
+        msg = f"allow_unknown_keys must be a boolean in {config_path}"
+        raise ConfigLoadError(msg)
+    unknown = _unknown_key_messages(raw, config_path)
+    if unknown:
+        if not allow_unknown:
+            raise ConfigLoadError(unknown[0])
+        for message in unknown:
+            print(f"warning: {message}", file=sys.stderr)
+
+
 def _unknown_key_messages(raw: dict[str, Any], config_path: Path) -> list[str]:
     """[CFG-8] unknown-key inventory, each message naming key and file."""
 
@@ -538,9 +654,12 @@ def _unknown_key_messages(raw: dict[str, Any], config_path: Path) -> list[str]:
     for key, value in raw.items():
         if key in _TABLE_KEYS:
             if isinstance(value, dict):
+                allowed = _table_key_names(key)
+                if key == "diagnostics" and _is_packaged_default_path(config_path):
+                    allowed = allowed | frozenset({"registry"})
                 messages.extend(
                     f"unknown config key `{key}.{sub}` in {config_path}"
-                    for sub in _unused_table_keys(value, _table_key_names(key))
+                    for sub in _unused_table_keys(value, allowed)
                 )
             continue
         if key in _TOP_LEVEL_KEYS:
@@ -549,7 +668,13 @@ def _unknown_key_messages(raw: dict[str, Any], config_path: Path) -> list[str]:
     return messages
 
 
+def _is_packaged_default_path(path: Path) -> bool:
+    return path.as_posix() == "backstitch/defaults.toml"
+
+
 def _table_key_names(table_name: str) -> frozenset[str]:
+    if table_name == "defaults":
+        return _DEFAULTS_KEYS
     if table_name == "profile":
         return _PROFILE_KEYS
     if table_name == "check":
@@ -562,6 +687,8 @@ def _table_key_names(table_name: str) -> frozenset[str]:
         return _TARGET_ROOT_KEYS
     if table_name == "lint":
         return _LINT_KEYS
+    if table_name == "diagnostics":
+        return _DIAGNOSTICS_KEYS
     return frozenset()
 
 

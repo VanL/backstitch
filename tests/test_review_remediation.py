@@ -144,9 +144,13 @@ def test_unknown_noqa_code_warns_under_allow_unknown(tmp_path: Path) -> None:
         "allow_unknown_keys = true\n[profile]\n"
         'spec_roots = ["docs/specs"]\nplan_roots = []\ncode_roots = ["pkg"]\n',
     )
-    result = run_cli("check", "--repo-root", str(tmp_path))
+    result = run_cli("check", "--repo-root", str(tmp_path), "--format", "json")
     assert result.returncode == 0
-    assert "NOT_A_REAL_CODE_9" in result.stderr, "typo suppression was silent"
+    data = json.loads(result.stdout)
+    assert any(
+        i["code"] == "SUPPRESSION_UNKNOWN_CODE" and "NOT_A_REAL_CODE_9" in i["message"]
+        for i in data["issues"]
+    ), "typo suppression was silent"
 
 
 # --- P2: noqa parsing is line-oriented ----------------------------------
@@ -241,10 +245,12 @@ def test_longer_fence_opener_requires_matching_close_length(
 # (pinned by tests/test_analysis_packets.py::test_packet_rows_have_stable_fields).
 
 
-# --- Round 2 P2: packets surfaces the same suppression diagnostics as check
+# --- Round 2 P2: suppression diagnostics are structured issues --------------
 
 
-def test_packets_emits_suppression_diagnostics(tmp_path: Path) -> None:
+def test_check_emits_suppression_diagnostics_as_structured_issues(
+    tmp_path: Path,
+) -> None:
     _write(tmp_path, "docs/specs/01-x.md", "# X\n\n## One [PX-1]\n")
     _write(
         tmp_path,
@@ -267,15 +273,11 @@ def test_packets_emits_suppression_diagnostics(tmp_path: Path) -> None:
         )
         + "\n",
     )
-    result = run_cli(
-        "packets",
-        "--repo-root",
-        str(tmp_path),
-        "--output",
-        str(tmp_path / "p.jsonl"),
-    )
-    assert "NOT_A_REAL_CODE_9" in result.stderr, "unknown-code warning dropped"
-    assert "unused per-file-ignore" in result.stderr, "stale-ignore warning dropped"
+    result = run_cli("check", "--repo-root", str(tmp_path), "--format", "json")
+    data = json.loads(result.stdout)
+    messages = {i["code"]: i["message"] for i in data["issues"]}
+    assert "NOT_A_REAL_CODE_9" in messages["SUPPRESSION_UNKNOWN_CODE"]
+    assert "unused per-file-ignore" in messages["SUPPRESSION_UNUSED"]
 
 
 # --- Round 2 P2: config show serializes [packets] -------------------------
@@ -300,7 +302,7 @@ def test_config_show_includes_packets_settings(tmp_path: Path) -> None:
 def test_bare_noqa_directive_warns() -> None:
     codes, warnings = parse_noqa_text("backstitch: noqa")
     assert codes == frozenset()
-    assert any("no issue codes" in w for w in warnings)
+    assert any("no issue codes" in diagnostic.message for diagnostic in warnings)
 
 
 def test_space_separated_unknown_tail_is_not_dropped() -> None:
@@ -312,7 +314,7 @@ def test_space_separated_unknown_tail_is_not_dropped() -> None:
         "backstitch: noqa CODE_REF_BROAD NOT_A_CODE", allow_unknown=True
     )
     assert codes == frozenset({"CODE_REF_BROAD"})
-    assert any("NOT_A_CODE" in w for w in warnings)
+    assert any("NOT_A_CODE" in diagnostic.message for diagnostic in warnings)
 
 
 def test_unparseable_noqa_token_warns() -> None:
@@ -320,7 +322,7 @@ def test_unparseable_noqa_token_warns() -> None:
         "backstitch: noqa CODE_REF_BROAD, (huh)", allow_unknown=True
     )
     assert codes == frozenset({"CODE_REF_BROAD"})
-    assert any("unparseable" in w for w in warnings)
+    assert any("unparseable" in diagnostic.message for diagnostic in warnings)
 
 
 def test_prose_mention_of_noqa_is_not_a_directive() -> None:
@@ -804,7 +806,10 @@ def test_marker_after_body_text_does_not_apply(tmp_path: Path) -> None:
         i["section_id"] for i in data["issues"] if i["code"] == "SPEC_SECTION_UNMAPPED"
     }
     assert "TM-2" in unmapped, "misplaced marker still suppressed the section"
-    assert "after body text" in result.stderr
+    assert any(
+        i["code"] == "SUPPRESSION_INVALID_SYNTAX" and "after body text" in i["message"]
+        for i in data["issues"]
+    )
 
 
 # --- Round 8 P3: span noqa attempting an error code warns --------------------
@@ -823,11 +828,14 @@ def test_span_noqa_on_error_code_warns(tmp_path: Path) -> None:
         ".backstitch.toml",
         '[profile]\nspec_roots = ["docs/specs"]\nplan_roots = []\ncode_roots = ["pkg"]\n',
     )
-    result = run_cli("check", "--repo-root", str(tmp_path))
+    result = run_cli("check", "--repo-root", str(tmp_path), "--format", "json")
     assert result.returncode == 1  # the error finding survives
-    assert "error-severity" in result.stderr, (
-        "span suppression of an error code was silently ignored"
-    )
+    data = json.loads(result.stdout)
+    assert any(
+        i["code"] == "SUPPRESSION_UNSUPPRESSIBLE_CODE"
+        and "SPEC_FILE_MISSING" in i["message"]
+        for i in data["issues"]
+    ), "span suppression of an error code was silently ignored"
 
 
 # --- Round 8 P3: packets resolves configuration once -------------------------
@@ -896,7 +904,11 @@ def test_empty_html_ignore_keeps_section_under_hatch(tmp_path: Path) -> None:
     result = run_cli("check", "--repo-root", str(tmp_path), "--format", "json")
     data = json.loads(result.stdout)
     assert data["summary"]["spec_sections"] == 1
-    assert "malformed traceability marker" in result.stderr
+    assert any(
+        i["code"] == "SUPPRESSION_INVALID_SYNTAX"
+        and "malformed traceability marker" in i["message"]
+        for i in data["issues"]
+    )
 
 
 # --- Round 9 P2: extended config paths anchor at the defining file ----------
@@ -1029,10 +1041,12 @@ def test_packet_issue_with_malformed_metadata_is_invocation_error(
 # --- Round 9 P3: stale error-code noqa warns without a matching finding -----
 
 
-def test_stale_error_code_noqa_warns_unconditionally(tmp_path: Path) -> None:
-    # [EXC-8]: the attempt warns even when no matching error is emitted --
-    # a directive that only warns when the error fires is silent exactly
-    # when its author believes it works.
+def test_stale_error_code_noqa_without_matching_issue_is_not_reported(
+    tmp_path: Path,
+) -> None:
+    # Suppressibility is based on an effective diagnostic instance. A stale
+    # suppression with no matching diagnostic is not an unsuppressible
+    # suppression attempt.
     _write(tmp_path, "docs/specs/01-x.md", "# X\n\n## One [SN-1]\n")
     _write(
         tmp_path,
@@ -1050,9 +1064,14 @@ def test_stale_error_code_noqa_warns_unconditionally(tmp_path: Path) -> None:
         "",
         "--code-root",
         "pkg",
+        "--format",
+        "json",
     )
     assert result.returncode == 0
-    assert "cannot suppress error-severity code SPEC_FILE_MISSING" in result.stderr
+    data = json.loads(result.stdout)
+    assert not any(
+        i["code"] == "SUPPRESSION_UNSUPPRESSIBLE_CODE" for i in data["issues"]
+    )
 
 
 # --- Round 10 P1: one-space empty HTML ignore --------------------------------
@@ -1745,7 +1764,10 @@ def test_summarize_rejects_summary_disagreeing_with_issues(tmp_path: Path) -> No
     report["issues"] = [
         {
             "code": "SPEC_FILE_MISSING",
+            "short_code": "BSS001",
             "severity": "error",
+            "default_severity": "error",
+            "context": None,
             "path": "p.py",
             "line": 1,
             "message": "m",

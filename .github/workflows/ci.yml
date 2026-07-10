@@ -1,13 +1,16 @@
 name: CI
 
-# Hermetic CI runs on every push and PR with no secrets. The paid, flake-prone
-# live-LLM job is part of the normal CI workflow, but it checks secret
-# availability inside the step and skips without failure when repository
-# secrets are unavailable, such as forked PRs.
+# Hermetic CI runs on every push and PR with no secrets. Repository pytest
+# config enables live LLM tests for local runs, so CI explicitly deselects or
+# disables them. The paid live job remains available behind a repository
+# variable for a future policy change.
 on:
   push:
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -30,10 +33,12 @@ jobs:
         run: uv sync --extra dev
       - name: Hermetic tests (live LLM deselected)
         run: uv run pytest tests -q -n auto --dist loadgroup -m "not live_llm"
-      - name: Prove live tests skip without opt-in
-        # No BACKSTITCH_LIVE_LLM here: the module must skip, not call a provider.
+      - name: Prove live tests skip under CI override
         # Expect exactly one skipped test; provider activity here is a failure.
-        run: uv run pytest tests/live/test_live_llm.py -q
+        run: |
+          output="$(env -u BACKSTITCH_LIVE_LLM uv run pytest tests/live/test_live_llm.py -q -o run_live_llm=false 2>&1)"
+          printf '%s\n' "${output}"
+          grep -Eq 'SKIPPED \[1\]' <<< "${output}"
       - name: Lint
         run: uv run ruff check .
       - name: Format
@@ -87,6 +92,10 @@ jobs:
   live-llm:
     name: live LLM
     needs: test
+    if: >-
+      ${{ vars.BACKSTITCH_CI_LIVE_LLM == '1' &&
+          github.ref == 'refs/heads/main' &&
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     env:
       BACKSTITCH_LIVE_LLM: "1"

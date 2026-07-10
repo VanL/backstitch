@@ -1,6 +1,7 @@
 """Validation and aggregation of semantic analysis results.
 
 Spec: docs/specs/02-backstitch-core.md [SC-6], [SC-7], [SC-13]
+Spec: docs/specs/05-backstitch-invariants.md [INV-5]
 
 Invalid analysis rows are analysis-summary errors, never repository trace
 errors, and semantic findings never change deterministic issue severity.
@@ -9,17 +10,35 @@ errors, and semantic findings never change deterministic issue severity.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-CLASSIFICATIONS = (
+from backstitch.grammar import is_valid_section_id
+
+SECTION_CLASSIFICATIONS = (
     "ok",
     "confirmed_mismatch",
     "probable_mismatch",
     "missing_trace",
     "ambiguous",
 )
+INVARIANT_CLASSIFICATIONS = (
+    "ok",
+    "weak_binding",
+    "confirmed_mismatch",
+    "probable_mismatch",
+    "ambiguous",
+)
+CLASSIFICATIONS = tuple(
+    dict.fromkeys((*SECTION_CLASSIFICATIONS, *INVARIANT_CLASSIFICATIONS))
+)
+CLASSIFICATIONS_BY_KIND = {
+    "section": SECTION_CLASSIFICATIONS,
+    "invariant": INVARIANT_CLASSIFICATIONS,
+}
+_CONTENT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +46,8 @@ class AnalysisResult:
     """One validated semantic finding for a packet."""
 
     packet_id: str
+    kind: str
+    content_hash: str | None
     classification: str
     confidence: float | None
     rationale: str
@@ -44,7 +65,7 @@ class AnalysisLoad:
 
 def validate_analysis_row(
     row: Any,
-    known_packet_ids: set[str] | None,
+    known_packet_ids: set[str] | Mapping[str, str] | None,
     *,
     allowed_evidence: Mapping[str, tuple[tuple[int, int], ...]] | None = None,
 ) -> AnalysisResult | str:
@@ -63,13 +84,58 @@ def validate_analysis_row(
     packet_id = row.get("packet_id")
     if not isinstance(packet_id, str) or not packet_id.strip():
         return "missing or invalid `packet_id`"
-    if known_packet_ids is not None and packet_id not in known_packet_ids:
-        return f"unknown packet ID `{packet_id}`"
+    kind: str
+    content_hash: str | None
+    if "kind" not in row:
+        if "content_hash" in row:
+            return "legacy section result must omit `content_hash`"
+        if packet_id.startswith("invariant::"):
+            return "missing `kind` for invariant result identity"
+        kind = "section"
+        content_hash = None
+    else:
+        raw_kind = row.get("kind")
+        if raw_kind not in CLASSIFICATIONS_BY_KIND:
+            return "invalid `kind`; expected `section` or `invariant`"
+        kind = raw_kind
+        if kind == "section":
+            if "content_hash" in row:
+                return "section result must omit `content_hash`"
+            if packet_id.startswith("invariant::"):
+                return "section result cannot use an invariant packet identity"
+            content_hash = None
+        else:
+            prefix = "invariant::"
+            invariant_id = packet_id.removeprefix(prefix)
+            if not packet_id.startswith(prefix) or not is_valid_section_id(
+                invariant_id
+            ):
+                return "invariant result requires `invariant::<ID>` packet identity"
+            raw_hash = row.get("content_hash")
+            if not isinstance(raw_hash, str) or not _CONTENT_HASH_RE.fullmatch(
+                raw_hash
+            ):
+                return (
+                    "invalid `content_hash`; expected 64 lowercase hexadecimal"
+                    " characters"
+                )
+            content_hash = raw_hash
+
+    if known_packet_ids is not None:
+        if packet_id not in known_packet_ids:
+            return f"unknown packet ID `{packet_id}`"
+        if isinstance(known_packet_ids, Mapping):
+            expected_kind = known_packet_ids[packet_id]
+            if kind != expected_kind:
+                return (
+                    f"result kind `{kind}` does not match packet kind `{expected_kind}`"
+                )
     classification = row.get("classification")
-    if classification not in CLASSIFICATIONS:
+    allowed_classifications = CLASSIFICATIONS_BY_KIND[kind]
+    if classification not in allowed_classifications:
         return (
-            f"unsupported classification {classification!r}; expected one of"
-            f" {', '.join(CLASSIFICATIONS)}"
+            f"unsupported classification {classification!r} for {kind} result;"
+            f" expected one of {', '.join(allowed_classifications)}"
         )
     summary = row.get("summary")
     if not isinstance(summary, str) or not summary.strip():
@@ -84,7 +150,9 @@ def validate_analysis_row(
         # The prompt contract asks for a confidence between 0 and 1;
         # anything else is a malformed row, not a very confident one.
         return "invalid `confidence`; expected a number between 0 and 1"
-    rationale = row.get("rationale", "")
+    rationale = row.get("rationale")
+    if rationale is None:
+        rationale = ""
     if not isinstance(rationale, str):
         return "invalid `rationale`; expected a string"
     if confidence is None and not rationale.strip():
@@ -127,6 +195,8 @@ def validate_analysis_row(
         evidence.append((item["path"], item["line"]))
     return AnalysisResult(
         packet_id=packet_id,
+        kind=kind,
+        content_hash=content_hash,
         classification=classification,
         confidence=float(confidence) if confidence is not None else None,
         rationale=rationale,
@@ -135,7 +205,28 @@ def validate_analysis_row(
     )
 
 
-def load_analysis_results(text: str, known_packet_ids: set[str] | None) -> AnalysisLoad:
+def analysis_result_to_row(result: AnalysisResult) -> dict[str, Any]:
+    """Serialize a validated result with canonical trusted metadata."""
+
+    row: dict[str, Any] = {
+        "packet_id": result.packet_id,
+        "kind": result.kind,
+        "classification": result.classification,
+        "summary": result.summary,
+        "rationale": result.rationale,
+        "evidence": [{"path": path, "line": line} for path, line in result.evidence],
+    }
+    if result.confidence is not None:
+        row["confidence"] = result.confidence
+    if result.kind == "invariant":
+        row["content_hash"] = result.content_hash
+    return row
+
+
+def load_analysis_results(
+    text: str,
+    known_packet_ids: set[str] | Mapping[str, str] | None,
+) -> AnalysisLoad:
     """Parse analysis JSONL; bad rows become errors, not exceptions."""
 
     results: list[AnalysisResult] = []
@@ -165,10 +256,23 @@ def packet_ids_from_report(report_data: dict[str, Any]) -> set[str]:
     packet must be rejected, not summarized.
     """
 
-    return {
-        f"{edge['spec_path']}#{edge['section_id']}"
+    return set(packet_identities_from_report(report_data))
+
+
+def packet_identities_from_report(report_data: dict[str, Any]) -> dict[str, str]:
+    """Derive packet IDs and kinds that a deterministic report can emit."""
+
+    identities = {
+        f"{edge['spec_path']}#{edge['section_id']}": "section"
         for edge in report_data.get("edges", [])
     }
+    identities.update(
+        {
+            f"invariant::{bind['invariant_id']}": "invariant"
+            for bind in report_data.get("binds", [])
+        }
+    )
+    return identities
 
 
 def render_analysis_summary(summary: Mapping[str, int], load: AnalysisLoad) -> str:
@@ -181,12 +285,13 @@ def render_analysis_summary(summary: Mapping[str, int], load: AnalysisLoad) -> s
     never a ``KeyError`` traceback (known fable defect fixed at port time).
     """
 
-    # The [SC-6] summary contract has six count keys, not just the three
+    # The [SC-6] summary contract has seven count keys, not just the three
     # this renderer happens to print.
     count_keys = (
         "spec_sections",
         "code_refs",
         "spec_mappings",
+        "invariants",
         "errors",
         "warnings",
         "infos",
@@ -222,25 +327,33 @@ def render_analysis_summary(summary: Mapping[str, int], load: AnalysisLoad) -> s
         "",
         "semantic findings (advisory):",
     ]
-    if load.results:
+    for kind in ("section", "invariant"):
+        kind_results = [result for result in load.results if result.kind == kind]
+        lines.append(f"  {kind} packets:")
+        if not kind_results:
+            lines.append("    none")
+            continue
         counts: dict[str, int] = {}
-        for result in load.results:
+        for result in kind_results:
             counts[result.classification] = counts.get(result.classification, 0) + 1
         lines.append(
-            "  " + ", ".join(f"{counts[c]} {c}" for c in CLASSIFICATIONS if c in counts)
+            "    "
+            + ", ".join(
+                f"{counts[classification]} {classification}"
+                for classification in CLASSIFICATIONS_BY_KIND[kind]
+                if classification in counts
+            )
         )
-        for result in load.results:
+        for result in kind_results:
             confidence = (
                 f" (confidence {result.confidence:.2f})"
                 if result.confidence is not None
                 else ""
             )
             lines.append(
-                f"  {result.packet_id} [{result.classification}]"
+                f"    {result.packet_id} [{result.classification}]"
                 f" {result.summary}{confidence}"
             )
-    else:
-        lines.append("  none")
     if load.errors:
         lines.append("")
         lines.append("analysis input problems:")

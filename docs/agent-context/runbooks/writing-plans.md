@@ -278,13 +278,12 @@ Backstitch repos may use **both**:
 
 | Mechanism | What it governs | Scanner sees it? |
 |-----------|-----------------|------------------|
-| **Prose `Status:` header** on a spec file (e.g. `Status: Proposed`) | Human/agent adoption — "do not implement [INV-*] until activated" ([SC-2]) | **No** — unless paired with globs or `meta_spec_globs` |
+| **Prose `Status:` header** on a spec file (e.g. `Status: Proposed`) | Human/agent adoption — "do not implement this spec until activated" | **No** — unless paired with globs or `meta_spec_globs` |
 | **Glob rungs** (`planned_spec_globs`, `exploratory_spec_globs`) | Per-**file** scanner classification ([SC-3]) | **Yes** — `CODE_REF_PLANNED_SPEC` / `CODE_REF_EXPLORATORY_SPEC` warnings |
 
-Example: `docs/specs/05-backstitch-invariants.md` is `Status: Proposed` in
-prose but **active** to the scanner when rung globs are empty — hence
-`SPEC_SECTION_UNMAPPED` **infos**, not a glob warning. Plans must say which
-mechanism they use:
+Example: a future spec may be `Status: Proposed` in prose but **active** to
+the scanner when rung globs are empty, producing `SPEC_SECTION_UNMAPPED`
+**infos**, not a glob warning. Plans must say which mechanism they use:
 
 - **Whole-spec not yet adopted** — prose `Status: Proposed` + explicit
   out-of-scope for implementation ([SC-2]); accept info-level unmapped debt,

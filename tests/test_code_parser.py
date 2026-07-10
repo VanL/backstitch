@@ -5,6 +5,8 @@ Spec: docs/specs/02-backstitch-core.md [SC-4], [SC-10]
 
 from __future__ import annotations
 
+import gc
+
 from backstitch.code_parser import DocBlock, ParsedModule, parse_python_source
 
 
@@ -205,3 +207,46 @@ def test_runtime_version_independent_syntax_parses() -> None:
     )
     assert parsed.parse_ok
     assert parsed.owner_spans == (("Box", 1, 2), ("pep701", 6, 7))
+
+
+def test_parser_exposes_definition_and_physical_docstring_metadata() -> None:
+    parsed = _parse(
+        '''class Suite:
+    """Tests-invariant: [INV.TEST.1]"""
+
+    @case
+    async def test_async(self):
+        pass
+'''
+    )
+    suite, test_async = parsed.definitions
+    assert (suite.qualname, suite.kind, suite.parent_qualname) == (
+        "Suite",
+        "class",
+        None,
+    )
+    assert (
+        test_async.qualname,
+        test_async.kind,
+        test_async.parent_qualname,
+        test_async.attachment_line,
+    ) == ("Suite.test_async", "function", "Suite", 4)
+    candidate = parsed.doc_candidates[0]
+    assert candidate.owner_qualname == "Suite"
+    assert candidate.node_type == "string"
+    assert candidate.raw_text == '"""Tests-invariant: [INV.TEST.1]"""'
+
+
+def test_repeated_definition_metadata_parsing_keeps_native_nodes_isolated() -> None:
+    source = "\n\n".join(
+        (f'# Comment {index}\ndef function_{index}() -> None:\n    """Doc {index}."""')
+        for index in range(20)
+    ).encode("utf-8")
+
+    for _ in range(25):
+        parsed = parse_python_source(source)
+        assert len(parsed.definitions) == 20
+
+    gc.collect()
+    assert parsed.doc_candidates[-1].text == "Doc 19."
+    assert parsed.comment_nodes[-1].text == "Comment 19"
