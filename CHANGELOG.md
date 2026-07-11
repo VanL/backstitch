@@ -26,6 +26,10 @@
 - Changed local pytest policy to run the real live-LLM contract test by default.
   The hermetic CI matrix explicitly disables it; the optional cloud CI job is
   restricted to configured main-branch events with read-only permissions.
+- Stabilized the credential-free local-LLM release gate with a curated pair of
+  real invariant packets and request-level temperature and seed controls. The
+  release helper now rechecks publication, active workflows, and tag state
+  before a lease-guarded unpublished retag.
 - Updated GitHub Actions to current Node 24-compatible majors and disabled
   `setup-uv` caching across CI and release workflows to avoid post-job cache
   failures and warning noise.

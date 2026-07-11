@@ -176,3 +176,21 @@ the caller also supplies them; a lone test-root override can retain inherited
 code roots. Dogfood this rule with real declarations and binds. Otherwise a
 committed production/test code-root list can appear healthy while every bind is
 silently parsed outside test scope as soon as an override changes one side.
+
+## Verify effective requests, not stored model defaults (2026-07-10)
+
+A model manifest can say `temperature 0` while an OpenAI-compatible request
+omits temperature and the server applies a different request default. Stored
+configuration proves intent, not effective inference behavior. A release gate
+that depends on deterministic model behavior must inspect the bytes forwarded
+to the serving endpoint and assert each load-bearing control there. Keep those
+controls at a test-owned transport boundary when production provider behavior
+must remain neutral.
+
+## Retagging needs a fresh compare-and-swap boundary (2026-07-10)
+
+An unpublished tag observed before long release checks is stale state by the
+time mutation begins. Push the reviewed branch first, then recheck publication,
+active release workflows, and the remote tag. Delete only with a force-with-
+lease tied to that fresh tag SHA. Once PyPI accepts an artifact, retag rollback
+is no longer valid; the only safe path is a new fix-forward version.

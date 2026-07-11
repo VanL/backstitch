@@ -66,7 +66,12 @@ The helper:
 4. updates `pyproject.toml` and `backstitch/__init__.py` together
 5. runs `uv lock`, `backstitch --version`, and `uv build`
 6. commits changed release files
-7. creates or pushes the `vX.Y.Z` tag
+7. pushes the reviewed branch before tag mutation
+8. checks for an active Release Gate, then refreshes PyPI, GitHub Release, and
+   remote/local tag state after the long checks; publication, an active gate,
+   or a changed remote tag stops the release
+9. for `--retag`, deletes the observed unpublished remote tag with a
+   `--force-with-lease` compare-and-swap, then recreates and pushes `vX.Y.Z`
 
 The helper never publishes directly. Pushing the tag starts
 `.github/workflows/release-gate.yml`.
@@ -105,6 +110,12 @@ different trust roles and should stay explicit.
 Before a real tag is pushed, rollback is a normal revert of local changes. After
 a tag is pushed but before publication, delete the unpublished tag locally and
 from `origin` if the release must be aborted.
+
+`--retag` is branch-first and lease-guarded. A branch-push failure leaves the
+old tag untouched. A lease failure means the remote tag changed and requires a
+fresh state inspection. If replacement tag push fails after guarded deletion,
+recheck publication and tag state before retrying the tag push. Never delete a
+tag while an earlier Release Gate for it is active.
 
 After PyPI publication, the release is a one-way door. Do not replace or delete
 published artifacts as a normal rollback path; publish a newer version that

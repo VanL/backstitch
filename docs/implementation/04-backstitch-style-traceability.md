@@ -247,10 +247,13 @@ Boundary and rationale:
   `summarize-analysis`) as subprocesses through the production `default_adapter`.
   Nothing inside the live test is mocked; the only allowed skip is the explicit
   pytest policy being disabled.
-- **Bounded dogfood corpus.** It generates packets from this repository, then
-  selects a small deterministic subset (smallest matching packets from
-  `docs/specs/02-backstitch-core.md` owned by a semantic-analysis module) so the
-  proof stays a smoke/contract check, not an exhaustive review.
+- **Bounded dogfood corpus.** The cloud lane keeps the smallest matching
+  section packet from `docs/specs/02-backstitch-core.md` owned by a semantic-
+  analysis module. The local lane instead generates `--kind invariant` and
+  requires the ordered IDs `invariant::INV.RES.1` and `invariant::INV.RES.2`.
+  Each must occur once, have no packet warnings, and contain bounded target and
+  binding-test snippets. There is no smallest-packet fallback: corpus drift
+  fails before model listing or completion traffic.
 - **Structure, not wording.** Assertions are on the result contract: one row per
   packet, every row passes `validate_analysis_row`, and
   `load_analysis_results` reports zero errors. Cloud-provider runs also assert
@@ -262,21 +265,25 @@ Boundary and rationale:
 - **Local endpoint proof.** With `BACKSTITCH_LIVE_LLM_KIND=local`, the test writes
   a temporary `llm` `extra-openai-models.yaml` entry pointing
   `backstitch-local` at a loopback counting proxy. The proxy forwards to the
-  configured upstream Ollama endpoint, verifies `/v1/models` lists the served
-  model, and records only the `analyze` phase. The test requires a subprocess
-  transport probe through `default_adapter`, at least one non-error row, and
-  request bodies showing the selected packet IDs and served model. The CI
+  configured upstream Ollama endpoint. For every completion it replaces
+  endpoint defaults with request-level `temperature = 0` and seed `42`; it
+  records the exact forwarded bodies only during `analyze`. The test validates
+  the curated corpus before provider activity, verifies `/v1/models`, requires
+  a subprocess transport probe through `default_adapter`, at least one non-
+  error row, and analyze bodies showing the packet IDs, served model,
+  temperature, and seed. Invalid completion JSON is rejected locally with HTTP
+  400 and is never forwarded unseeded. The CI
   workflow uses `backstitch-local-model:latest` because Ollama exposes created
   models with an explicit tag on `/v1/models`. The committed manual-workflow
   base model is `llama3.2:3b`, bounded by the workflow Modelfile (`num_ctx
-  4096`, `num_predict 1024`, `temperature 0`); with the adapter's
-  constrained-decoding request (see "Constrained decoding when available"
-  above) that configuration passed the gate in 8 of 8 runs with zero
-  contained error rows on a 16 vCPU / 16 GB local Docker environment on
-  2026-07-06 (7 of 8 before JSON mode, when per-row syntax slips were the
-  dominant failure). The earlier 2 CPU / 8 GB timeouts were an artifact of
-  that simulation, and `qwen2.5:0.5b` was abandoned after producing total
-  invalid rows. Individual per-packet `error` rows are tolerated only for
+  4096`, `num_predict 1024`, stored `temperature 0`). The 2026-07-06 8/8
+  constrained-decoding result remains a historical observation, but not valid
+  evidence of effective temperature zero: the request omitted temperature and
+  pinned Ollama 0.31.1 applied `1.0`. The stabilized request-level controls and
+  curated invariant corpus passed the real local gate on 2026-07-10. The
+  earlier 2 CPU / 8 GB timeouts were an artifact of that simulation, and
+  `qwen2.5:0.5b` was abandoned after producing total invalid rows. Individual
+  per-packet `error` rows are tolerated only for
   non-strict local runs because content-level rejects (invalid evidence
   paths or fields) remain possible from small models even when syntax is
   decoder-enforced; `BACKSTITCH_LIVE_LLM_STRICT=1` restores the cloud-style
@@ -286,9 +293,10 @@ Boundary and rationale:
   pytest default. `.github/workflows/ci.yml` retains a cloud provider job behind
   `BACKSTITCH_CI_LIVE_LLM=1`, restricted to main-branch push or manual-main
   events with read-only repository permissions, then injects `OPENAI_API_KEY`
-  from repository secrets. `.github/workflows/local-llm.yml` is a separate manual
-  `workflow_dispatch` canary for Ollama; it is deliberately outside the
-  release-gated `CI` workflow and outside fork pull requests.
+  from repository secrets. `.github/workflows/local-llm.yml` is a separate
+  Ollama workflow on `workflow_dispatch` and pushes to `main`; the release gate
+  requires it green by commit SHA. It remains outside the `CI` workflow and
+  outside fork pull requests.
 
 Local usage and the cost/flake tradeoff are documented in `README.md`.
 

@@ -46,6 +46,7 @@ DEFAULT_LOCAL_LLM_CONTEXT_LENGTH: Final[str] = "4096"
 DEFAULT_LOCAL_LLM_NUM_PREDICT: Final[str] = "1024"
 LOCAL_LLM_PREWARM_TIMEOUT_SECONDS: Final[int] = 900
 LOCAL_LLM_PREWARM_POLL_SECONDS: Final[float] = 2.0
+LOCAL_LLM_INFERENCE_SEED: Final[int] = 42
 
 HERMETIC_TEST_COMMAND: Final[tuple[str, ...]] = (
     "uv",
@@ -570,6 +571,7 @@ def _prewarm_local_llm(env: dict[str, str]) -> None:
             "model": model,
             "messages": [{"role": "user", "content": "Reply with OK."}],
             "temperature": 0,
+            "seed": LOCAL_LLM_INFERENCE_SEED,
             "max_tokens": 4,
             "stream": False,
         },
@@ -803,6 +805,27 @@ def _url_exists(url: str) -> bool:
         raise RuntimeError(f"Unable to query {url}: {exc.reason}") from exc
 
 
+def _read_json_url(url: str) -> object:
+    """Read one JSON endpoint with the release helper's GitHub authentication."""
+
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "backstitch-release-helper",
+    }
+    if url.startswith(GITHUB_API_BASE):
+        headers.update(_github_api_auth_headers())
+    request = urllib_request.Request(url, headers=headers)
+    try:
+        with urllib_request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+            return json.load(response)
+    except urllib_error.HTTPError as exc:
+        raise RuntimeError(f"Unable to query {url}: HTTP {exc.code}") from exc
+    except urllib_error.URLError as exc:
+        raise RuntimeError(f"Unable to query {url}: {exc.reason}") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Unable to parse JSON from {url}: {exc}") from exc
+
+
 def github_release_exists(tag_name: str) -> bool:
     """Return whether GitHub already has a published release for the tag."""
 
@@ -824,6 +847,45 @@ def pypi_version_exists(package_name: str, version: str) -> bool:
     encoded_project = urllib_parse.quote(package_name, safe="")
     encoded_version = urllib_parse.quote(version, safe="")
     return _url_exists(f"{PYPI_API_BASE}/{encoded_project}/{encoded_version}/json")
+
+
+def active_release_gate_runs(
+    tag_name: str,
+    *,
+    target: ReleaseTarget = ROOT_RELEASE_TARGET,
+) -> tuple[str, ...]:
+    """Return active release-gate run URLs for a tag, if any."""
+
+    remote_url = origin_remote_url()
+    repo_slug = github_repo_slug_from_remote(remote_url)
+    if repo_slug is None:
+        raise RuntimeError(
+            f"Unable to determine GitHub repository from origin remote: {remote_url}"
+        )
+    workflow_name = Path(target.release_workflow).name
+    encoded_workflow = urllib_parse.quote(workflow_name, safe="")
+    query = urllib_parse.urlencode({"branch": tag_name, "per_page": 20})
+    url = (
+        f"{GITHUB_API_BASE}/repos/{repo_slug}/actions/workflows/"
+        f"{encoded_workflow}/runs?{query}"
+    )
+    payload = _read_json_url(url)
+    if not isinstance(payload, dict) or not isinstance(
+        payload.get("workflow_runs"), list
+    ):
+        raise RuntimeError(
+            f"GitHub workflow-runs response for {workflow_name} was malformed"
+        )
+    active: list[str] = []
+    for run in payload["workflow_runs"]:
+        if not isinstance(run, dict):
+            raise RuntimeError(
+                f"GitHub workflow-runs response for {workflow_name} was malformed"
+            )
+        if run.get("head_branch") != tag_name or run.get("status") == "completed":
+            continue
+        active.append(str(run.get("html_url") or run.get("id") or "unknown run"))
+    return tuple(active)
 
 
 def inspect_release_state(
@@ -857,6 +919,35 @@ def published_destinations(state: ReleaseState) -> str:
     if state.pypi_release_exists:
         destinations.append("PyPI publication")
     return " and ".join(destinations)
+
+
+def refresh_release_state_before_tag_mutation(
+    version: str,
+    *,
+    target: ReleaseTarget,
+    observed_remote_tag_commit: str | None,
+) -> ReleaseState:
+    """Recheck one-way-door and remote-tag state after long release checks."""
+
+    tag_name = target.tag_name(version)
+    active_runs = active_release_gate_runs(tag_name, target=target)
+    if active_runs:
+        raise RuntimeError(
+            f"A release gate is still active for {tag_name}: "
+            f"{', '.join(active_runs)}; refusing tag mutation."
+        )
+    state = inspect_release_state(version, target=target)
+    if state.published:
+        raise RuntimeError(
+            f"{target.display_name} version {version} was published during release "
+            f"preparation to {published_destinations(state)}; refusing tag mutation."
+        )
+    if state.remote_tag_commit != observed_remote_tag_commit:
+        raise RuntimeError(
+            f"Tag {state.tag_name} changed on origin during release preparation; "
+            "refusing tag mutation."
+        )
+    return state
 
 
 def resolve_target_version(
@@ -1024,9 +1115,19 @@ def _prepare_tag_action(
         run_command(("git", "tag", "-d", tag_name), dry_run=dry_run)
 
     if tag_action == "replace_remote":
+        assert state.remote_tag_commit is not None
+        run_command(
+            (
+                "git",
+                "push",
+                f"--force-with-lease=refs/tags/{tag_name}:{state.remote_tag_commit}",
+                "origin",
+                f":refs/tags/{tag_name}",
+            ),
+            dry_run=dry_run,
+        )
         if state.local_tag_commit is not None:
             run_command(("git", "tag", "-d", tag_name), dry_run=dry_run)
-        run_command(("git", "push", "--delete", "origin", tag_name), dry_run=dry_run)
 
     if tag_action in {"create", "replace_local", "replace_remote"}:
         run_command(("git", "tag", tag_name), dry_run=dry_run)
@@ -1158,8 +1259,8 @@ def main(argv: list[str] | None = None) -> int:
                 "dry-run: no release commit needed unless generated release files "
                 "change during post-update checks"
             )
-        _prepare_tag_action(release_state, tag_action=tag_action, dry_run=True)
         run_command(("git", "push"), dry_run=True)
+        _prepare_tag_action(release_state, tag_action=tag_action, dry_run=True)
         _push_tag_action(release_state, tag_action=tag_action, dry_run=True)
         print(
             "dry-run: next step is to wait for "
@@ -1210,8 +1311,19 @@ def main(argv: list[str] | None = None) -> int:
         allow_retag=args.retag,
     )
 
-    _prepare_tag_action(release_state, tag_action=tag_action, dry_run=False)
     run_command(("git", "push"))
+    release_state = refresh_release_state_before_tag_mutation(
+        target_version,
+        target=target,
+        observed_remote_tag_commit=release_state.remote_tag_commit,
+    )
+    tag_action = plan_tag_action(
+        release_state,
+        head_commit=head_commit,
+        version_changed=release_commit_created,
+        allow_retag=args.retag,
+    )
+    _prepare_tag_action(release_state, tag_action=tag_action, dry_run=False)
     _push_tag_action(release_state, tag_action=tag_action, dry_run=False)
 
     print(

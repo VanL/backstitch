@@ -19,10 +19,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # llama3.2:3b chosen from local bake-off evidence (2026-07-06, Apple-silicon
-  # Docker, 16 vCPU / 16 GB): bounded + temperature-0 it passed the
-  # non-total-failure contract in 7/8 runs at ~25-40 s per run. qwen2.5:0.5b
-  # (the prior low-cost default) produced total invalid rows.
+  # llama3.2:3b remains the bounded local canary. The 2026-07-06 bake-off
+  # recorded 7/8 passes, but a 2026-07-10 audit found Ollama's OpenAI route
+  # overrode the stored temperature-0 parameter with request default 1.0.
+  # tests/live/test_live_llm.py now applies temperature 0 + seed 42 on every
+  # forwarded completion request and asserts the effective analyze bodies.
   BACKSTITCH_LOCAL_LLM_BASE_MODEL: llama3.2:3b
   BACKSTITCH_LOCAL_LLM_SERVED_MODEL: backstitch-local-model:latest
   BACKSTITCH_LOCAL_LLM_ENDPOINT: http://127.0.0.1:11434/v1
@@ -101,6 +102,8 @@ jobs:
           FROM ${BACKSTITCH_LOCAL_LLM_BASE_MODEL}
           PARAMETER num_ctx ${OLLAMA_CONTEXT_LENGTH}
           PARAMETER num_predict ${OLLAMA_NUM_PREDICT}
+          # Defense-in-depth model metadata. The OpenAI-compatible route also
+          # requires request-level controls, enforced by the local test proxy.
           PARAMETER temperature 0
           EOF
           docker cp "${RUNNER_TEMP}/BackstitchModelfile" backstitch-llm:/tmp/BackstitchModelfile

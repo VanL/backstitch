@@ -103,6 +103,12 @@ tolerated by the lenient contract). Explicit strict-mode runs
 (`BACKSTITCH_LIVE_LLM_STRICT=1`) passed 4 of 5 across the session — one
 content-level reject — so strict remains non-required, per plan.
 
+Correction (2026-07-10): the Modelfile stored `temperature 0`, but the OpenAI-
+compatible request omitted temperature and Ollama 0.31.1 applied request
+default `1.0`. These counts remain valid historical outcomes for JSON mode,
+but are not temperature-zero measurements. The release-gate stabilization plan
+adds request-level temperature/seed controls and a curated invariant corpus.
+
 ## Independent Review
 
 Codex review of the initial diff: one P1 — the capability gate proved

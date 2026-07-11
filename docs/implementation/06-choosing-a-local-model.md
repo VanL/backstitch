@@ -12,9 +12,16 @@ trusting a row.**
 
 ## Measured rows
 
+Correction (2026-07-10): the 2026-07-06 Ollama measurements verified the
+Modelfile stored `temperature 0`, but the `llm` OpenAI request omitted the
+field. Pinned Ollama 0.31.1 therefore applied request default `1.0`, overriding
+the stored value. The pass counts remain historical observations, not
+temperature-zero measurements. The CI harness now puts temperature zero and a
+fixed seed on the forwarded request and verifies both fields.
+
 | Model (bounds) | Environment | Lenient gate | Strict | s/run | JSON constrained? | Notes |
 |---|---|---|---|---|---|---|
-| `llama3.2:3b` (num_ctx 4096, num_predict 1024, temp 0) | Docker Ollama, 16 vCPU / 16.8 GB VM, CPU-only (2026-07-06) | 8/8 | 4/5 | **yes** (Ollama enforces) | Rationales are boilerplate; classifications advisory-only. The CI lane's committed default. |
+| `llama3.2:3b` (num_ctx 4096, num_predict 1024; stored temp 0, effective temp 1.0) | Docker Ollama, 16 vCPU / 16.8 GB VM, CPU-only (2026-07-06) | 8/8 | 4/5 | **yes** (Ollama enforces) | Historical pre-stabilization row. Rationales are boilerplate; classifications advisory-only. The CI lane still uses this model with request-level temp 0 and seed 42. |
 | `qwen/qwen3-8b` (ctx 4096, temp 0) | LM Studio native/Metal, 128 GB host (2026-07-06) | 8/8 | 2/3 | **no** (LM Studio ignores it) | Valid JSON is the model's own discipline, not the decoder's. |
 | `qwen/qwen3-14b` (ctx 4096, temp 0) | LM Studio native/Metal, 128 GB host (2026-07-06) | 8/8 | 2/3 | **no** | Strict miss was a raw "not valid JSON" — the tail constrained decoding would have caught. |
 | `openai/gpt-oss-20b` (ctx 4096, temp 0) | LM Studio native/Metal, 128 GB host (2026-07-06) | 8/8 | **3/3** | **no** | Best of the sweep: cleanest JSON and fastest (MoE, ~3.6B active), even without enforcement. |
@@ -57,7 +64,8 @@ constrained decoding. Readable findings start around the 14B–20B class.
 ## Verified OpenAI-compatible servers
 
 - **Ollama** (`http://127.0.0.1:11434/v1`) — the CI lane
-  (`.github/workflows/local-llm.yml`, digest-pinned, Modelfile-bounded).
+  (`.github/workflows/local-llm.yml`, digest-pinned, Modelfile-bounded, with
+  request-level temperature and seed applied by the test proxy).
 - **LM Studio** (`http://127.0.0.1:1234/v1` by default) — native
   Metal-accelerated dev lane; model ids come from `GET /v1/models`, and
   context/temperature bounds are per-model load settings.

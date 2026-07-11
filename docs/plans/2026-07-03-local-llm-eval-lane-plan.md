@@ -1,12 +1,15 @@
 # Local LLM Evaluation Lane
 
-Status: implementation complete. The local live gate now passes on local
-hardware with the bounded `llama3.2:3b` default: on a 16 vCPU / 16.8 GB
-Docker Desktop VM (2026-07-06), `num_ctx 4096` / `num_predict 1024` /
-`temperature 0` passed 7 of 8 gate runs at ~25-40 s each. The earlier
-2 CPU / 8 GB timeouts were an artifact of that simulated floor, not of the
-models. The workflow stays manual `workflow_dispatch` until a dispatch on
-the actual GitHub target runner (public repo, 4 vCPU / 16 GB) passes. The
+Status: implementation complete and graduated to pushes on `main`; the Release
+Gate requires the local workflow green by commit SHA. The bounded
+`llama3.2:3b` default produced 7 passes in 8 runs at ~25-40 s each on a 16 vCPU
+/ 16.8 GB Docker Desktop VM (2026-07-06) with `num_ctx 4096` and
+`num_predict 1024`. Those runs stored `temperature 0` in the Modelfile, but the
+OpenAI-compatible request omitted it and Ollama 0.31.1 applied effective
+request default `1.0`; the counts are not temperature-zero evidence. The
+2026-07-10 stabilization now uses a curated invariant corpus and puts
+temperature zero plus seed 42 on each effective request. The earlier 2 CPU /
+8 GB timeouts were an artifact of that simulated floor, not of the models. The
 ~1-in-8 borderline-output flake originally named here was subsequently
 eliminated by adapter-level constrained decoding
 (`docs/plans/2026-07-06-analyze-json-mode-plan.md`): post-change, 8/8 gate
@@ -1457,3 +1460,11 @@ accept-and-close listener instead of assuming a closed host port.
   pass within the 15-minute step budget there, `main` goes red and releases
   block until the model/timeout/packet budget is tuned. Treat the first main
   run as the acceptance gate before relying on a release.
+- **Measurement correction and stabilized corpus (2026-07-10).** The 2026-07-06
+  bake-off verified stored Modelfile temperature zero, not effective request
+  temperature. `llm` omitted the field and Ollama 0.31.1 applied `1.0`; the
+  historical pass counts are therefore not temperature-zero evidence. The
+  release-gate stabilization plan supersedes smallest-first local selection:
+  the lane now curates `invariant::INV.RES.1` and `invariant::INV.RES.2`, applies
+  request temperature zero plus seed 42 in the local proxy, and asserts the
+  exact forwarded analyze bodies.

@@ -640,6 +640,25 @@ in credential-free automation contexts, including forked pull requests, **only
 after an explicit threat-model-gated workflow change**; it is not enabled on
 forked pull requests by default. This does not change `analyze`'s exit-code
 contract or the advisory status of semantic findings.
+
+A repository-owned local-endpoint automation gate must make its model input
+and inference controls explicit. It must generate invariant packets through
+the public `packets --kind invariant` command and select an ordered,
+repository-owned set of at least two real invariant packet IDs. Every selected
+packet must occur exactly once, have no packet warnings, and carry at least one
+qualifying target item and one qualifying binding-test item. A qualifying item
+has a nonblank path, a positive integer `start_line`, and a nonblank snippet.
+Invalid curated input fails before model listing or any completion request,
+with no smallest-packet or best-effort fallback.
+
+When an OpenAI-compatible endpoint supplies request defaults that override
+stored model parameters, the local test harness must put `temperature = 0` and
+a fixed nonzero seed on every completion request that reaches the endpoint. Its
+transport proof must record the forwarded analyze requests and assert the
+selected model, packet IDs, temperature, and seed. This tuning is test-owned:
+it must not add provider-specific behavior to Backstitch's production adapter
+or alter cloud/custom-provider calls.
+
 Live semantic findings remain advisory and must not create CI failure based on
 classification unless a separate policy explicitly changes this section.
 
@@ -1232,6 +1251,8 @@ _Implementation mapping_:
 - `docs/plans/2026-07-06-local-model-catalog-and-doctor-plan.md` (implementing)
 - `docs/plans/2026-07-06-backstitch-organization-refactor-plan.md` (implementing)
 - `docs/plans/2026-07-03-local-llm-eval-lane-plan.md` (implementing)
+- `docs/plans/2026-07-10-local-llm-release-gate-stabilization-plan.md`
+  (implementing)
 - `docs/plans/2026-07-03-live-llm-tests-plan.md` (implementing)
 - `docs/plans/2026-07-03-input-validation-invariants-plan.md` (implementing)
 - `docs/plans/2026-07-02-backstitch-four-way-reconciliation-plan.md` (implementing)

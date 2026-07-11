@@ -53,12 +53,17 @@ DEFAULT_BACKSTITCH_LOCAL_LLM_SERVED_MODEL = DEFAULT_BACKSTITCH_LOCAL_LLM_BASE_MO
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LIVE_SPEC = "docs/specs/02-backstitch-core.md"
 DEFAULT_LIVE_PACKETS = 1
-DEFAULT_LOCAL_LIVE_PACKETS = 2
 MAX_LIVE_PACKETS = 5
+LOCAL_LIVE_PACKET_IDS = (
+    "invariant::INV.RES.1",
+    "invariant::INV.RES.2",
+)
 DEFAULT_LOCAL_ENDPOINT = "http://127.0.0.1:11434/v1"
 LOCAL_HTTP_TIMEOUT_SECONDS = 20
 LOCAL_SUBPROCESS_TIMEOUT_SECONDS = 300
 LOCAL_ANALYZE_TIMEOUT_SECONDS = 900
+LOCAL_INFERENCE_TEMPERATURE = 0
+LOCAL_INFERENCE_SEED = 42
 # Conservative top of the plan's ~3-4 bytes/token range. Assumed, not measured:
 # a target-runner bake-off has not produced a K figure yet (recorded in the
 # plan); replace with the measured value when one exists.
@@ -78,7 +83,7 @@ def _local_prompt_byte_ceiling() -> int:
 
 @dataclass
 class _CountingProxy:
-    """Tiny stdlib proxy used only by the opt-in local live lane."""
+    """Local test proxy that applies and records effective inference controls."""
 
     upstream_endpoint: str
     server: Any | None = None
@@ -107,12 +112,25 @@ class _CountingProxy:
             def _forward(self) -> None:
                 length = int(self.headers.get("Content-Length", "0") or "0")
                 body = self.rfile.read(length) if length else b""
-                if (
-                    proxy.recording
-                    and self.command == "POST"
-                    and _is_completion_path(self.path)
-                ):
-                    proxy.request_bodies.append(body.decode("utf-8", errors="replace"))
+                is_completion = self.command == "POST" and _is_completion_path(
+                    self.path
+                )
+                if is_completion:
+                    try:
+                        payload = json.loads(body)
+                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        self._send_400(f"invalid completion request JSON: {exc}")
+                        return
+                    if not isinstance(payload, dict):
+                        self._send_400(
+                            "invalid completion request JSON: expected an object"
+                        )
+                        return
+                    payload["temperature"] = LOCAL_INFERENCE_TEMPERATURE
+                    payload["seed"] = LOCAL_INFERENCE_SEED
+                    body = json.dumps(payload).encode("utf-8")
+                    if proxy.recording:
+                        proxy.request_bodies.append(body.decode("utf-8"))
 
                 headers = {
                     key: value
@@ -152,6 +170,14 @@ class _CountingProxy:
             def _send_502(self, message: str) -> None:
                 payload = message.encode()
                 self.send_response(502)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def _send_400(self, message: str) -> None:
+                payload = message.encode()
+                self.send_response(400)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
@@ -301,9 +327,8 @@ def _select_live_packets(
     """Deterministically choose the bounded live subset from generated packets.
 
     There is no packet-filter subcommand and calling ``analyze_packets``
-    directly is forbidden, so the filtering lives here. Cloud runs keep the
-    historic semantic-module focus; local CPU runs may choose the smallest real
-    packets from the repository corpus to keep the transport canary bounded.
+    directly is forbidden, so the cloud filtering lives here. The local lane
+    uses ``_select_local_live_packets`` and a curated invariant corpus instead.
     """
 
     candidates: list[tuple[int, dict[str, object]]] = []
@@ -329,6 +354,60 @@ def _select_live_packets(
         key=lambda item: (len(json.dumps(item[1])), str(item[1]["packet_id"]), item[0])
     )
     return [packet for _, packet in candidates[:count]]
+
+
+def _select_local_live_packets(
+    all_packets_text: str,
+) -> list[dict[str, object]]:
+    """Select and validate the ordered invariant corpus owned by the local gate."""
+
+    by_id: dict[str, list[dict[str, object]]] = {}
+    for raw in all_packets_text.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        packet = json.loads(raw)
+        packet_id = str(packet.get("packet_id", ""))
+        by_id.setdefault(packet_id, []).append(packet)
+
+    selected: list[dict[str, object]] = []
+    for packet_id in LOCAL_LIVE_PACKET_IDS:
+        matches = by_id.get(packet_id, [])
+        assert len(matches) == 1, (
+            f"local live packet {packet_id!r} must occur exactly once; "
+            f"found {len(matches)}"
+        )
+        packet = matches[0]
+        assert packet.get("kind") == "invariant", (
+            f"local live packet {packet_id!r} must have kind 'invariant'"
+        )
+        assert not packet.get("packet_warnings"), (
+            f"local live packet {packet_id!r} must have no packet warnings"
+        )
+        assert _has_bounded_packet_evidence(packet.get("targets")), (
+            f"local live packet {packet_id!r} must have bounded target evidence"
+        )
+        assert _has_bounded_packet_evidence(packet.get("binding_tests")), (
+            f"local live packet {packet_id!r} must have bounded binding-test evidence"
+        )
+        selected.append(packet)
+    return selected
+
+
+def _has_bounded_packet_evidence(items: object) -> bool:
+    if not isinstance(items, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and isinstance(item.get("path"), str)
+        and bool(item["path"].strip())
+        and isinstance(item.get("start_line"), int)
+        and not isinstance(item["start_line"], bool)
+        and item["start_line"] > 0
+        and isinstance(item.get("snippet"), str)
+        and bool(item["snippet"].strip())
+        for item in items
+    )
 
 
 def _endpoint_origin(endpoint: str) -> str:
@@ -437,7 +516,8 @@ def _configure_local_llm(
         "model_name": served_model,
         "api_base": proxy.endpoint,
         # Honored only by llm's CLI; the Python API path `analyze` uses still
-        # issues streaming (SSE) requests, which the proxy relays untouched.
+        # issues streaming (SSE) requests. The proxy preserves streaming while
+        # adding the local gate's request-level temperature and seed controls.
         "can_stream": False,
     }
     (llm_home / "extra-openai-models.yaml").write_text(
@@ -511,7 +591,7 @@ def _assert_local_prompt_budget(subset: list[dict[str, object]]) -> None:
     assert not too_large, (
         f"selected local-live packets exceed the prompt byte ceiling ({ceiling} "
         f"bytes = OLLAMA_CONTEXT_LENGTH * {LOCAL_ASSUMED_BYTES_PER_TOKEN} assumed "
-        "bytes/token); shrink DEFAULT_LOCAL_LIVE_PACKETS or retune "
+        "bytes/token); curate smaller invariant packets or retune "
         f"OLLAMA_CONTEXT_LENGTH. Oversized: {too_large}"
     )
 
@@ -535,16 +615,27 @@ def _assert_analyze_hit_local_endpoint(
         f"local analyze requests did not include selected packet ids: {missing_ids}"
     )
     wrong_models: list[object] = []
+    wrong_controls: list[tuple[object, object]] = []
     for body in proxy.request_bodies:
         try:
             payload = json.loads(body)
         except json.JSONDecodeError as exc:
             pytest.fail(f"local analyze request body was not JSON: {exc}: {body}")
-        if isinstance(payload, dict) and payload.get("model") != served_model:
+        if not isinstance(payload, dict):
+            pytest.fail(f"local analyze request body was not an object: {payload!r}")
+        if payload.get("model") != served_model:
             wrong_models.append(payload.get("model"))
+        controls = (payload.get("temperature"), payload.get("seed"))
+        if controls != (LOCAL_INFERENCE_TEMPERATURE, LOCAL_INFERENCE_SEED):
+            wrong_controls.append(controls)
     assert not wrong_models, (
         f"local analyze used unexpected model values: {wrong_models}; "
         f"expected {served_model!r}"
+    )
+    assert not wrong_controls, (
+        f"local analyze used unexpected inference controls: {wrong_controls}; "
+        f"expected temperature={LOCAL_INFERENCE_TEMPERATURE}, "
+        f"seed={LOCAL_INFERENCE_SEED}"
     )
 
 
@@ -584,36 +675,31 @@ def _exercise_live_llm_analysis_contract(
         assert proxy is not None
         local_config = _configure_local_llm(tmp_path, monkeypatch, proxy)
 
-    live_model = _resolve_live_model()
-
-    if local_config is not None:
-        _assert_model_listed(local_config)
-        _assert_local_transport(local_config)
-
     all_packets = tmp_path / "all-packets.jsonl"
     live_packets = tmp_path / "live-packets.jsonl"
     analysis = tmp_path / "analysis.jsonl"
     report = tmp_path / "report.json"
 
     # 1. Generate the full packet corpus through the real CLI.
-    gen = _run_cli("packets", "--repo-root", ".", "--output", str(all_packets))
+    packet_args = ["packets", "--repo-root", "."]
+    if kind == "local":
+        packet_args.extend(("--kind", "invariant"))
+    packet_args.extend(("--output", str(all_packets)))
+    gen = _run_cli(*packet_args)
     _assert_no_traceback(gen, "packets")
     assert gen.returncode == 0, gen.stderr
     all_text = all_packets.read_text(encoding="utf-8")
     assert all_text.strip(), "packets produced empty output"
 
     # 2. Build the bounded live subset in-process and write it out.
-    packet_count = (
-        DEFAULT_LOCAL_LIVE_PACKETS if kind == "local" else DEFAULT_LIVE_PACKETS
-    )
-    subset = _select_live_packets(
-        all_text,
-        packet_count,
-        require_semantic_owner=kind != "local",
-    )
     if kind == "local":
-        assert subset, "local live LLM testing needs at least one generated packet"
+        subset = _select_local_live_packets(all_text)
     else:
+        subset = _select_live_packets(
+            all_text,
+            DEFAULT_LIVE_PACKETS,
+            require_semantic_owner=True,
+        )
         assert subset, (
             f"no packets from {LIVE_SPEC} own a semantic-analysis module; the "
             "dogfood corpus stopped exercising the live semantic path"
@@ -629,6 +715,13 @@ def _exercise_live_llm_analysis_contract(
     live_packets.write_text(
         "".join(json.dumps(packet) + "\n" for packet in subset), encoding="utf-8"
     )
+
+    # Curated corpus validity is a precondition for provider activity. Resolve
+    # and probe the model only after packet generation, selection, and bounds.
+    live_model = _resolve_live_model()
+    if local_config is not None:
+        _assert_model_listed(local_config)
+        _assert_local_transport(local_config)
 
     # 3. Real provider call through the public analyze command.
     if proxy is not None:

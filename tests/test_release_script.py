@@ -144,6 +144,45 @@ def test_local_llm_precheck_opts_in_to_local_provider_path(
     }
 
 
+def test_local_llm_prewarm_sends_deterministic_request_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[tuple[str, dict[str, object] | None]] = []
+    env = {
+        "BACKSTITCH_LOCAL_LLM_ENDPOINT": "http://127.0.0.1:11434/v1",
+        "BACKSTITCH_LOCAL_LLM_SERVED_MODEL": "backstitch-local-model:latest",
+    }
+
+    monkeypatch.setattr(release, "_prepare_ollama_model", lambda value: None)
+
+    def fake_json_api_request(
+        url: str,
+        *,
+        payload: dict[str, object] | None = None,
+        timeout: float,
+    ) -> dict[str, object]:
+        requests.append((url, payload))
+        if url.endswith("/models"):
+            return {"data": [{"id": "backstitch-local-model:latest"}]}
+        return {}
+
+    monkeypatch.setattr(release, "_json_api_request", fake_json_api_request)
+
+    release._prewarm_local_llm(env)
+
+    assert requests[-1] == (
+        "http://127.0.0.1:11434/v1/chat/completions",
+        {
+            "model": "backstitch-local-model:latest",
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+            "temperature": 0,
+            "seed": 42,
+            "max_tokens": 4,
+            "stream": False,
+        },
+    )
+
+
 def test_command_env_appends_pytest_addopts(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PYTEST_ADDOPTS", "-ra")
 
@@ -349,6 +388,301 @@ def test_all_target_dry_run_reuses_current_unpublished_version(
     assert "dry-run: current backstitch version 0.2.0 is unpublished" in output
     assert ("git", "tag", "v0.2.0") in commands
     assert ("git", "push", "origin", "v0.2.0") in commands
+
+
+def test_retag_dry_run_pushes_branch_before_leased_remote_deletion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+    old_commit = "b" * 40
+    new_commit = "a" * 40
+
+    def fake_run_command(
+        command: tuple[str, ...],
+        *,
+        cwd: Path = release.PROJECT_ROOT,
+        dry_run: bool = False,
+        env_overrides: dict[str, str] | None = None,
+    ) -> None:
+        assert dry_run is True
+        commands.append(command)
+
+    monkeypatch.setattr(release, "read_target_version", lambda target: "0.2.0")
+    monkeypatch.setattr(release, "is_dirty_worktree", lambda: False)
+    monkeypatch.setattr(
+        release,
+        "inspect_release_state",
+        lambda version, *, target: _state(local=old_commit, remote=old_commit),
+    )
+    monkeypatch.setattr(release, "current_head_commit", lambda: new_commit)
+    monkeypatch.setattr(release, "run_command", fake_run_command)
+
+    assert release.main(["all", "--dry-run", "--skip-checks", "--retag"]) == 0
+
+    branch_push = commands.index(("git", "push"))
+    leased_delete = commands.index(
+        (
+            "git",
+            "push",
+            f"--force-with-lease=refs/tags/v0.2.0:{old_commit}",
+            "origin",
+            ":refs/tags/v0.2.0",
+        )
+    )
+    assert branch_push < leased_delete
+
+
+@pytest.mark.parametrize(
+    ("published_state", "destination"),
+    [
+        (_state(local="b" * 40, remote="b" * 40, pypi=True), "PyPI"),
+        (_state(local="b" * 40, remote="b" * 40, github=True), "GitHub"),
+    ],
+)
+def test_real_release_rechecks_publication_after_branch_push(
+    monkeypatch: pytest.MonkeyPatch,
+    published_state: object,
+    destination: str,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+    old_commit = "b" * 40
+    new_commit = "a" * 40
+    states = iter(
+        (
+            _state(local=old_commit, remote=old_commit),
+            published_state,
+        )
+    )
+
+    monkeypatch.setattr(release, "read_target_version", lambda target: "0.2.0")
+    monkeypatch.setattr(release, "is_dirty_worktree", lambda: False)
+    monkeypatch.setattr(
+        release,
+        "inspect_release_state",
+        lambda version, *, target: next(states),
+    )
+    monkeypatch.setattr(release, "current_head_commit", lambda: new_commit)
+    monkeypatch.setattr(release, "build_postupdate_steps", tuple)
+    monkeypatch.setattr(release, "release_files_changed", lambda target: False)
+    monkeypatch.setattr(release, "_require_command", lambda command: None)
+    monkeypatch.setattr(
+        release,
+        "active_release_gate_runs",
+        lambda tag_name, *, target: (),
+    )
+    monkeypatch.setattr(
+        release,
+        "run_command",
+        lambda command, **kwargs: commands.append(command),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=f"published during release preparation.*{destination}",
+    ):
+        release.main(["all", "--skip-checks", "--retag"])
+
+    assert commands == [("git", "push")]
+
+
+def test_real_release_refuses_active_release_gate_before_tag_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+    old_commit = "b" * 40
+    new_commit = "a" * 40
+
+    monkeypatch.setattr(release, "read_target_version", lambda target: "0.2.0")
+    monkeypatch.setattr(release, "is_dirty_worktree", lambda: False)
+    monkeypatch.setattr(
+        release,
+        "inspect_release_state",
+        lambda version, *, target: _state(local=old_commit, remote=old_commit),
+    )
+    monkeypatch.setattr(release, "current_head_commit", lambda: new_commit)
+    monkeypatch.setattr(release, "build_postupdate_steps", tuple)
+    monkeypatch.setattr(release, "release_files_changed", lambda target: False)
+    monkeypatch.setattr(release, "_require_command", lambda command: None)
+    monkeypatch.setattr(
+        release,
+        "active_release_gate_runs",
+        lambda tag_name, *, target: ("https://github.test/actions/runs/123",),
+    )
+    monkeypatch.setattr(
+        release,
+        "run_command",
+        lambda command, **kwargs: commands.append(command),
+    )
+
+    with pytest.raises(RuntimeError, match="release gate is still active"):
+        release.main(["all", "--skip-checks", "--retag"])
+
+    assert commands == [("git", "push")]
+
+
+@pytest.mark.parametrize("local_tag_exists", [True, False])
+def test_real_retag_pushes_branch_then_replaces_observed_tag(
+    monkeypatch: pytest.MonkeyPatch,
+    local_tag_exists: bool,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+    old_commit = "b" * 40
+    new_commit = "a" * 40
+    initial_state = _state(local=old_commit, remote=old_commit)
+    refreshed_state = _state(
+        local=old_commit if local_tag_exists else None,
+        remote=old_commit,
+    )
+    states = iter((initial_state, refreshed_state))
+
+    monkeypatch.setattr(release, "read_target_version", lambda target: "0.2.0")
+    monkeypatch.setattr(release, "is_dirty_worktree", lambda: False)
+    monkeypatch.setattr(
+        release,
+        "inspect_release_state",
+        lambda version, *, target: next(states),
+    )
+    monkeypatch.setattr(release, "current_head_commit", lambda: new_commit)
+    monkeypatch.setattr(release, "build_postupdate_steps", tuple)
+    monkeypatch.setattr(release, "release_files_changed", lambda target: False)
+    monkeypatch.setattr(release, "_require_command", lambda command: None)
+    monkeypatch.setattr(
+        release,
+        "active_release_gate_runs",
+        lambda tag_name, *, target: (),
+    )
+    monkeypatch.setattr(
+        release,
+        "run_command",
+        lambda command, **kwargs: commands.append(command),
+    )
+
+    assert release.main(["all", "--skip-checks", "--retag"]) == 0
+
+    expected_commands = [
+        ("git", "push"),
+        (
+            "git",
+            "push",
+            f"--force-with-lease=refs/tags/v0.2.0:{old_commit}",
+            "origin",
+            ":refs/tags/v0.2.0",
+        ),
+    ]
+    if local_tag_exists:
+        expected_commands.append(("git", "tag", "-d", "v0.2.0"))
+    expected_commands.extend(
+        [
+            ("git", "tag", "v0.2.0"),
+            ("git", "push", "origin", "v0.2.0"),
+        ]
+    )
+    assert commands == expected_commands
+
+
+def test_active_release_gate_runs_returns_only_incomplete_tag_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_urls: list[str] = []
+    monkeypatch.setattr(
+        release,
+        "origin_remote_url",
+        lambda: "git@github.com:VanL/backstitch.git",
+    )
+
+    def fake_read_json_url(url: str) -> object:
+        seen_urls.append(url)
+        return {
+            "workflow_runs": [
+                {
+                    "head_branch": "v0.2.0",
+                    "status": "in_progress",
+                    "html_url": "https://github.test/runs/1",
+                },
+                {
+                    "head_branch": "v0.2.0",
+                    "status": "completed",
+                    "html_url": "https://github.test/runs/2",
+                },
+                {
+                    "head_branch": "v0.1.0",
+                    "status": "queued",
+                    "html_url": "https://github.test/runs/3",
+                },
+            ]
+        }
+
+    monkeypatch.setattr(release, "_read_json_url", fake_read_json_url)
+
+    assert release.active_release_gate_runs("v0.2.0") == ("https://github.test/runs/1",)
+    assert "/actions/workflows/release-gate.yml/runs?" in seen_urls[0]
+    assert "branch=v0.2.0" in seen_urls[0]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [[], {}, {"workflow_runs": ["not-an-object"]}],
+)
+def test_active_release_gate_runs_rejects_malformed_responses(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: object,
+) -> None:
+    monkeypatch.setattr(
+        release,
+        "origin_remote_url",
+        lambda: "git@github.com:VanL/backstitch.git",
+    )
+    monkeypatch.setattr(release, "_read_json_url", lambda url: payload)
+
+    with pytest.raises(RuntimeError, match="workflow-runs response.*malformed"):
+        release.active_release_gate_runs("v0.2.0")
+
+
+def test_refresh_release_state_refuses_changed_remote_tag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        release,
+        "active_release_gate_runs",
+        lambda tag_name, *, target: (),
+    )
+    monkeypatch.setattr(
+        release,
+        "inspect_release_state",
+        lambda version, *, target: _state(remote="c" * 40),
+    )
+
+    with pytest.raises(RuntimeError, match="changed on origin"):
+        release.refresh_release_state_before_tag_mutation(
+            "0.2.0",
+            target=release.ROOT_RELEASE_TARGET,
+            observed_remote_tag_commit="b" * 40,
+        )
+
+
+def test_refresh_release_state_checks_active_gate_before_publication_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_active_runs(tag_name: str, *, target: object) -> tuple[()]:
+        calls.append("active-runs")
+        return ()
+
+    def fake_inspect(version: str, *, target: object) -> object:
+        calls.append("release-state")
+        return _state(remote="b" * 40)
+
+    monkeypatch.setattr(release, "active_release_gate_runs", fake_active_runs)
+    monkeypatch.setattr(release, "inspect_release_state", fake_inspect)
+
+    release.refresh_release_state_before_tag_mutation(
+        "0.2.0",
+        target=release.ROOT_RELEASE_TARGET,
+        observed_remote_tag_commit="b" * 40,
+    )
+
+    assert calls == ["active-runs", "release-state"]
 
 
 def test_capture_command_preserves_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
