@@ -659,6 +659,20 @@ selected model, packet IDs, temperature, and seed. This tuning is test-owned:
 it must not add provider-specific behavior to Backstitch's production adapter
 or alter cloud/custom-provider calls.
 
+When the pinned local endpoint does not reliably enforce structured output on
+streaming requests, the test-owned proxy must derive a strict JSON Schema from
+each selected packet's exact identity, result vocabulary, and shown evidence
+bounds. It must forward exactly one nonstreaming analyze request per packet,
+then relay the returned assistant content unchanged in the streaming envelope
+expected by the production adapter. The proxy must not repair or semantically
+validate model output; the ordinary result parser remains authoritative, and
+total invalid output still fails. The schema and request must keep explanation,
+evidence-count, and output-token bounds explicit. Malformed packet prompts or upstream
+completion envelopes fail locally without fallback traffic. Before replacing
+the format, the proxy must prove the production adapter requested
+`json_object`; a missing format or any duplicate packet attempt is rejected
+before upstream forwarding or recording.
+
 Live semantic findings remain advisory and must not create CI failure based on
 classification unless a separate policy explicitly changes this section.
 

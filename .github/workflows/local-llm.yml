@@ -23,7 +23,9 @@ env:
   # recorded 7/8 passes, but a 2026-07-10 audit found Ollama's OpenAI route
   # overrode the stored temperature-0 parameter with request default 1.0.
   # tests/live/test_live_llm.py now applies temperature 0 + seed 42 on every
-  # forwarded completion request and asserts the effective analyze bodies.
+  # forwarded completion request. Analyze also uses packet-bounded schema
+  # decoding on a test-owned nonstream/SSE bridge, with the production parser
+  # still deciding whether the unchanged assistant content is valid.
   BACKSTITCH_LOCAL_LLM_BASE_MODEL: llama3.2:3b
   BACKSTITCH_LOCAL_LLM_SERVED_MODEL: backstitch-local-model:latest
   BACKSTITCH_LOCAL_LLM_ENDPOINT: http://127.0.0.1:11434/v1

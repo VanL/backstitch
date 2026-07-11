@@ -27,7 +27,8 @@
   The hermetic CI matrix explicitly disables it; the optional cloud CI job is
   restricted to configured main-branch events with read-only permissions.
 - Stabilized the credential-free local-LLM release gate with a curated pair of
-  real invariant packets and request-level temperature and seed controls. The
+  real invariant packets, request-level temperature and seed controls, and
+  packet-bounded schema decoding across a test-owned nonstream/SSE bridge. The
   release helper now rechecks publication, active workflows, and tag state
   before a lease-guarded unpublished retag.
 - Updated GitHub Actions to current Node 24-compatible majors and disabled

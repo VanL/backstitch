@@ -267,20 +267,36 @@ Boundary and rationale:
   `backstitch-local` at a loopback counting proxy. The proxy forwards to the
   configured upstream Ollama endpoint. For every completion it replaces
   endpoint defaults with request-level `temperature = 0` and seed `42`; it
-  records the exact forwarded bodies only during `analyze`. The test validates
-  the curated corpus before provider activity, verifies `/v1/models`, requires
-  a subprocess transport probe through `default_adapter`, at least one non-
-  error row, and analyze bodies showing the packet IDs, served model,
-  temperature, and seed. Invalid completion JSON is rejected locally with HTTP
-  400 and is never forwarded unseeded. The CI
+  records the exact forwarded bodies only during `analyze`. Ollama does not
+  reliably enforce JSON Schema on the adapter's streaming route across CPU
+  implementations, so recorded analyze calls cross a test-owned bridge: the
+  proxy derives a strict schema from the real packet's result vocabulary and
+  evidence bounds, forwards exactly one nonstreaming request, then relays the
+  assistant content unchanged as SSE to `default_adapter`. The ordinary result
+  parser remains the sole validator; the proxy never repairs model output.
+  Summary and rationale length, evidence count, and request output are bounded
+  (`48`, `72`, one item, and `128` tokens respectively) so constrained
+  nonstream generation cannot run to the served model's broader 1024-token
+  ceiling.
+  Before replacement, the proxy requires the adapter's original
+  `json_object`; it tracks packet IDs and rejects SDK retries or adapter
+  compatibility fallback before a second upstream request.
+  The test validates the curated corpus before provider activity, verifies
+  `/v1/models`, requires a subprocess transport probe through
+  `default_adapter`, at least one non-error row, and exact analyze bodies
+  showing the packet IDs, served model, temperature, seed, nonstream mode, and
+  packet-bounded schema. Invalid completion JSON, malformed packet prompts,
+  malformed upstream envelopes, and duplicate packet attempts fail locally
+  without additional upstream traffic. The CI
   workflow uses `backstitch-local-model:latest` because Ollama exposes created
   models with an explicit tag on `/v1/models`. The committed manual-workflow
   base model is `llama3.2:3b`, bounded by the workflow Modelfile (`num_ctx
   4096`, `num_predict 1024`, stored `temperature 0`). The 2026-07-06 8/8
   constrained-decoding result remains a historical observation, but not valid
   evidence of effective temperature zero: the request omitted temperature and
-  pinned Ollama 0.31.1 applied `1.0`. The stabilized request-level controls and
-  curated invariant corpus passed the real local gate on 2026-07-10. The
+  pinned Ollama 0.31.1 applied `1.0`. The stabilized request-level controls,
+  curated invariant corpus, and schema bridge passed the real local gate on
+  2026-07-10. The
   earlier 2 CPU / 8 GB timeouts were an artifact of that simulation, and
   `qwen2.5:0.5b` was abandoned after producing total invalid rows. Individual
   per-packet `error` rows are tolerated only for

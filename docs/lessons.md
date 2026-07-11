@@ -194,3 +194,15 @@ time mutation begins. Push the reviewed branch first, then recheck publication,
 active release workflows, and the remote tag. Delete only with a force-with-
 lease tied to that fresh tag SHA. Once PyPI accepts an artifact, retag rollback
 is no longer valid; the only safe path is a new fix-forward version.
+
+## Fixed sampling inputs do not guarantee cross-hardware model output (2026-07-10)
+
+Temperature zero and a fixed seed make the request explicit, but quantized
+inference can still choose different near-tie tokens across ARM and x86 kernels.
+A small-model CI gate must not depend on lucky formatting from one machine.
+Constrain the output properties the deterministic validator already requires
+at a test-owned serving boundary, then leave the ordinary parser as final
+authority. If a server enforces schemas only for nonstreaming requests, bridge
+that response back to the unchanged streaming client without repairing the
+assistant content. Transport control, decoder control, and semantic validation
+are three distinct proofs.

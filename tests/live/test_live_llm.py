@@ -34,8 +34,12 @@ from typing import Any
 
 import pytest
 
-from backstitch.analysis_llm import build_prompt
-from backstitch.analysis_results import load_analysis_results, validate_analysis_row
+from backstitch.analysis_llm import _packet_evidence_bounds, build_prompt
+from backstitch.analysis_results import (
+    INVARIANT_CLASSIFICATIONS,
+    load_analysis_results,
+    validate_analysis_row,
+)
 
 # The root collection hook applies policy skips after collecting this marker,
 # so a disabled direct invocation reports one skip instead of exiting 5.
@@ -64,6 +68,7 @@ LOCAL_SUBPROCESS_TIMEOUT_SECONDS = 300
 LOCAL_ANALYZE_TIMEOUT_SECONDS = 900
 LOCAL_INFERENCE_TEMPERATURE = 0
 LOCAL_INFERENCE_SEED = 42
+LOCAL_ANALYZE_MAX_TOKENS = 128
 # Conservative top of the plan's ~3-4 bytes/token range. Assumed, not measured:
 # a target-runner bake-off has not produced a K figure yet (recorded in the
 # plan); replace with the measured value when one exists.
@@ -89,6 +94,7 @@ class _CountingProxy:
     server: Any | None = None
     thread: Any | None = None
     request_bodies: list[str] = field(default_factory=list)
+    analyze_packet_ids: set[str] = field(default_factory=set)
     recording: bool = False
 
     def __enter__(self) -> _CountingProxy:
@@ -112,6 +118,8 @@ class _CountingProxy:
             def _forward(self) -> None:
                 length = int(self.headers.get("Content-Length", "0") or "0")
                 body = self.rfile.read(length) if length else b""
+                bridge_analyze_response = False
+                analyze_model = ""
                 is_completion = self.command == "POST" and _is_completion_path(
                     self.path
                 )
@@ -128,6 +136,40 @@ class _CountingProxy:
                         return
                     payload["temperature"] = LOCAL_INFERENCE_TEMPERATURE
                     payload["seed"] = LOCAL_INFERENCE_SEED
+                    if proxy.recording:
+                        if payload.get("stream") is not True:
+                            self._send_400(
+                                "local analyze request must use the adapter's "
+                                "streaming path"
+                            )
+                            return
+                        if payload.get("response_format") != {"type": "json_object"}:
+                            self._send_400(
+                                "local analyze request must arrive with the "
+                                "adapter's json_object response format"
+                            )
+                            return
+                        try:
+                            packet = _local_analyze_packet(payload)
+                            packet_id = str(packet["packet_id"])
+                            if packet_id in proxy.analyze_packet_ids:
+                                self._send_400(
+                                    "local analyze packet may be forwarded upstream "
+                                    f"only once: {packet_id}"
+                                )
+                                return
+                            payload["response_format"] = _local_analyze_response_format(
+                                payload
+                            )
+                        except ValueError as exc:
+                            self._send_400(str(exc))
+                            return
+                        payload["stream"] = False
+                        payload.pop("stream_options", None)
+                        payload["max_tokens"] = LOCAL_ANALYZE_MAX_TOKENS
+                        bridge_analyze_response = True
+                        analyze_model = str(payload.get("model", ""))
+                        proxy.analyze_packet_ids.add(packet_id)
                     body = json.dumps(payload).encode("utf-8")
                     if proxy.recording:
                         proxy.request_bodies.append(body.decode("utf-8"))
@@ -150,9 +192,16 @@ class _CountingProxy:
                         with urllib.request.urlopen(
                             request, timeout=LOCAL_ANALYZE_TIMEOUT_SECONDS
                         ) as response:
-                            self._send_streaming_response(
-                                response.status, response.headers.items(), response
-                            )
+                            if bridge_analyze_response:
+                                self._send_json_completion_as_sse(
+                                    response.status,
+                                    response,
+                                    model=analyze_model,
+                                )
+                            else:
+                                self._send_streaming_response(
+                                    response.status, response.headers.items(), response
+                                )
                     except urllib.error.HTTPError as exc:
                         self._send_streaming_response(
                             exc.code, exc.headers.items(), exc
@@ -209,6 +258,62 @@ class _CountingProxy:
                     self.wfile.flush()
                 self.close_connection = True
 
+            def _send_json_completion_as_sse(
+                self,
+                status: int,
+                source: Any,
+                *,
+                model: str,
+            ) -> None:
+                if status < 200 or status >= 300:
+                    raise ValueError(
+                        f"local analyze upstream returned unexpected HTTP {status}"
+                    )
+                raw = source.read()
+                try:
+                    payload = json.loads(raw)
+                    content = payload["choices"][0]["message"]["content"]
+                except (
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                    KeyError,
+                    IndexError,
+                    TypeError,
+                ) as exc:
+                    raise ValueError(
+                        "local analyze upstream returned a malformed completion"
+                    ) from exc
+                if not isinstance(content, str):
+                    raise ValueError(
+                        "local analyze upstream returned a malformed completion"
+                    )
+                chunk = {
+                    "id": "chatcmpl-backstitch-local",
+                    "object": "chat.completion.chunk",
+                    "created": 0,
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": content},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                }
+                events = (
+                    f"data: {json.dumps(chunk)}\n\n".encode(),
+                    b"data: [DONE]\n\n",
+                )
+                self._response_started = True
+                self.send_response(status)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                for event in events:
+                    self.wfile.write(event)
+                    self.wfile.flush()
+                self.close_connection = True
+
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -237,6 +342,7 @@ class _CountingProxy:
 
     def start_analyze_phase(self) -> None:
         self.request_bodies.clear()
+        self.analyze_packet_ids.clear()
         self.recording = True
 
     def stop_analyze_phase(self) -> None:
@@ -408,6 +514,113 @@ def _has_bounded_packet_evidence(items: object) -> bool:
         and bool(item["snippet"].strip())
         for item in items
     )
+
+
+def _local_analyze_packet(payload: dict[str, object]) -> dict[str, object]:
+    """Extract exactly one curated invariant packet from an analyze request."""
+
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        raise ValueError("local analyze request must contain one invariant packet")
+    candidates: list[dict[str, object]] = []
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        _, separator, packet_text = content.rpartition("\n\n")
+        if not separator:
+            continue
+        try:
+            packet = json.loads(packet_text)
+        except json.JSONDecodeError:
+            continue
+        if (
+            isinstance(packet, dict)
+            and packet.get("kind") == "invariant"
+            and packet.get("packet_id") in LOCAL_LIVE_PACKET_IDS
+        ):
+            candidates.append(packet)
+    if len(candidates) != 1:
+        raise ValueError("local analyze request must contain one invariant packet")
+    return candidates[0]
+
+
+def _local_evidence_schema(packet: dict[str, object]) -> list[dict[str, object]]:
+    variants: list[dict[str, object]] = []
+    for path, ranges in _packet_evidence_bounds(packet).items():
+        for start_line, end_line in ranges:
+            variants.append(
+                {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "const": path},
+                        "line": {
+                            "type": "integer",
+                            "minimum": start_line,
+                            "maximum": end_line,
+                        },
+                    },
+                    "required": ["path", "line"],
+                    "additionalProperties": False,
+                }
+            )
+    return variants
+
+
+def _local_analyze_response_format(
+    payload: dict[str, object],
+) -> dict[str, object]:
+    """Build strict test-owned decoding bounds from the request's real packet."""
+
+    packet = _local_analyze_packet(payload)
+    evidence_variants = _local_evidence_schema(packet)
+    if not evidence_variants:
+        raise ValueError("local analyze invariant packet has no bounded evidence")
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "backstitch_invariant_analysis",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "packet_id": {
+                        "type": "string",
+                        "const": packet["packet_id"],
+                    },
+                    "classification": {
+                        "type": "string",
+                        "enum": list(INVARIANT_CLASSIFICATIONS),
+                    },
+                    "summary": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 48,
+                    },
+                    "rationale": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 72,
+                    },
+                    "evidence": {
+                        "type": "array",
+                        "maxItems": 1,
+                        "items": {"anyOf": evidence_variants},
+                    },
+                },
+                "required": [
+                    "packet_id",
+                    "classification",
+                    "summary",
+                    "rationale",
+                    "evidence",
+                ],
+                "additionalProperties": False,
+            },
+        },
+    }
 
 
 def _endpoint_origin(endpoint: str) -> str:
@@ -602,20 +815,16 @@ def _assert_analyze_hit_local_endpoint(
     expected_packet_ids: set[str],
     served_model: str,
 ) -> None:
-    assert len(proxy.request_bodies) >= len(expected_packet_ids), (
-        "local analyze did not send enough completion requests through the "
-        f"counting proxy: {len(proxy.request_bodies)} requests for "
-        f"{len(expected_packet_ids)} packets"
+    assert len(proxy.request_bodies) == len(expected_packet_ids), (
+        "local analyze must send exactly one analyze request per selected packet: "
+        f"{len(proxy.request_bodies)} requests for {len(expected_packet_ids)} packets"
     )
-    joined = "\n".join(proxy.request_bodies)
-    missing_ids = sorted(
-        packet_id for packet_id in expected_packet_ids if packet_id not in joined
-    )
-    assert not missing_ids, (
-        f"local analyze requests did not include selected packet ids: {missing_ids}"
-    )
+    request_packet_ids: list[str] = []
     wrong_models: list[object] = []
     wrong_controls: list[tuple[object, object]] = []
+    wrong_stream_modes: list[tuple[object, object]] = []
+    wrong_token_limits: list[object] = []
+    wrong_response_formats: list[object] = []
     for body in proxy.request_bodies:
         try:
             payload = json.loads(body)
@@ -625,9 +834,22 @@ def _assert_analyze_hit_local_endpoint(
             pytest.fail(f"local analyze request body was not an object: {payload!r}")
         if payload.get("model") != served_model:
             wrong_models.append(payload.get("model"))
+        try:
+            packet = _local_analyze_packet(payload)
+        except ValueError as exc:
+            pytest.fail(f"local analyze request did not contain one packet: {exc}")
+        request_packet_ids.append(str(packet["packet_id"]))
+        expected_response_format = _local_analyze_response_format(payload)
+        if payload.get("response_format") != expected_response_format:
+            wrong_response_formats.append(payload.get("response_format"))
         controls = (payload.get("temperature"), payload.get("seed"))
         if controls != (LOCAL_INFERENCE_TEMPERATURE, LOCAL_INFERENCE_SEED):
             wrong_controls.append(controls)
+        stream_mode = (payload.get("stream"), payload.get("stream_options"))
+        if stream_mode != (False, None):
+            wrong_stream_modes.append(stream_mode)
+        if payload.get("max_tokens") != LOCAL_ANALYZE_MAX_TOKENS:
+            wrong_token_limits.append(payload.get("max_tokens"))
     assert not wrong_models, (
         f"local analyze used unexpected model values: {wrong_models}; "
         f"expected {served_model!r}"
@@ -636,6 +858,22 @@ def _assert_analyze_hit_local_endpoint(
         f"local analyze used unexpected inference controls: {wrong_controls}; "
         f"expected temperature={LOCAL_INFERENCE_TEMPERATURE}, "
         f"seed={LOCAL_INFERENCE_SEED}"
+    )
+    assert not wrong_stream_modes, (
+        "local analyze upstream requests did not use the nonstream schema path: "
+        f"{wrong_stream_modes}"
+    )
+    assert not wrong_token_limits, (
+        "local analyze upstream requests used unexpected token limits: "
+        f"{wrong_token_limits}"
+    )
+    assert sorted(request_packet_ids) == sorted(expected_packet_ids), (
+        "local analyze requests must contain each selected packet exactly once; "
+        f"saw {request_packet_ids}"
+    )
+    assert not wrong_response_formats, (
+        "local analyze requests used unexpected response schemas: "
+        f"{wrong_response_formats}"
     )
 
 

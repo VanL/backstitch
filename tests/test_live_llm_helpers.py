@@ -13,6 +13,9 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+from openai import OpenAIError
+
+from backstitch.analysis_llm import default_adapter
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,8 +34,63 @@ def _load_live_module() -> ModuleType:
 live_llm = _load_live_module()
 
 
+def _local_packet(packet_id: str) -> dict[str, object]:
+    suffix = packet_id.rsplit(".", 1)[-1]
+    return {
+        "packet_id": packet_id,
+        "kind": "invariant",
+        "targets": [
+            {"path": "backstitch/resolver.py", "start_line": 10, "snippet": "x"}
+        ],
+        "binding_tests": [
+            {
+                "path": f"tests/test_resolver_{suffix}.py",
+                "start_line": 20,
+                "snippet": "assert x",
+            }
+        ],
+    }
+
+
+def _recorded_local_payload(
+    packet_id: str,
+    *,
+    temperature: int = 0,
+) -> dict[str, object]:
+    packet = _local_packet(packet_id)
+    payload: dict[str, object] = {
+        "model": "backstitch-local-model:latest",
+        "messages": [{"role": "user", "content": "review\n\n" + json.dumps(packet)}],
+        "temperature": temperature,
+        "seed": 42,
+        "stream": False,
+        "max_tokens": 128,
+    }
+    payload["response_format"] = live_llm._local_analyze_response_format(payload)
+    return payload
+
+
 def test_local_llm_counting_proxy_forwards_and_records_completion_requests() -> None:
     seen_upstream_bodies: list[str] = []
+    assistant_content = '  first\n"quoted" \\ slash ☃\nlast  '
+    packet = {
+        "packet_id": "invariant::INV.RES.1",
+        "kind": "invariant",
+        "targets": [
+            {
+                "path": "backstitch/resolver.py",
+                "start_line": 798,
+                "snippet": "line one\nline two",
+            }
+        ],
+        "binding_tests": [
+            {
+                "path": "tests/test_resolver.py",
+                "start_line": 482,
+                "snippet": "assert first\nassert second",
+            }
+        ],
+    }
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib hook name
@@ -49,7 +107,9 @@ def test_local_llm_counting_proxy_forwards_and_records_completion_requests() -> 
             length = int(self.headers.get("Content-Length", "0") or "0")
             body = self.rfile.read(length).decode()
             seen_upstream_bodies.append(body)
-            payload = json.dumps({"choices": [{"message": {"content": "OK"}}]}).encode()
+            payload = json.dumps(
+                {"choices": [{"message": {"content": assistant_content}}]}
+            ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -75,10 +135,13 @@ def test_local_llm_counting_proxy_forwards_and_records_completion_requests() -> 
                 "model": "backstitch-local-model",
                 "temperature": 1,
                 "seed": 7,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+                "response_format": {"type": "json_object"},
                 "messages": [
                     {
                         "role": "user",
-                        "content": "packet docs/specs/02-backstitch-core.md#SC-7",
+                        "content": "review this invariant\n\n" + json.dumps(packet),
                     }
                 ],
             }
@@ -108,13 +171,111 @@ def test_local_llm_counting_proxy_forwards_and_records_completion_requests() -> 
             proxy.start_analyze_phase()
             response = urllib.request.urlopen(request, timeout=5)  # noqa: S310
             assert response.status == 200
+            relayed = response.read()
             proxy.stop_analyze_phase()
 
+            expected_analyze_payload = {
+                **{
+                    key: value
+                    for key, value in expected_payload.items()
+                    if key != "stream_options"
+                },
+                "stream": False,
+                "max_tokens": 128,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "backstitch_invariant_analysis",
+                        "strict": True,
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "packet_id": {
+                                    "type": "string",
+                                    "const": "invariant::INV.RES.1",
+                                },
+                                "classification": {
+                                    "type": "string",
+                                    "enum": [
+                                        "ok",
+                                        "weak_binding",
+                                        "confirmed_mismatch",
+                                        "probable_mismatch",
+                                        "ambiguous",
+                                    ],
+                                },
+                                "summary": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 48,
+                                },
+                                "rationale": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 72,
+                                },
+                                "evidence": {
+                                    "type": "array",
+                                    "maxItems": 1,
+                                    "items": {
+                                        "anyOf": [
+                                            {
+                                                "type": "object",
+                                                "properties": {
+                                                    "path": {
+                                                        "type": "string",
+                                                        "const": "backstitch/resolver.py",
+                                                    },
+                                                    "line": {
+                                                        "type": "integer",
+                                                        "minimum": 798,
+                                                        "maximum": 799,
+                                                    },
+                                                },
+                                                "required": ["path", "line"],
+                                                "additionalProperties": False,
+                                            },
+                                            {
+                                                "type": "object",
+                                                "properties": {
+                                                    "path": {
+                                                        "type": "string",
+                                                        "const": "tests/test_resolver.py",
+                                                    },
+                                                    "line": {
+                                                        "type": "integer",
+                                                        "minimum": 482,
+                                                        "maximum": 483,
+                                                    },
+                                                },
+                                                "required": ["path", "line"],
+                                                "additionalProperties": False,
+                                            },
+                                        ]
+                                    },
+                                },
+                            },
+                            "required": [
+                                "packet_id",
+                                "classification",
+                                "summary",
+                                "rationale",
+                                "evidence",
+                            ],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+            }
+            first_event = relayed.split(b"\n\n", 1)[0]
+            chunk = json.loads(first_event.removeprefix(b"data: "))
+            assert chunk["choices"][0]["delta"]["content"] == assistant_content
+            assert relayed.endswith(b"data: [DONE]\n\n")
             assert [json.loads(body) for body in seen_upstream_bodies] == [
-                expected_payload
+                expected_analyze_payload
             ]
             assert [json.loads(body) for body in proxy.request_bodies] == [
-                expected_payload
+                expected_analyze_payload
             ]
     finally:
         server.shutdown()
@@ -164,10 +325,215 @@ def test_local_llm_counting_proxy_rejects_invalid_completion_json(
         thread.join(timeout=5)
 
 
+def test_local_llm_counting_proxy_rejects_analyze_without_one_packet_prompt() -> None:
+    upstream_calls = 0
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - stdlib hook name
+            nonlocal upstream_calls
+            upstream_calls += 1
+            self.send_response(500)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with live_llm._CountingProxy(
+            f"http://127.0.0.1:{server.server_port}/v1"
+        ) as proxy:
+            proxy.start_analyze_phase()
+            request = urllib.request.Request(
+                f"{proxy.endpoint}/chat/completions",
+                data=json.dumps(
+                    {
+                        "model": "backstitch-local-model",
+                        "stream": True,
+                        "response_format": {"type": "json_object"},
+                        "messages": [{"role": "user", "content": "no packet"}],
+                    }
+                ).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with pytest.raises(urllib.error.HTTPError) as excinfo:
+                urllib.request.urlopen(request, timeout=5)  # noqa: S310
+            assert excinfo.value.code == 400
+            assert b"one invariant packet" in excinfo.value.read()
+            assert upstream_calls == 0
+            assert proxy.request_bodies == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "response_format",
+    [None, {"type": "json_schema"}],
+)
+def test_local_llm_counting_proxy_requires_adapter_json_object_before_schema(
+    response_format: object,
+) -> None:
+    upstream_calls = 0
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - stdlib hook name
+            nonlocal upstream_calls
+            upstream_calls += 1
+            self.send_response(500)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with live_llm._CountingProxy(
+            f"http://127.0.0.1:{server.server_port}/v1"
+        ) as proxy:
+            proxy.start_analyze_phase()
+            payload = {
+                "model": "backstitch-local-model",
+                "stream": True,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "review\n\n"
+                        + json.dumps(_local_packet("invariant::INV.RES.1")),
+                    }
+                ],
+            }
+            if response_format is not None:
+                payload["response_format"] = response_format
+            request = urllib.request.Request(
+                f"{proxy.endpoint}/chat/completions",
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with pytest.raises(urllib.error.HTTPError) as excinfo:
+                urllib.request.urlopen(request, timeout=5)  # noqa: S310
+            assert excinfo.value.code == 400
+            assert b"json_object" in excinfo.value.read()
+            assert upstream_calls == 0
+            assert proxy.request_bodies == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_local_llm_counting_proxy_rejects_malformed_nonstream_completion() -> None:
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - stdlib hook name
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            self.rfile.read(length)
+            payload = b"{}"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with live_llm._CountingProxy(
+            f"http://127.0.0.1:{server.server_port}/v1"
+        ) as proxy:
+            proxy.start_analyze_phase()
+            packet = _local_packet("invariant::INV.RES.1")
+            request = urllib.request.Request(
+                f"{proxy.endpoint}/chat/completions",
+                data=json.dumps(
+                    {
+                        "model": "backstitch-local-model",
+                        "stream": True,
+                        "response_format": {"type": "json_object"},
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "review\n\n" + json.dumps(packet),
+                            }
+                        ],
+                    }
+                ).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with pytest.raises(urllib.error.HTTPError) as excinfo:
+                urllib.request.urlopen(request, timeout=5)  # noqa: S310
+            assert excinfo.value.code == 502
+            assert b"malformed completion" in excinfo.value.read()
+            assert len(proxy.request_bodies) == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_local_llm_proxy_allows_one_upstream_attempt_through_default_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upstream_calls = 0
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - stdlib hook name
+            nonlocal upstream_calls
+            upstream_calls += 1
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            self.rfile.read(length)
+            payload = b"{}"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with live_llm._CountingProxy(
+            f"http://127.0.0.1:{server.server_port}/v1"
+        ) as proxy:
+            live_llm._configure_local_llm(
+                tmp_path,
+                monkeypatch,
+                proxy,
+            )
+            proxy.start_analyze_phase()
+            packet = _local_packet("invariant::INV.RES.1")
+            adapter = default_adapter("backstitch-local")
+
+            with pytest.raises(OpenAIError):
+                adapter("review\n\n" + json.dumps(packet))
+
+            assert upstream_calls == 1
+            assert len(proxy.request_bodies) == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_local_llm_counting_proxy_relays_streaming_responses() -> None:
-    # llm's Python API ignores `can_stream: false` (it is CLI-only), so real
-    # local runs stream SSE through the proxy; this covers the shape
-    # production actually uses, not just the plain-JSON response above.
+    # Transport preflight remains an ordinary streaming request. Analyze uses
+    # the separate test-owned nonstream-to-SSE bridge covered above.
     sse_chunks = [
         b'data: {"choices": [{"delta": {"content": "O"}}]}\n\n',
         b'data: {"choices": [{"delta": {"content": "K"}}]}\n\n',
@@ -197,10 +563,21 @@ def test_local_llm_counting_proxy_relays_streaming_responses() -> None:
     try:
         upstream = f"http://127.0.0.1:{server.server_port}/v1"
         with live_llm._CountingProxy(upstream) as proxy:
-            proxy.start_analyze_phase()
             request = urllib.request.Request(
                 f"{proxy.endpoint}/chat/completions",
-                data=json.dumps({"model": "m", "stream": True}).encode(),
+                data=json.dumps(
+                    {
+                        "model": "m",
+                        "stream": True,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "review\n\n"
+                                + json.dumps(_local_packet("invariant::INV.RES.1")),
+                            }
+                        ],
+                    }
+                ).encode(),
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
@@ -211,7 +588,7 @@ def test_local_llm_counting_proxy_relays_streaming_responses() -> None:
             proxy.stop_analyze_phase()
 
             assert relayed == b"".join(sse_chunks)
-            assert len(proxy.request_bodies) == 1
+            assert proxy.request_bodies == []
     finally:
         server.shutdown()
         server.server_close()
@@ -273,38 +650,44 @@ def test_local_llm_counting_proxy_returns_502_when_upstream_is_unreachable() -> 
 def test_local_analyze_transport_assertion_rejects_wrong_inference_controls() -> None:
     proxy = live_llm._CountingProxy("http://127.0.0.1:9/v1")
     proxy.request_bodies = [
-        json.dumps(
-            {
-                "model": "backstitch-local-model:latest",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "invariant::INV.RES.1 invariant::INV.RES.2",
-                    }
-                ],
-                "temperature": 1,
-                "seed": 42,
-            }
-        ),
-        json.dumps(
-            {
-                "model": "backstitch-local-model:latest",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "invariant::INV.RES.1 invariant::INV.RES.2",
-                    }
-                ],
-                "temperature": 0,
-                "seed": 42,
-            }
-        ),
+        json.dumps(_recorded_local_payload("invariant::INV.RES.1", temperature=1)),
+        json.dumps(_recorded_local_payload("invariant::INV.RES.2")),
     ]
 
     with pytest.raises(AssertionError, match="unexpected inference controls"):
         live_llm._assert_analyze_hit_local_endpoint(
             proxy,
             expected_packet_ids=set(live_llm.LOCAL_LIVE_PACKET_IDS),
+            served_model="backstitch-local-model:latest",
+        )
+
+
+def test_local_analyze_transport_assertion_rejects_duplicate_packet_request() -> None:
+    packet = {
+        "packet_id": "invariant::INV.RES.1",
+        "kind": "invariant",
+        "targets": [{"path": "a.py", "start_line": 1, "snippet": "x"}],
+        "binding_tests": [
+            {"path": "test_a.py", "start_line": 1, "snippet": "assert x"}
+        ],
+    }
+    body = json.dumps(
+        {
+            "model": "backstitch-local-model:latest",
+            "messages": [
+                {"role": "user", "content": "review\n\n" + json.dumps(packet)}
+            ],
+            "temperature": 0,
+            "seed": 42,
+        }
+    )
+    proxy = live_llm._CountingProxy("http://127.0.0.1:9/v1")
+    proxy.request_bodies = [body, body]
+
+    with pytest.raises(AssertionError, match="exactly one analyze request"):
+        live_llm._assert_analyze_hit_local_endpoint(
+            proxy,
+            expected_packet_ids={"invariant::INV.RES.1"},
             served_model="backstitch-local-model:latest",
         )
 

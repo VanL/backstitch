@@ -19,6 +19,16 @@ the stored value. The pass counts remain historical observations, not
 temperature-zero measurements. The CI harness now puts temperature zero and a
 fixed seed on the forwarded request and verifies both fields.
 
+CI correction (2026-07-10): temperature and seed stabilize sampling inputs but
+do not make quantized inference byte-identical across ARM and x86 kernels. A
+GitHub x86 run produced snippet-relative or malformed evidence that the strict
+parser correctly rejected, while the ARM run produced one valid row. The local
+CI harness now derives a packet-bounded JSON Schema, requests one nonstreaming
+completion (the route where pinned Ollama enforces it), and relays the exact
+assistant content back to the unchanged streaming adapter. This is test-owned;
+ordinary custom endpoints still receive the production adapter's normal JSON-
+object request.
+
 | Model (bounds) | Environment | Lenient gate | Strict | s/run | JSON constrained? | Notes |
 |---|---|---|---|---|---|---|
 | `llama3.2:3b` (num_ctx 4096, num_predict 1024; stored temp 0, effective temp 1.0) | Docker Ollama, 16 vCPU / 16.8 GB VM, CPU-only (2026-07-06) | 8/8 | 4/5 | **yes** (Ollama enforces) | Historical pre-stabilization row. Rationales are boilerplate; classifications advisory-only. The CI lane still uses this model with request-level temp 0 and seed 42. |
@@ -65,7 +75,8 @@ constrained decoding. Readable findings start around the 14B–20B class.
 
 - **Ollama** (`http://127.0.0.1:11434/v1`) — the CI lane
   (`.github/workflows/local-llm.yml`, digest-pinned, Modelfile-bounded, with
-  request-level temperature and seed applied by the test proxy).
+  request-level temperature/seed and packet-bounded schema decoding applied by
+  the test proxy).
 - **LM Studio** (`http://127.0.0.1:1234/v1` by default) — native
   Metal-accelerated dev lane; model ids come from `GET /v1/models`, and
   context/temperature bounds are per-model load settings.

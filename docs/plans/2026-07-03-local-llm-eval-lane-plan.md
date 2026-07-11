@@ -8,12 +8,12 @@ Gate requires the local workflow green by commit SHA. The bounded
 OpenAI-compatible request omitted it and Ollama 0.31.1 applied effective
 request default `1.0`; the counts are not temperature-zero evidence. The
 2026-07-10 stabilization now uses a curated invariant corpus and puts
-temperature zero plus seed 42 on each effective request. The earlier 2 CPU /
-8 GB timeouts were an artifact of that simulated floor, not of the models. The
-~1-in-8 borderline-output flake originally named here was subsequently
-eliminated by adapter-level constrained decoding
-(`docs/plans/2026-07-06-analyze-json-mode-plan.md`): post-change, 8/8 gate
-runs with zero contained error rows on the same hardware.
+temperature zero plus seed 42 on each effective request. A later x86 CI run
+showed those controls do not guarantee cross-kernel output identity, so analyze
+traffic also uses packet-bounded schema decoding over a test-owned nonstream/
+SSE bridge. The earlier 2 CPU / 8 GB timeouts were an artifact of that simulated
+floor, not of the models. Adapter-level JSON-object decoding eliminated syntax
+slips on the original hardware, but did not constrain evidence fields.
 Plan type: implementation with spec revision
 Risk level: boundary-crossing — new CI execution context, Docker service
 lifecycle, network transport to a locally hosted model, `llm` provider
@@ -1452,19 +1452,18 @@ accept-and-close listener instead of assuming a closed host port.
   simplebroker's model of requiring a service-backed test workflow by name
   before publishing. Still **not** on `pull_request`: fork-PR exposure remains
   a separate Threat-Model-gated step.
-  **Open validation risk:** the graduation precondition in the original plan
-  was "target-runner evidence shows a model passes." That evidence is still
-  only from a 16 vCPU / 16 GB local box; `llama3.2:3b` on the actual public
-  GitHub runner (4 vCPU / 16 GB, CPU-only) is **unproven**. The first push to
-  `main` is that validation: if the bounded `llama3.2:3b` lenient gate does not
-  pass within the 15-minute step budget there, `main` goes red and releases
-  block until the model/timeout/packet budget is tuned. Treat the first main
-  run as the acceptance gate before relying on a release.
+  **Target-runner result:** the first stabilized x86 run proved provisioning,
+  transport, temperature, and seed, but both rows failed evidence validation
+  because ARM and x86 inference chose different formats. The corrective lane
+  now constrains the exact packet/evidence schema on a nonstreaming Ollama call
+  and bridges unchanged assistant content back to the streaming adapter. The
+  target runner remains the final acceptance gate before publication.
 - **Measurement correction and stabilized corpus (2026-07-10).** The 2026-07-06
   bake-off verified stored Modelfile temperature zero, not effective request
   temperature. `llm` omitted the field and Ollama 0.31.1 applied `1.0`; the
   historical pass counts are therefore not temperature-zero evidence. The
   release-gate stabilization plan supersedes smallest-first local selection:
   the lane now curates `invariant::INV.RES.1` and `invariant::INV.RES.2`, applies
-  request temperature zero plus seed 42 in the local proxy, and asserts the
-  exact forwarded analyze bodies.
+  request temperature zero plus seed 42 in the local proxy, derives a strict
+  packet-bounded schema, bridges nonstreaming Ollama output back to SSE, and
+  asserts the exact forwarded analyze bodies.

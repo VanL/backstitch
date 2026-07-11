@@ -108,6 +108,11 @@ compatible request omitted temperature and Ollama 0.31.1 applied request
 default `1.0`. These counts remain valid historical outcomes for JSON mode,
 but are not temperature-zero measurements. The release-gate stabilization plan
 adds request-level temperature/seed controls and a curated invariant corpus.
+The first x86 CI run then showed that `json_object` prevents syntax errors but
+does not constrain evidence fields, and that fixed sampling inputs do not make
+quantized inference identical across CPU kernels. The local gate now adds a
+test-owned packet-bounded JSON Schema on a nonstreaming Ollama request and
+relays unchanged assistant content back to the streaming production adapter.
 
 ## Independent Review
 

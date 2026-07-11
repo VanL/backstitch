@@ -1,7 +1,9 @@
 # Local LLM Release-Gate Stabilization
 
-Status: implementation, local verification, and independent implementation
-review complete; commit, authoritative dry-run review, and publication pending.
+Status: first retag attempt stopped before publication on a cross-hardware
+model-output failure. The nonstream schema-bridge correction passes the real
+pinned Ollama gate locally and independent corrective review is approved;
+commit, authoritative dry-run, retag, and publication are pending.
 Plan type: implementation with spec revision.
 Risk level: high. This changes a release-blocking live-model contract and ends
 with retagging an unpublished release. PyPI publication is a one-way door.
@@ -11,7 +13,9 @@ with retagging an unpublished release. PyPI publication is a one-way door.
 Make the credential-free local-LLM release gate repeatable and explicit: use a
 stable ordered pair of real invariant packets with bounded target and binding-
 test evidence, and put deterministic inference controls on the request that
-actually reaches Ollama. After the fix passes every repository gate and an
+actually reaches Ollama. Constrain the already-required output shape at the
+test-owned endpoint boundary without changing the production adapter or
+repairing model output. After the fix passes every repository gate and an
 independent review, move the unpublished `v0.3.0` tag to the fix commit with
 `bin/release.py all --retag` and verify publication on PyPI and GitHub.
 
@@ -279,6 +283,29 @@ self-corpus gate never observes partial reciprocal state.
    verify PyPI contains exactly the wheel and sdist and GitHub Release contains
    those plus the Sigstore bundle.
 
+8. **Cross-hardware constrained-decoding correction.** The first corrected
+   `main` local workflow proved temperature/seed controls but produced two
+   invalid evidence rows on x86, while ARM local runs produced one or two valid
+   rows. Keep the validator and total-failure exit unchanged. For recorded
+   analyze calls only, derive a strict JSON Schema from the real packet's
+   identity, result vocabulary, and canonical evidence bounds; forward one
+   nonstreaming request because pinned Ollama does not reliably enforce the
+   schema while streaming; then relay the exact assistant content as SSE to the
+   unchanged adapter. Reject malformed prompts and upstream envelopes without
+   fallback. Require the adapter's incoming `json_object` before replacement,
+   and reject a repeated packet ID before recording or forwarding so SDK
+   retries and the adapter compatibility fallback cannot create a second
+   upstream request.
+   Bound summary/rationale lengths, evidence count, and request output tokens
+   so nonstream constrained decoding cannot consume the full served-model
+   prediction ceiling.
+   - Files: `tests/live/test_live_llm.py`,
+     `tests/test_live_llm_helpers.py`, [SC-7], implementation/model docs, this
+     plan, workflow comments, changelog, and lessons.
+   - Done locally: red proxy/schema/count tests turned green; the real pinned
+     Ollama test passed through the nonstream/SSE bridge. Corrective independent
+     review and the full release gate remain pending.
+
 ## Testing Plan
 
 Use vertical red-green slices. The primary proofs are real loopback HTTP, the
@@ -333,7 +360,7 @@ before action; the author records acceptance, rejection, or out-of-scope reason.
 
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |----------|------------------|-----------------|-----------|---------------|
-| None | The reviewed [SC-7] delta and retag hardening plan | Implemented as reviewed | No implementation deviation | None |
+| [SC-7] | Curated packets plus temperature zero and seed 42 make the small-model gate repeatable | ARM local runs passed, but x86 CI produced snippet-relative and malformed evidence for both packets | Quantized inference is not byte-identical across CPU kernels; sampling controls cannot constrain the already-required evidence shape | Promoted: test-owned packet-bounded schema decoding over a nonstream/SSE bridge; no output repair or validator relaxation |
 
 ## Execution Log
 
@@ -369,6 +396,31 @@ before action; the author records acceptance, rejection, or out-of-scope reason.
   coverage is 85 percent (35 of 41 changed path families), the full hermetic
   and acceptance suites pass, and the second exact real Ollama run passed on
   the final reviewed worktree.
+- 2026-07-10: Committed `93b31d5`, passed the authoritative dry-run review, and
+  ran `bin/release.py all --retag`. All local helper checks including cloud and
+  local live providers passed; branch and tag moved to that commit.
+- 2026-07-10: New-SHA CI passed, but x86 `local-llm` run `29136132546` failed
+  both invariant rows on invalid evidence, so Release Gate `29136134794`
+  stopped before build or publication. PyPI and GitHub Release remained absent.
+  Root cause: the same greedy request can diverge across ARM and x86 inference
+  kernels, and streaming JSON-object mode does not constrain evidence shape.
+- 2026-07-10: Added the test-owned nonstream schema/SSE bridge. Hermetic tests
+  prove exact schema bounds, replacement of `json_object`, one request per
+  packet, unchanged assistant-content relay, upstream-free prompt rejection,
+  and malformed-envelope failure. The exact real pinned Ollama gate passes
+  through the bridge without changing the production parser or adapter.
+- 2026-07-10: Corrective review reproduced six upstream calls on a malformed
+  completion because the OpenAI client and adapter both retry. Added incoming
+  `json_object` proof plus per-phase packet-ID admission: duplicate attempts are
+  rejected before recording or forwarding. A real `default_adapter` regression
+  test now proves one malformed upstream call, one recorded request, and
+  failure; exact-content SSE tests cover whitespace, escapes, and Unicode.
+- 2026-07-10: Bounded constrained output to 48-character summaries,
+  72-character rationales, one evidence item, and 128 output tokens after an
+  unbounded nonstream request hit Ollama's own ten-minute cutoff at 97 generated
+  tokens. The final real two-packet gate passed in about five minutes. Two
+  independent corrective reviewers approved the final slice with no remaining
+  blockers.
 
 ## Out Of Scope
 
