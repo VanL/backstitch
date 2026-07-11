@@ -1,9 +1,7 @@
 # Local LLM Release-Gate Stabilization
 
-Status: first retag attempt stopped before publication on a cross-hardware
-model-output failure. The nonstream schema-bridge correction passes the real
-pinned Ollama gate locally and independent corrective review is approved;
-commit, authoritative dry-run, retag, and publication are pending.
+Status: complete. Corrective commit `60f4d2c` passed local and GitHub x86 model
+gates; `v0.3.0` was published to PyPI and GitHub Release with attestations.
 Plan type: implementation with spec revision.
 Risk level: high. This changes a release-blocking live-model contract and ends
 with retagging an unpublished release. PyPI publication is a one-way door.
@@ -421,6 +419,16 @@ before action; the author records acceptance, rejection, or out-of-scope reason.
   tokens. The final real two-packet gate passed in about five minutes. Two
   independent corrective reviewers approved the final slice with no remaining
   blockers.
+- 2026-07-10: Committed `60f4d2c`, passed the second authoritative dry-run and
+  independent release-readiness review, then ran
+  `bin/release.py all --retag` without skipped checks. Main and tag CI passed;
+  x86 `local-llm` run `29137721906` passed; Release Gate `29137723988` passed.
+- 2026-07-10: Publication verified. PyPI exposes exactly
+  `backstitch-0.3.0-py3-none-any.whl` and `backstitch-0.3.0.tar.gz`; GitHub
+  Release `v0.3.0` exposes those distributions plus
+  `backstitch-v0.3.0.sigstore.json`. PyPI and GitHub distribution SHA-256
+  digests match (`412909f9...60f99` wheel, `c0f8a18e...54573` sdist), the tag
+  points to `60f4d2c`, and an isolated PyPI install reports `backstitch 0.3.0`.
 
 ## Out Of Scope
 
