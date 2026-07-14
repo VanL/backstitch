@@ -1,0 +1,51 @@
+# Coalescing State
+
+Status: Active — governed by [DOM-14] in
+`docs/specs/01-development-documentation-operating-model.md` (adopted
+from agent-guidance @ `2f7eff6` via
+`docs/plans/2026-07-14-agent-guidance-propagation-plan.md`).
+
+Owner: any agent that observes a tripped threshold at session start.
+Boundary: lessons, plans, and skill/runbook promotion. Specs and
+implementation docs are living documents and are never coalesced. The
+Golden Rules and the 2026-07-01 four-way bake-off section are
+importance-floored and exemplar-class (the ecosystem's
+incident-of-record): never fold candidates. Verification: the run log
+plus the mandatory zero-warning self-corpus gate. Required action: the
+session-start check is **read-only**; all writes happen only inside an
+authorized maintenance task (`skills/coalescing/SKILL.md`).
+
+**Local format adaptation:** this ledger uses dated H2 sections, not
+dated bullets. Derivation command:
+`grep -cE '^## 20[0-9]{2}-' docs/lessons.md` (sections after the
+watermark date).
+
+## Thresholds
+
+| Tier | Trigger (derived count) | Threshold | Age floor |
+|------|------------------------|-----------|-----------|
+| Lessons | dated H2 sections after the lessons watermark | 5 | 30 days, never sections cited by an active plan, never the exemplar sections above |
+| Plans | plans with status completed/superseded, not `exemplar`, and no retired-ledger line | 8 | none — harvest gate and two-step retirement are the guards |
+| Promotion | distinct citations of the same workflow theme since the promotion watermark | 3 | n/a |
+
+## Watermarks
+
+| Tier | Distilled through | Source SHA |
+|------|-------------------|------------|
+| Lessons | (none — first sweep below) | — |
+| Plans | (none — first sweep pending) | — |
+| Promotion | (none) | — |
+
+## Deferral State
+
+| Tier | Checked through (date, SHA) | Counts at check | Reason deferred | Reconsider when |
+|------|------------------------------|-----------------|-----------------|-----------------|
+| Lessons | 2026-07-14, first sweep | 1 dated section past (no) watermark — under threshold 5; also within age floor and exemplar-class | Not tripped; nothing foldable | Count changes or a section ages past 30 days without exemplar status |
+| Plans | 2026-07-14, first sweep | not derived | Plan statuses live in `## Related Plans` tags (implementing/implemented), not a status index; first real sweep derives from those | A sweep is authorized with plans in scope |
+| Promotion | 2026-07-14, first sweep | not derived | Derive at a future sweep | — |
+
+## Run Log
+
+| Date | Tier(s) | Source SHA | Claim |
+|------|---------|------------|-------|
+| 2026-07-14 | all | — (checked-deferred; nothing folded) | Layer adopted from agent-guidance `2f7eff6`; first sweep ran in the same unit per the sweep-after-propagation rule. Lessons: 1 dated section (the 2026-07-01 bake-off), under threshold, within age floor, and exemplar-class — nothing foldable. No watermark advanced. Self-corpus gate 0/0/0. |

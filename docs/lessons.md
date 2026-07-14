@@ -1,5 +1,9 @@
 # Lessons Learned
 
+Startup context is the Golden Rules plus dated sections after the
+watermark in `docs/coalescing.md`; the rest of this ledger is
+searchable history.
+
 Use this file for durable, project-level lessons that should influence future
 sessions.
 
