@@ -33,6 +33,9 @@ agents, and human contributors working in this repository.
 - `testing-patterns.md`: how to choose the right proof and avoid weak tests
 - `adversarial-acceptance-probes.md`: the black-box probe kit any
   implementation must pass before integration, independent of spec version
+- `designing-agent-facing-interfaces.md`: principles for designing any
+  surface an agent consumes — APIs, CLIs, and structured documentation
+  (adopted from agent-guidance; directly relevant to the backstitch CLI)
 - `maintaining-traceability.md`: how to keep docs synchronized during delivery
 - `skills-lifecycle.md`: how to add, update, and retire reusable skills
 - `external-skill-suites.md`: precedence and crosswalk for external skill

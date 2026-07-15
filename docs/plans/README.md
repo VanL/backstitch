@@ -47,6 +47,7 @@ Risky plans are blocked if they do not make explicit:
 | Plan | Status |
 |------|--------|
 | 2026-07-14-agent-guidance-propagation-plan.md | active |
+| 2026-07-15-agent-interfaces-runbook-adoption-plan.md | completed — runbook adopted from agent-guidance @ a4b4345 |
 
 (Existing plans carry status via each spec's `## Related Plans` tags;
 rows are added here as plans open or the coalescing sweep needs them.)
