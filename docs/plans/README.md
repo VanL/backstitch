@@ -48,6 +48,7 @@ Risky plans are blocked if they do not make explicit:
 |------|--------|
 | 2026-07-14-agent-guidance-propagation-plan.md | active |
 | 2026-07-15-agent-interfaces-runbook-adoption-plan.md | completed — runbook adopted from agent-guidance @ a4b4345 |
+| 2026-07-17-agent-guidance-delta-wave-propagation-plan.md | completed — hub delta a4b4345..b248e1c landed; scoped review no-blocker; self-corpus gate 0/0/0 pre and post |
 
 (Existing plans carry status via each spec's `## Related Plans` tags;
 rows are added here as plans open or the coalescing sweep needs them.)

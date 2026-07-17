@@ -92,6 +92,7 @@ Quick pointers to the key guidance documents in this repository.
 |------|---------|
 | `skills/README.md` | Skill directory purpose and conventions |
 | `skills/_template/SKILL.md` | Starter template for new reusable skills |
+| `skills/interface-review/SKILL.md` | Review an agent-facing surface (REST/MCP/CLI/doc) against `designing-agent-facing-interfaces.md` |
 
 ## Update Guidance
 

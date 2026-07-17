@@ -129,7 +129,9 @@ CLIs — a stated "not applicable: single-writer CLI" is a valid
 answer, silence is not. The
 compound-engineering suite's `cli-agent-readiness-reviewer` persona is
 a compatible external lens for CLIs (see `external-skill-suites.md`
-for precedence).
+for precedence). `skills/interface-review/SKILL.md` is the repeatable
+procedure that operationalizes this walk — its checklist, evidence bar,
+and findings-table output contract.
 
 ## Worked Example
 

@@ -20,6 +20,19 @@ dated bullets. Derivation command:
 `grep -cE '^## 20[0-9]{2}-' docs/lessons.md` (sections after the
 watermark date).
 
+**Fold unit and progress model (per [DOM-14]):** the lessons ledger is a
+single flat chronological ledger, not a domain-grouped one — its fold
+unit is the dated H2 section counted repo-wide, and the count includes
+only cold, unfolded sections (past the lessons watermark date and outside
+the age floor). Because it is folded strictly in date order rather than
+by theme-cluster across dates, its progress model is the **date
+watermark** in the Watermarks table (a date cursor is correct here: no
+unfolded material sits behind the watermark). The plans and promotion
+tiers likewise fold repo-wide, tracked by the `Distilled through` /
+`Checked through` watermarks below. Should any tier later split into
+domain-grouped ledgers, switch that tier to per-section watermarks or a
+fold-records index and re-declare it here.
+
 ## Thresholds
 
 | Tier | Trigger (derived count) | Threshold | Age floor |
