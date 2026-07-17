@@ -61,4 +61,5 @@ fold-records index and re-declare it here.
 
 | Date | Tier(s) | Source SHA | Claim |
 |------|---------|------------|-------|
+| 2026-07-17 | — (propagation; nothing folded) | source agent-guidance @ `b248e1c`; landed `2a6cc20` | Delta wave per `docs/plans/2026-07-17-agent-guidance-delta-wave-propagation-plan.md`: [DOM-14] fold-unit trigger bullet + this file's fold-unit declaration; six coalescing-skill refinements; interface-review skill; writing-plans and review-loops wave content; call-agent brief standard. Scoped review no blocker, zero findings. Self-corpus gate 0/0/0 pre and post. Reviewer flagged (owner items, pre-existing): the lessons-derivation regex undercounts `## Title (YYYY-MM-DD)` headings; one index row carries a transient-state status. No thresholds, watermarks, or folds touched. |
 | 2026-07-14 | all | `9ddb4d6` (checked-deferred; nothing folded) | Layer adopted from agent-guidance `2f7eff6`; first sweep ran in the same unit per the sweep-after-propagation rule. Lessons: 1 dated section (the 2026-07-01 bake-off), under threshold, within age floor, and exemplar-class — nothing foldable. No watermark advanced. Self-corpus gate 0/0/0. |
