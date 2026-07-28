@@ -866,10 +866,13 @@ operational report is not.
 Current packet and analysis reports include closed suppression eligible,
 emitted, result, cache-hit, provider-call, classification, diagnostic, and
 debt counts. `require_complete` covers every emitted suppression packet. A
-required `suppression` kind is satisfied when all eligible suppression
-packets were emitted; zero eligible suppressions is vacuously complete so
-deleting the last suppression does not break CI. Missing one of a nonzero
-eligible population is incomplete and exits `2`.
+valid current packet-report schema 3 is intrinsically complete: `eligible` and
+`emitted` both count the selected executable/evaluate population, and every
+selected audit row has exactly one packet. A forged difference is an invalid
+packet report and exits `2` before adapter construction. A required
+`suppression` kind therefore records policy intent; zero eligible
+suppressions is vacuously complete so deleting the last suppression does not
+break CI.
 
 Packet-report schema 3 and analysis-report schema 4 are the current producer
 contracts when suppression packets are supported. Readers retain exact
@@ -1426,8 +1429,8 @@ zero-call profile until a validated external cache has been restored; this is
 an honest availability failure, not a reason to commit cache objects.
 
 For required kinds, `suppression` follows `invariant` in canonical order. A
-nonzero eligible suppression population requires every eligible suppression
-packet; zero eligible suppressions is vacuously complete.
+valid current packet report already proves that every eligible suppression
+has been emitted. Zero eligible suppressions is vacuously complete.
 
 Backstitch sets
 `lint.require_suppression_declarations = true` and includes `suppression` in

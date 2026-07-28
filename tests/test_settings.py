@@ -148,7 +148,9 @@ def test_documented_suppression_settings_require_every_closed_field(
     config = tmp_path / "missing.toml"
     config.write_text(
         "[[lint.suppressions]]\n"
-        + "\n".join(f"{key} = {value}" for key, value in values.items() if key != missing)
+        + "\n".join(
+            f"{key} = {value}" for key, value in values.items() if key != missing
+        )
         + "\n",
         encoding="utf-8",
     )

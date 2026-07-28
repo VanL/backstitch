@@ -61,6 +61,7 @@ from backstitch.semantic_verification import (
 
 CacheMode = Literal["off", "read-write", "require"]
 CacheSource = Literal["off", "hit", "miss"]
+SemanticPacketKind = Literal["section", "invariant", "suppression"]
 ProblemStage = Literal[
     "config",
     "input",
@@ -299,6 +300,9 @@ class SemanticCacheRun:
     cache_hits: int
     cache_misses: int
     provider_calls: int
+    kind_counts: dict[str, dict[str, int]] = field(
+        default_factory=lambda: _empty_analyzer_kind_counts()
+    )
 
     @property
     def results(self) -> tuple[dict[str, Any], ...]:
@@ -356,6 +360,18 @@ class VerificationCacheInspection:
 class _Resolution:
     row: dict[str, Any]
     source: CacheSource
+
+
+def _empty_packet_kind_counts() -> dict[str, int]:
+    return {"section": 0, "invariant": 0, "suppression": 0}
+
+
+def _empty_analyzer_kind_counts() -> dict[str, dict[str, int]]:
+    return {
+        "cache_hits": _empty_packet_kind_counts(),
+        "cache_misses": _empty_packet_kind_counts(),
+        "provider_calls": _empty_packet_kind_counts(),
+    }
 
 
 class _AnalysisFailure(Exception):
@@ -1296,6 +1312,7 @@ def analyze_with_cache(
     cache_hits = 0
     cache_misses = 0
     provider_calls = 0
+    kind_counts = _empty_analyzer_kind_counts()
     runtime_exceeded = False
     if cache_mode not in ("off", "read-write", "require"):
         problems.append(
@@ -1483,6 +1500,8 @@ def analyze_with_cache(
                 "maximum semantic analysis runtime exceeded before provider call",
             )
         provider_calls += 1
+        packet_kind = cast(SemanticPacketKind, packet["kind"])
+        kind_counts["provider_calls"][packet_kind] += 1
         try:
             response = adapter(
                 model_request_bytes(
@@ -1512,6 +1531,8 @@ def analyze_with_cache(
                 result_path = _result_path(cache_path, identity.analysis_key)
                 if not _path_exists(result_path):
                     cache_misses += 1
+                    packet_kind = cast(SemanticPacketKind, row["kind"])
+                    kind_counts["cache_misses"][packet_kind] += 1
                     raise _AnalysisFailure(
                         "completeness",
                         "incomplete_result",
@@ -1526,6 +1547,8 @@ def analyze_with_cache(
                 )
                 if not initial_result:
                     cache_misses += 1
+                    packet_kind = cast(SemanticPacketKind, row["kind"])
+                    kind_counts["cache_misses"][packet_kind] += 1
 
                 def call_current(
                     current_row: dict[str, Any] = row,
@@ -1544,8 +1567,12 @@ def analyze_with_cache(
                 )
                 if not initial_result and resolution.source == "hit":
                     cache_misses -= 1
+                    packet_kind = cast(SemanticPacketKind, row["kind"])
+                    kind_counts["cache_misses"][packet_kind] -= 1
             if resolution.source == "hit":
                 cache_hits += 1
+                packet_kind = cast(SemanticPacketKind, row["kind"])
+                kind_counts["cache_hits"][packet_kind] += 1
             canonical_results.append(canonical_json_bytes(resolution.row))
         except _AnalysisFailure as exc:
             problems.append(
@@ -1584,6 +1611,7 @@ def analyze_with_cache(
         cache_hits,
         cache_misses,
         provider_calls,
+        kind_counts,
     )
 
 

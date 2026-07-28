@@ -2012,10 +2012,12 @@ in packet/report context.
 Legacy semantic completeness keys apply only when at least one row is
 `selected`: `minimum_packets` compares selected count;
 `required_kinds` requires `section` and `invariant` among selected rows
-exactly as before. For `suppression`, a nonzero eligible population requires
-every eligible suppression packet among selected rows; zero eligible
-suppressions is vacuously complete. [EVC-12] fires both the zero-eligible and
-nonzero-incomplete cases. This asymmetry lets removal of the last exception
+exactly as before. For `suppression`, current packet-report schema 3 is
+intrinsically complete: eligible and emitted both count selected
+executable/evaluate rows, and packet-report validation rejects any missing
+selected packet before semantic analysis. Zero eligible suppressions is
+vacuously complete. [EVC-12] fires both the zero-eligible case and the invalid
+packet-report boundary. This asymmetry lets removal of the last exception
 remain a passing end state without weakening ordinary intent completeness.
 `maximum_packets` and `maximum_prompt_bytes` are fail-closed ceilings;
 `require_complete` requires one valid result per selected packet. All-skipped bypasses these semantic

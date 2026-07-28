@@ -272,7 +272,7 @@ def validate_analysis_row(
         content_hash = None
     else:
         raw_kind = row.get("kind")
-        if raw_kind not in CLASSIFICATIONS_BY_KIND:
+        if raw_kind not in {"section", "invariant"}:
             return "invalid `kind`; expected `section` or `invariant`"
         kind = raw_kind
         if kind == "section":

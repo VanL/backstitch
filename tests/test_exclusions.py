@@ -98,9 +98,7 @@ def test_legacy_meta_and_inline_rules_do_not_gain_unused_diagnostics() -> None:
         inline_spec_ignores={
             ("docs/specs/01-x.md", "X-1"): frozenset({"SPEC_SECTION_UNMAPPED"})
         },
-        inline_code_ignores={
-            "pkg/x.py": frozenset({"CODE_REF_UNMAPPED_FROM_SPEC"})
-        },
+        inline_code_ignores={"pkg/x.py": frozenset({"CODE_REF_UNMAPPED_FROM_SPEC"})},
     )
 
     assert collect_unused_ignore_diagnostics(index) == []

@@ -153,6 +153,9 @@ _ANALYSIS_REPORT_V3_FIELDS = frozenset(
         "verification",
     }
 )
+_ANALYSIS_REPORT_V4_FIELDS = _ANALYSIS_REPORT_V3_FIELDS | frozenset(
+    {"packet_schema_versions", "kind_counts"}
+)
 _PROBLEM_V1_FIELDS = frozenset({"packet_id", "stage", "code", "message"})
 _PROBLEM_V3_FIELDS = frozenset(
     {"packet_id", "obligation_id", "stage", "code", "message", "details"}
@@ -193,7 +196,27 @@ _SEMANTIC_CODE_DATA = {
     "SEMANTIC_MISSING_TRACE": ("BSA003", "missing_trace"),
     "SEMANTIC_WEAK_BINDING": ("BSA004", "weak_binding"),
     "SEMANTIC_AMBIGUOUS": ("BSA005", "ambiguous"),
+    "SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT": (
+        "BSA006",
+        "rationale_insufficient",
+    ),
+    "SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD": ("BSA007", "scope_overbroad"),
+    "SEMANTIC_SUPPRESSION_RISK_UNADDRESSED": ("BSA008", "risk_unaddressed"),
 }
+_SUPPRESSION_ONLY_CODES = frozenset(
+    {
+        "SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT",
+        "SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD",
+        "SEMANTIC_SUPPRESSION_RISK_UNADDRESSED",
+    }
+)
+_QUALIFIED_SEMANTIC_CODES = (
+    "SEMANTIC_CONFIRMED_MISMATCH",
+    "SEMANTIC_PROBABLE_MISMATCH",
+    "SEMANTIC_MISSING_TRACE",
+    "SEMANTIC_WEAK_BINDING",
+    "SEMANTIC_AMBIGUOUS",
+)
 _LEGACY_VERIFICATION_STATES = frozenset(
     {
         "evidence_bound",
@@ -518,9 +541,9 @@ class AnalysisReport:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> AnalysisReport:
-        if value.get("schema_version") == 3:
+        if value.get("schema_version") in {3, 4}:
             raise AnalysisReportError(
-                "analysis report schema 3 must be created through "
+                "analysis report schema 3 or 4 must be created through "
                 "validate_analysis_report with its paired packet report"
             )
         return cls._from_shape(value)
@@ -631,8 +654,8 @@ def _validate_qualification_details(value: object, name: str) -> None:
     for index, value in enumerate(selectors):
         selector = _nonblank_string(value, f"{name}.selectors[{index}]")
         code, separator, context = selector.partition(":")
-        canonical_codes = tuple(_SEMANTIC_CODE_DATA)
-        short_codes = tuple(item[0] for item in _SEMANTIC_CODE_DATA.values())
+        canonical_codes = _QUALIFIED_SEMANTIC_CODES
+        short_codes = tuple(_SEMANTIC_CODE_DATA[code][0] for code in canonical_codes)
         if not separator or context != "independently_verified":
             raise AnalysisReportError(f"{name}.selectors[{index}] is invalid")
         if code in canonical_codes:
@@ -769,18 +792,28 @@ def _validate_warning_debt(value: object, index: int) -> int:
     return len(warnings)
 
 
-def _validate_semantic_identity(row: dict[str, Any], name: str) -> None:
+def _validate_semantic_identity(
+    row: dict[str, Any], name: str, *, suppression_allowed: bool = False
+) -> None:
     if not isinstance(row["code"], str) or row["code"] not in _SEMANTIC_CODE_DATA:
         raise AnalysisReportError(f"{name}.code is not canonical")
+    if not suppression_allowed and row["code"] in _SUPPRESSION_ONLY_CODES:
+        raise AnalysisReportError(f"{name}.code is not valid in this report schema")
     _nonblank_string(row["packet_id"], f"{name}.packet_id")
     _analysis_digest(row["packet_hash"], f"{name}.packet_hash")
     _analysis_digest(row["finding_hash"], f"{name}.finding_hash")
 
 
-def _validate_finding_debt(value: object, index: int, *, current: bool) -> None:
+def _validate_finding_debt(
+    value: object,
+    index: int,
+    *,
+    current: bool,
+    suppression_allowed: bool = False,
+) -> None:
     name = f"{'finding' if current else 'candidate'}_debt[{index}]"
     row = _exact_record(value, _FINDING_DEBT_FIELDS, name)
-    _validate_semantic_identity(row, name)
+    _validate_semantic_identity(row, name, suppression_allowed=suppression_allowed)
     states = (
         _CURRENT_VERIFICATION_STATES - {"human_verified", "human_rejected"}
         if current
@@ -793,10 +826,12 @@ def _validate_finding_debt(value: object, index: int, *, current: bool) -> None:
         raise AnalysisReportError(f"{name}.verification_state is invalid")
 
 
-def _validate_disposition(value: object, index: int) -> None:
+def _validate_disposition(
+    value: object, index: int, *, suppression_allowed: bool = False
+) -> None:
     name = f"unused_dispositions[{index}]"
     row = _exact_record(value, _DISPOSITION_FIELDS, name)
-    _validate_semantic_identity(row, name)
+    _validate_semantic_identity(row, name, suppression_allowed=suppression_allowed)
     if not isinstance(row["status"], str) or row["status"] not in {
         "accepted",
         "rejected",
@@ -837,25 +872,47 @@ def _validate_diagnostic(
     effective_policy_layers: set[str],
     *,
     current: bool,
+    suppression_allowed: bool = False,
 ) -> bool:
     from backstitch.diagnostics import selector_matches
     from backstitch.semantic_policy import SEMANTIC_DEFAULT_LEVELS, VerificationState
 
     name = f"semantic_diagnostics[{index}]"
     row = _exact_record(value, _DIAGNOSTIC_FIELDS, name)
-    _validate_semantic_identity(row, name)
+    _validate_semantic_identity(row, name, suppression_allowed=suppression_allowed)
     short_code, classification = _SEMANTIC_CODE_DATA[row["code"]]
     if row["short_code"] != short_code or row["classification"] != classification:
         raise AnalysisReportError(f"{name} code aliases are inconsistent")
-    if not isinstance(row["packet_kind"], str) or row["packet_kind"] not in {
-        "section",
-        "invariant",
-    }:
+    allowed_packet_kinds = (
+        {"section", "invariant", "suppression"}
+        if suppression_allowed
+        else {"section", "invariant"}
+    )
+    if (
+        not isinstance(row["packet_kind"], str)
+        or row["packet_kind"] not in allowed_packet_kinds
+    ):
         raise AnalysisReportError(f"{name}.packet_kind is invalid")
     if (
-        row["packet_kind"] == "section" and row["classification"] == "weak_binding"
-    ) or (
-        row["packet_kind"] == "invariant" and row["classification"] == "missing_trace"
+        (row["packet_kind"] == "section" and row["classification"] == "weak_binding")
+        or (
+            row["packet_kind"] == "invariant"
+            and row["classification"] == "missing_trace"
+        )
+        or (
+            row["packet_kind"] == "suppression"
+            and row["classification"]
+            not in {
+                "rationale_insufficient",
+                "scope_overbroad",
+                "risk_unaddressed",
+                "ambiguous",
+            }
+        )
+        or (
+            row["packet_kind"] != "suppression"
+            and row["code"] in _SUPPRESSION_ONLY_CODES
+        )
     ):
         raise AnalysisReportError(f"{name} classification is invalid for packet kind")
     verification_states = (
@@ -886,7 +943,9 @@ def _validate_diagnostic(
     if evidence_keys != sorted(evidence_keys):
         raise AnalysisReportError(f"{name}.evidence is not canonically ordered")
     required_roles = (
-        {"requirement", "implementation"}
+        {"requirement", "counterevidence"}
+        if row["classification"] in {"scope_overbroad", "risk_unaddressed"}
+        else {"requirement", "implementation"}
         if row["classification"]
         in {"confirmed_mismatch", "probable_mismatch", "weak_binding"}
         else {"requirement"}
@@ -1011,6 +1070,10 @@ def _validate_diagnostic(
         and selector_context == selector_state
         and selector_code in {row["code"], row["short_code"]}
         and "*" not in selector_code
+        and not (
+            policy_state == "independently_verified"
+            and row["code"] in _SUPPRESSION_ONLY_CODES
+        )
     )
 
 
@@ -1185,6 +1248,8 @@ def _validate_analysis_alignment_projection(
     counts: object,
     audit: object,
     issues: object,
+    *,
+    current: bool,
 ) -> dict[str, int]:
     if not isinstance(counts, dict) or set(counts) != _READINESS_COUNT_FIELDS:
         raise AnalysisReportError("alignment_summary is invalid")
@@ -1193,26 +1258,25 @@ def _validate_analysis_alignment_projection(
         for field in _READINESS_COUNT_FIELDS
     }
     selected = normalized_counts["selected"]
+    audit_rows = audit if isinstance(audit, list) else []
     packets = []
-    if isinstance(audit, list):
+    if audit_rows:
         packets = [
             {"packet_id": item.get("obligation_id"), "packet_hash": "0" * 64}
-            for item in audit
+            for item in audit_rows
             if isinstance(item, dict)
             and item.get("obligation_rung") == "active"
             and item.get("disposition") == "evaluate"
             and item.get("alignment_state") == "complete"
         ]
     synthetic: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3 if current else 2,
         "artifact": "backstitch-packet-report",
-        "packet_schema_version": 3,
         "scope": "source_snapshot",
         "source_snapshot": source_snapshot,
         "derivation_contract": {
             "obligation_algorithm_version": 1,
             "discovery_algorithm_version": 1,
-            "packet_contract_version": 3,
             "normalization_version": 1,
             "semantic_config_sha256": "0" * 64,
         },
@@ -1228,6 +1292,35 @@ def _validate_analysis_alignment_projection(
         "tool_version": "analysis-projection",
         "created_at": "1970-01-01T00:00:00Z",
     }
+    if current:
+        packet_versions = (
+            [3, 4]
+            if any(
+                isinstance(item, dict)
+                and item.get("kind") == "suppression"
+                and _audit_bucket(item) == "selected"
+                for item in audit_rows
+            )
+            else [3]
+        )
+        kind_counts = {
+            packet_kind: sum(
+                isinstance(item, dict)
+                and item.get("kind") == packet_kind
+                and _audit_bucket(item) == "selected"
+                for item in audit_rows
+            )
+            for packet_kind in ("section", "invariant", "suppression")
+        }
+        synthetic["packet_schema_versions"] = packet_versions
+        synthetic["derivation_contract"]["packet_contract_versions"] = packet_versions
+        synthetic["kind_counts"] = {
+            "eligible": kind_counts,
+            "emitted": dict(kind_counts),
+        }
+    else:
+        synthetic["packet_schema_version"] = 3
+        synthetic["derivation_contract"]["packet_contract_version"] = 3
     synthetic["packet_report_content_sha256"] = hashlib.sha256(
         canonical_json_bytes(_packet_report_content_projection(synthetic))
     ).hexdigest()
@@ -1594,15 +1687,20 @@ def _validate_verification(
         raise AnalysisReportError("complete verification work does not recompute")
 
 
-def _validate_analysis_report_v3_shape(value: Mapping[str, Any]) -> dict[str, Any]:
-    if set(value) != _ANALYSIS_REPORT_V3_FIELDS:
+def _validate_analysis_report_source_shape(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    schema_version = value.get("schema_version")
+    current = schema_version == 4 and not isinstance(schema_version, bool)
+    expected_fields = (
+        _ANALYSIS_REPORT_V4_FIELDS if current else _ANALYSIS_REPORT_V3_FIELDS
+    )
+    if set(value) != expected_fields:
         raise AnalysisReportError(
-            "analysis report schema 3 does not match closed shape"
+            f"analysis report schema {schema_version} does not match closed shape"
         )
-    if value.get("schema_version") != 3 or isinstance(
-        value.get("schema_version"), bool
-    ):
-        raise AnalysisReportError("analysis report schema_version must be 3")
+    if isinstance(schema_version, bool) or schema_version not in {3, 4}:
+        raise AnalysisReportError("analysis report schema_version must be 3 or 4")
     if value.get("artifact") != "backstitch-analysis-report":
         raise AnalysisReportError("analysis report artifact is invalid")
     scope = value.get("scope")
@@ -1642,6 +1740,7 @@ def _validate_analysis_report_v3_shape(value: Mapping[str, Any]) -> dict[str, An
         value.get("alignment_summary"),
         value.get("alignment_audit"),
         value.get("deterministic_issues"),
+        current=current,
     )
     _analysis_digest(value.get("packet_jsonl_sha256"), "packet_jsonl_sha256")
     _analysis_digest(value.get("result_jsonl_sha256"), "result_jsonl_sha256")
@@ -1664,6 +1763,70 @@ def _validate_analysis_report_v3_shape(value: Mapping[str, Any]) -> dict[str, An
     analysis_counts = {
         name: _analysis_nonnegative_int(value.get(name), name) for name in count_names
     }
+    normalized_kind_counts: dict[str, dict[str, int]] | None = None
+    if current:
+        packet_schema_versions = value.get("packet_schema_versions")
+        if packet_schema_versions not in ([3], [3, 4]) or any(
+            isinstance(item, bool) for item in packet_schema_versions
+        ):
+            raise AnalysisReportError(
+                "packet_schema_versions must be exactly [3] or [3, 4]"
+            )
+        raw_kind_counts = value.get("kind_counts")
+        expected_populations = {
+            "eligible",
+            "emitted",
+            "results",
+            "cache_hits",
+            "cache_misses",
+            "provider_calls",
+        }
+        if (
+            not isinstance(raw_kind_counts, dict)
+            or set(raw_kind_counts) != expected_populations
+        ):
+            raise AnalysisReportError(
+                "kind_counts does not match the closed population shape"
+            )
+        normalized_kind_counts = {}
+        for population in (
+            "eligible",
+            "emitted",
+            "results",
+            "cache_hits",
+            "cache_misses",
+            "provider_calls",
+        ):
+            raw_counts = raw_kind_counts[population]
+            if (
+                not isinstance(raw_counts, dict)
+                or set(raw_counts) != _CURRENT_COUNT_FIELDS
+            ):
+                raise AnalysisReportError(
+                    f"kind_counts.{population} must contain all packet kinds"
+                )
+            normalized_kind_counts[population] = {
+                packet_kind: _analysis_nonnegative_int(
+                    raw_counts[packet_kind],
+                    f"kind_counts.{population}.{packet_kind}",
+                )
+                for packet_kind in ("section", "invariant", "suppression")
+            }
+        aggregate_fields = {
+            "emitted": "packet_count",
+            "results": "result_count",
+            "cache_hits": "cache_hits",
+            "cache_misses": "cache_misses",
+            "provider_calls": "provider_calls",
+        }
+        for population, aggregate in aggregate_fields.items():
+            if (
+                sum(normalized_kind_counts[population].values())
+                != analysis_counts[aggregate]
+            ):
+                raise AnalysisReportError(
+                    f"kind_counts.{population} does not equal {aggregate}"
+                )
     if analysis_counts["packet_count"] != counts["selected"]:
         raise AnalysisReportError("packet_count must equal alignment_summary.selected")
     if analysis_counts["result_count"] > analysis_counts["packet_count"]:
@@ -1692,7 +1855,12 @@ def _validate_analysis_report_v3_shape(value: Mapping[str, Any]) -> dict[str, An
     if not isinstance(finding_debt, list):
         raise AnalysisReportError("finding_debt must be a list")
     for index, item in enumerate(finding_debt):
-        _validate_finding_debt(item, index, current=True)
+        _validate_finding_debt(
+            item,
+            index,
+            current=True,
+            suppression_allowed=current,
+        )
     cost = value.get("estimated_cost_microusd")
     source = value.get("cost_rate_source")
     if cost is None:
@@ -1715,7 +1883,13 @@ def _validate_analysis_report_v3_shape(value: Mapping[str, Any]) -> dict[str, An
     if not isinstance(diagnostics, list):
         raise AnalysisReportError("semantic_diagnostics must be a list")
     authoritative = [
-        _validate_diagnostic(item, index, set(layers), current=True)
+        _validate_diagnostic(
+            item,
+            index,
+            set(layers),
+            current=True,
+            suppression_allowed=current,
+        )
         for index, item in enumerate(diagnostics)
     ]
     diagnostic_identities = [
@@ -1766,7 +1940,7 @@ def _validate_analysis_report_v3_shape(value: Mapping[str, Any]) -> dict[str, An
     if not isinstance(unused, list):
         raise AnalysisReportError("unused_dispositions must be a list")
     for index, item in enumerate(unused):
-        _validate_disposition(item, index)
+        _validate_disposition(item, index, suppression_allowed=current)
     disposition_identities = [
         (item["code"], item["packet_id"], item["packet_hash"], item["finding_hash"])
         for item in unused
@@ -1816,9 +1990,25 @@ def _validate_analysis_report_v3_shape(value: Mapping[str, Any]) -> dict[str, An
         elif (
             analysis_counts["cache_hits"] + analysis_counts["cache_misses"]
             != analysis_counts["packet_count"]
-            or analysis_counts["provider_calls"] > analysis_counts["cache_misses"]
+            or analysis_counts["provider_calls"]
+            > analysis_counts["cache_hits"] + analysis_counts["cache_misses"]
         ):
             raise AnalysisReportError("analyzer cache counters do not recompute")
+        if normalized_kind_counts is not None:
+            for packet_kind in ("section", "invariant", "suppression"):
+                hits = normalized_kind_counts["cache_hits"][packet_kind]
+                misses = normalized_kind_counts["cache_misses"][packet_kind]
+                calls = normalized_kind_counts["provider_calls"][packet_kind]
+                emitted = normalized_kind_counts["emitted"][packet_kind]
+                if hits == 0 and misses == 0:
+                    if calls != emitted:
+                        raise AnalysisReportError(
+                            f"cache-off {packet_kind} calls do not match emitted packets"
+                        )
+                elif hits + misses != emitted or calls > hits + misses:
+                    raise AnalysisReportError(
+                        f"{packet_kind} cache counters do not recompute"
+                    )
     _validate_verification(
         value.get("verification"),
         diagnostics=diagnostics,
@@ -1830,8 +2020,10 @@ def _validate_analysis_report_v3_shape(value: Mapping[str, Any]) -> dict[str, An
 
 
 def _validate_analysis_report_shape(value: Mapping[str, Any]) -> dict[str, Any]:
-    if value.get("schema_version") == 3:
-        return _validate_analysis_report_v3_shape(value)
+    if value.get("schema_version") in {3, 4} and not isinstance(
+        value.get("schema_version"), bool
+    ):
+        return _validate_analysis_report_source_shape(value)
     return _validate_analysis_report_v1_shape(value)
 
 
@@ -3011,11 +3203,10 @@ def validate_analysis_report(
 ) -> AnalysisReport:
     """Validate a closed report against independently known operation facts.
 
-    Schema 3 is a paired contract: callers must supply the validated schema-2
-    packet report so copied source/alignment fields cannot self-attest.  The
-    expected operation fields are mandatory and bind current-versus-historical
-    runtime decisions. Schema 1 remains a bounded historical reader only and
-    rejects all schema-3 pairing arguments.
+    Schemas 3 and 4 are paired contracts: callers must supply the validated
+    immediately corresponding packet report so copied source/alignment fields
+    cannot self-attest. The expected operation fields bind runtime authority.
+    Schema 1 remains a bounded historical reader only.
     """
 
     untrusted_value: Mapping[str, Any]
@@ -3035,19 +3226,22 @@ def validate_analysis_report(
         "artifact_currentness": expected_artifact_currentness,
         "source_provenance": expected_source_provenance,
     }
-    if schema_version == 3:
+    if schema_version in {3, 4}:
         if packet_report is None:
             raise AnalysisReportError(
-                "analysis report schema 3 requires its paired packet report"
+                f"analysis report schema {schema_version} requires its paired "
+                "packet report"
             )
         if result_jsonl is None:
             raise AnalysisReportError(
-                "analysis report schema 3 requires exact result_jsonl bytes"
+                f"analysis report schema {schema_version} requires exact "
+                "result_jsonl bytes"
             )
         packet_values = tuple(packets) if packets is not None else ()
         if not packet_values and value["packet_count"] != 0:
             raise AnalysisReportError(
-                "analysis report schema 3 requires its validated packets"
+                f"analysis report schema {schema_version} requires its "
+                "validated packets"
             )
         expected_runtime_values = {
             "scope": expected_scope,
@@ -3057,7 +3251,8 @@ def validate_analysis_report(
         }
         if any(expected is None for expected in expected_runtime_values.values()):
             raise AnalysisReportError(
-                "analysis report schema 3 requires all expected runtime authority fields"
+                f"analysis report schema {schema_version} requires all expected "
+                "runtime authority fields"
             )
         reconstructed_packet_jsonl = b"".join(
             canonical_json_bytes(packet.to_dict()) + b"\n" for packet in packet_values
@@ -3068,9 +3263,11 @@ def validate_analysis_report(
             packets=packet_values,
         )
         packet_value = validated_packet_report.to_dict()
-        if packet_value["schema_version"] != 2:
+        required_packet_report_schema = 3 if schema_version == 4 else 2
+        if packet_value["schema_version"] != required_packet_report_schema:
             raise AnalysisReportError(
-                "analysis report schema 3 requires packet report schema 2"
+                f"analysis report schema {schema_version} requires packet report "
+                f"schema {required_packet_report_schema}"
             )
         paired_fields = {
             "packet_jsonl_sha256": "packet_jsonl_sha256",
@@ -3088,6 +3285,24 @@ def validate_analysis_report(
                 raise AnalysisReportError(
                     f"analysis report {analysis_field} does not match packet report"
                 )
+        if schema_version == 4:
+            if (
+                value["packet_schema_versions"]
+                != packet_value["packet_schema_versions"]
+            ):
+                raise AnalysisReportError(
+                    "analysis report packet_schema_versions does not match packet "
+                    "report"
+                )
+            for population in ("eligible", "emitted"):
+                if (
+                    value["kind_counts"][population]
+                    != packet_value["kind_counts"][population]
+                ):
+                    raise AnalysisReportError(
+                        f"analysis report kind_counts.{population} does not match "
+                        "packet report"
+                    )
         packet_hashes = {
             item["packet_id"]: item["packet_hash"] for item in packet_value["packets"]
         }
@@ -3103,6 +3318,15 @@ def validate_analysis_report(
             raise AnalysisReportError(
                 "analysis report result_count does not match validated results"
             )
+        if schema_version == 4:
+            result_kind_counts = {
+                packet_kind: sum(row["kind"] == packet_kind for row in results)
+                for packet_kind in ("section", "invariant", "suppression")
+            }
+            if value["kind_counts"]["results"] != result_kind_counts:
+                raise AnalysisReportError(
+                    "analysis report result kind counts do not match validated results"
+                )
         verification_expectations = _bind_diagnostics_to_results(
             value, results, packet_values
         )
@@ -3129,7 +3353,8 @@ def validate_analysis_report(
         or any(expected is not None for expected in expected_fields.values())
     ):
         raise AnalysisReportError(
-            "schema-3 packet/scope arguments cannot validate legacy analysis report"
+            "source-report packet/scope arguments cannot validate legacy analysis "
+            "report"
         )
     if result_jsonl is not None:
         if not isinstance(result_jsonl, bytes):

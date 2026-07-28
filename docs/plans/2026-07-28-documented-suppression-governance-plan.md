@@ -924,6 +924,7 @@ Add to [EVC-12]:
 
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |----------|------------------|-----------------|-----------|---------------|
+| [SEM-7], [EVC-8.7], [EVC-12] | Analyze separately rejects a nonzero eligible suppression population with fewer emitted packets. | Current packet-report schema 3 rejects that artifact first: eligible and emitted both recompute from the selected executable/evaluate audit rows and selected rows must exactly match packets. Analyze treats a validated report as complete; zero eligible remains vacuously complete. | The planned post-validation state is unrepresentable without weakening the closed report contract or adding another population field. The existing validator is the correct failure owner and exits `2` before adapter construction. | Revise [SEM-7], [EVC-8.7], and [EVC-12] to name intrinsic schema-3 completeness and require an invalid-artifact boundary probe instead of a dead analyzer branch. |
 
 ## Dependency-Ordered Implementation Slices
 
@@ -1284,6 +1285,22 @@ Focused Round 3: `VERDICT: PASS`. R2-1 through R2-5 were verified fixed; no
 new defect caused by those fixes was confirmed. Claude also verified the four
 spec hashes against `225bc53`, every replacement anchor against the baseline
 text, and every corrected owner against the promotion edit list.
+
+## Implementation Review Record
+
+- Slice 1 independent review: `PASS`. The review checked source/config
+  parsing, strict fail-closed behavior, precedence, provenance, shared meta
+  resolution, and additive audit output.
+- Slice 2 independent review: `PASS` after one correction. Packet issue order
+  now uses one policy-independent canonical key in both producer and validator;
+  a severity-swap test proves stable bytes and identity.
+- Slice 3 independent review: `PASS` after authority, compatibility,
+  completeness, and race-accounting corrections. BSA006-BSA008 have no
+  mechanical or human authority under an independently verified policy cell;
+  historical schema-less results cannot be suppression results; current
+  packet-report validation owns intrinsic suppression completeness; and an
+  ownership-loss race may truthfully report a provider call followed by a
+  cache hit at aggregate and per-kind levels.
 
 ## Out Of Scope
 

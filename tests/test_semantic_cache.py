@@ -283,6 +283,23 @@ def test_required_replay_is_byte_identical_and_constructs_no_adapter(
     assert replay.result_jsonl == populated.result_jsonl
 
 
+def test_analyzer_operational_counts_are_recorded_at_each_kind_event(
+    tmp_path: Path,
+) -> None:
+    packets = (
+        _validated(),
+        ValidatedSemanticPacket.from_row(_invariant_packet(), cache_eligible=True),
+    )
+
+    run = _run(tmp_path / "cache", packets, cache_mode="off")
+
+    assert run.kind_counts == {
+        "cache_hits": {"section": 0, "invariant": 0, "suppression": 0},
+        "cache_misses": {"section": 0, "invariant": 0, "suppression": 0},
+        "provider_calls": {"section": 1, "invariant": 1, "suppression": 0},
+    }
+
+
 def test_idle_cache_root_deletion_rebuilds_or_fails_by_selected_mode(
     tmp_path: Path,
 ) -> None:
@@ -903,6 +920,11 @@ def test_single_flight_waiter_never_calls_and_reuses_owner_result(
     assert owner_run.provider_calls == 1
     assert waiter_run.provider_calls == 0
     assert waiter_run.cache_hits == 1
+    assert waiter_run.kind_counts == {
+        "cache_hits": {"section": 1, "invariant": 0, "suppression": 0},
+        "cache_misses": {"section": 0, "invariant": 0, "suppression": 0},
+        "provider_calls": {"section": 0, "invariant": 0, "suppression": 0},
+    }
 
 
 def test_waiter_accepts_result_published_before_lock_reopen(
@@ -1370,6 +1392,11 @@ def test_owner_failure_removes_only_its_unchanged_lock(tmp_path: Path) -> None:
     assert run.results == ()
     assert run.problems[0].stage == "provider"
     assert run.problems[0].code == "provider_failure"
+    assert run.kind_counts == {
+        "cache_hits": {"section": 0, "invariant": 0, "suppression": 0},
+        "cache_misses": {"section": 1, "invariant": 0, "suppression": 0},
+        "provider_calls": {"section": 1, "invariant": 0, "suppression": 0},
+    }
     assert not (cache_path / "locks" / f"{identity.analysis_key}.lock").exists()
 
 
@@ -1458,6 +1485,11 @@ def test_analyzer_ownership_loss_serves_an_identical_published_result_as_hit(
     assert replay.cache_hits == 1
     assert replay.cache_misses == 0
     assert replay.provider_calls == 1
+    assert replay.kind_counts == {
+        "cache_hits": {"section": 1, "invariant": 0, "suppression": 0},
+        "cache_misses": {"section": 0, "invariant": 0, "suppression": 0},
+        "provider_calls": {"section": 1, "invariant": 0, "suppression": 0},
+    }
     assert lock_path.exists() is (ownership_state == "replaced")
 
 

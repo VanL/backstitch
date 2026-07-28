@@ -102,9 +102,7 @@ def test_declared_html_suppression_is_auditable_end_to_end(tmp_path: Path) -> No
     result = build_obligation_runtime(
         tmp_path,
         profile,
-        BackstitchSettings(
-            lint=LintSettings(require_suppression_declarations=True)
-        ),
+        BackstitchSettings(lint=LintSettings(require_suppression_declarations=True)),
     ).pipeline
 
     assert result.report.issues == ()
@@ -144,9 +142,7 @@ def test_declaration_bearing_python_docstring_and_comment_rules_fire(
     result = build_obligation_runtime(
         tmp_path,
         profile,
-        BackstitchSettings(
-            lint=LintSettings(require_suppression_declarations=True)
-        ),
+        BackstitchSettings(lint=LintSettings(require_suppression_declarations=True)),
     ).pipeline
 
     suppressed_paths = {
@@ -235,9 +231,7 @@ def test_invalid_or_unresolved_declaration_leaves_original_finding_active(
     result = build_obligation_runtime(
         tmp_path,
         profile,
-        BackstitchSettings(
-            lint=LintSettings(require_suppression_declarations=True)
-        ),
+        BackstitchSettings(lint=LintSettings(require_suppression_declarations=True)),
     ).pipeline
 
     assert result.suppressed == ()
@@ -276,9 +270,7 @@ def test_declared_rules_preserve_inline_precedence_and_exact_section_scope(
                     sections=("X-1",),
                     codes=("SPEC_SECTION_UNMAPPED",),
                     declaration=reference,
-                    origin=SuppressionOrigin(
-                        source="/trusted/config.toml", position=0
-                    ),
+                    origin=SuppressionOrigin(source="/trusted/config.toml", position=0),
                 ),
             ),
         )

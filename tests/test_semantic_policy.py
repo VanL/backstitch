@@ -85,9 +85,7 @@ def _canonical_result(
                     "start_line": 11,
                     "end_line": 11,
                     "excerpt": "dangerous_call()",
-                    "excerpt_sha256": hashlib.sha256(
-                        b"dangerous_call()"
-                    ).hexdigest(),
+                    "excerpt_sha256": hashlib.sha256(b"dangerous_call()").hexdigest(),
                 },
             )
         return {

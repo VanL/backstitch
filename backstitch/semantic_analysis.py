@@ -442,14 +442,16 @@ def _packet_report_preflight(
         return problems, None
 
     value = report.to_dict()
-    if value["schema_version"] != 2 or any(
+    report_schema = value["schema_version"]
+    if report_schema not in {2, 3} or any(
         not packet.semantic_eligible for packet in request.packets
     ):
         problems.append(
             _problem(
                 "input",
                 "invalid_input",
-                "semantic analysis requires packet schema 3 and packet-report schema 2",
+                "semantic analysis requires packet schema 3 or 4 and "
+                "packet-report schema 2 or 3",
             )
         )
         return problems, None
@@ -458,6 +460,7 @@ def _packet_report_preflight(
     emitted = {
         "section": sum(row["kind"] == "section" for row in rows),
         "invariant": sum(row["kind"] == "invariant" for row in rows),
+        "suppression": sum(row["kind"] == "suppression" for row in rows),
     }
     prompt_byte_count = (
         sum(
@@ -468,7 +471,14 @@ def _packet_report_preflight(
         else 0
     )
     for kind in request.settings.required_kinds:
-        if emitted[kind] == 0:
+        if kind == "suppression":
+            # Current packet-report validation has already proved that every
+            # eligible suppression audit row has one emitted packet. Zero
+            # eligible suppressions is therefore the only valid empty case.
+            missing = False
+        else:
+            missing = emitted[kind] == 0
+        if missing:
             problems.append(
                 _problem(
                     "completeness",
@@ -639,6 +649,7 @@ def _execute_cache(
     int,
     int,
     int,
+    dict[str, dict[str, int]],
 ]:
     provider_call_budget = ProviderCallBudget(request.settings.maximum_provider_calls)
     adapter_factory = request.adapter_factory
@@ -694,6 +705,7 @@ def _execute_cache(
             run.cache_hits,
             run.cache_misses,
             run.provider_calls,
+            run.kind_counts,
         )
 
     def analyze_one(
@@ -709,6 +721,11 @@ def _execute_cache(
                 zip(request.packets, identities, strict=True),
             )
         )
+    kind_counts = _empty_analyzer_kind_counts()
+    for run in runs:
+        for event in kind_counts:
+            for packet_kind in kind_counts[event]:
+                kind_counts[event][packet_kind] += run.kind_counts[event][packet_kind]
     return (
         tuple(result for run in runs for result in run.results),
         b"".join(run.result_jsonl for run in runs),
@@ -716,7 +733,15 @@ def _execute_cache(
         sum(run.cache_hits for run in runs),
         sum(run.cache_misses for run in runs),
         sum(run.provider_calls for run in runs),
+        kind_counts,
     )
+
+
+def _empty_analyzer_kind_counts() -> dict[str, dict[str, int]]:
+    return {
+        event: {"section": 0, "invariant": 0, "suppression": 0}
+        for event in ("cache_hits", "cache_misses", "provider_calls")
+    }
 
 
 def _disabled_verification_report() -> dict[str, Any]:
@@ -1270,6 +1295,7 @@ def _build_report(
     cache_hits: int,
     cache_misses: int,
     provider_calls: int,
+    analyzer_kind_counts: dict[str, dict[str, int]],
     prompt_byte_count: int,
     elapsed_milliseconds: int,
     estimated_cost_microusd: int | None,
@@ -1277,12 +1303,14 @@ def _build_report(
     verification: dict[str, Any],
 ) -> dict[str, Any]:
     if request.packet_report is None:
-        raise ValueError("schema-3 analysis report requires a packet report")
+        raise ValueError("current analysis report requires a packet report")
     packet_report = request.packet_report.to_dict()
-    if packet_report.get("schema_version") != 2:
-        raise ValueError("schema-3 analysis report requires packet report schema 2")
-    return {
-        "schema_version": 3,
+    packet_report_schema = packet_report.get("schema_version")
+    if packet_report_schema not in {2, 3}:
+        raise ValueError("analysis report requires packet report schema 2 or 3")
+    schema_version = 4 if packet_report_schema == 3 else 3
+    report = {
+        "schema_version": schema_version,
         "artifact": "backstitch-analysis-report",
         "scope": request.scope,
         "semantic_status": request.semantic_status,
@@ -1322,6 +1350,28 @@ def _build_report(
         "verification": verification,
         "problems": [problem.to_row() for problem in problems],
     }
+    if schema_version == 4:
+        # [SEM-7] blast radius: these aggregate counters and the per-kind
+        # projection must be derived from the same actual cache/provider events.
+        operational_totals = {
+            event: sum(analyzer_kind_counts[event].values())
+            for event in ("cache_hits", "cache_misses", "provider_calls")
+        }
+        report.update(operational_totals)
+        report["packet_schema_versions"] = packet_report["packet_schema_versions"]
+        report["kind_counts"] = {
+            "eligible": dict(packet_report["kind_counts"]["eligible"]),
+            "emitted": dict(packet_report["kind_counts"]["emitted"]),
+            "results": {
+                packet_kind: sum(row["kind"] == packet_kind for row in results)
+                for packet_kind in ("section", "invariant", "suppression")
+            },
+            **{
+                event: dict(analyzer_kind_counts[event])
+                for event in ("cache_hits", "cache_misses", "provider_calls")
+            },
+        }
+    return report
 
 
 def _stderr_lines(
@@ -1382,6 +1432,7 @@ def _run_semantic_analysis(
     cache_hits = 0
     cache_misses = 0
     provider_calls = 0
+    analyzer_kind_counts = _empty_analyzer_kind_counts()
     estimated_cost: int | None = None
     verification_cost: int | None = None
     verification_report = (
@@ -1567,6 +1618,7 @@ def _run_semantic_analysis(
             cache_hits,
             cache_misses,
             provider_calls,
+            analyzer_kind_counts,
         ) = _execute_cache(
             request,
             identities,
@@ -1662,6 +1714,7 @@ def _run_semantic_analysis(
         cache_hits=cache_hits,
         cache_misses=cache_misses,
         provider_calls=provider_calls,
+        analyzer_kind_counts=analyzer_kind_counts,
         prompt_byte_count=(prompt_byte_count),
         elapsed_milliseconds=elapsed,
         estimated_cost_microusd=estimated_cost,
@@ -1707,6 +1760,7 @@ def _run_semantic_analysis(
                     cache_hits=cache_hits,
                     cache_misses=cache_misses,
                     provider_calls=provider_calls,
+                    analyzer_kind_counts=analyzer_kind_counts,
                     prompt_byte_count=prompt_byte_count,
                     elapsed_milliseconds=elapsed,
                     estimated_cost_microusd=estimated_cost,
@@ -1749,6 +1803,7 @@ def _run_semantic_analysis(
                     cache_hits=cache_hits,
                     cache_misses=cache_misses,
                     provider_calls=provider_calls,
+                    analyzer_kind_counts=analyzer_kind_counts,
                     prompt_byte_count=prompt_byte_count,
                     elapsed_milliseconds=elapsed,
                     estimated_cost_microusd=estimated_cost,

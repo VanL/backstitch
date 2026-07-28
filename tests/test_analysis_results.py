@@ -271,6 +271,19 @@ def test_analysis_result_legacy_and_partial_union_rules() -> None:
         assert load.errors
 
 
+def test_schema_less_legacy_result_cannot_be_reinterpreted_as_suppression() -> None:
+    forged = _invariant_row(
+        kind="suppression",
+        classification="rationale_insufficient",
+    )
+
+    load = load_analysis_results(forged, None)
+
+    assert load.results == ()
+    assert len(load.errors) == 1
+    assert "expected `section` or `invariant`" in load.errors[0]
+
+
 def test_result_kind_must_match_report_derived_identity() -> None:
     identities = {
         PACKET_ID: "section",

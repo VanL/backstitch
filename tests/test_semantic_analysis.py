@@ -514,6 +514,42 @@ def _packet_report(
     )
 
 
+def _packet_report_v3(
+    packet_jsonl: bytes,
+    packets: tuple[ValidatedSemanticPacket, ...],
+) -> PacketReport:
+    value = _packet_report(packet_jsonl, packets).to_dict()
+    value["schema_version"] = 3
+    value["packet_schema_versions"] = [value.pop("packet_schema_version")]
+    derivation = value["derivation_contract"]
+    derivation["packet_contract_versions"] = [derivation.pop("packet_contract_version")]
+    rows = tuple(packet.to_dict() for packet in packets)
+    counts = {
+        packet_kind: sum(row["kind"] == packet_kind for row in rows)
+        for packet_kind in ("section", "invariant", "suppression")
+    }
+    value["kind_counts"] = {"eligible": counts, "emitted": dict(counts)}
+    value["packet_report_content_sha256"] = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                key: item
+                for key, item in value.items()
+                if key
+                not in {
+                    "packet_report_content_sha256",
+                    "tool_version",
+                    "created_at",
+                }
+            }
+        )
+    ).hexdigest()
+    return validate_packet_report(
+        value,
+        packet_jsonl=packet_jsonl,
+        packets=packets,
+    )
+
+
 def _all_skipped_packet_report() -> PacketReport:
     value: dict[str, Any] = {
         "schema_version": 2,
@@ -643,6 +679,98 @@ def test_complete_clean_run_publishes_closed_report_and_exits_zero(
     assert request.result_path.read_bytes() == run.result_jsonl
     assert request.report_path is not None
     assert request.report_path.read_bytes() == run.report_json
+
+
+def test_current_report_counts_operational_events_and_zero_suppressions_vacuously(
+    tmp_path: Path,
+) -> None:
+    request = _analysis_request(
+        tmp_path,
+        settings=_resolved(
+            cache_path=tmp_path / "cache",
+            required_kinds=("section", "suppression"),
+        ),
+    )
+    packet_jsonl = b"".join(
+        canonical_json_bytes(packet.to_dict()) + b"\n" for packet in request.packets
+    )
+    request = replace(
+        request,
+        packet_report=_packet_report_v3(packet_jsonl, request.packets),
+    )
+
+    run = run_semantic_analysis(request)
+
+    assert run.exit_code == 0
+    assert run.report["schema_version"] == 4
+    assert run.report["packet_schema_versions"] == [3]
+    assert run.report["kind_counts"] == {
+        "eligible": {"section": 1, "invariant": 0, "suppression": 0},
+        "emitted": {"section": 1, "invariant": 0, "suppression": 0},
+        "results": {"section": 1, "invariant": 0, "suppression": 0},
+        "cache_hits": {"section": 0, "invariant": 0, "suppression": 0},
+        "cache_misses": {"section": 0, "invariant": 0, "suppression": 0},
+        "provider_calls": {"section": 1, "invariant": 0, "suppression": 0},
+    }
+
+
+@pytest.mark.parametrize("ownership_state", ["replaced", "absent"])
+def test_analysis_report_accepts_hit_after_provider_call_on_ownership_loss(
+    tmp_path: Path,
+    ownership_state: str,
+) -> None:
+    cache_path = tmp_path / "cache"
+    settings = _resolved(cache_path=cache_path, cache_mode="read-write")
+    request = _analysis_request(tmp_path, settings=settings)
+    packet_jsonl = b"".join(
+        canonical_json_bytes(packet.to_dict()) + b"\n" for packet in request.packets
+    )
+    request = replace(
+        request,
+        packet_report=_packet_report_v3(packet_jsonl, request.packets),
+    )
+    populated = run_semantic_analysis(request)
+    assert populated.exit_code == 0
+
+    row = request.packets[0].to_dict()
+    identity = build_inference_identity(
+        row,
+        settings.provider_identity,
+        settings.request_identity,
+        search_epoch=settings.search_epoch,
+    )
+    result_path = cache_path / "results" / f"{identity.analysis_key}.json"
+    result_bytes = result_path.read_bytes()
+    result_path.unlink()
+    lock_path = cache_path / "locks" / f"{identity.analysis_key}.lock"
+
+    def publish_winner(_prompt: str) -> ProviderCallResult:
+        if ownership_state == "replaced":
+            lock = json.loads(lock_path.read_bytes())
+            lock["owner_token"] = "e" * 64
+            lock_path.write_bytes(canonical_json_bytes(lock))
+        else:
+            lock_path.unlink()
+        result_path.write_bytes(result_bytes)
+        return ProviderCallResult(json.dumps(_model_row()), PROVENANCE)
+
+    raced = run_semantic_analysis(
+        replace(
+            request,
+            adapter_factory=lambda: publish_winner,
+            result_path=tmp_path / "raced-analysis.jsonl",
+            report_path=tmp_path / "raced-analysis-report.json",
+        )
+    )
+
+    assert raced.exit_code == 0
+    assert raced.result_jsonl == populated.result_jsonl
+    assert raced.report["cache_hits"] == 1
+    assert raced.report["cache_misses"] == 0
+    assert raced.report["provider_calls"] == 1
+    assert raced.report["kind_counts"]["cache_hits"]["section"] == 1
+    assert raced.report["kind_counts"]["cache_misses"]["section"] == 0
+    assert raced.report["kind_counts"]["provider_calls"]["section"] == 1
 
 
 def test_prompt_resource_mutation_cannot_change_frozen_preflight_or_budget_bytes(

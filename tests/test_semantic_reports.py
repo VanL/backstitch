@@ -993,6 +993,91 @@ def _validate_v3(
     )
 
 
+def _analysis_report_v4() -> tuple[dict[str, Any], bytes, dict[str, Any]]:
+    report, result_jsonl, packet_report = _analysis_report_v3()
+    packet_report["schema_version"] = 3
+    packet_report["packet_schema_versions"] = [
+        packet_report.pop("packet_schema_version")
+    ]
+    derivation = packet_report["derivation_contract"]
+    derivation["packet_contract_versions"] = [derivation.pop("packet_contract_version")]
+    packet_report["kind_counts"] = {
+        "eligible": {"section": 1, "invariant": 0, "suppression": 0},
+        "emitted": {"section": 1, "invariant": 0, "suppression": 0},
+    }
+    packet_report["packet_report_content_sha256"] = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                key: value
+                for key, value in packet_report.items()
+                if key
+                not in {
+                    "packet_report_content_sha256",
+                    "tool_version",
+                    "created_at",
+                }
+            }
+        )
+    ).hexdigest()
+    report.update(
+        schema_version=4,
+        packet_schema_versions=[3],
+        packet_report_content_sha256=packet_report["packet_report_content_sha256"],
+        kind_counts={
+            **deepcopy(packet_report["kind_counts"]),
+            "results": {"section": 1, "invariant": 0, "suppression": 0},
+            "cache_hits": {"section": 0, "invariant": 0, "suppression": 0},
+            "cache_misses": {"section": 1, "invariant": 0, "suppression": 0},
+            "provider_calls": {"section": 1, "invariant": 0, "suppression": 0},
+        },
+    )
+    return report, result_jsonl, packet_report
+
+
+@pytest.mark.parametrize(
+    "population",
+    [
+        "eligible",
+        "emitted",
+        "results",
+        "cache_hits",
+        "cache_misses",
+        "provider_calls",
+    ],
+)
+def test_analysis_report_v4_pairs_each_closed_kind_population(
+    population: str,
+) -> None:
+    report, result_jsonl, packet_report = _analysis_report_v4()
+    validated = validate_analysis_report(
+        report,
+        result_jsonl=result_jsonl,
+        packet_report=packet_report,
+        packets=_current_packets(),
+        expected_scope="current_repository",
+        expected_semantic_status="evaluated",
+        expected_artifact_currentness="current",
+        expected_source_provenance="captured_current",
+    )
+    assert (
+        validated.to_dict()["kind_counts"][population]
+        == report["kind_counts"][population]
+    )
+
+    report["kind_counts"][population]["section"] += 1
+    with pytest.raises(AnalysisReportError, match="kind_counts|cache counters"):
+        validate_analysis_report(
+            report,
+            result_jsonl=result_jsonl,
+            packet_report=packet_report,
+            packets=_current_packets(),
+            expected_scope="current_repository",
+            expected_semantic_status="evaluated",
+            expected_artifact_currentness="current",
+            expected_source_provenance="captured_current",
+        )
+
+
 def test_analysis_report_round_trips_through_its_own_loader(tmp_path: Path) -> None:
     report, result_jsonl = _analysis_report()
     validated = validate_analysis_report(

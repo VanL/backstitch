@@ -104,9 +104,7 @@ def test_validated_structured_meta_rule_sets_the_shared_obligation_rung(
                     sections=(),
                     codes=(),
                     declaration=f"{spec_path}#SUP-META",
-                    origin=SuppressionOrigin(
-                        source="/trusted/config.toml", position=0
-                    ),
+                    origin=SuppressionOrigin(source="/trusted/config.toml", position=0),
                 ),
             )
         )
