@@ -74,12 +74,24 @@ _Implementation mapping_:
 |---------|------------------|
 | `check` | `--repo-root` after `resolve()` |
 | `packets` | `--repo-root` after `resolve()` |
-| `analyze` | parent directory of `--packets` after `resolve()` |
+| `obligation list` / `obligation OBLIGATION_ID` | `--repo-root` after `resolve()`, or current working directory when omitted |
+| `analyze --repo-root` | repository root after `resolve()` |
+| `analyze --packets` | parent directory of `--packets` after `resolve()` |
+| `eval` | parent directory of `--corpus` manifest after `resolve()` |
+| `cache cleanup-lock` | no discovery; all cache/staleness inputs are explicit |
 | `summarize-analysis` | no discovery in v1; CLI args only |
+| `guide alignment` | no discovery; installed code-owned guide only |
+| optional `mcp` | required `--repo-root` after `resolve()` |
 | `doctor` | current working directory after `resolve()` |
 
 If `--config` is provided ([CFG-5]), discovery is skipped and that file is the
 sole config source (still subject to CLI/env precedence above file values).
+
+Implicit discovery recognizes only `.backstitch.toml` and a `pyproject.toml`
+that contains `[tool.backstitch]`. An explicit `--config PATH` may name any
+TOML filename. An `extend` value may also name any TOML filename. Neither
+mechanism adds that basename to implicit discovery or gives the basename
+special validation or trust semantics.
 
 ### 3.2 Upward search
 
@@ -206,9 +218,23 @@ Environment variables in v1:
 | Variable | Affects | Notes |
 |----------|---------|-------|
 | `BACKSTITCH_WEFT_ROOT` | sibling Weft discovery | overrides `target_roots.weft` |
-| `LLM_MODEL` | `analyze` model fallback | overrides `analyze.model` when `--model` omitted |
+| `LLM_MODEL` | `analyze` model fallback | overrides `analyze.model` when `--model` is omitted; a different nonblank configured model is rejected in cached modes |
 
 CLI flags always beat config and environment for the same setting.
+In `read-write` or `require` mode, a nonblank configured `analyze.model` and
+`model_revision` are one declared identity pair. `--model` or `LLM_MODEL` may
+not replace that model with a different value while silently retaining the
+configured revision; use a configuration that declares both values. A blank
+configured model may still be filled by ordinary CLI/environment precedence.
+
+When enabled verification uses `provider_source = "analyze"`, the complete
+resolved analyze descriptor is atomic even when analyze cache mode is `off`:
+model, revision, backend/plugin/distribution identity, input/output rates,
+token overhead, and cost-rate source travel together. `--model` and
+`LLM_MODEL` may be absent or equal the config-declared model; neither may
+replace it while retaining the other identity or cost fields. A different
+reused model requires an atomic configuration change to the complete analyze
+descriptor ([EVC-5]).
 
 `code_roots` and `test_roots` form one ordered override pair. A layer that
 replaces `code_roots` and omits `test_roots` resets test roots to empty. A
@@ -228,7 +254,105 @@ _Implementation mapping_:
 - `backstitch/doctor.py`
 - `backstitch/target_roots.py`
 
+### 5.1 Canonical Resolution And Generic CLI Overlays [CFG-5.1]
+
+`backstitch.settings.resolve_config(...)` is the sole public owner for
+assembling effective Backstitch settings. It accepts the command's discovery
+anchor, explicit-selection state, an environment mapping, repeatable generic
+CLI option pairs, and normalized dedicated CLI values. It returns one
+immutable `BackstitchSettings` snapshot including selected-path and layer
+provenance.
+
+Each invocation resolves settings once and passes that snapshot into command
+and core code. Downstream code must not rediscover files, reread Backstitch
+environment overrides, or apply another precedence rule. Tests below the
+resolution boundary may construct or replace a `BackstitchSettings` value and
+pass it directly; resolver and public-CLI tests use the real filesystem, TOML
+parser, environment mapping, and argument parser.
+
+The repeatable CLI form is `--option KEY VALUE`. `KEY` is a known,
+runtime-consulted dotted leaf path in standalone `.backstitch.toml` shape and
+never includes `tool.backstitch`. Split `KEY` on literal dots with no quoted
+segments or escaping; every segment is nonempty. Individual map entries whose
+names contain dots, including `lint.per-file-ignores` and
+`lint.per-section-ignores` entries, are not addressable; traversal stops at a
+non-leaf table and is exit `2`. Reserved/non-consulted leaves such as
+`packets.output` are not runtime-overridable.
+
+`VALUE` is one argument and may not contain NUL, CR, or LF. Parse it by
+constructing exactly one synthetic TOML assignment, `value = <argument>`. If
+that parse succeeds, the synthetic document must contain exactly one
+top-level key named `value`; that value may itself be a scalar, array, or
+inline table. An additional top-level key or table is exit `2`. If the
+one-assignment parse fails, treat the entire argument as a bare string. Quote
+a string that would otherwise parse as a boolean, number, date, array, or
+inline table. The empty string is `""`.
+
+Generic options and dedicated setting flags form one final CLI layer after the
+defined environment layer. Existing key-specific merge and paired-root rules
+apply. A repeated generic key, an assignment to an unknown/non-leaf/reserved
+key, or a dedicated flag plus generic option for the same canonical key is
+exit `2`. `extend`, `allow_unknown_keys`, and `defaults.schema_version` are
+load-time structure and cannot be set by `--option`.
+
+The complete dedicated-setting alias map is:
+
+| CLI flag | Canonical key | Commands |
+|---|---|---|
+| `--profile` | `profile.name` | `check`, `packets` |
+| `--spec-root` | `profile.spec_roots` | `check`, `packets` |
+| `--plan-root` | `profile.plan_roots` | `check`, `packets` |
+| `--code-root` | `profile.code_roots` | `check`, `packets` |
+| `--test-root` | `profile.test_roots` | `check`, `packets` |
+| `--format` | `check.format` | `check` only |
+| `--output` | `check.output` | `check` only |
+| `--warnings-as-errors` / `--no-warnings-as-errors` | `check.warnings_as_errors` | `check` |
+| `--model` | `analyze.model` | `analyze`, `doctor` |
+| `--concurrency` | `analyze.concurrency` | `analyze` |
+
+All other flags are operational arguments rather than setting aliases.
+`--repo-root`, non-check `--format`/`--output`, analyze report and packet
+paths, packet `--output`, obligation `--limit`, and config selection controls
+therefore never conflict with a generic setting key.
+
+CLI artifact paths are relative to the process working directory. Scan roots
+retain their target-repository-relative meaning. CLI values never acquire the
+selected config file's directory as their base. `--no-config` and `--option`
+may be combined, yielding defaults, then defined environment, then CLI.
+
+`config show` applies and renders the same effective option layer as runtime
+commands. `config path` resolves and validates the same request, then prints
+only the selected path. `summarize-analysis`, `guide`, and
+`cache cleanup-lock` reject global `--config`, `--no-config`, and `--option`
+because they do not consume configuration.
+
+Configuration resolution performs no provider import, credential read,
+network call, snapshot capture, cache mutation, or output publication.
+Malformed options and invalid final settings are exit `2` before those
+effects. Provider-library default-model selection may occur later only in an
+explicitly provider-touching command when the resolved model is blank; it is
+not a second Backstitch configuration source.
+
+_Implementation mapping_:
+
+- `backstitch/settings.py`
+- `backstitch/cli.py`
+- `backstitch/analysis_llm.py`
+- `backstitch/doctor.py`
+- `backstitch/target_roots.py`
+- `tests/test_cli_config.py`
+- `tests/test_doctor.py`
+- `tests/test_settings.py`
+- `tests/test_semantic_settings.py`
+
 ## 6. Schema [CFG-6]
+
+_Implementation mapping_:
+
+- `backstitch/config.py`
+- `backstitch/diagnostics.py`
+- `backstitch/settings.py`
+- `backstitch/target_roots.py`
 
 ### 6.1 Top-level keys
 
@@ -306,7 +430,104 @@ not suppress invariant diagnostics.
 | `model` | string | CLI `--model` default |
 | `concurrency` | integer | CLI `--concurrency` |
 
-### 6.6 `[target_roots]` / `[tool.backstitch.target_roots]`
+All other semantic inference, cache, completeness, budget, finding, and
+disposition keys are defined exactly in [SEM-9]. They are strict known keys
+under `[analyze]` and `[[analyze.dispositions]]`; unknown or mistyped semantic
+keys, including the historical-only `[analyze.eval]` producer spelling, follow
+[CFG-8]. Current evaluation configuration lives only under `[verify.eval]`.
+Packaged values are conservative. A repository's applied TOML owns stricter
+policy, and workflow YAML must not duplicate those non-secret controls.
+
+When `extend` names `pyproject.toml`, the loader selects the target file's
+`[tool.backstitch]` table before merging. Other TOML filenames contribute
+their top-level tables. `extend` filenames are otherwise unrestricted and
+carry no special validation or trust semantics.
+
+### 6.6 `[obligations]` / `[tool.backstitch.obligations]` [CFG-6.6]
+
+The complete initial table and packaged defaults are:
+
+```toml
+[tool.backstitch.obligations]
+section_required_roles = ["implementation"]
+page_size = 5
+maximum_page_size = 100
+maximum_response_bytes = 65536
+maximum_candidate_items = 2000
+maximum_catalog_items = 100000
+maximum_lexical_seeds = 10
+maximum_snapshot_files = 20000
+maximum_file_bytes = 5000000
+maximum_snapshot_bytes = 100000000
+maximum_work_units = 2000000
+maximum_packet_bytes = 10000000
+maximum_packet_report_bytes = 10000000
+maximum_call_seconds = 10.0
+snapshot_capture_attempts = 3
+static_neighbor_depth = 1
+```
+
+Types, ranges, cross-field constraints, and the distinction between
+snapshot-identity settings and presentation/deadline settings are exactly
+[EVC-8.2] and [EVC-8.3.1]. There is no repository ID, case root, manifest path,
+proposal limit, activation option, or source-write option.
+
+_Implementation mapping_:
+
+- `backstitch/settings.py`
+
+### 6.7 `[verify]` / `[tool.backstitch.verify]`
+
+Packaged defaults contain exactly `enabled = false`. A disabled verifier has
+one of two strict shapes: minimal disabled contains exactly
+`enabled = false`; dormant complete contains `enabled = false` plus every
+enabled base-table key required by [EVC-5], the provider table required by
+`provider_source` when applicable, and an optional but complete
+`[verify.eval]` table. Partial dormant tables are invalid. Dormant fields
+receive the same unknown-key, type, range, nonblank, provider-identity, cost,
+path, and internal cross-field validation as enabled fields, while disabled
+verification performs no adapter construction, qualification-artifact load,
+cache access, or provider call. CLI layers apply before final shape
+validation, so `--option verify.enabled true` can activate a dormant complete
+table but makes a minimal disabled table fail for missing required keys.
+The complete enabled base table, nested override provider table, types, ranges,
+all-or-nothing `provider_source` rule, provider identity, cost, cache,
+aggregation, and budget semantics are exactly [EVC-5].
+The qualification subtable is exactly [EVC-10.1]:
+
+```toml
+[tool.backstitch.verify.eval]
+mode = "report"
+qualification_corpus = "tests/semantic_eval/v3/manifest.json"
+qualification_corpus_sha256 = "sha256:<digest>"
+qualification_report = "docs/evidence/verify-eval-report.json"
+qualification_report_sha256 = "sha256:<digest>"
+trials = 2
+interval_method = "wilson"
+confidence_level = 0.95
+minimum_positive_units = 1
+minimum_negative_units = 1
+minimum_evidence_sufficiency_rate = 0.0
+minimum_conditional_precision = 0.0
+minimum_conditional_recall = 0.0
+minimum_end_to_end_recall = 0.0
+minimum_recall_lower_bound = 0.0
+maximum_false_positive_rate = 1.0
+maximum_false_positive_upper_bound = 1.0
+maximum_indeterminate_rate = 1.0
+maximum_uncached_flip_rate = 1.0
+require_all_critical = false
+```
+
+`verify.eval` is the sole promoting evaluation path. The superseded
+`analyze.eval` table is always an unknown settings key. Only schema-2 report
+objects remain readable through an explicit bounded historical report API;
+that artifact API does not parse producer TOML and grants no current policy
+authority. Enforce-mode paths, hashes, thresholds, sample
+floors, strong-selector report binding, and composed analyzer/verifier identity
+rules are exactly [EVC-6] and [EVC-10.1].
+
+### 6.8 `[target_roots]` / `[tool.backstitch.target_roots]`
 
 | Key | Type | Maps from |
 |-----|------|-----------|
@@ -314,7 +535,7 @@ not suppress invariant diagnostics.
 
 Additional sibling names are reserved for future spec revisions.
 
-### 6.7 Scan boundaries (ruff `exclude` analogue)
+### 6.9 Scan boundaries (ruff `exclude` analogue)
 
 `exclude` and `extend_exclude` are configured at the top level of
 `[tool.backstitch]` / `.backstitch.toml` — the same scope as `extend` and
@@ -365,7 +586,7 @@ Invalid under strict load — `extend_exclude` is not a profile field:
 extend_exclude = ["tests/fixtures/**"]  # -> unknown key ([CFG-8])
 ```
 
-### 6.8 `extend` merge semantics
+### 6.10 `extend` merge semantics
 
 When `extend = "../other.toml"` is present:
 
@@ -383,11 +604,11 @@ otherwise.
 Circular `extend` chains must error.
 
 `exclude`, `extend_exclude`, `[profile]`, `[check]`, `[packets]`, `[analyze]`,
-`[target_roots]`, `[lint]`, and `[diagnostics]` all have defaults in the
+`[obligations]`, `[verify]`, `[target_roots]`, `[lint]`, and `[diagnostics]` all have defaults in the
 packaged default TOML. Python dataclass defaults may mirror those values for
 type construction, but the packaged TOML is the behavioral source of truth.
 
-### 6.9 Traceability exclusions
+### 6.11 Traceability exclusions
 
 Lint-style suppressions (`meta_spec_globs`, `lint.per-file-ignores`,
 `lint.per-section-ignores`, and related keys) are defined in
@@ -395,7 +616,7 @@ Lint-style suppressions (`meta_spec_globs`, `lint.per-file-ignores`,
 in v1. They are intentionally separate from `exclude` / `extend_exclude`,
 which skip scanning.
 
-### 6.10 Analogues intentionally omitted in v1
+### 6.12 Analogues intentionally omitted in v1
 
 The following mypy/ruff options do **not** have v1 analogues:
 
@@ -409,7 +630,7 @@ The following mypy/ruff options do **not** have v1 analogues:
 
 These may be proposed in a later spec revision with separate reference codes.
 
-### 6.11 `[diagnostics]` / `[tool.backstitch.diagnostics]`
+### 6.13 `[diagnostics]` / `[tool.backstitch.diagnostics]`
 
 | Key | Type | Meaning |
 |-----|------|---------|
@@ -443,17 +664,6 @@ level = "info"
 `off` hides the diagnostic from normal output but keeps it visible in the
 suppression/audit view.
 
-_Implementation mapping_:
-- `backstitch/defaults.toml`
-- `backstitch/diagnostics.py`
-- `backstitch/settings.py`
-- `backstitch/config.py`
-- `backstitch/profiles.py`
-- `backstitch/markdown_specs.py`
-- `backstitch/python_refs.py`
-- `backstitch/resolver.py`
-- `backstitch/target_roots.py`
-
 ## 7. CLI Additions [CFG-7]
 
 `backstitch` must add:
@@ -461,9 +671,16 @@ _Implementation mapping_:
 ```bash
 backstitch --config PATH <command> ...
 backstitch --no-config <command> ...
+backstitch --option KEY VALUE <command> ...
+backstitch <command> --option KEY VALUE ...
 backstitch config show [--repo-root PATH]
 backstitch config path [--repo-root PATH]
 ```
+
+`--option` is repeatable and follows [CFG-5.1]. `config show` applies and
+renders the same final option layer as runtime commands. `config path` resolves
+and validates the same request, then prints only the selected path. A command
+that does not consume configuration rejects all configuration controls.
 
 `--no-config` skips repository discovery and explicit repository config, then
 runs with packaged defaults plus CLI/env overrides. It exists so behavior with
@@ -496,7 +713,7 @@ Update [SC-5] usage examples to show optional config-driven defaults:
 
 ```bash
 backstitch check --repo-root .
-backstitch analyze --packets packets.jsonl --output analysis.jsonl
+backstitch analyze --packets packets.jsonl --packet-report packet-report.json --output analysis.jsonl
 ```
 
 _Implementation mapping_:
@@ -523,6 +740,20 @@ The loader must fail with exit code `2` and a clear message when:
 - reserved diagnostic codes used as ordinary suppressions
 - a nonempty effective `test_root` is not equal to or nested under any final
   effective `code_root`
+- any semantic value, range, enum, duplicate, path, cross-field combination,
+  cost contract, eval qualification setting, disposition, or failure-authority
+  rule violates [SEM-5], [SEM-6], or [SEM-9]
+- any obligation limit, role set, snapshot/packet relation, verifier enabled
+  shape, provider-source/override relation, verify-eval selector, composed
+  identity, or qualification rule violates [EVC-5], [EVC-6], [EVC-8.3.1], or
+  [EVC-10.1]
+- current analyze, historical analyze, obligation, guide, or conditional MCP
+  flags violate [EVC-5.1] or [EVC-8.3]
+- `--option` has the wrong arity, contains NUL/CR/LF, has a malformed dotted
+  key, names an unknown, non-leaf, reserved/non-consulted, or load-time key,
+  repeats a key, conflicts with a dedicated CLI flag, parses as more than one
+  synthetic TOML assignment, or produces a value that fails the existing
+  type, range, identity, containment, or cross-field validation
 
 For `analyze.concurrency`: values below `1` are invalid (exit `2`). Support
 for values above `1` is optional in v1 — an implementation that declines must
@@ -557,6 +788,24 @@ _Implementation mapping_:
 
 Required proof:
 
+- firing public-CLI tests for generic scalar, boolean, numeric, array, inline,
+  quoted-ambiguous, and empty-string values; repeated distinct keys; duplicate
+  keys; NUL/CR/LF and multi-assignment rejection; unknown, non-leaf,
+  reserved/non-consulted, and load-time keys; empty key segments, quoted key
+  segments, and attempts to address dotted map-entry names; every
+  dedicated-setting alias conflict; every named operational non-alias; options
+  before and after the subcommand; `--no-config`; and `config show`
+- precedence tests proving CLI over defined environment over selected config
+  over extended parents over packaged defaults, with all config-consuming
+  commands using the same resolver
+- injection tests proving command/core code accepts a resolved
+  `BackstitchSettings` snapshot without reading repository config or
+  Backstitch environment overrides again
+- explicit-selection and `extend` tests using arbitrary TOML filenames, plus
+  discovery tests proving those filenames are not implicitly discovered
+- verifier-shape tests for minimal disabled, dormant complete, rejected
+  partial dormant, CLI activation of dormant complete, and rejected CLI
+  activation of minimal disabled
 - unit tests for discovery boundaries, including stop-at-`$HOME` behavior
 - unit tests for `.backstitch.toml` precedence over `pyproject.toml` in the same
   directory
@@ -587,7 +836,21 @@ Required proof:
   code, packet content, or model selection) compared with `--no-config` or
   the built-in default. This catches the partial-implementation failure where
   `config show` reflects a key that `check`, `packets`, or `analyze` never
-  actually consults
+actually consults
+- every `[obligations]`, enabled/disabled `[verify]`, nested provider, and
+  `[verify.eval]` key has a firing or no-op-prevention test; tests cover
+  snapshot-identity versus presentation-only changes, provider reuse and
+  override, absent/equal/different CLI and environment models, qualification
+  report identity, and strong-selector authorization
+- superseded case-root, case-manifest, proposal, activation, source-write, and
+  `analyze.eval` producer keys are exercised as unknown keys. Under the
+  explicit `allow_unknown_keys = true` forward-compatibility hatch they remain
+  named warnings and confer no behavior or authority; they are never silently
+  accepted as aliases
+- the full [SEM-9] matrix has firing tests for packaged defaults, exact types
+  and ranges, zero sentinels, cache/json combinations, plugin distribution
+  identity, path anchoring, cost overhead, eval thresholds/sample units,
+  duplicate dispositions, and final semantic failure authority
 - `ruff` and `mypy` over new loader modules
 
 Do not call external LLMs in config tests. Use fake adapters for `analyze`
@@ -624,6 +887,12 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-07-15-agent-guided-evidence-cases-plan.md`
+  (implementing)
+- `docs/plans/2026-07-11-deterministic-semantic-gate-plan.md`
+  (implementing)
+- `docs/plans/2026-07-27-canonical-config-resolution-plan.md`
+  (implementation and verification recorded)
 - `docs/plans/2026-07-09-backstitch-invariant-traceability-plan.md`
   (implemented)
 - `docs/plans/2026-07-08-configurable-diagnostics-plan.md` (implementing)

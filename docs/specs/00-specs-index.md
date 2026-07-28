@@ -22,10 +22,26 @@ stay aligned instead of competing.
 3. `03-backstitch-configuration.md`
 4. `04-backstitch-traceability-exclusions.md`
 5. `05-backstitch-invariants.md` (Status: Active)
+6. `06-semantic-gates.md` (Status: Active)
+7. `07-verification-and-evidence-cases.md` (Status: Active)
+8. `08-intent-coverage.md` (Status: Proposed)
 
+Product identity — the boundary rule, evidence-class rule, the two lanes and
+policy layer, the metric identity rule, and the contract-coverage matrix — is
+stated in `02-backstitch-core.md` [SC-16]; feature debates test against it
+first.
 Diagnostic identity, short codes, default policy, and the packaged defaults
 layer are governed by `02-backstitch-core.md` [SC-11]/[SC-15] and
 `03-backstitch-configuration.md` [CFG-5]/[CFG-6].
+Semantic cache identity, evidence state, packaged policy, repository-applied
+policy, completeness, and CI gating are governed by
+`06-semantic-gates.md` [SEM-1] through [SEM-10].
+Obligations, readiness, read-only evidence discovery, source-derived packets,
+and the blinded adversarial verify stage are governed by
+`07-verification-and-evidence-cases.md` [EVC-1] through [EVC-12].
+Definition-level intent coverage, exemptions, the diff ratchet, drift
+coverage, and the uncovered-definition triage loop are governed by
+`08-intent-coverage.md` [COV-1] through [COV-9].
 
 ## Naming
 

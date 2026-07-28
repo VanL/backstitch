@@ -22,3 +22,5 @@ read order stay aligned instead of competing.
 4. `04-backstitch-style-traceability.md`
 5. `05-release-publishing.md`
 6. `06-choosing-a-local-model.md`
+7. `07-deterministic-semantic-gate.md`
+8. `08-aligned-intent-read-model.md`

@@ -1,690 +1,682 @@
-# Verification And Evidence Case Spec
+# Verification And Aligned Evidence Spec
 
-Status: Proposed
+Status: Active
+
+> **Superseded draft:** The prior proposal and activation based evidence-case
+> design is preserved at commit
+> `25346a988ad2022237160261aa61d2692d5baaa4` (file SHA-256
+> `3df5b8eb9391ba98400aa8736f1c99d67082c97278ef371f9b85560ab52b43f1`).
+> Retrieve it with
+> `git show 25346a988ad2022237160261aa61d2692d5baaa4:docs/specs/07-verification-and-evidence-cases.md`.
+> That draft was `Status: Proposed`; it was never normative and is superseded
+> by this active revision.
 
 Related specs:
 
-- `docs/specs/02-backstitch-core.md` [SC-4] through [SC-8], [SC-10],
+- `docs/specs/02-backstitch-core.md` [SC-3] through [SC-8], [SC-10],
   [SC-13], [SC-15], [SC-16]
-- `docs/specs/03-backstitch-configuration.md` [CFG-3], [CFG-6], [CFG-8]
-- `docs/specs/04-backstitch-traceability-exclusions.md` [EXC-4], [EXC-6.2],
+- `docs/specs/03-backstitch-configuration.md` [CFG-3], [CFG-5], [CFG-6],
+  [CFG-8], [CFG-9]
+- `docs/specs/04-backstitch-traceability-exclusions.md` [EXC-4], [EXC-6],
   [EXC-7], [EXC-8]
-- `docs/specs/05-backstitch-invariants.md` [INV-5], [INV-7], [INV-9]
+- `docs/specs/05-backstitch-invariants.md` [INV-3], [INV-5], [INV-7], [INV-9]
 - `docs/specs/06-semantic-gates.md` [SEM-1] through [SEM-10]
+- `docs/specs/08-intent-coverage.md` [COV-6], [COV-7], [COV-9]
 
-This spec extends the semantic gate ([SEM-*]) with an independent
-verification stage, an obligation-centered agent interface backed by a
-deterministic evidence broker, and a durable,
-content-addressed **evidence case** as the unit CI validates. [SEM-*] governs
-how one model result is produced, bound, cached, and policed. This spec governs
-how a *claim* accumulates independent support, how an agent discovers and
-proposes relevant evidence through deterministic interfaces, how Backstitch
-validates and activates that proposal as a frozen case, and how CI re-validates
-the active case without re-running discovery.
+This spec defines how Backstitch helps turn aligned intent into an executable
+gate. It adds an obligation-centered human and agent interface, deterministic
+candidate discovery, source-derived evidence packets, and independent semantic
+verification. It does not create a second evidence authority. Repository
+source remains authoritative.
+
+The coordinated promotion record in the related plan is the evidence that this
+revision passed its independent review and cross-spec gate. Implementations
+may cite only the active, hashed revision recorded there.
 
 ## 1. Purpose And Scope [EVC-1]
 
-The semantic lane's analyze stage is a bounded search heuristic. Search
-output alone must not gate. This spec defines the two mechanisms that turn a
-searched claim into something a repository may gate on:
+Backstitch answers three different questions and must keep them separate:
 
-- an **adversarial verify stage**, independent of analyze, that attempts to
-  falsify each candidate claim and returns a structured, evidence-bound
-  verdict with a support score;
-- an **evidence case**: a frozen, content-addressed proof object containing
-  the claim, its proof obligations, every cited span with digests, the
-  deterministic candidate universe considered, recorded omissions, and the
-  assembly record — so that CI validates a bounded case instead of asking an
-  agent to rediscover the repository.
+1. **What does the repository say must be true?** Spec sections and invariant
+   declarations identify obligations.
+2. **What source does the repository declare as implementing or testing that
+   intent?** Reciprocal mappings, backlinks, binds, and binding-test markers
+   establish alignment.
+3. **Does the aligned implementation appear to conform to the intent?** The
+   semantic analyzer and blinded adversarial verifier provide measured
+   judgments over a deterministic source-derived packet.
 
-The mental model is proof-carrying review: the stochastic part searches for
-and assembles the proof object once, at authoring time; the checking part is
-cheap, bounded, and repeatable. Trust concentrates in the checker and in
-measurement, never in the searcher.
+The first two questions are deterministic. Their answer is repository source,
+not an agent decision. The third question is stochastic and cannot confer
+alignment that the first two questions did not establish.
 
-This spec does not claim mechanical semantic truth. A verified claim is a
-measured, replayable judgment — stronger evidence, not proof. Nothing in
-this spec may be described as mechanical verification; that term remains
-reserved for [SEM-5] `mechanically_verified`.
+This spec governs:
 
-## 2. Overall Model [EVC-2]
+- obligation inventory, detail, evidence summary, and readiness;
+- source-authored obligation skips;
+- deterministic discovery of candidate evidence and counterevidence;
+- exact source receipts, candidate identities, static relations, and trace
+  guidance;
+- the CLI, optional local stdio MCP adapter, and installed alignment guide;
+- compilation of aligned source into evidence packet schema version 3;
+- current-repository analysis versus historical packet replay;
+- independent blinded verification, aggregation, measurement, and policy
+  integration.
 
-The full pipeline, including the [SEM-*] layers it builds on:
+This spec does not govern or permit:
+
+- Backstitch editing specs, source, tests, mappings, backlinks, binds, skips,
+  or configuration;
+- agent-authored evidence manifests, proposal files, activation, deactivation,
+  or mutable evidence-case state;
+- runtime tracing, arbitrary filesystem query, HTTP or remote MCP transport;
+- model-selected packet membership;
+- describing semantic judgment as mechanical proof.
+
+Backstitch may write packets, reports, caches, and evaluation artifacts only
+to paths explicitly requested by an existing artifact-producing command.
+Those files are derived output. Deleting them loses no alignment decision.
+
+## 2. Mental Model And Authority [EVC-2]
+
+The public nouns are:
+
+| Noun | Meaning | Authority |
+|---|---|---|
+| **obligation** | One addressable spec section or first-class invariant | Its repository source declaration |
+| **evidence link** | A mapping, backlink, bind, or binding-test relation associated with an obligation | A valid human-reviewed source declaration and its required reciprocal relation |
+| **candidate** | A bounded deterministic discovery result that may be relevant | Advisory; it has no alignment authority |
+| **skip** | A reasoned source annotation that suppresses semantic evaluation without claiming conformance | Human-reviewed spec source |
+| **evidence packet** | Exact requirement, declared evidence, and deterministic counterevidence sent to semantic analysis | Derived, content-addressed output |
+| **gate** | Alignment readiness followed by semantic analysis, verification, and policy | Backstitch computation over one current source snapshot |
+
+The product has a repeatable bootstrap loop and a separate gate:
 
 ```text
-deterministic packet or evidence case
-  -> analyze: candidate claim search               (stochastic, cached)
-  -> deterministic evidence binding                ([SEM-5])
-  -> verify: independent falsification attempt     (stochastic, cached)
-  -> support score -> conservative event aggregate (measured, [EVC-5])
-  -> verification state and diagnostic context     ([SEM-5]/[SEM-6])
-  -> packaged default policy -> applied policy     ([SEM-6])
-  -> fail_on -> exit 0 / 1 / 2                     ([SEM-7])
+bootstrap (repeat on any current source snapshot)
+  obligation -> deterministic candidate report
+             -> human disposition
+             -> human-reviewed reciprocal source declarations
+
+gate (always rebuild from current source declarations)
+  obligation -> alignment readiness
+             -> deterministic evidence packet
+             -> analyze -> adversarial verify -> policy
+             -> executable gate result
 ```
 
-And the obligation and evidence-case lifecycle around it:
+Discovery cannot establish alignment. A model result cannot establish
+alignment. A packet or cache object cannot establish alignment. A candidate
+becomes declared evidence only when repository source carries the supported
+declarations and the existing resolver establishes the required reciprocal
+relations.
 
-```text
-specifications -> obligation list -> one obligation
-        -> current evidence/counterevidence views
-        -> deterministic evidence discovery and named candidate detail
-        -> agent evidence proposal                 (stochastic, untrusted)
-        -> deterministic proposal validation
-        -> explicit obligation activation          (atomic, content-addressed)
-        -> human review and ordinary repository landing
-        |
-        +-> explicit obligation skip annotation    (scoped, reasoned, auditable)
-        |
-        v
-CI validates each non-skipped obligation and its active frozen case:
-  spans still match -> universe recomputed and diffed
-  -> coverage obligations met -> cached verdicts reused
-  -> policy applied
-```
+_Implementation mapping_:
 
-Layer boundaries mirror [SEM-2]: classification and verdicts are
-policy-neutral; verification state is trusted metadata; diagnostic identity
-is stable vocabulary; severity comes from policy. Changing policy re-uses
-cached analyze and verify results with zero provider calls.
+- `backstitch/obligations.py`
 
-## 3. The Verify Stage [EVC-3]
+### 2.1 Obligation Identity And Readiness [EVC-2.1]
 
-Verify is a second, independent stochastic judgment over a canonical finding
-produced by analyze. A frozen evidence case shapes the finding's packet, but
-is never itself direct verifier input. Its contract:
+A section obligation uses the existing canonical file-qualified section
+identity from [SC-4]. An invariant obligation uses
+`invariant::<invariant_id>`. Bare aliases may be accepted as input only when
+the existing resolver finds exactly one canonical identity. Responses always
+return the canonical identity. Ambiguity is never guessed.
 
-- **Adversarial task.** The verify prompt instructs the model to construct
-  the strongest counter-interpretation of the claim and to identify what
-  would make the claim false. It is not asked to agree.
-- **Blinded input.** The verifier receives the claim, its proof obligations,
-  and a closed verifier-case projection. That projection contains case ID/hash,
-  target requirement, proof obligations, current selected implementation/test/
-  counterevidence spans, exact current spans for every omitted universe
-  candidate, and universe candidate IDs/kinds/paths/locators
-  with selected/considered/omitted state. It exposes reason-free obligation
-  completion state but excludes every assembler reason, question text,
-  exploratory log, analyzer support estimate, analyzer summary or rationale,
-  and prior verify verdict. Trusted normalization constructs the projection
-  rather than redacting an open case object.
-- **Independent identity.** Verify has its own prompt ID/version/byte-hash
-  and its own configured model and request controls, defaulting separately
-  from analyze. Its `(backend_id, plugin_id, model, model_revision)` tuple must
-  differ from analyze's tuple; otherwise enabled configuration is invalid.
-  A different model family is preferred because distinct IDs do not remove
-  correlated failure modes. The verify inference contract and cache key follow
-  the [SEM-3] rules with a distinct contract family; analyze and verify
-  results never share a cache object.
-- **Canonical claim.** An analyzed claim is bound by the exact [SEM-6] finding
-  projection whose canonical SHA-256 is `finding_hash`: code, classification,
-  packet kind, packet ID, packet hash, and ordered trusted evidence. EVC names
-  that existing digest `claim_hash`; it does not hash summary, rationale,
-  confidence, or other presentation text. The verifier's model-visible claim
-  contains exactly `claim_hash`, code, classification, packet kind/ID/hash,
-  and ordered evidence coordinates `{role, path, start_line, end_line,
-  excerpt_sha256}`. It excludes evidence excerpt text because the trusted case
-  sources below provide each current body once. The verifier request contains
-  that canonical claim projection and only the trusted closed verifier-case
-  projection defined below, derived from the case-mode source packet and
-  validated active case. Exact preimages are in [EVC-3.1].
-- **Structured output.** The untrusted model response contains exactly
-  `claim_hash`, `verdict`, `support_score`, `rationale`, and `evidence`.
-  Verdict is `supported`, `unsupported`, or `indeterminate`; score is in
-  `[0.0, 1.0]`; rationale is nonblank; and evidence uses [SEM-5] model fields.
-  Trusted normalization replaces quotes from shown content and rejects any
-  citation outside it. The immutable cache object is the exact [EVC-3.1]
-  record. Cache hits recursively revalidate all identities and evidence.
-- **Evidence sufficiency.** A `supported` result uses a classification-aware
-  minimum. `confirmed_mismatch` and `probable_mismatch` cite `requirement` and
-  `implementation`. Section `missing_trace` cites `requirement` and at least
-  one `implementation`, is valid only in case mode, and requires the trusted
-  complete structural-relation projection to show no declared mapping or
-  backlink for the target. It proves absence of the required trace edge, not
-  absence of implementation. Invariant `weak_binding` cites `requirement` and
-  `implementation` and is valid only in case mode. When selected test evidence
-  exists it also cites `test`; only the absent-test variant may omit that
-  citation, and then the trusted projection must show a complete universe with
-  zero eligible test candidates. `ambiguous` cites `requirement` plus at least one of
-  `implementation`, `test`, or `counterevidence`. `unsupported` cites
-  `requirement` plus at least one `implementation`, `test`, or
-  `counterevidence` region. `indeterminate` cites at least the requirement;
-  its nonblank rationale names the missing or conflicting evidence. Extra
-  citations may use only those four roles and exact shown regions. A result
-  that violates this matrix or a required complete-universe precondition is
-  malformed tool output, never a verdict. No `supported` result is eligible
-  unless `case_verifiable` is true and every proof-obligation status is
-  `complete` or validly `complete_absent`; `complete_absent` can support only
-  the invariant weak-binding absent-test branch. Otherwise the finding remains `evidence_bound` with context
-  `verification_indeterminate` without a provider call.
-- **Failure is not falsity.** Provider failure, malformed output, or
-  evidence-binding failure of the verify result is a tool failure ([SEM-7]
-  exit `2` semantics), never `unsupported`.
+Each addressable obligation has these independent facts:
 
-An `unsupported` verdict on an analyze finding does not delete the finding;
-it sets the finding's verify context (see [EVC-6]) so policy can decide.
-Configured verify epochs select distinct keyed adversarial repetitions without
-modifying the frozen case; they are not claimed as statistically independent
-samples. Repeated identical requests replay from cache and are one event.
-The exact selection and aggregation rules are in [EVC-5].
+| Fact | Closed values | Meaning |
+|---|---|---|
+| `intent_state` | `identified` | The addressable source obligation has one supported identity; identity defects are separate `unaddressable_intent` rows |
+| `alignment_state` | `untraced`, `partial`, `complete`, `invalid` | Required evidence roles are absent, incomplete, complete, or malformed |
+| `disposition` | `evaluate`, `skipped` | Semantic evaluation is requested or suppressed by one valid source skip |
+| `obligation_rung` | `active`, `planned`, `exploratory`, `meta` | Existing profile and traceability classification determines whether the intent participates in the current gate |
+| `gate_state` | `not_executable`, `executable` | The current addressable obligation cannot run or can run; operation failures are top-level problems, not synthetic obligation states |
+
+`gate_state` is readiness, not a semantic verdict. Analyzer classifications,
+verifier verdicts, policy findings, and process exit status remain separate.
+
+The deterministic state rules are:
+
+- a section requires at least one valid reciprocal `implementation` evidence
+  relation;
+- configured section role `test` requires at least one valid reciprocal test
+  relation when present in `section_required_roles`;
+- an invariant requires its unique declaration, at least one atomic bound target,
+  and at least one valid binding-test relation under [INV-5]; its roles are
+  fixed as `implementation` and `binding_test` and cannot be weakened by the
+  section-role setting;
+- a v1 spec-invariant target is atomic only when its resolved mapping names a
+  captured regular `.py` file, tree-sitter parsing succeeds, and an explicit
+  symbol selects exactly one owner; a null symbol selects the whole parsed
+  module receipt. A code-declared invariant is atomic only when its declaration
+  line selects exactly one containing owner (the `module` sentinel selects the
+  whole parsed module). Directory, non-Python, unparseable, or ambiguous-owner
+  attempts remain visible one-sided declarations and do not satisfy readiness;
+- no required role present gives `untraced`;
+- at least one required role satisfied while another is absent, or a one-sided
+  declaration that can be attributed to the obligation, gives `partial`;
+- every required role satisfied by valid reciprocal relations gives
+  `complete`;
+- malformed or ambiguous identity, duplicate declaration, or contradictory
+  declarations that prevent one readiness answer give `invalid`;
+- valid sections under `spec_roots` and valid first-class invariants enter the
+  inventory. Planned/exploratory file classification and section/file meta
+  classification produce their named `obligation_rung`. Invariant-style
+  Markdown bullets remain ordinary sections under [INV-2]. ID-less prose does
+  not enter. A code-declared invariant is `active` unless its captured source
+  is excluded from the active profile;
+- `alignment_state = invalid` gives `gate_state = not_executable`;
+- `alignment_state` other than `complete` gives `not_executable`;
+- `obligation_rung` other than `active` gives `not_executable` without
+  creating current-gate alignment debt;
+- `disposition = skipped` gives `not_executable`, regardless of alignment;
+- complete alignment with `disposition = evaluate` gives `executable`;
+- capture, configuration, budget, or internal failures return a top-level
+  operation problem and exit 2. They do not mint an obligation record.
+
+A skipped obligation remains in every denominator. Its alignment state is
+still computed and reported without change. Evidence summary and candidate
+discovery remain available. The skip does not count as analysis, independent
+verification, or conformance.
+
+Current semantic selection and corpus behavior are exact. The last column
+describes readiness only; deterministic issue policy is applied later by
+[EVC-8.7]:
+
+| Active obligation condition | Corpus bucket | Semantic calls | Creates readiness blocker |
+|---|---|---:|---|
+| `disposition = skipped` at any alignment state | `skipped` | 0 | no |
+| `evaluate` and `alignment_state = complete` | `selected` | analyzer plus configured verifier | no |
+| `evaluate` and alignment is `untraced`, `partial`, or `invalid` | `alignment_debt` | 0 | yes, exit 2 |
+| Determination fails after a captured identity exists | `blocked` | 0 | yes, exit 2 |
+
+Non-active rungs enter `out_of_scope` and cause no semantic call or readiness
+blocker. If any active `alignment_debt` or `blocked` row exists, current analyze
+makes zero provider calls for the whole corpus, publishes no current analysis
+report, and exits 2. Otherwise [EVC-8.7]'s first-match matrix applies. In
+particular, any failing deterministic issue exits 1 with no current analysis
+report before semantic calls. This includes BSE001 and retained trace issues;
+BSE001 is not a separate or later exit selector. If no deterministic issue
+fails, Backstitch evaluates every `selected` row. A corpus with at least one
+active obligation and all active obligations skipped then makes zero provider
+calls, performs final recapture, publishes a report with
+`semantic_status = "not_run_all_skipped"`, makes no conformance claim for a
+skipped obligation, and exits 0.
+A corpus with no active obligation is `semantic_status = "no_active_intent"`,
+makes zero provider calls, publishes no current analysis report, and exits 2.
+After successful selected evaluation, semantic policy owns exit 0 or 1.
+Provider/tool failure still owns exit 2.
+
+Corpus discovery also reports parser-recognized reserved intent syntax that
+cannot become an addressable obligation: an ID-bearing heading or first-class
+invariant marker with an invalid, missing, duplicate, or ambiguous ID. Such a
+row has `entry_type = "unaddressable_intent"`; it is not assigned a synthetic
+obligation ID. For Markdown headings, reserved syntax means the complete inline
+heading content ends in one square-bracket marker (or consists only of that
+marker) after supported trailing directives are removed. A blank or invalid
+marker ID, or a marker with no section title, fires
+`SPEC_SECTION_HEADING_INVALID`; its inventory row carries the exact captured
+source line as `excerpt`. A heading with no terminal marker remains ordinary
+ID-less prose, including a heading that uses brackets before later prose. It is
+not inferred to be intent in v1.
+
+_Implementation mapping_:
+
+- `backstitch/markdown_specs.py`
+- `backstitch/obligation_runtime.py`
+- `backstitch/obligations.py`
+
+### 2.2 Evidence Roles And Relations [EVC-2.2]
+
+The closed evidence roles are `implementation`, `test`, and `binding_test`.
+`counterevidence` is a packet role, not a source-declared alignment role.
+
+For section obligations, role derives from the resolved evidence path after
+root containment and profile exclusions. A reciprocal mapping/backlink whose
+path is under any configured `test_root` has role `test`; otherwise it has role
+`implementation`. A path under both code and test roots is `test` only. One
+edge never satisfies both roles. Tests use the same `_Implementation mapping_`
+and code `Spec:` backlink forms as other section evidence; v1 adds no test-only
+annotation grammar. Invariants continue to use declaration/bind and
+`Tests-invariant:` grammar, and a binding-test row has role `binding_test`.
+
+The closed relation kinds are:
+
+- `spec_mapping`: an implementation mapping owned by a spec section;
+- `code_backlink`: a resolving code `Spec:` reference;
+- `invariant_declaration`: the owner of a first-class invariant;
+- `invariant_bind`: a resolved invariant target;
+- `binding_test`: a resolved `Tests-invariant:` relation;
+- `static_import`: a conservative captured Python import relation;
+- `static_call`: a conservative captured Python call relation;
+- `static_reference`: another conservative captured Python name relation;
+- `enclosing_definition`: lexical ownership of a candidate;
+- `issue_target`: an existing deterministic resolver issue attributed to the
+  obligation.
+
+The first five may describe declared evidence. The last five are derived
+orientation or counterevidence only. A static relation never claims runtime
+reach, execution, assertion, or conformance.
+
+For section implementation evidence, one `spec_mapping` and one resolving
+`code_backlink` must form the reciprocal relation required by [SC-4]. One side
+alone is visible in evidence summary but does not satisfy the role. Invariant
+roles use [INV-5]'s declaration, bind, and test rules without inventing a
+parallel relation language.
+
+### 2.3 Bootstrap-To-Gate Lifecycle [EVC-2.3]
+
+Bootstrap and gate are separate operations joined only by human-reviewed
+repository source:
+
+1. bootstrap captures one current snapshot and reports plausible candidates,
+   receipts, trace states, discovery reasons, and supported trace forms;
+2. a human accepts or rejects those suggestions and records accepted evidence
+   through the repository's existing source declarations;
+3. gate captures current source again, resolves only source-declared evidence,
+   builds a deterministic packet, and reports whether that packet appears to
+   support the obligation.
+
+A candidate report is disposable derived output. It never becomes gate input
+or evidence authority. Re-running bootstrap on the same snapshot and settings
+must produce byte-identical core results. Re-running it after source changes
+must produce a newly snapshot-bound report, so new, removed, moved, newly
+declared, partially declared, and conflicted candidates are visible for human
+review. The command must not describe an earlier candidate report as current.
+
+Gate packet construction does not reuse candidate dispositions. It resolves
+the human decisions expressed in current source, rejects incomplete alignment
+before provider calls, and applies [EVC-5.1]'s currentness boundary before it
+publishes a current result. Better discovery ranking, explanations, and trace
+advice reduce the cost of the human bridge; they never confer authority.
+
+## 3. Blinded Adversarial Verify Stage [EVC-3]
+
+Semantic analyze remains a bounded stochastic search heuristic under [SEM-*].
+A blinded adversarial verify stage attempts to falsify each normalized analyze
+finding before stronger policy may act on it.
+
+Verify must:
+
+- receive a reason-free projection of the same source-derived packet that
+  analyze used;
+- receive the normalized claim and its trusted evidence-bound citations;
+- exclude analyzer rationale, analyzer confidence, policy level, source skip
+  reason, discovery guidance, and any human or agent selection reason;
+- use a separately resolved verifier inference contract, adversarial prompt
+  identity, request controls, and search epoch; its provider/model tuple may
+  equal or differ from analyze's tuple;
+- return one closed verdict: `support`, `refute`, or `indeterminate`;
+- return a finite `support_score` in `[0, 1]` and trusted evidence citations
+  reconstructed from the supplied packet;
+- never search the repository, request more evidence, or change packet
+  membership;
+- treat provider, shape, budget, and evidence-binding failures as inability to
+  verify, not as evidence that the claim is false.
+
+An aggregate claim state is:
+
+- `independently_verified` when every required verify event says `support` and
+  each support score meets `minimum_support_score`;
+- `disputed` when any required event says `refute` with valid bound evidence;
+- `verification_indeterminate` otherwise.
+
+Verifier independence is procedural: a reason-free packet projection, a
+falsification prompt, and separate request, event, and cache identities. It is
+not statistical or model independence. Cross-model correlation is not a
+qualification metric, and a distinct model grants no additional evidence
+class. The state `independently_verified` means the claim survived this bounded
+blinded process under the exact qualified configuration. It does not mean
+mechanical proof.
+
+_Implementation mapping_:
+
+- `backstitch/semantic_verification.py`
 
 ### 3.1 Closed Verifier Contracts [EVC-3.1]
 
-The verifier-case projection contains exactly:
-
-```text
-schema_version = 1
-claim_hash
-packet_id
-packet_hash
-case_id
-case_evidence_hash
-obligation_id
-target
-proof_obligations
-evidence_sources
-case_verifiable = true
-universe_complete = true
-structural_relations_complete = true
-universe
-structural_relations
-```
-
-`target` contains exactly the [EVC-9.1] requirement `path`, `start_line`,
-`end_line`, `raw_sha256`, `normalized_sha256`, and `receipt_hash`; requirement
-text appears only in the source catalog below. A `proof_obligations` row
-contains exactly `proof_obligation_id` and `status` (`complete` or
-`complete_absent`, or `unresolved`) and sorts by ID. `evidence_sources` is the
-exact maximal, deduplicated, text-bearing [EVC-9.1] catalog and order. It
-contains the requirement and every packet evidence candidate, including each
-considered or omitted candidate rendered as analyzer counterevidence, while
-showing each source line at most once per role. No receipt body is copied into
-the claim, target, universe, or a second omission array. An accounted candidate
-without one current showable source prevents `case_verifiable`. A verifier-
-universe row contains exactly
-`candidate_id`, `candidate_kind`, `path`, `structural_locator`, and
-`decisions`; decisions use the exact [EVC-4.1] shape and order. A structural-
-relation row contains exactly `proof_obligation_id`, `candidate_id`, and
-`relation_kind`, where relation kind is one of the four derived kinds in
-[EVC-4.1]. Rows sort by `(proof_obligation_id, candidate_id, relation_kind)`.
-The two completeness booleans and `case_verifiable` are set only after [EVC-9]
-reconstructs the entire universe and all derived relations. Any unresolved
-proof obligation prevents `case_verifiable`; its question and reason remain
-hidden. Trace mode has no verifier-case projection and cannot invoke verify.
-
-This projection contains no reason, open question, exploratory telemetry,
-analyzer text/score, proposed relation, prior verdict, or disposition. Its
-`verifier_case_hash` is the lowercase SHA-256 of [SEM-3] canonical JSON for
-the complete projection above.
-
-The verify inference contract contains exactly:
-
-```text
-contract_version = 1
-prompt = {id, version, sha256}
-provider = {
-  backend_id, plugin_id, model_id, model_revision,
-  adapter_id, adapter_version, llm_distribution_version,
-  plugin_distribution_name, plugin_distribution_version
-}
-request = {json_mode, temperature, seed, max_tokens}
-```
-
-This is the exact [SEM-3] offline provider/request identity under a distinct
-verify contract family. Strings are nonblank in cached modes, versions are
-validated exactly as [SEM-3], prompt/adapter versions are positive integers,
-hashes are lowercase SHA-256, and request values follow [EVC-5]. The exact
-model-input object contains `request_schema_version = 1`, canonical `claim`,
-`verifier_case`, `verifier_case_hash`, and the event `search_epoch`. Request
-bytes are the verify prompt instruction bytes, two newline bytes, then
-canonical JSON for that object. The epoch is therefore both model-visible and
-keyed; configured repetitions are distinct requests, though not statistically
-independent samples.
-
-Before cache lookup or provider construction, Backstitch counts those exact
-UTF-8 request bytes for every event and requires each to be at most
-`verify.maximum_prompt_bytes`. Overflow is exit `2` with
-`BUDGET_EXHAUSTED`, the exact byte count, and an action to reduce the reviewed
-case/universe spans or raise the reviewed ceiling. It makes zero provider calls
-and cache writes. The ceiling is operational policy and does not enter the
-inference contract; the exact request bytes already do. Orientation and
-proposal validation report the conservative request upper bound defined in
-[EVC-8.3.1], so an inevitable overflow is visible before activation/analyze.
-Analyze still measures the exact request for each actual claim.
-
-Each configured event has this exact key preimage:
-
-```text
-{identity: "verify-event", version: 1, claim_hash, case_evidence_hash,
- verifier_case_hash, search_epoch, inference_contract}
-```
-
-`verify_key` is lowercase SHA-256 of its canonical JSON. Distinct claims,
-semantic case evidence, shown bytes, universes, relations, epochs, prompts, models, controls, or
-adapters cannot collide. Operational budgets and concurrency do not enter.
-
-The immutable `verify/results/<verify_key>.json` object contains exactly
-`schema_version = 1`, `object_type = "verify-result"`, `verify_key`, `claim`,
-`case_evidence_hash`, `verifier_case_hash`, `search_epoch`, `inference_contract`,
-`result`, `provenance`, and `raw_response_sha256`. `result` contains exactly
-`claim_hash`, normalized `verdict`, finite `support_score`, nonblank
-`rationale`, and canonical `evidence`. Evidence uses [SEM-5]'s exact trusted
-record and order. `provenance` reuses the exact [SEM-4] provenance record.
-Unknown fields or any path/key/content mismatch are cache corruption and exit
-`2`, never a miss.
-
-Verify cache concurrency uses these disjoint paths:
-
-```text
-verify/results/<verify_key>.json
-verify/locks/<verify_key>.lock
-verify/guards/<verify_key>.guard
-verify/audit/locks/<verify_key>.<audit_sha256>.json
-```
-
-Every [SEM-4] validation, immutable no-replace publication, guard, advisory
-lock, single-flight, waiter, owner-token, failure cleanup, stale-lock audit,
-and filesystem rule applies by exact substitution of `verify_key` for
-`analysis_key` and object-type prefix `verify-` for `semantic-`. Provider calls
-never occur while holding the guard, and concurrent misses produce at most one
-verify provider call. Explicit cleanup uses `backstitch cache cleanup-lock
---cache-path PATH --family verify --key VERIFY_KEY --lock-stale-seconds N
---reason TEXT`; family is closed to `analyze` or `verify`, and verify cleanup
-can touch only the paths above.
-
-## 4. Evidence Cases [EVC-4]
-
-An evidence case is the durable unit for claims whose evidence spans more
-than one packet, or that a repository wants to gate on over time. It is a
-canonical JSON object, content-addressed by `case_hash` (SHA-256 of the
-complete canonical case payload excluding the `case_hash` envelope field,
-using [SEM-3] canonical serialization rules). Agent proposal reasons and
-relations remain labeled untrusted data, but their exact bytes are still
-hash-bound so review history cannot change without a new case hash. The object
-is committed to the repository as the human-readable PR-diff projection.
-
-In v1, a case target is exactly one canonical spec section or declared
-invariant. The semantic claim is derived, not agent-authored: the repository's
-implementation and tests conform to the target's exact normative content at
-the addressed snapshot. Backstitch derives these closed proof-obligation IDs:
-
-| Target | Proof-obligation ID suffix | Meaning |
-|---|---|---|
-| section | `::implementation` | Selected implementation evidence supports the normative section |
-| section | `::test` | Selected test evidence exercises the normative section |
-| invariant | `::implementation` | Selected target evidence implements the invariant |
-| invariant | `::binding-test` | Selected binding-test evidence exercises the invariant |
-| both | `::counterevidence` | Every deterministic counterevidence candidate is considered or omitted with reason |
-
-The full proof-obligation ID is the canonical `obligation_id` plus the suffix.
-Custom free-form claims or agent-defined proof-obligation schemas require a
-later case-format version. Backstitch derives the proof obligations, but only
-the agent may propose that a selected candidate semantically supports one.
-
-A frozen case must contain:
-
-- the exact semantic claim, stated once; its stable case ID; and its one
-  canonical `obligation_id` ([EVC-8])
-- its proof obligations: the enumerated sub-claims that must each hold
-- the portable repository identity and exact repository snapshot against which the
-  proposal was validated and frozen
-- the canonical agent proposal: selected implementation evidence, selected
-  test evidence, counterevidence considered, reasoned omissions, and open
-  questions; every selection and unresolved request names a derived proof
-  obligation; the proposal contains candidate IDs and reasons, never
-  agent-supplied trusted locators, digests, universe membership, or validation
-  states
-- every cited source span: stable candidate ID, path, structural locator, exact
-  excerpt, exact receipt hash, and a **normalized span digest** (see below)
-- the exact target section or invariant text, structural locator, target
-  receipt hash, and normalized target digest from which every proof obligation
-  was derived
-- every typed relation between a proof obligation and cited candidate,
-  using the closed vocabulary `declared_mapping`, `declared_backlink`,
-  `invariant_binding`, `static_reference`, `semantic_support`, and
-  `counterevidence`; structural relations record their trusted derivation,
-  while semantic support and counterevidence record untrusted proposal status
-- the deterministic candidate universe considered ([EVC-7]): every member,
-  each marked included or omitted, every omission carrying a nonblank reason
-- unresolved evidence requests, if any, each with a proof-obligation ID,
-  nonblank question, and reason
-- the configured candidate and response budgets, plus the deterministic
-  selected-evidence totals reconstructed from unique cited broker receipts;
-  exploratory call totals and wall time are adapter telemetry, not trusted
-  case fields
-- content-addressed receipts for the exact broker observations cited by the proposal,
-  plus the deterministic reconstruction record used at activation; exploratory
-  adapter logs may be retained for audit but are not gate authority
-- the evidence-guide identity, broker schema version, universe-construction
-  version, and case-format version
-
-`case_id` is the stable SHA-256 identity of repository ID plus canonical
-obligation ID and is unchanged by refresh. `case_hash` identifies one frozen
-version. Neither the active-manifest path nor local clone path is another case
-identity. Stable IDs render as `case:sha256:<64 lowercase hex>` and
-`candidate:sha256:<64 lowercase hex>`; content hashes render as
-`sha256:<64 lowercase hex>`.
-
-Analyze and verify outputs are not case fields. They are produced after activation
-and stored as separate immutable cache objects whose identities bind the case
-semantic evidence through packet or claim identity and the inference contract.
-The audit-only `case_hash` is not an inference key. This keeps the case
-immutable and prevents a stochastic result from changing its evidence identity.
-
-Candidate and observation identities are different because they identify
-different things. `candidate_id` is stable across non-structural content
-edits: it hashes the portable repository ID, canonical repository-relative
-path, parser-owned structural locator, and candidate kind. A structural edit
-that changes the locator intentionally changes the candidate ID. Universe
-diffs compare candidate IDs.
-Definition, reference, report-issue, and target locators use the exact closed
-[EVC-4.2] objects. Line numbers and raw digests never enter candidate identity.
-`receipt_hash` identifies one exact observation: it binds the portable
-repository/candidate coordinate, exact excerpt digest, normalization digest,
-and broker schema, but not the repository-wide snapshot. The case object binds
-the capture snapshot separately for audit. An unrelated file edit therefore
-does not rename an unchanged receipt.
-Proposal input uses candidate IDs; activation derives and records receipt hashes.
-
-Span normalization v1 is an exact byte transform. Decode strict UTF-8; replace
-each CRLF pair with LF, then every remaining CR with LF. On each resulting
-line remove only trailing U+0020 SPACE and U+0009 TAB code points. Preserve all
-other code points, leading indentation, internal blank lines, comments,
-docstrings, tokens, and line order. Remove every terminal LF, then append
-exactly one LF when the remaining text is nonempty; the empty result stays zero
-bytes. Re-encode UTF-8. Comments can carry Backstitch refs, invariant binds,
-suppressions, type directives, and coverage pragmas, so comment changes are
-semantic for case validity. Invalid UTF-8 is unreadable input and never a
-replacement-decoded receipt. The normalization algorithm is code-owned and
-versioned; changing it is a case-format version bump. Raw-byte digests are
-recorded alongside as provenance.
-
-Invalidation is obligation-scoped: a changed span invalidates exactly the
-obligations that cite it, not the whole case. A case with some invalidated
-obligations is stale, not deleted; refresh re-assembles only the invalidated
-obligations from the current deterministic universe.
-Target requirement churn is the exception: a changed normalized target digest
-invalidates every derived proof obligation because their meaning may have
-changed. Raw-only target churn preserves case currency but changes packet and
-cache identity exactly like raw-only source churn.
-
-Normalized case validity and semantic cache identity are separate contracts.
-When the normalized span digest is unchanged but the raw bytes changed, the
-case remains current, but packet generation uses the current exact bytes. The
-packet hash therefore changes and required semantic replay may need a trusted
-cache refresh. Formatting tolerance must never be represented as byte-stable
-model input.
-
-Agent-facing proposal input is canonicalized at its write boundary: safe
-identifier and path near-misses are normalized and reported through [EVC-8]
-guidance. Frozen cases remain a closed trusted schema. Unknown structural
-fields at activation or CI validation are rejected with an exact repair action;
-this deliberate strictness protects canonical hashing and provenance rather
-than treating an unknown field as harmless extension data.
-
-### 4.1 Closed Case Artifact [EVC-4.1]
-
-The immutable case object contains exactly these top-level fields:
-
-```text
-schema_version = 1
-object_type = "evidence-case"
-case_id
-case_hash
-case_evidence_hash
-repository_id
-repository_snapshot
-obligation_id
-claim
-target
-proof_obligations
-universe_contract
-expanded_candidates
-implementation_evidence
-test_evidence
-counterevidence_considered
-omissions
-open_questions
-universe
-relations
-receipts
-budgets
-reconstruction
-guide
-```
-
-`claim` contains exactly `claim_contract_version = 1`, `kind =
-"conformance"`, `obligation_id`, and `target_receipt_hash`. `target` contains
-exactly `target_kind` (`section` or `invariant`), `path`,
-`structural_locator`, `start_line`, `end_line`, `excerpt`, `raw_sha256`,
-`normalized_sha256`, and `receipt_hash`. A proof-obligation row contains
-exactly `proof_obligation_id` and `kind` (`implementation`, `test`,
-`binding-test`, or `counterevidence`) plus `status` (`complete`,
-`complete_absent`, or `unresolved`). A section has exactly implementation,
-test, and counterevidence rows; an invariant has exactly implementation,
-binding-test, and counterevidence rows. `complete_absent` is allowed only for
-an invariant binding-test row when the complete mandatory universe has zero
-eligible test candidates. It is derived, never agent-asserted. A section test
-obligation with no candidate remains unresolved. An open question makes
-its named obligation `unresolved`; otherwise allowed selected evidence and
-complete counterevidence accounting make it `complete`.
-
-`universe_contract` contains exactly `contract_version = 1`, the fixed ordered
-`candidate_kinds`, fixed ordered `relation_kinds`, canonical ordered
-`profile_name`, `spec_roots`, `plan_roots`, `code_roots`, `test_roots`, and
-`exclusions`, canonical ordered `planned_spec_globs` and
-`exploratory_spec_globs`, positive `maximum_candidate_items`,
-positive `maximum_catalog_items`, `static_neighbor_depth`, and nonblank
-`universe_algorithm_version` and `report_issue_projection_version`.
-Candidate-kind order is `implementation`,
-`test`, `static_reference`, `unresolved_reference`, `report_issue`. Relation-
-kind order is `declared_mapping`, `declared_backlink`, `invariant_binding`,
-`static_reference`, `semantic_support`, `counterevidence`.
-
-The five proposal arrays preserve the exact agent judgments but never acquire
-trusted status. An expanded-candidate row contains exactly `candidate_id` and
-nonblank `reason`. Implementation, test, counterevidence-considered, and
-omission rows contain exactly `proof_obligation_id`, `candidate_id`, and
-nonblank `reason`. An open-question row contains exactly
-`proof_obligation_id`, nonblank `question`, and nonblank `reason`.
-
-A `universe` row contains exactly `candidate_id`, `candidate_kind`, `path`,
-`structural_locator`, `receipt_hash`, and `decisions`. Each decision contains
-exactly `proof_obligation_id` and `decision` (`selected`, `considered`, or
-`omitted`). A `relations` row contains exactly `proof_obligation_id`,
-`candidate_id`, `relation_kind`, `trust` (`derived` or `proposed`), and
-nullable `reason`. Derived relations require null reason and use only the four
-structural relation kinds; proposed relations require a nonblank reason and use
-only `semantic_support` or `counterevidence`.
-
-A `receipts` row contains exactly `receipt_hash`, `candidate_id`, `path`,
-`structural_locator`, `start_line`, `end_line`, `excerpt`, `raw_sha256`, and
-`normalized_sha256`. Every universe receipt resolves exactly one row; target
-receipt fields live only in `target`.
-
-`reconstruction` contains exactly `broker_schema_version`,
-`snapshot_algorithm_version`,
-`universe_algorithm_version`, `report_issue_projection_version`,
-`normalization_version`, `case_format_version`, `proposal_sha256`, and
-`universe_sha256`.
-`guide` contains exactly nonblank `guide_id`, positive integer `guide_version`,
-and `content_sha256`.
-
-`budgets` contains exactly `maximum_response_bytes`,
-`maximum_candidate_items`, `maximum_catalog_items`, `maximum_snapshot_files`,
-`maximum_file_bytes`, `maximum_snapshot_bytes`, `maximum_proposal_bytes`,
-`maximum_proposal_text_bytes`, `maximum_case_bytes`, `static_neighbor_depth`,
-`accounted_candidate_count`, and `accounted_raw_bytes`. All are integers
-excluding booleans and nonnegative; configured maxima are positive.
-`accounted_candidate_count` is the number of
-unique universe candidate IDs having at least one `selected`, `considered`, or
-`omitted` decision. `accounted_raw_bytes` groups those candidates' receipt
-intervals by path, merges overlapping inclusive physical-line intervals, and
-sums the UTF-8 byte length of the exact captured slices for the resulting
-maximal intervals. Source bytes, including captured line terminators, count at
-most once even when candidate receipts overlap; adjacent non-overlapping
-intervals remain separate but do not duplicate bytes. An empty-module virtual
-span contributes zero bytes. The target receipt is not a universe candidate
-and is excluded from both counts.
-
-Canonical array order is: proof obligations by ID; expanded candidates by
-`(candidate_id, reason)`; each evidence/omission array by
-`(proof_obligation_id, candidate_id, reason)`; open questions by
-`(proof_obligation_id, question, reason)`; universe by `candidate_id`, with
-decisions by `(proof_obligation_id, decision)`; relations by
-`(proof_obligation_id, candidate_id, relation_kind, trust, reason-or-empty)`;
-and receipts by `receipt_hash`. Root, exclusion, and classification-glob
-strings are unique and sort by Unicode code point. `profile_name` and every
-algorithm/reconstruction version string are nonblank. IDs are unique in their
-owning array except one
-candidate may have decisions for distinct proof obligations. Every path is a
-canonical repository-relative POSIX path, every line is a positive integer
-with end not before start, and every digest/ID uses its required lowercase
-format. Unknown fields, duplicate identities, broken cross-references, or
-non-canonical order are invalid.
-
-`case_hash` is the SHA-256 of canonical JSON for every field above except
-`case_hash` itself. The canonical indented object stored on disk has the same
-semantic values and is serialized with `json.dumps(sort_keys=True, indent=2,
-ensure_ascii=True, separators=(",", ": "))`, UTF-8 encoding, and exactly one
-terminal newline. Whitespace does not enter the hash. `proposal_sha256` hashes
-the canonical [EVC-8.4] proposal after its arrays are put in the orders above
-and after removing only the global `active_manifest_hash` compare-and-swap
-token. That token is an activation precondition/result, not case identity.
-`universe_sha256` hashes the canonical `universe` array. These rules make the
-artifact independently reproducible without trusting the freezing process.
-
-`case_evidence_hash` is a separate semantic identity. Its exact preimage is:
+For each normalized analyze finding, Backstitch derives a claim object with
+exactly:
 
 ```text
 {
-  identity: "evidence-case-semantic",
-  version: 1,
-  case_id,
-  repository_id,
+  packet_id,
+  packet_hash,
   obligation_id,
-  target,
-  proof_obligations,
-  universe_contract,
-  universe,
-  relations: [{proof_obligation_id, candidate_id, relation_kind, trust}],
-  receipts,
-  reconstruction: {
-    broker_schema_version,
-    snapshot_algorithm_version,
-    universe_algorithm_version,
-    report_issue_projection_version,
-    normalization_version,
-    case_format_version
-  }
+  kind,
+  code,
+  classification,
+  statement,
+  evidence: [{role, path, start_line, end_line, excerpt_sha256}]
 }
 ```
 
-Every value and array order is the exact corresponding [EVC-4.1] value and
-order. The relation projection removes only `reason`. The preimage excludes
-`case_evidence_hash`, `case_hash`, `repository_snapshot`, every agent
-reason/question string, guide provenance, proposal digest, and active-manifest
-CAS state. It changes for
-evidence, decisions, structural/proposed relation types, receipts, target, or
-semantic reconstruction-contract changes, but not advocacy prose or
-operational response/time budgets. Semantic universe limits already enter the
-snapshot and universe contract. The rendered value is
-`sha256:<64 lowercase hex>` and the full case hash binds it.
+The claim's `evidence` is reconstructed and normalized under [SEM-5].
+`statement` is the normalized analyzer result's required nonblank `summary`
+field, byte-for-byte after [SEM-3]'s existing string validation. Analyzer
+`rationale` and confidence do not enter. Claim evidence uses only
+[EVC-9.1]'s `requirement`, `implementation`, `test`, or `counterevidence`
+coordinates, with exact reconstructed excerpt hashes and canonical role/path/
+span/hash ordering. `claim_hash` is lowercase SHA-256 of canonical JSON for
+this exact object.
 
-### 4.2 Versioned Identity Preimages [EVC-4.2]
-
-All identity preimages use [SEM-3] canonical JSON and contain exactly the
-shown fields. The digest is SHA-256 of those UTF-8 bytes:
+The model-visible verifier request has exactly:
 
 ```text
-case_id:
-  {identity: "evidence-case-series", version: 1,
-   repository_id, obligation_id}
-
-candidate_id:
-  {identity: "evidence-candidate", version: 1,
-   repository_id, path, structural_locator, candidate_kind}
-
-receipt_hash:
-  {identity: "evidence-receipt", version: 1,
-   repository_id, candidate_id, path, structural_locator,
-   start_line, end_line, raw_sha256, normalized_sha256,
-   broker_schema_version}
+{
+  verify_contract_version: 3,
+  packet: <the EVC-9.1 model-visible packet projection>,
+  claim: <the claim object above>
+}
 ```
 
-The case and candidate digests render with their named prefixes from [EVC-4].
-Receipt digests render `sha256:<64 lowercase hex>`. `raw_sha256` is the digest
-of the exact UTF-8 excerpt bytes and `normalized_sha256` is the digest after
-the versioned [EVC-4] normalization. Target receipts use the same preimage with
-`candidate_id` replaced by the canonical `obligation_id` and add
-`target_kind`; this is a separate exact variant, not a fabricated candidate.
+It contains no source snapshot metadata, receipts, analyzer rationale,
+analyzer confidence, guide text, trace guidance, skip reason, artifact path,
+cache metadata, or policy. `verifier_packet_hash` is SHA-256 of canonical JSON
+for that exact request.
 
-`structural_locator` is a closed canonical JSON object, never a delimiter-
-joined string. Its variants are:
+The untrusted verifier response is one closed object with exactly:
 
 ```text
-Python definition:
-  {kind: "python_definition", definition_kind, name_path}
-
-Python reference:
-  {kind: "python_reference", owner_name_path, reference_kind,
-   normalized_target, occurrence}
-
-Report issue:
-  {kind: "report_issue", code, target_kind, target_id,
-   owner: {path, line, section_id, symbol, invariant_id}}
-
-Spec target:
-  {kind: "spec_section", spec_path, section_id}
-
-Code invariant target:
-  {kind: "invariant_code", invariant_id, declaration_kind: "code",
-   owner_name_path}
-
-Spec invariant target:
-  {kind: "invariant_spec", invariant_id, declaration_kind: "spec",
-   section_id}
+{
+  packet_id,
+  claim_hash,
+  verdict,
+  support_score,
+  summary,
+  evidence
+}
 ```
 
-Name paths are arrays of exact Python identifier spellings from outermost to
-innermost lexical definition; module has an empty path. Definition kind is
-`module`, `class`, `function`, or `async_function`. Reference kind is one of
-`import_module`, `import_name`, `call_name`, `call_import_alias`,
-`call_module_member`, `call_self_member`, `call_cls_member`, or `unresolved`.
-`normalized_target` is the NFC-normalized token spelling after the exact alias
-table resolution in [EVC-7.2], with dotted components joined by one period and no
-added whitespace. `occurrence` is the zero-based source-order index among
-references with the same owner path, reference kind, and normalized target.
-Report-owner `path` is canonical repository-relative, and its other four
-fields are the exact nullable [SC-6] Issue coordinates; `line` is null or
-positive. Target and issue kinds use their existing closed vocabularies. The source path remains the
-separate identity `path`; each invariant variant rejects the other variant's
-owner field. Unknown keys or variants are invalid. The locator object itself enters identity preimages, so JSON escaping
-handles delimiter-like target text without another escaping rule.
+`verdict` uses the closed vocabulary above. `summary` is nonblank. Evidence
+items use [SEM-5]'s exact role/path/span model fields and are independently
+reconstructed from packet bytes. Unknown keys, wrong identities, non-finite
+scores, out-of-packet citations, or unsupported roles invalidate the event.
+`support` and `refute` each require at least one valid bound citation;
+`indeterminate` may use an empty evidence array. An empty refutation therefore
+cannot create a disputed policy context.
 
-## 5. Support Scores And Calibration [EVC-5]
+The exact verifier provider input is the code-owned adversarial prompt bytes,
+two LF bytes, then canonical JSON for the model-visible verifier request. When
+`json_mode = "require"`, the provider JSON Schema is a closed object with the
+six response fields above, exact packet and claim identity constants, the
+three verdict values, a finite numeric score bounded to `[0, 1]`, a nonblank
+summary string, and evidence items restricted to exact packet
+`evidence_regions` choices. This is only a generation constraint. Trusted
+normalization still revalidates every returned byte and relationship.
 
-`support_score` is model self-estimate. It is uncalibrated and must not be
-named, rendered, or documented as a probability. Policy may threshold on it,
-but a finding gated only by an uncalibrated score cannot exceed the packaged
-advisory ceiling in [SEM-6]. Calibrated probability and calibration-map
-artifacts are outside v1; adding them requires a new reviewed spec and cannot
-be enabled by an unknown config key.
+Before provider construction, Backstitch derives the offline verify inference
+contract:
 
-Verify uses a complete, separate, non-secret table. No value inherits from
-`[tool.backstitch.analyze]`. This is an enabled repository example, not the
-packaged default:
+```text
+{
+  verify_contract_version: 3,
+  verifier_packet_hash,
+  claim_hash,
+  prompt: {id, version, sha256},
+  provider: {
+    backend_id, plugin_id, model_id, model_revision,
+    adapter_id, adapter_version,
+    llm_distribution_version,
+    plugin_distribution_name, plugin_distribution_version
+  },
+  request: {json_mode, temperature, seed, max_tokens},
+  base_search_epoch,
+  effective_search_epoch
+}
+```
+
+`verify_key` is SHA-256 of canonical JSON for this contract. Cache objects are
+immutable and keyed by `verify_key`. A cached row is accepted only after its
+object schema, inference contract, key, response hash, identities, score, and
+evidence binding are recomputed. Provider provenance never changes the
+pre-call key.
+
+`base_search_epoch` is one configured [EVC-5] epoch. In an ordinary analysis,
+`effective_search_epoch` equals it. In an [EVC-10.1] evaluation,
+`effective_search_epoch` is the trial-specific derivation defined there. Every
+finding causes at most one verify request per configured base epoch. There is
+no unkeyed retry or fallback under the same event identity.
+
+A cached verifier object contains exactly:
+
+```text
+{
+  schema_version: 1,
+  object_type: "verification-result",
+  inference_contract,
+  verify_key,
+  result,
+  provenance,
+  raw_response_sha256
+}
+```
+
+Its canonical result contains exactly:
+
+```text
+{
+  schema_version: 1,
+  packet_id,
+  packet_hash,
+  claim_hash,
+  verifier_packet_hash,
+  verify_key,
+  verdict,
+  support_score,
+  summary,
+  evidence
+}
+```
+
+`provenance` contains provider response identity, observed model identity, and
+token counts under the existing [SEM-4] opaque provenance rules.
+It is required for audit but excluded from every pre-call key. The raw response
+hash binds exact returned bytes without storing them in reports.
+
+One aggregate verification event contains exactly:
+
+```text
+{
+  packet_id,
+  packet_hash,
+  claim_hash,
+  verifier_packet_hash,
+  required_epochs: [{base_search_epoch, effective_search_epoch}],
+  results: [{
+    verify_key, base_search_epoch, effective_search_epoch,
+    verdict, support_score, evidence
+  }],
+  aggregate_state,
+  context
+}
+```
+
+Required epochs and results preserve configured base-epoch order, and every
+result pair must equal the corresponding required pair. `aggregate_state` is
+`independently_verified`, `disputed`, or `verification_indeterminate`.
+`context` is respectively `independently_verified`, `disputed_by_verifier`, or
+`verification_indeterminate`. A mechanically or human verified finding may
+still have a lower-precedence verifier event, but final policy context composes
+through [EVC-6] rather than rewriting this event.
+
+_Implementation mapping_:
+
+- `backstitch/semantic_verification.py`
+
+## 4. Derived Evidence Artifacts [EVC-4]
+
+Backstitch has no evidence-case authority object. It has derived artifacts:
+
+- evidence packet JSON Lines and its packet report;
+- analysis and verification result objects;
+- immutable cache objects;
+- analysis, policy, and evaluation reports.
+
+Each artifact states its schema version, exact content identity, source
+snapshot identity where applicable, and scope. An artifact never chooses which
+source evidence is authoritative. Packet construction always re-derives that
+choice from the captured source graph.
+
+There is no proposal schema, proposal validation, activation, deactivation,
+active manifest, case root, case ID, case hash, evidence-case conflict token,
+or source mutation receipt in v1. No compatibility reader may convert one of
+those superseded objects into current alignment authority.
+
+### 4.1 Identity, Canonical JSON, And Receipts [EVC-4.1]
+
+Unless a related active spec defines a narrower projection, canonical JSON is
+`json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)`
+encoded as UTF-8 with no trailing newline. Every identity in this spec uses
+lowercase SHA-256 of the named canonical bytes.
+
+A raw source receipt contains exactly:
+
+```text
+{
+  receipt_version: 1,
+  path,
+  structural_locator,
+  start_line,
+  end_line,
+  raw_sha256
+}
+```
+
+Paths are canonical repository-relative POSIX paths. Lines are one-based and
+inclusive. `raw_sha256` hashes the exact raw bytes from the beginning of the
+start line through the end of the end line, including captured line
+terminators inside the span. The empty file has span `1..1` and empty bytes.
+The `receipt_hash` is SHA-256 of canonical JSON for the complete receipt.
+
+Candidate identity is:
+
+```text
+"candidate:sha256:" + SHA256({
+  candidate_identity_version: 1,
+  candidate_kind,
+  path,
+  structural_locator
+})
+```
+
+Candidate identity is stable across a body-only edit that preserves its
+structural locator. Its receipt changes whenever its exact span bytes or
+coordinates change. A candidate ID without its addressed snapshot and receipt
+does not prove current content.
+
+Artifact integrity and repository currentness are independent. Integrity is
+`valid` only after schema, digest, identity, and internal relationships
+recompute; otherwise it is `corrupt` and the operation fails. A valid artifact
+addressed without a repository comparison has
+`artifact_currentness = "unverifiable"`. A repository-addressed comparison
+uses exactly:
+
+| Value | Meaning |
+|---|---|
+| `current` | Artifact source snapshot equals the captured repository snapshot and the artifact validates |
+| `stale` | Artifact validates but names a different source snapshot |
+| `unverifiable` | No repository address was captured for comparison |
+
+Currentness never follows from filename, modification time, Git status, or a
+matching obligation ID alone.
+
+_Implementation mapping_:
+
+- `backstitch/evidence_discovery.py`
+- `backstitch/evidence_summary.py`
+
+### 4.2 Structural Locator Grammar [EVC-4.2]
+
+The closed locator kinds are:
+
+```text
+markdown-section:<section-id>
+markdown-invariant:<section-id>:<invariant-id>
+python-file:<canonical-path-sha256>
+python-module:<module-name>
+python-definition:<qualified-name>:<node-kind>:<same-name-ordinal>
+python-reference:<owner-locator-sha256>:<node-kind>:<ordinal>
+resolver-issue:<canonical-code>:<target-identity>:<ordinal>
+source-declaration:<relation-kind>:<line>:<same-line-ordinal>
+```
+
+All components are UTF-8 NFC. An ordinal is the zero-based position among
+same-kind nodes in tree-sitter source order after normalization. A definition's
+same-name ordinal is among definitions with the same qualified name and node
+kind in one module. It therefore distinguishes repeated `def f` or `class C`
+statements without using body bytes. `owner-locator-sha256` hashes the complete
+canonical structural locator of the enclosing definition or module, so a
+reference cannot inherit an ambiguous qualified owner. Node kind is one of
+`class`, `function`, `async-function`, `call`, `import`, `name`, or
+`attribute`. A locator that cannot be derived without guessing does not mint a
+candidate.
+
+A source-declaration locator addresses the exact source marker reported in an
+evidence row. `relation-kind` is one of `spec_mapping`, `code_backlink`,
+`invariant_declaration`, `invariant_bind`, or `binding_test`. `line` is its
+one-based captured source line with no leading zero. Its ordinal is the
+zero-based position among declarations of the same projected relation kind on
+that line in parser source order. The locator is a receipt address only; it
+does not mint a candidate or add alignment authority. Receipt construction
+asserts the closed grammar before returning a public row, so an unknown
+locator kind cannot ship.
+
+A `python-file` locator addresses a whole-file evidence receipt by SHA-256 of
+the NFC canonical repository-relative POSIX path encoded as UTF-8. The receipt
+also carries that readable path. This locator is for an exact path-qualified
+source evidence atom, including captured targets outside configured code/test
+roots. It is independent of `python-module`, which names an unambiguous import
+candidate under [EVC-7.2]. Import-root overlap, duplicate module names, or an
+identifier-invalid path can block a module candidate without invalidating an
+exact file receipt.
+
+Receipt spans are:
+
+| Origin | Span |
+|---|---|
+| Markdown section or invariant | Exact parser-owned statement/section span, excluding a skip directive from semantic text |
+| Python file | Complete captured file addressed by exact repository path |
+| Python module | Complete captured file |
+| Class, function, or async function | Complete tree-sitter definition beginning at the first decorator |
+| Python reference | Complete enclosing definition, or complete module for module scope |
+| Binding test | Complete bound test definition beginning at the first decorator |
+| Resolver issue | Exact target requirement span; the issue retains its own locator separately |
+| Source declaration | Exact one-line mapping, backlink, invariant, or binding marker |
+
+Tree-sitter points are zero-based and end-exclusive. Start line is
+`start_point.row + 1`. If `end_point.column == 0` and the end row follows the
+start row, inclusive end line is `end_point.row`; otherwise it is
+`end_point.row + 1`.
+
+_Implementation mapping_:
+
+- `backstitch/code_parser.py`
+- `backstitch/evidence_discovery.py`
+- `backstitch/evidence_summary.py`
+- `backstitch/markdown_specs.py`
+
+## 5. Verification Aggregation And Provider Resolution [EVC-5]
+
+`support_score` is an ordinal decision aid, not a probability. Policy uses it
+only through the closed threshold in [EVC-3]. It must not be called calibrated
+unless a future contract defines and measures a calibration target.
+
+Verify has a separate non-secret table for its adversarial prompt, request
+controls, aggregation, cache, and budgets. Provider resolution is one explicit
+all-or-nothing choice. Packaged defaults contain only `enabled = false`. The
+default enabled form reuses analyze's complete resolved provider and cost
+descriptor:
 
 ```toml
 [tool.backstitch.verify]
 enabled = true
-backend_id = "llm"
-plugin_id = "provider-plugin"
-plugin_distribution_name = "provider-distribution"
-model = "provider-model-id"
-model_revision = "repository-declared-revision"
+provider_source = "analyze"      # analyze | override
 concurrency = 1
 cache_path = ".backstitch/semantic-cache"
 cache_mode = "require"            # off | read-write | require
-search_epochs = ["1"]              # ordered, unique, nonblank
+search_epochs = ["1"]             # ordered, unique, nonblank
 json_mode = "require"
 temperature = 0.0
 seed = 42
@@ -695,2009 +687,1943 @@ indeterminate = "report"          # allow | report
 maximum_provider_calls = 100
 maximum_prompt_bytes = 1000000
 lock_wait_timeout_seconds = 300
-lock_stale_seconds = 3600
 maximum_runtime_seconds = 1800
 maximum_estimated_cost_microusd = 1000000
+```
+
+A repository that wants another provider or model uses
+`provider_source = "override"` and supplies exactly one complete nested table:
+
+```toml
+[tool.backstitch.verify.provider]
+backend_id = "llm"
+plugin_id = "provider-plugin"
+plugin_distribution_name = "provider-distribution"
+model = "provider-model-id"
+model_revision = "repository-declared-revision"
 input_cost_microusd_per_million_tokens = 400000
 output_cost_microusd_per_million_tokens = 1600000
 input_token_overhead = 256
 cost_rate_source = "reviewed source and date"
 ```
 
-The packaged default has `enabled = false`. In that state Backstitch makes no
-verify calls, reads or writes no verify cache objects, emits no verification-
-debt record or verify notice, and projects no `independently_verified` state.
-Enabling verify requires the repository to supply the complete table above,
-including reviewed model identity, budgets, and cost rates. An incomplete
-enabled table or any unknown key is a configuration error.
+When disabled, Backstitch makes no verify call, reads or writes no verifier
+cache object, and projects no independent verification context. Two disabled
+shapes are valid. Minimal disabled contains exactly `enabled = false`.
+Dormant complete contains `enabled = false` plus every enabled base-table key
+shown above, the provider table required by `provider_source` when applicable,
+and an optional but complete `verify.eval` table. Partial dormant forms are
+invalid. Dormant fields receive the same unknown-key, type, range, nonblank,
+provider-identity, cost, path, and internal cross-field validation as enabled
+fields, but disabled state performs no adapter construction,
+qualification-artifact load, cache access, or provider call.
 
-When enabled, the resolved `(backend_id, plugin_id, model, model_revision)`
-tuple must differ from the resolved analyze tuple. This establishes an
-independent model identity and separate blinded protocol; it does not claim
-statistical independence between repeated verify epochs or model families.
+Config/environment/CLI layers apply before final verify-shape validation.
+Therefore `--option verify.enabled true` activates a dormant complete
+descriptor and applies ordinary enabled validation, while applying it to the
+minimal disabled form is exit `2` for missing required fields.
+`provider_source` is exactly `analyze` or `override` in enabled and dormant
+complete forms.
 
-`enabled` is boolean. `minimum_support_score` is a finite number in `[0, 1]`.
-`required_verdicts` is an integer excluding booleans and at least one.
-`indeterminate` is exactly `allow` or `report`. Cost, budget, timeout, cache,
-model, and request fields use the [SEM-9] value rules for their corresponding
-analyze keys; no type coercion occurs. `maximum_prompt_bytes` is an integer
-excluding booleans and at least one. `search_epochs` is the ordered nonblank
-string list constrained below.
+For `analyze`, the nested provider table must be absent. Backstitch reuses the
+fully resolved analyze `backend_id`, `plugin_id`,
+`plugin_distribution_name`, `model`, `model_revision`, input/output cost rates,
+token overhead, and cost-rate source after ordinary config precedence.
+`provider_source = "analyze"` requires that complete descriptor to be declared
+in resolved config. `--model` or `LLM_MODEL` may be absent or equal that model;
+it cannot select another model while retaining the configured revision or cost
+metadata. A different model requires an atomic config change to the complete
+analyze descriptor, which changes both resolved inference identities and the
+qualification selector. Credential resolution follows the one resolved
+plugin/provider; the verify contract does not require another credential. The
+inherited descriptor must satisfy the same nonblank provider and cached-identity
+validation as an override; analyze's optional off-cache resolution cannot
+supply guessed or blank verify identity.
 
-Backend, plugin, distribution, model, revision, JSON mode, temperature, seed,
-maximum tokens, verify prompt descriptor, and adapter identity enter the
-verify inference contract. Epoch enters the separate verify event identity and
-model request. Operational budgets and concurrency do not. The
-validation and mode rules for the shared fields are exactly [SEM-3]/[SEM-9];
-missing independent identity fields are configuration errors. The length of
-`search_epochs` must equal `required_verdicts`, which is a positive integer;
-epochs are unique and their listed order is canonical.
+For `override`, the nested table is required with exactly every shown key.
+Partial override, analyze fallback for a missing override field, an override
+table in analyze mode, and unknown nested keys are invalid. Provider strings
+are nonblank. Cost fields use [SEM-9]'s exact rules. The resolved override tuple
+may equal or differ from analyze's tuple. Equality is valid; difference is an
+optional ensemble choice and grants no additional policy authority.
 
-Aggregation is conservative and order-independent after selecting that exact
-configured set:
+`required_verdicts` is a positive integer excluding booleans and equals the
+length of unique ordered `search_epochs`. `minimum_support_score` is finite in
+`[0, 1]`; `indeterminate` is `allow` or `report`; `maximum_prompt_bytes` is a
+positive integer. Shared cache, request, runtime, cost-ceiling, and locking
+fields use [SEM-9]'s exact value rules and no coercion. The complete resolved
+provider/request descriptor enters [EVC-3.1]'s inference contract; config
+spelling and `provider_source` do not, so equal resolved contracts have equal
+identity. Epoch enters each event key. Operational budgets, concurrency, and
+cost rates do not enter the event identity.
 
-| Events for one `claim_hash` | Aggregate state |
-|---|---|
-| Any provider/tool/malformed/binding failure | exit `2`; no aggregate verdict |
-| Any `unsupported` | `disputed` with context `disputed_by_verifier` |
-| Otherwise any missing event under required replay | exit `2` and `CASE_VERDICT_MISSING` |
-| Otherwise any `indeterminate` or supported score below threshold | `evidence_bound` with context `verification_indeterminate` |
-| All `supported` and every score meets the threshold | `independently_verified` with context `verified` |
+A positive verifier cost ceiling requires a nonblank resolved cost-rate source
+and explicit resolved rates/overhead whether they came from analyze or the
+override. A zero ceiling disables that budget under [SEM-9]'s existing rule.
 
-The displayed aggregate support score is the minimum selected event score,
-never an average or probability. Policy changes reuse the same event objects.
-Adding, removing, or reordering configured epochs changes the verification-run
-identity but not an existing event's cache key.
+Multiple required verify epochs aggregate conservatively:
 
-`indeterminate = "allow"` projects the documented indeterminate context with
-no separate debt record or stderr notice. `report` additionally appends the
-claim hash and event keys to the closed verification-debt report and emits one
-concise non-failing stderr notice. Neither mode exits `2` merely because the
-verdict is indeterminate; exact diagnostic policy may still control the target
-finding. Unknown values are configuration errors.
+- one valid `refute` makes the claim `disputed`;
+- otherwise, every epoch must return valid `support` at or above the threshold
+  for `independently_verified`;
+- otherwise, any valid `indeterminate` response or valid support below the
+  threshold makes the claim `verification_indeterminate`.
 
-Correlated error is acknowledged, not hidden: two model judgments from
-similar models share failure modes. The [SEM-8] lane must therefore measure
-verify quality separately per configured verify model, and the promotion
-requirements of [SEM-8] (zero hard-fail false positives on negative
-controls, recall with interval, replay stability) apply to the combined
-analyze-plus-verify pipeline end to end, not to the verifier in isolation.
+A valid model verdict `indeterminate` follows that last rule. A provider,
+cache, malformed-shape, binding, budget, or tool failure is not a model verdict:
+it returns exit 2, publishes no aggregate event or current report, and never
+becomes `refute` or `verification_indeterminate`. `indeterminate = allow`
+records the valid indeterminate event without a debt notice; `report` also
+marks that same aggregate event as verification debt and emits one concise
+non-failing notice. The event in the closed analysis-report `verification`
+object is the complete machine-readable debt record; there is no second debt
+array or shadow representation.
 
-### 5.1 Invocation, Reports, And Exit Ownership [EVC-5.1]
+Changing prompt, provider identity, request controls, packet bytes, claim
+bytes, verifier contract version, effective epoch, or evidence normalization
+creates new affected verify keys. Changing the required epoch list, support
+threshold, or indeterminate rule changes verifier composition and aggregate
+policy identity; it does not rewrite an otherwise identical per-event key.
+Newly required epochs still create their own new event keys. Rendering, output
+paths, concurrency, policy severity, and timestamps change neither event keys
+nor composition identity.
 
-`backstitch analyze` owns verify execution. After each non-`ok` analyze result
-is normalized into a canonical finding and before policy projection, it runs
-or replays the configured verify events only when verify is enabled, the
-packet is case mode, and the active case satisfies [EVC-9]'s policy-independent
-`case_verifiable` predicate. Trace-mode, stale, incomplete, and unresolved-case
-findings remain `evidence_bound` and make no verify cache access or call.
-`backstitch eval` invokes the same production path. `summarize-analysis` never
-runs or replays verify; it only validates and renders an existing report.
+Stronger independently verified policy remains disabled until a committed
+evaluation report passes [EVC-10.1]. Failure to qualify does not block
+report-only operation.
 
-Analyze result JSONL remains the policy-neutral schema-v2 analyze rows. Verify
-events remain immutable cache objects; trusted aggregate state appears in the
-analysis report and semantic diagnostic projection, not by rewriting result
-rows.
+Until Slice 8 implements and validates the current [EVC-10.1] qualification
+artifact, no `BSA*:independently_verified` selector may gain failure authority.
+If resolved policy requests such authority, Slice-7 code fails closed before
+cache or provider construction with the requalification action. Slice 8 owns
+successful qualification loading plus missing, corrupt, failing, and
+composition-mismatched artifact cases. `[analyze.eval]` remains historical
+schema-2 report-field vocabulary only; settings loading always rejects an
+`[analyze.eval]` table under [CFG-6.5].
 
-Every post-EVC [SEM-7] analysis-report producer emits schema version 2.
-Version 1 is read-only migration input. Version 2 contains every version-1
-field unchanged plus exactly one new top-level `verification` field. That
-record contains exactly `enabled`,
-`cache_hits`, `cache_misses`, `provider_calls`, nullable
-`estimated_cost_microusd`, nullable `cost_rate_source`, `events`, `debt`, and
-`case_diagnostics`.
-When disabled, `enabled` is false, counts are zero, nullable fields are null,
-and all three arrays are empty.
+_Implementation mapping_:
 
-When verify is enabled but a finding is not `case_verifiable`, no verification
-event, debt, or BSE005/BSE006 row is created because no event was required or
-attempted. Counts do not change. The ordinary semantic diagnostic remains
-`evidence_bound` with `verification_indeterminate` context and the case-
-validation diagnostics explain the policy-independent reason. Thus no empty
-verify-key list or null aggregate score is serialized as a synthetic event.
+- `backstitch/semantic_verification.py`
+- `backstitch/settings.py`
 
-An event row contains exactly `claim_hash`, `case_id`, `case_hash`,
-`case_evidence_hash`, `verifier_case_hash`, ordered `verify_keys`,
-`aggregate_state`, `context`,
-`aggregate_support_score`, and `minimum_support_score`. Aggregate support is
-the [EVC-5] minimum selected event score; state/context pairs are exactly
-[EVC-6]. Rows preserve packet input order, then canonical finding-code and
-claim-hash order within a packet. Verify keys preserve configured epoch order. A debt row
-contains exactly `claim_hash`, `case_hash`, `case_evidence_hash`, ordered
-`verify_keys`, and
-`context = "verification_indeterminate"`; debt rows preserve event order.
-`indeterminate = "allow"` leaves debt empty, while `report` appends the row and
-emits its one concise stderr notice.
+### 5.1 Invocation, Scope, And Publication [EVC-5.1]
 
-A verification case-diagnostic row contains exactly `code`, `short_code`,
-`packet_id`, `claim_hash`, `case_id`, `case_hash`, `case_evidence_hash`, `context`,
-`default_severity`, `severity`, `message`, and `winning_policy_rule`, reusing
-[SEM-6]'s exact rule record. `analyze` emits BSE005 once for a claim when any
-configured event is absent after cache replay/attempt, and emits BSE006 once
-when any selected event is `unsupported`. Their exact contexts are
-`missing_verify_event` and `disputed_by_verifier`, respectively. Unsupported
-produces both
-the original BSA finding in `disputed_by_verifier` context and the BSE006 audit
-row; it never deletes either. Rows preserve event order then BSE code order.
+`backstitch analyze` has two mutually exclusive input modes:
 
-The failure row in [EVC-5]'s aggregation table has precedence over every
-verdict row. In a mixed set with one valid `unsupported` event and one failed
-or absent event, the failed report retains BSE005 and BSE006 audit rows for the
-two observed conditions, but emits no aggregate event row, no debt row, and no
-`disputed_by_verifier` BSA projection. The immutable analyzer result row and
-valid verify cache object remain available for diagnosis. Exit is `2`; the
-partial event set cannot become a target finding.
+```text
+backstitch analyze --repo-root PATH
+  [--packets-output PATH --packet-report-output PATH]
+  [--output PATH] [--report PATH]
+  [--model MODEL] [--concurrency N]
+  [--config PATH | --no-config] [--format text|json]
+  [--option KEY VALUE]...
 
-BSE005/BSE006 use [SC-15] visibility levels but are failure-ineligible audit
-diagnostics: no applied severity can grant them exit `1`. A missing required
-event still causes mandatory exit `2` through the verify-cache/completeness
-problem regardless of BSE005's info/warning/off presentation. BSE006 has no
-exit effect. `eval` obtains the same records only through its production
-analyze substages; no evidence command emits either code.
-
-[SEM-7] report problems gain stages `verify_cache`, `verify_provider`, and
-`verify_normalization`, paired respectively with its existing cache/provider/
-malformed-result codes. Any verify cache miss under require mode, provider
-failure, malformed response, binding failure, missing configured event, or
-invalid aggregate makes report status `failed` and overall analyze exit `2`.
-Tool/completeness exit `2` takes precedence; otherwise a projected diagnostic
-in `fail_on` exits `1`; otherwise analyze exits `0`. No verify problem becomes
-`unsupported`, `indeterminate`, or a target finding.
-
-## 6. Verification State And Policy Integration [EVC-6]
-
-Verify extends the [SEM-5] trusted verification-state vocabulary with one
-state and three exact diagnostic contexts:
-
-- `independently_verified`: an independent, blinded, adversarial verify
-  event (or the configured N of them) returned `supported` with scores
-  meeting the applied thresholds. This is a specific, protocol-bound
-  strengthening of [SEM-5] `corroborated`.
-
-The projection table is:
-
-| Aggregate outcome | Verification state | Diagnostic context |
-|---|---|---|
-| all required events supported above threshold | `independently_verified` | `verified` |
-| any unsupported event | existing `disputed` | `disputed_by_verifier` |
-| indeterminate or below threshold | existing `evidence_bound` | `verification_indeterminate` |
-| missing/tool failure | no projected finding | exit `2` problem |
-
-Diagnostic projection follows [SEM-6]. Contexts are selectable exactly, for
-example:
-
-```toml
-[[tool.backstitch.diagnostics.levels]]
-select = ["SEMANTIC_CONFIRMED_MISMATCH:verified"]
-level = "error"
+backstitch analyze --packets PATH --packet-report PATH
+  [--compare-repo-root PATH]
+  [--output PATH] [--report PATH]
+  [--model MODEL] [--concurrency N]
+  [--config PATH | --no-config] [--format text|json]
+  [--option KEY VALUE]...
 ```
 
-Policy boundaries:
+The configuration selection and override grammar composes with [CFG-5.1].
+Configuration controls may appear globally before `analyze` or in the
+positions shown here, but may not assign the same generic key twice or combine
+a generic key with its dedicated alias.
 
-- The packaged default policy keeps `analyzed` (evidence_bound),
-  `corroborated`, and `verified` findings advisory. Its
-  `independently_verified` levels match [SEM-6]'s
-  `mechanically_verified` column exactly: warning for BSA001 through BSA004
-  and info for BSA005. Packaged defaults never make a stochastic verdict an
-  error.
-- A repository-applied policy may promote `verified` findings to `error`
-  only when the applied `[tool.backstitch.verify]` thresholds are met and the [SEM-8] eval
-  mode for the verify lane is `enforce` with measured, committed
-  thresholds. Promotion without a measured baseline is a configuration
-  error.
-- `unsupported` uses the existing `disputed` state and the
-  `disputed_by_verifier` context. It is advisory and visible; it does not
-  suppress the finding.
-- `indeterminate` and below-threshold support use `evidence_bound` plus
-  `verification_indeterminate` and follow the exact allow/report behavior in
-  [EVC-5].
-- [SEM-5]'s boundary is preserved: `mechanically_verified` and
-  `human_verified` remain the only states the *packaged* policy may treat
-  as error-eligible. `independently_verified` error promotion is always a
-  repository decision, made against measurement.
+`--repo-root` and `--packets` are required alternatives. Packet replay always
+requires `--packet-report`. Current mode forbids input `--packet-report` and
+`--compare-repo-root`; historical mode forbids both packet-output flags.
+`--packets-output` and `--packet-report-output` must occur together. `--config`
+and `--no-config` are mutually exclusive. `--concurrency` is a positive
+integer. Existing model/config rules remain [SEM-9].
 
-## 7. The Candidate Universe [EVC-7]
+All four output flags are optional. `--output` writes canonical policy-neutral
+result JSONL. `--report` writes the closed analysis report. The packet-output
+pair writes the internally derived packet JSONL and packet report. Without an
+output flag, that artifact is retained in memory only. Stdout always renders
+the final analysis summary: text by default, or the complete analysis report
+as canonical JSON for `--format json`. A failed run with no publishable report
+prints one line-safe error to stderr and nothing to stdout. This makes the
+advertised `backstitch analyze --repo-root PATH` a complete gate invocation.
 
-The assembling agent must never be the sole judge of what evidence is
-"all the necessary code". Completeness of consideration is deterministic:
+Current-repository mode owns this sequence:
 
-The closed v1 candidate kinds are `implementation`, `test`,
-`static_reference`, `unresolved_reference`, and `report_issue`. Root role,
-parser node, or report ownership derives the kind; the agent never supplies it.
+1. capture one immutable repository snapshot;
+2. resolve obligations and readiness from that snapshot;
+3. apply [EVC-2.1]'s corpus matrix, failing the whole run before provider work
+   for alignment debt while excluding valid skips and non-active rungs;
+4. derive packets from the same snapshot and resolved graph;
+5. analyze, verify, and project policy;
+6. capture a second whole repository snapshot through the same owner;
+7. publish current results only when both snapshot identities match.
 
-- Backstitch constructs the **seed set** from the target section or invariant,
-  every valid mapping and backlink edge for it, invariant targets and binding
-  tests, and every deterministic report issue bound to the target.
-- Backstitch constructs the **mandatory candidate universe** by repeatedly
-  adding the captured Python import and static-reference neighbors of every
-  code or test definition in the seed set, in candidate-ID order, through
-  `static_neighbor_depth`. Depth zero is the seed set only; depth one adds its
-  direct neighbors. Closure stops at the configured depth or a fixed point.
-- The agent may **expand** the universe with additional candidates (each
-  recorded with a reason) through the contained candidate-resolution operation
-  in [EVC-8]. Each expanded candidate becomes another seed and receives the
-  same configured closure. Proposal validation computes the fixed universe;
-  newly exposed members make the proposal incomplete until selected,
-  considered, or omitted with a nonblank reason. Open questions affect proof-
-  obligation readiness, not candidate accounting. The agent can never remove
-  a member.
-- At validation time ([EVC-9]) the universe is **recomputed** from current
-  repository structure and diffed against the frozen universe. Members
-  present in the recomputation but absent from the frozen case — a new
-  caller, a new implementation, a new binding test — make the case stale.
-  Span digests detect mutation of considered evidence; the universe diff
-  detects the *addition* of unconsidered evidence. Both are required; hash
-  checks alone would freeze omissions-by-evolution into green cases.
+All requested final artifact paths are staged until step 7. A changed snapshot
+returns exit 2 and publishes no current report or policy result. Immutable
+cache entries already written for the first snapshot may remain valid facts
+about that historical snapshot, but they have no current gate authority.
 
-V1 Python relations are deliberately closed:
+Each requested artifact resolves distinctly from every other requested output
+and from every input artifact. In current mode it must also lie outside every
+captured spec/plan/code/test root, must not equal any selected config or extend-
+chain file, and must not match any other semantic input path. The directory
+containing a config file is not itself a config root and remains eligible when
+no other rule excludes it. This check happens before capture. It prevents
+publication from changing the semantic snapshot it just certified.
 
-- imports resolve `import module [as alias]` and `from module import name [as
-  alias]` only when the module maps to exactly one captured `.py` file under a
-  configured code or test root;
-- calls resolve `name(...)`, an imported `alias(...)`, `module.name(...)`, and
-  `self.name(...)` or `cls.name(...)` inside a captured class only when lexical
-  scope, the import table, or that class yields exactly one definition;
-- dynamic imports, re-exports without one captured target, wildcard imports,
-  higher-order calls, computed attributes, and other `object.name(...)` calls
-  are unresolved and never guessed;
-- inverse caller edges are built only from those same resolved calls. Ordering
-  is `(candidate_id, relation_kind, source_locator, target_locator)`.
+The same exclusion applies to the resolved analyze and verify cache roots,
+lock/guard/audit paths, and any provider-local file path Backstitch itself can
+write. A configured mutable path that overlaps a semantic input is invalid
+configuration before cache or provider construction. Remote provider state is
+outside repository currentness.
 
-An unresolved form in the closure becomes a mandatory
-`unresolved_reference` candidate only when its normalized module or name can
-plausibly target the captured repository: a module-qualified or imported form
-must have a first module segment that matches a captured local module; an
-unqualified or computed call must have a terminal referenced name that matches
-a captured definition in the candidate catalog. Clearly external unresolved
-references may be retained as bounded orientation telemetry, or omitted from
-the mandatory universe, but they are never guessed into local relations. This
-rule prevents ordinary dependency calls from making every case permanently
-incomplete while keeping plausible local ambiguity visible.
+Each staged artifact is created beside its final path as a unique exclusive
+regular file named with the current process ID plus 128 bits of randomness,
+written completely, flushed, and closed before the final snapshot comparison.
+After a match, Backstitch atomically replaces final paths in dependency order:
+`--packets-output`, `--packet-report-output`, `--output`, then `--report`.
+A replacement failure is exit 2 and reports which earlier finals were
+published. A consumer validates paired digests and may reject an earlier final
+paired with a later failed replacement. No current analysis report or gate
+success is emitted. The current invocation removes only the exact staging
+paths it created and recorded in memory. There is no automatic startup cleanup
+or age-based deletion of another run's staging files in v1.
 
-Deterministic counterevidence candidates are: target-bound report issues,
-mandatory unresolved-reference candidates, ambiguous same-name definitions
-encountered during resolution, and closure members not already classified by
-a declared mapping/backlink or invariant bind as implementation or test
-support. The public operation is therefore `--find-evidence --kind
-counterevidence`; it proposes places that may weaken the case and does not assert semantic
-counterevidence. A static relation proves only that the parser observed a
-source relation. It does not prove runtime reach or that a test assertion
-checks the obligation. Runtime tracing is outside v1.
+Current mode reports `scope = "current_repository"` and
+`artifact_currentness = "current"` only after step 7.
 
-The broker's report-issue projection consumes the resolver's raw deterministic
-`Issue` inventory after planned/exploratory profile classification but before
-traceability suppression, diagnostic-level policy, `fail_on`, or synthetic
-unused-suppression findings. A suppression can hide presentation noise but can
-never shrink a mandatory evidence universe. Effective `profile_name`,
-`plan_roots`, `planned_spec_globs`, and `exploratory_spec_globs` enter the
-snapshot and universe contract because they can change target or report-issue
-classification. `meta_spec_globs`, its `process_spec_globs` alias, lint ignore
-tables, `warn_unused_ignores`, diagnostic levels, and `fail_on` do not enter:
-the raw report-issue projection is defined to be independent of them.
-`report_issue_projection_version` changes whenever that raw resolver seam or
-its target-binding rule changes.
+Packet mode validates exact packet bytes and packet report identity, performs
+no repository comparison, reports `scope = "historical_snapshot"` and
+`artifact_currentness = "unverifiable"`, and judges the internally consistent
+packet content under its **claimed historical snapshot**. Without source bytes
+or a repository comparison it does not prove that the named snapshot ever
+contained those bytes. It cannot emit a current-repository policy claim.
+Packet-only analysis summary has the same historical scope.
 
-Universe construction parameters (edge kinds, neighborhood depth, size
-budget) are non-secret configuration recorded inside the frozen case; a
-parameter change is a case-invalidating event, not a silent widening.
-`maximum_catalog_items` caps unique candidate IDs across the complete global
-catalog of every eligible captured origin, independent of obligation. Catalog
-construction follows candidate-ID order and fails with observed count
-`limit + 1` as soon as the next unique member would exceed the ceiling; it
-returns no partial catalog. `maximum_candidate_items` separately caps unique
-candidate IDs in one addressed obligation's mandatory fixed-point universe,
-including closure from every agent-expanded seed. The limit is checked after
-each deterministic closure insertion and fails at observed `limit + 1` with
-no partial page, proposal receipt, or frozen case. Page size and aggregate
-exploration calls do not consume either ceiling.
-Universe reads are ordered and paginated. A page cursor is a self-contained,
-snapshot-bound continuation token; it is not server-side session state, and a
-fresh CLI process or MCP server can serve the next page from the full call
-address alone.
+For explicit audit comparison, packet mode may also receive
+`--compare-repo-root PATH`. This captures the repository solely to compute
+`artifact_currentness`. A match permits `current`; a mismatch reports `stale`.
+The operation remains `scope = "historical_snapshot"` and cannot become the
+current gate because it did not derive packets and readiness inside the
+start/end capture boundary. `--repo-root` current mode and `--packets` remain
+mutually exclusive.
 
-### 7.1 Closed Candidate Spans [EVC-7.1]
+Config discovery for current mode anchors at the resolved repository root.
+Config discovery for historical mode anchors at the packet file's parent, as
+the packet replay command does. Every `analyze --packets` invocation requires
+its paired schema-2 packet report and packet-schema-3 contents. Legacy
+packet-schema-2 and unversioned artifacts remain accepted only by bounded
+validation and presentation paths; they are never analyzable, rewritten, or
+accepted by current, historical schema-3, completeness, or qualification runs.
 
-Every candidate receipt uses the captured byte image and this closed span
-table. Source lines are one-based and inclusive. An excerpt is the exact bytes
-from the beginning of its start line through the end of its end line, including
-captured line terminators that fall inside that slice; an unterminated final
-line is not modified. The empty module has span `1..1` and an empty excerpt.
+## 6. Policy And Diagnostic Integration [EVC-6]
 
-| Candidate origin | Receipt span |
+Alignment readiness, analyzer judgment, verifier judgment, and policy are
+separate records. Policy may make execution stricter but cannot make an
+unaligned or skipped obligation executable.
+
+For each semantic classification from [SEM-6], final policy context is exactly
+one of `evidence_bound`, `verification_indeterminate`,
+`independently_verified`, `mechanically_verified`, `human_verified`,
+`disputed_by_verifier`, or `human_rejected`. The noun `candidate` is reserved
+for discovered source and is not a semantic context.
+
+Context composition uses this first-matching precedence:
+
+1. an exact matching human `accepted` disposition produces
+   `human_verified`; an exact matching `rejected` disposition produces
+   `human_rejected`;
+2. otherwise, a named deterministic predicate under [SEM-5] produces
+   `mechanically_verified`;
+3. otherwise, aggregate independent verification produces
+   `independently_verified`, `disputed_by_verifier`, or
+   `verification_indeterminate`;
+4. otherwise, a normalized analyzer finding is `evidence_bound`.
+
+Every lower-precedence observation remains in the analysis report. Precedence
+selects policy context only; it does not erase a verifier dispute or human
+decision from audit. The old `corroborated` context is read-only legacy input
+and normalizes to `evidence_bound`; producers never emit it after coordinated
+promotion.
+
+Only `mechanically_verified` and `human_verified` have failure authority by
+default. `independently_verified` may have failure authority only for an exact
+semantic-code/context selector after [EVC-10.1] enforce qualification passes
+for that canonical long code and current derivation/inference identities.
+Configuration may spell the code with [SEM-6]'s long code or `BSA00*` alias;
+policy resolution normalizes it to the long code before qualification lookup.
+Evidence-bound,
+indeterminate, and both disputed contexts never cause exit 1. Wildcards may
+lower visibility but cannot grant failure authority.
+
+At configuration resolution, every explicit exact
+`CODE:independently_verified` selector whose effective level is in
+`fail_on` requires `verify.enabled = true` and the configured enforce report to
+be present, valid, passing in both its aggregate and exact-code cohorts, and
+matched to the current source-derivation algorithms and analyzer/verifier
+inference identities. Its corpus digest, trial count, interval/confidence,
+sample floors, thresholds, and critical requirement must also equal the current
+enforce configuration. Every required aggregate and `<SEMANTIC-code>:` check
+must exist and pass; an aggregate
+pass cannot substitute for a missing, empty, or failing code cohort. Disabled
+verification is invalid config for that selector. Missing, corrupt, failing,
+or identity-mismatched qualification is exit 2 before cache/provider work with
+`qualification/required_qualification_unavailable`; it never silently lowers
+the requested gate to report-only. The problem names the affected selectors,
+reason, expected report identity when available, current composed identity, and
+the action `Re-run qualification for the current source-derivation,
+qualification, and inference contracts or remove the failure-authority
+selector.` When no failure-authority selector is
+requested, unavailable qualification leaves `independently_verified` advisory
+and report-only as before.
+
+Coordinated promotion gives these packaged levels:
+
+| BSA code | evidence_bound | verification_indeterminate | independently_verified | mechanically_verified | human_verified | disputed_by_verifier | human_rejected |
+|---|---|---|---|---|---|---|---|
+| `BSA001` | warning | warning | warning | warning | warning | info | info |
+| `BSA002` | info | info | warning | warning | warning | info | info |
+| `BSA003` | warning | warning | warning | warning | warning | info | info |
+| `BSA004` | warning | warning | warning | warning | warning | info | info |
+| `BSA005` | info | info | info | info | info | info | info |
+
+The canonical `BSA001` through `BSA005` issue family remains owned by [SEM-6].
+This spec allocates exactly one EVC audit diagnostic:
+
+| Code | Short | Packaged level | Meaning |
+|---|---|---|---|
+| `OBLIGATION_SKIPPED` | `BSE001` | info | One valid source-authored skip suppressed semantic evaluation for the addressed obligation |
+
+It is emitted once per valid skip at the marker locator, with context
+`source_skip`, obligation ID, and exact reason in the suppression/audit record.
+The skip marker does not suppress this diagnostic. Ordinary exact policy may
+set BSE001 to error to prohibit skips, or off to hide it from default findings
+while retaining audit visibility. No other BSE code is allocated. Deterministic
+trace defects retain their existing [SC-*]/[INV-*] canonical codes. Artifact,
+budget, input, provider, and snapshot failures are operation problems and exit
+2, not suppressible repository findings.
+
+Disposition rules in [SEM-6] apply only to semantic findings. They do not
+alter `intent_state`, `alignment_state`, `disposition`, `gate_state`, evidence
+summary, candidate trace state, packet bytes, or artifact currentness.
+
+_Implementation mapping_:
+
+- `backstitch/semantic_policy.py`
+
+## 7. Deterministic Candidate Discovery [EVC-7]
+
+`--find-evidence` discovers a closed, deterministic candidate universe from
+the same captured source snapshot and resolved report used for readiness. It
+does not call a model.
+
+The closed candidate kinds are:
+
+- `implementation_definition`: module, class, function, or method under a code
+  root;
+- `test_definition`: module, class, function, or method under a test root;
+- `static_reference`: a conservatively resolved Python import, call, name, or
+  attribute reference;
+- `unresolved_reference`: a plausible local Python relation that the closed
+  resolver cannot resolve uniquely;
+- `report_issue`: an existing policy- and suppression-independent raw resolver
+  issue attributable to the obligation.
+
+Each candidate has one trace state:
+
+| State | Meaning |
 |---|---|
-| path-only Python implementation/test or module definition | complete captured file |
-| class, function, async function, or code-invariant owner | complete tree-sitter definition, beginning at the first decorator when present |
-| static or unresolved Python reference | complete lexical owner definition; complete file when owner is module |
-| invariant binding test | complete bound test definition, beginning at its first decorator |
-| deterministic report issue | complete target section or invariant requirement span |
+| `declared` | Existing source declarations fully establish the candidate's required reciprocal evidence relation |
+| `partially_declared` | At least one relevant source declaration exists but reciprocity or a required role is missing |
+| `untraced` | No relevant source declaration associates the candidate with the obligation |
+| `conflicted` | Ambiguous, duplicate, malformed, or contradictory declarations prevent one relation answer |
 
-Tree-sitter points are zero-based and end-exclusive. The start line is
-`start_point.row + 1`. When `end_point.column = 0` and the end row follows the
-start row, the inclusive end line is `end_point.row`; otherwise it is
-`end_point.row + 1`. The decorated-definition wrapper, not only its inner
-definition, supplies these points. A multiline reference therefore receives
-its owner body once, not an arbitrary call-line fragment. A report-issue
-candidate's `path` is the target requirement path; its locator retains the
-issue's own [SC-6] coordinates. A missing target or unreadable owner cannot
-produce a receipt and prevents universe completeness.
+`report_issue` candidates represent a resolver's existing evidence that some
+relation was attempted or required. They are therefore
+`partially_declared` unless the issue is ambiguous, duplicate, malformed, or
+contradictory, in which case they are `conflicted`. A `report_issue` candidate
+cannot be `declared` or `untraced`.
 
-Candidate-specific receipts may have identical or overlapping spans. They
-remain distinct observations because candidate IDs differ. [EVC-9.1] performs
-the separate maximal model-visible merge, preserving every candidate and
-receipt identity in text-free subrows while showing overlapping source lines
-once per role.
+An untraced heuristic candidate is advisory. It does not by itself change
+alignment or exit status. It becomes readiness-blocking only if it exposes an
+existing broken source declaration or a separate active spec defines a closed
+universal coverage rule. Discovery never silently turns similarity or static
+reach into a required evidence link.
 
-### 7.2 Python Module And Alias Resolution [EVC-7.2]
+The closed discovery bases are `declared_relation`, `invariant_relation`,
+`resolver_issue`, `lexical_match`, `static_neighbor`, and
+`ambiguous_relation`. One candidate may carry several bases in this order.
 
-Module identity is derived only from captured `.py` files under configured
-code/test roots. For each containing root, derive one name as follows. If the
-root itself contains captured `__init__.py`, the root contributes its final
-path component as the package prefix; otherwise it is an import base and
-contributes no prefix. Append the file path relative to the root, remove the
-`.py` suffix, and remove a final `__init__` component. Every remaining
-component must be a Python identifier and not a keyword. Repository root `.`
-has no final component and never contributes a prefix. A file contained by
-overlapping roots is importable only when every root derives the same module
-name. One module name mapping to multiple files, an empty derived name, or
-disagreement across roots is ambiguous and never guessed.
+The initial seed set for one obligation is:
 
-For a file that is not `__init__.py`, its current package is its module name
-without the final component; for `__init__.py`, it is the whole module name.
-A relative import with `d` leading dots starts at that package and removes
-`d - 1` trailing components; insufficient components are unresolved. Its
-written module components are then appended. Absolute imports use their
-written components. Resolution succeeds only when the resulting module maps
-to one captured file. `from M import N` first resolves `M`; `N` resolves to a
-captured submodule `M.N` when one exists, otherwise to exactly one captured
-module-scope definition named `N` in module `M`. Both is ambiguous; neither is
-unresolved.
+- every declared evidence owner and binding test;
+- every raw resolver issue targeted to the obligation;
+- the first `maximum_lexical_seeds` positive lexical matches among class,
+  function, and method `implementation_definition` and `test_definition`
+  candidates in the complete captured candidate catalog; whole-module
+  candidates are not lexical seeds;
+- every definition or reference reachable within `static_neighbor_depth`
+  through the closed relations below;
+- every same-name ambiguous local definition encountered during that closure.
 
-Each lexical definition owns an import-binding table. At a reference,
-bindings from enclosing scopes through the current scope are considered;
-the innermost binding wins, then the latest import textually before the
-reference. Any parameter, assignment target, loop/with target, exception
-target, local definition, or deletion of the same spelling in that Python
-scope makes an import binding there unavailable; Backstitch does not emulate
-runtime control flow. `import A.B as X` binds `X` to module `A.B`; without
-`as`, it binds `A` to module `A`. `from M import N as X` binds `X` (or `N`)
-to the unique submodule/definition resolution above. Wildcard imports create
-no bindings. Import aliases affect only references after their import node.
+A path-only Python source declaration seeds only the exact `python-module`
+candidate for that file. It never marks definitions or references inside the
+file, or candidates below a directory path, as declared. An explicit symbol
+seeds only the matching definition owner. This preserves the distinction
+between a whole-file human declaration and the graph nodes used to find nearby
+advisory candidates.
 
-The normalized target for a resolved import/reference is its fully qualified
-module name, plus one period and definition name where applicable. An
-unresolved target is the NFC-normalized exact dotted token spelling after
-removing surrounding syntax, with no whitespace rewriting inside identifiers.
-Call resolution then applies [EVC-7]'s closed call forms against this alias
-table and the captured lexical definition table. Any collision, shadowing,
-unsupported syntax, or multiple definition remains an
-`unresolved_reference`; it never chooses by filesystem or traversal order.
+Lexical matching is exact and portable. Normalize source strings to UTF-8 NFC,
+split their ASCII letter/digit runs at non-alphanumeric bytes, lower-to-upper
+camel transitions, and letter/digit transitions, then lowercase. Discard
+tokens shorter than three bytes and this closed stop set: `the`, `and`, `for`,
+`with`, `from`, `this`, `that`, `must`, `should`, `will`, `not`, `are`, `was`,
+`into`, `when`, `where`. Obligation tokens come from its canonical ID, title,
+and requirement text. Candidate tokens come from its canonical path, module
+name, and qualified symbol. A lexical score is the pair `(shared_token_count,
+shared_token_byte_count)`. A positive match has nonzero first component.
+Lexical seed selection excludes whole-module, reference, and issue candidates.
+A whole-module match would inject a complete file as advisory text, while an
+unresolved reference with a generic owner can consume a seed and force a large
+same-name ambiguity closure before any owning definition is selected. Modules
+remain available when source-declared; references remain available through
+conservative static reach from selected definitions. Selection sorts
+descending by score, then by candidate ID, and takes the configured prefix.
+Tokens do not enter receipts or alignment authority.
 
-## 8. Obligation Interface And Evidence Broker [EVC-8]
+Fixed-point expansion follows candidate-ID order. Candidate response ordering
+is `(trace_state_order, candidate_kind_order, negative_shared_token_count,
+negative_shared_token_byte_count, path, start_line, structural_locator,
+candidate_id)`, where trace state order is `conflicted`,
+`partially_declared`, `untraced`, `declared` and candidate kind order is the
+declaration order above. Negative fields mean larger lexical scores sort
+first. Pagination never changes universe membership.
 
-The public aggregate root is an **obligation**: one spec section or invariant
-that Backstitch can inspect, discover evidence for, activate, check, skip, or
-unskip. Evidence cases, candidates, receipts, relations, cursors, and the
-mandatory universe are subordinate protocol nouns. They remain exact and
-inspectable, but an agent does not assemble the domain model from broker
-endpoints before it can ask what the repository requires.
+Every candidate returns its identity and receipt, kind, path, owner, span,
+ordered discovery bases, lexical score, derived static relations, existing
+declared relations, trace state, and a structured `suggested_trace_edits`
+array. Guidance names the supported source forms and exact target ID. It is
+advice, not a patch. It must not claim that the suggested relation is correct.
+For a spec-declared invariant with no implementation target,
+`ADD_INVARIANT_BIND` names the owning section's canonical `path#section` ID and
+`supported_forms = ["spec_mapping"]`; the human authors that mapping in the
+owning section. A code-declared invariant already has its declaration owner as
+the target and emits no target-edit advice. `ADD_BINDING_TEST` continues to
+name the invariant obligation and the `binding_test` form.
 
-Assembly runs against a deterministic **evidence broker**, not against raw
-repository access. One transport-neutral library owns obligation discovery,
-evidence discovery, canonicalization, pagination, relation derivation,
-budgets, receipts, and response guidance. The CLI and MCP server are thin
-adapters over that library; they may not define transport-specific obligation
-or evidence semantics.
+_Implementation mapping_:
+
+- `backstitch/code_parser.py`
+- `backstitch/evidence_discovery.py`
+- `backstitch/markdown_specs.py`
+- `backstitch/resolver.py`
+
+### 7.1 Candidate Spans, Budgets, And Closure [EVC-7.1]
+
+Candidate spans follow [EVC-4.2]. Overlapping candidates remain distinct.
+Packet construction separately merges overlapping model-visible text while
+retaining candidate identities and receipts.
+
+Deterministic work budgets select or reject a universe. Wall time never selects
+a prefix. The work-unit accounting is:
+
+- one unit per catalog node visited;
+- one unit per static edge inspected;
+- one unit per unique closure insertion attempt;
+- one unit per candidate-to-declaration comparison;
+- one unit per receipt byte hashed, charged in 4096-byte blocks rounded up.
+
+Catalog overflow, per-obligation candidate overflow, work-unit overflow, file
+overflow, snapshot overflow, or packet overflow aborts the complete operation
+with `BUDGET_EXHAUSTED`, exit 2, and no partial page, packet, result, or cursor.
+An operational deadline may abort the whole operation with `DEADLINE_EXCEEDED`,
+exit 2, and no partial output. Repeating an operation on the same snapshot and
+configuration produces the same universe regardless of machine speed.
+
+_Implementation mapping_:
+
+- `backstitch/code_parser.py`
+- `backstitch/evidence_discovery.py`
+
+### 7.2 Conservative Python Relations [EVC-7.2]
+
+Module identity derives only from captured `.py` files under configured code
+and test roots. A root containing `__init__.py` contributes its last component
+as a package prefix; another root is an import base. Remove `.py` and a final
+`__init__`. Components must be Python identifiers and not keywords. Overlap
+that derives different names, duplicate module names, or an empty name is
+ambiguous and never guessed.
+
+The resolver supports only:
+
+- absolute and relative `import` and `from ... import ...` forms that resolve
+  to one captured module or one captured module-scope definition;
+- lexical alias bindings visible after their import and not shadowed by a
+  nearer parameter, assignment, definition, target, or deletion;
+- direct calls to a unique local definition by local name, imported alias, or
+  resolved module-qualified name;
+- inverse caller relations derived from those same resolved calls.
+
+Wildcard imports, dynamic imports, re-exports with multiple targets,
+higher-order calls, computed attributes, monkey patching, and runtime dispatch
+remain unresolved. A plausible local unresolved form becomes an
+`unresolved_reference`; an obviously external form may be omitted from the
+mandatory universe. The rule is based on captured local module prefixes and
+definition names, never on environment imports.
+
+_Implementation mapping_:
+
+- `backstitch/code_parser.py`
+- `backstitch/evidence_discovery.py`
+
+## 8. Obligation Interface [EVC-8]
+
+The CLI is the complete human, script, and CI interface. MCP is an optional
+local context-efficient adapter over the same read core. Neither surface has
+more alignment authority than the other.
+
+The public bootstrap loop is:
+
+```text
+backstitch obligation list
+backstitch obligation OBLIGATION_ID
+backstitch obligation OBLIGATION_ID --summarize-evidence
+backstitch obligation OBLIGATION_ID --find-evidence
+backstitch obligation OBLIGATION_ID --candidate CANDIDATE_ID
+backstitch guide alignment
+backstitch check
+backstitch analyze --repo-root PATH
+```
+
+`--find-evidence` is intentionally re-runnable. Every invocation captures the
+addressed repository as it exists for that invocation and returns the accepted
+snapshot identity. A saved candidate report is historical as soon as its
+snapshot differs from the repository; users refresh it by running the same
+command again. `--summarize-evidence` independently reads the current
+human-reviewed source declarations, and `analyze --repo-root` independently
+builds the current gate packet from those declarations. Neither consumes a
+saved candidate report as authority.
+
+No public v1 command named `proposal`, `validate`, `activate`, `deactivate`,
+`skip`, or `unskip` exists. `backstitch check` remains the deterministic
+repository-wide traceability gate. There is no separate obligation-specific
+check pipeline.
 
 ### 8.1 Teaching And Progressive Disclosure [EVC-8.1]
 
-An agent must be able to become competent through Backstitch itself. The
-surface is taught in three layers:
+`backstitch guide alignment` prints the installed versioned quick start. It
+teaches obligation identity, evidence summary, candidate trace states,
+supported mapping/backlink/invariant-target/binding-test/skip forms, review ownership, and
+the commands above. It does not restate payload schemas or normative rules.
 
-1. **Reference:** `backstitch obligation --help`, `backstitch obligation
-   reference --format json`, and `backstitch guide evidence-assembly`
-   explain the obligation lifecycle, proposal shape, evidence vocabulary,
-   result guidance, skip semantics, and trust boundary. MCP exposes the exact
-   installed guide and schemas as `backstitch://guides/evidence-assembly`,
-   `backstitch://reference/obligations`, and
-   `backstitch://schemas/evidence-proposal` resources.
-2. **Orientation:** `backstitch obligation list` or
-   `backstitch obligation ID`, and MCP `list_obligations` or
-   `get_obligation`, return compact status, counts, freshness, and the
-   required next action. They do not return all snippets.
-3. **Detail:** obligation evidence, counterevidence, candidate discovery, and
-   candidate detail are explicit, named, paginated views requested only when
-   needed.
+`skills/backstitch-alignment/SKILL.md` is a thin repository workflow adapter.
+It tells an agent when to list, summarize, discover, inspect, and hand a source
+diff to a human for review. It points to the installed guide and command help.
+It must not contain a second protocol contract.
 
-The default obligation view is the compact orientation read. There is no
-public `orient` verb. The public interface says what the repository is trying
-to check before exposing how the broker represents candidate evidence.
-
-The repository skill `skills/evidence-assembly/SKILL.md` is an optional
-workflow accelerator, not required training. It is a thin wrapper around the
-installed guide; duplicated normative guidance is forbidden. Updating the
-guide changes its content digest, which enters the frozen case and any
-agent-assembly evaluation identity as historical provenance. A guide-only
-change does not make an existing case stale; a broker schema, universe rule,
-or normalization change does.
-
-### 8.2 Stateless Address And Identity [EVC-8.2]
-
-There is no `init` command, hidden draft session, MCP session handle, or
-multi-step context setup. Every read carries or derives an inspectable full
-address:
-
-- one canonical repository identity and exact repository snapshot
-- one canonical `obligation_id`
-- the named operation and any operation-specific selector
-- an optional self-contained, snapshot-bound page cursor
-
-`repository_id` is a required, non-secret, portable configuration string for
-every repository-bound evidence operation and read. Packaged reference, guide,
-and schema-resource operations perform no repository discovery and carry no
-repository identity. For this repository the configured identity is
-`github.com/VanL/backstitch`. It is identical across clones and enters
-candidate IDs, cases, and hashes. The resolved absolute root is local transport
-metadata only; it is echoed for inspection but excluded from canonical
-payloads, committed artifacts, and hashes.
-
-The repository snapshot is not Git `HEAD`. The broker first captures one
-immutable byte image of every broker-visible spec, source, test, mapping,
-invariant, and configuration input. Inventory is sorted by canonical relative
-path; symlinks and escapes are rejected. Each capture attempt records file
-metadata before and after each read, then repeats inventory and metadata
-inspection. A changed inventory or file discards the whole attempt. Exhausting
-`snapshot_capture_attempts` is exit `2`; data from attempts are never mixed.
-Resolver, parser, universe, span, and receipt construction consume only that
-byte image and may not reopen live repository files.
-
-Every semantic or configuration source file in that image is read through a
-bounded stream. If one file exceeds `maximum_file_bytes`, reading stops at
-`limit + 1` and returns `BUDGET_EXHAUSTED` with budget `file_bytes`; no partial
-image survives. `maximum_snapshot_bytes` counts the sum of exact raw bytes for
-all semantic and configuration input files in sorted inventory order. If the
-next complete file would exceed it, capture returns budget `snapshot_bytes`
-with observed equal to the prior sum plus that file's exact byte length and
-discards the attempt. File-count exhaustion likewise observes `limit + 1`.
-Before repository configuration is known, the code-owned bootstrap loader
-allows at most 64 configuration files, 1,000,000 raw bytes per file, and
-5,000,000 raw bytes across the resolved extend chain. It uses bounded reads
-before TOML parsing; overflow is traceback-free invalid configuration and exit
-`2`. These constants are part of `broker_schema_version`, not repository
-overrides. The later immutable capture must contain those exact same config
-bytes and applies the configured file/snapshot ceilings too.
-
-The snapshot is the versioned SHA-256 of the semantic image's canonical
-path/raw-digest manifest plus a canonical effective projection of repository
-ID, effective profile classification, resolved roots/exclusions, candidate and
-snapshot ceilings, static depth, and broker/universe/report-issue/
-normalization algorithm versions. Configuration source
-bytes are captured and parsed from the same image but their raw digest is not
-hashed as a semantic file merely because they contain operational keys.
-Contained absolute root configuration is normalized to the canonical
-repository-relative path before entering this projection; the clone-specific
-absolute prefix never enters a snapshot or committed object.
-Case root, required-obligation policy, page sizes, response/request/proposal/
-proposal-text/case byte ceilings, call time, and capture retry count are
-operational or policy fields and are excluded. The
-snapshot binds dirty and
-untracked inputs inside the declared boundary. Immediately before switching
-the active-case manifest, activation captures a second image; a different snapshot
-writes no active state and returns `SNAPSHOT_CONFLICT`. A later edit may make a
-newly frozen case immediately stale, but cannot make the frozen object's own
-fields internally inconsistent.
-
-The snapshot preimage is exactly:
+The installed guide artifact is exactly:
 
 ```text
 {
-  identity: "evidence-repository-snapshot",
+  guide_schema_version: 1,
+  guide_id: "alignment",
+  guide_version: 2,
+  backstitch_version,
+  content_sha256,
+  content
+}
+```
+
+`content` is the exact installed UTF-8 Markdown; `content_sha256` hashes those
+bytes. Text format prints `content` unchanged. JSON and MCP return the complete
+artifact. A guide content change increments `guide_version`; the hash detects
+an unincremented edit. Guide identity is measurement provenance and never
+enters source alignment or packet identity.
+
+CLI help teaches the first useful bootstrap command and the distinction
+between declared evidence and candidates. A zero-context user must not need MCP
+or repository-specific agent guidance to discover the complete loop.
+
+_Implementation mapping_:
+
+- `backstitch/alignment_guide.py`
+
+### 8.2 Snapshot Capture And Stateless Addressing [EVC-8.2]
+
+There is no `init`, hidden session, server handle, or mutable draft. Every
+repository operation uses an explicit `--repo-root` or the inspectable current
+directory. When [EVC-8.6]'s adapter is implemented, every MCP repository tool
+requires `repo_root`. The MCP server is started with one allowed root; a tool
+root must resolve to that same contained root. MCP framing may echo the allowed
+canonical root as transport metadata outside the core result. CLI text prints
+the resolved root in its orientation header; CLI JSON is the canonical core
+object and excludes it. Each implemented surface identifies the captured
+snapshot inside the core result. Root bytes never enter semantic identity.
+
+The snapshot owner captures one immutable view of all included config, spec,
+plan, code, and test inputs. Readable files contribute exact bytes. A file that is
+stably unreadable across an accepted attempt contributes an `unreadable`
+manifest row and the existing `FILE_UNREADABLE` issue, not guessed bytes. An
+attempt:
+
+1. enumerates canonical repository-relative POSIX paths in Unicode code-point
+   order and records one `lstat` tuple per input;
+2. opens each readable path without following symlinks, compares `fstat` with
+   its `lstat`, reads once through a bounded stream, and repeats `fstat`;
+3. repeats the complete sorted inventory and every `lstat` tuple;
+4. accepts only if membership and every compared tuple are unchanged.
+
+The exact comparison tuple is `(st_dev, st_ino, file_type_and_permission_mode,
+st_size, st_mtime_ns, st_ctime_ns)`. Nanoseconds are required; a platform that
+cannot supply them is unsupported and exits 2. `file_type_and_permission_mode`
+is `stat.S_IFMT(st_mode) | stat.S_IMODE(st_mode)`. A readable file's pre-open
+`lstat`, first `fstat`, second `fstat`, and repeated `lstat` tuples must all be
+equal. An unreadable row requires equal pre/post/repeated `lstat` tuples and
+the same platform-neutral error class on both bounded open attempts.
+
+On POSIX, the owner walks from an already opened repository directory
+descriptor. Each intermediate component is opened with
+`O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`; the final component uses
+`O_RDONLY|O_NOFOLLOW|O_CLOEXEC`. It rejects empty, dot, dot-dot, absolute,
+backslash, NUL, non-directory intermediate, symlink, and non-regular final
+components. V1 supports only `os.name == "posix"` systems that expose directory
+file descriptors, `O_NOFOLLOW`, `O_DIRECTORY`, `O_CLOEXEC`, and nanosecond stat
+fields with the behavior above. Every other platform returns
+`UNSUPPORTED_PLATFORM`, exit 2, before repository traversal. V1 uses this exact
+descriptor-walk algorithm; non-POSIX or alternative open algorithms require a
+new reviewed contract. It never falls back to a path-based open that follows
+symlinks.
+
+Membership, tuple, or readable/error-class change is a torn attempt: discard
+every byte and retry from an empty buffer up to `snapshot_capture_attempts`,
+which defaults to 3. No bytes or metadata are mixed across attempts. A stable
+symlink, escape, non-regular object, unsupported platform, permanent budget
+overflow, or invalid root is not retried. Exhausting torn attempts returns
+`SNAPSHOT_UNSTABLE` with exact attempt count, exit 2, and no partial core
+result or artifact.
+
+Inventory applies [SC-3]/[CFG-6]'s root and exclusion selection. The no-follow
+open and containment algorithm is owned here because the active specs do not
+yet define it. Replacement between enumeration and open therefore discards the
+attempt rather than changing the addressed file.
+
+The accepted inventory also retains one frozen path catalog. It contains each
+existing configured spec, plan, code, and test root; every non-excluded
+directory and regular file below those roots, including objects whose suffix
+does not make them semantic file inputs; and every exact repo-relative mapping
+target declared by the captured specs, even when that target is outside a
+configured root. Catalog rows are exactly
+`{path, kind}`, where `kind` is `directory` or `regular_file`; they are unique
+and ordered by path. The capture records and compares the full stat tuple for
+every row in both inventory passes, but clone-local stat values do not enter
+semantic identity. A missing configured root has no root row. Therefore the
+normalized configured roots plus the catalog distinguish a missing root from
+an existing empty root. Resolver path existence and directory-ownership checks
+use only this catalog. `maximum_catalog_items` bounds its complete row count;
+overflow is `BUDGET_EXHAUSTED` for `catalog_items`, never truncation.
+
+Declared-target expansion is part of the same bounded whole-capture owner. An
+attempt captures the configured-root/config view plus the previous exact
+target set, parses only those captured spec bytes to derive the current exact
+target set, and accepts only when both sets are equal. A changed target set
+discards the attempt and retries from empty with the newly derived set. A
+regular-file target outside the configured roots becomes a readable or stably
+unreadable semantic file row so path-symbol resolution consumes captured bytes;
+a directory target is catalog-only. Target-set convergence, torn inventory,
+and metadata retry share the one `snapshot_capture_attempts` ceiling: no more
+than three whole capture attempts occur by default. Exhaustion has the same
+`SNAPSHOT_UNSTABLE` result and publishes no partial view.
+
+Canonical catalog and target paths are Unicode NFC repository-relative POSIX
+strings. No absolute path, backslash, NUL, empty component, dot-dot component,
+or surrogate code point is valid. The already-open repository root is the one
+special row `.`. A trailing slash on an exact directory mapping is removed
+before lookup (`pkg/` addresses catalog path `pkg`); no other dot component is
+retained. If two native inventory names or declared tokens normalize to the
+same canonical path, capture fails as invalid input instead of choosing one.
+Sorting is Unicode code-point order over these canonical strings.
+
+Before effective configuration is known, the bootstrap loader reads at most
+64 config files, 1,000,000 raw bytes per file, and 5,000,000 raw bytes over the
+resolved extend chain. It applies bounded reads before TOML parsing. Overflow,
+cycle, unreadable config, or changed config identity is exit 2. Config
+discovery and `extend` may select a layer outside `--repo-root` as [CFG-3] and
+[CFG-6] permit. The bootstrap loader therefore retains each layer's exact raw
+bytes and stable read identity in base-to-leaf application order. The snapshot
+revalidates each layer with a bounded no-follow read before and after every
+whole capture attempt. The accepted repository snapshot must contain the exact
+same config bytes used to derive its inventory and semantic settings;
+otherwise the whole attempt is discarded. An absolute config path is
+operational capture metadata and never enters snapshot identity.
+
+After capture, parsers, resolver, obligation readiness, discovery, receipts,
+and packet construction receive only the immutable view and cannot reopen
+repository source. List, evidence summary, and deterministic `check` may report
+a stable unreadable file and continue as [SC-4] requires. Evidence that needs
+that file is incomplete. Default obligation detail includes discovery-derived
+candidate counts, so it has the same completeness boundary as
+`--find-evidence` and `--candidate`. Those three reads, packet generation, and
+current semantic analysis require a complete semantic catalog; any included
+unreadable config, spec, plan, code, or test input is `SOURCE_UNREADABLE`, exit
+2, for those operations. The intentional final capture in current analyze mode
+is a new whole snapshot through the same owner.
+
+Snapshot identity is SHA-256 of canonical JSON for:
+
+```text
+{
+  identity: "backstitch-repository-snapshot",
   version: 1,
-  repository_id,
-  files: [{path, raw_sha256}],
+  config_inputs: [{ordinal, raw_sha256}],
+  files: [{path, state, raw_sha256, error_class}],
+  catalog_sha256,
+  missing_roots,
   semantic_config: {
     profile_name,
     spec_roots, plan_roots, code_roots, test_roots, exclusions,
     planned_spec_globs, exploratory_spec_globs,
-    maximum_candidate_items, maximum_catalog_items, maximum_snapshot_files,
-    maximum_file_bytes, maximum_snapshot_bytes,
+    section_required_roles,
+    maximum_candidate_items, maximum_catalog_items, maximum_lexical_seeds,
+    maximum_snapshot_files, maximum_file_bytes, maximum_snapshot_bytes,
+    maximum_work_units, maximum_packet_bytes, maximum_packet_report_bytes,
     static_neighbor_depth
   },
   algorithms: {
-    broker_schema_version, snapshot_algorithm_version,
-    universe_algorithm_version, report_issue_projection_version,
+    snapshot_algorithm_version,
+    obligation_algorithm_version,
+    discovery_algorithm_version,
+    packet_contract_version,
     normalization_version
   }
 }
 ```
 
-File rows sort by path and contain every semantic file in the captured image,
-not operational config source files; `raw_sha256` hashes the exact complete
-captured file bytes. Each root/exclusion/glob array is unique and sorts by
-Unicode code point after contained absolute roots become canonical
-repository-relative POSIX paths. `profile_name` and every named algorithm
-version are nonblank. Every named config/algorithm field is required. No other
-effective config, file metadata, Git identity, timestamp, or local path enters
-this preimage. The rendered snapshot is
-`sha256:<64 lowercase hex>` of its [SEM-3] canonical JSON.
+`config_inputs` contains every selected non-packaged config layer in exact
+base-to-leaf order. `ordinal` is its zero-based position and `raw_sha256`
+hashes the retained exact bytes. Rows contain no path. A repository-contained
+config also remains a file row so repository inventory changes remain visible;
+file and byte counts count that physical input once. A config outside the
+repository exists only in `config_inputs`, but its exact bytes remain in the
+immutable internal view. Changing its location without changing the complete
+ordered bytes does not change semantic identity.
 
-CLI working-directory or `--repo-root` context is allowed only when the
-portable identity, local root metadata, and snapshot are echoed in the response. The
-MCP server is started for one explicit repository root; every tool response
-echoes that root's identity and current snapshot. Neither adapter may accept a
-per-call absolute path outside the resolved root.
+File rows include every repository-contained semantic input and sort by path.
+`state` is `readable` or `unreadable`; readable rows require `raw_sha256` and
+null `error_class`, while unreadable rows require null `raw_sha256` and one
+stable platform-neutral class: `permission`, `not_regular`, or `io`. Arrays
+are unique and Unicode-code-point sorted after normalization.
+`missing_roots` is the unique ordered array of normalized configured roots
+that have no accepted directory row. `catalog_sha256` is lowercase SHA-256 of
+canonical JSON for exactly `{catalog_version: 1, paths: <the complete ordered
+catalog row array>, missing_roots}`. The accepted immutable snapshot retains
+those rows for downstream resolution; they are not expanded in the public
+identity document. `semantic_config` binds the normalized roots and
+exclusions. A catalog membership, kind, or missing-root change therefore
+changes snapshot identity even when semantic file bytes do not.
+Absolute roots become contained repository-relative POSIX paths. Page sizes,
+response byte limits, deadline, retry count, output paths, policy levels, and
+provider configuration are operational and excluded.
 
-Section obligations use the existing canonical packet identity
-`<spec_path>#<section_id>`. Invariant obligations use
-`invariant::<invariant_id>`. User input may use an unambiguous shorthand such
-as `INV.RES.1`; the broker normalizes it once, returns
-`IDENTIFIER_NORMALIZED` guidance, and emits only the canonical identity in
-trusted artifacts. Ambiguous input is a true conflict and is rejected with
-the candidate identities and an action for choosing one.
+_Implementation mapping_:
 
-The obligation inventory is exactly the complete ordered union of the
-section targets eligible for the sole semantic packet producer under [SEM-3]
-and the invariant targets eligible under [INV-5]. Backstitch does not invent a
-second eligibility filter for the CLI. `backstitch obligation list` includes
-evaluated, uncovered, stale, and skipped members in canonical obligation-ID
-order; filtering a member out because it lacks evidence or carries a skip
-would make the inventory dishonest.
+- `backstitch/check_pipeline.py`
+- `backstitch/obligation_runtime.py`
+- `backstitch/repository_snapshot.py`
+- `backstitch/resolver.py`
+- `backstitch/settings.py`
 
-Every universe member has one stable broker-minted `candidate_id`; every exact
-observation has one content-addressed `receipt_hash`, as defined in [EVC-4].
-The agent selects a candidate ID and supplies a proof-obligation binding and
-reason. It never supplies a trusted locator, digest, receipt, structural
-relation, validation state, or universe-membership claim that Backstitch can
-derive. For a candidate the broker did not discover, the agent may propose a
-contained repository-relative path and optional symbol to the resolution
-operation; Backstitch derives everything else.
+### 8.3 Exact CLI Grammar [EVC-8.3]
 
-### 8.3 Obligation-Centered Interface [EVC-8.3]
-
-The CLI read surface is one resource-first family:
+The new command grammar is:
 
 ```text
 backstitch obligation list
-backstitch obligation ID
-backstitch obligation ID --evidence
-backstitch obligation ID --counterevidence
-backstitch obligation ID --find-evidence
-backstitch obligation ID --candidate CANDIDATE
-backstitch obligation ID --candidate CANDIDATE --neighbors
-backstitch obligation ID resolve --path RELPATH
+  [--repo-root PATH] [--cursor TOKEN] [--limit N] [--format text|json]
+
+backstitch obligation OBLIGATION_ID
+  [--repo-root PATH] [--format text|json]
+  [--summarize-evidence | --find-evidence |
+   --candidate CANDIDATE_ID]
+  [--cursor TOKEN] [--limit N]
+
+backstitch guide alignment [--format text|json]
+
+backstitch mcp --repo-root PATH              # when the Phase D adapter ships
+
+backstitch analyze --repo-root PATH
+  [--packets-output PATH --packet-report-output PATH]
+  [--output PATH] [--report PATH]
+  [--model MODEL] [--concurrency N]
+  [--config PATH | --no-config] [--format text|json]
+  [--option KEY VALUE]...
+
+backstitch analyze --packets PATH --packet-report PATH
+  [--compare-repo-root PATH]
+  [--output PATH] [--report PATH]
+  [--model MODEL] [--concurrency N]
+  [--config PATH | --no-config] [--format text|json]
+  [--option KEY VALUE]...
 ```
 
-The default `backstitch obligation ID` view is a compact summary. Exactly one
-of `--evidence`, `--counterevidence`, `--find-evidence`, or
-`--candidate` may select a detail view. `--kind
-implementation|test|counterevidence` is valid only with `--find-evidence`;
-omitting it returns the three kinds in that order. `--neighbors` is valid
-only with `--candidate` and changes candidate detail from source text to
-static neighbors. These constraints prevent accidental context expansion
-while keeping the common reads on one obligation-shaped surface.
+Every grammar above for a command that consumes configuration composes with
+[CFG-5.1]'s global or command-local
+`[--config PATH | --no-config] [--option KEY VALUE]...` grammar. This includes
+`obligation`; `guide`, conditional `mcp`, and other commands consume
+configuration only where their own governing sections explicitly say so.
 
-The MCP tool surface is:
+The three detail selectors are mutually exclusive. `--cursor` and `--limit`
+are valid only for `list`, `--summarize-evidence`, and `--find-evidence`.
+Candidate detail is one bounded item and is not paginated. Unknown IDs,
+snapshot-mismatched cursors, selector misuse, and invalid limits are exit 2.
+Analyze flag compatibility, output ownership, path rules, stdout, and config
+anchors are exactly [EVC-5.1].
 
-```text
-list_obligations
-get_obligation
-find_obligation_evidence
-get_obligation_candidate
-resolve_obligation_candidate
-validate_obligation_proposal
-```
+The MCP line is conditional. CLI is the complete required interface. A Phase D
+deferral may omit the MCP command, extra, tools, and resource without weakening
+CLI, packet, or semantic qualification. Once an installed distribution
+advertises `backstitch mcp`, all of [EVC-8.6] and its conditional verification
+requirements apply.
 
-`get_obligation` has the closed view vocabulary `summary`, `evidence`,
-and `counterevidence`. `find_obligation_evidence` has the closed evidence
-kind vocabulary `all`, `implementation`, `test`, and
-`counterevidence`. `get_obligation_candidate` explicitly selects source
-or neighbors. These are obligation-specific reads, not a generic query
-language. A generic `query` tool whose meaning depends on a separate
-operation-name lookup table is not conforming. The library may use one internal
-dispatcher, but that storage-oriented shape must not leak through either
-agent-facing adapter.
-
-All reads and proposal validation are deterministic and repository-read-only.
-They serve obligation status, active resolved evidence, recorded
-counterevidence and omissions, exact candidate spans, definitions, static
-callers/callees, mappings, invariants, universe pages, and content-addressed
-receipts. Response ordering and pagination are stable for one repository
-snapshot. The broker enforces configured request, byte, candidate, and
-wall-time limits per call. Activation reconstructs the canonical
-`accounted_candidate_count` and overlap-deduplicated
-`accounted_raw_bytes` totals for every universe candidate selected,
-considered, or omitted in the proposal. It does not claim to know session-wide
-exploration cost.
-
-`--find-evidence` and `find_obligation_evidence` invoke deterministic broker
-discovery only. They never call a model or agent. The installed guide and
-read-only MCP tools let an external authorized agent use those reads to build
-a proposal; no CLI spelling silently crosses from deterministic discovery into
-stochastic judgment.
-
-The exact CLI address shapes are below. `COMMON` means the optional
-`[--format json|text]`; it defaults to `json`. `REPOSITORY` means the
-optional `[--repo-root PATH]`. Options after a subcommand may appear in any
-order, at most once; no unlisted option is accepted.
+`obligation list` is the bootstrap report. It returns one paginated `entries`
+array ordered by `(path, start_line, entry_type_order, entry_identity)`, where
+entry type order is `unaddressable_intent` then `obligation`. Each row is
+either:
 
 ```text
-backstitch obligation reference COMMON
-backstitch guide evidence-assembly COMMON
-backstitch obligation list [--cursor TOKEN] [--limit N] REPOSITORY COMMON
-backstitch obligation ID REPOSITORY COMMON
-backstitch obligation ID --evidence [--cursor TOKEN] [--limit N] REPOSITORY COMMON
-backstitch obligation ID --counterevidence [--cursor TOKEN] [--limit N] REPOSITORY COMMON
-backstitch obligation ID --find-evidence [--kind implementation|test|counterevidence] [--cursor TOKEN] [--limit N] REPOSITORY COMMON
-backstitch obligation ID --candidate CANDIDATE [--cursor TOKEN] REPOSITORY COMMON
-backstitch obligation ID --candidate CANDIDATE --neighbors [--cursor TOKEN] [--limit N] REPOSITORY COMMON
-backstitch obligation ID resolve --path RELPATH [--symbol SYMBOL] REPOSITORY COMMON
-backstitch obligation ID validate --proposal PATH REPOSITORY COMMON
-backstitch obligation ID activate --proposal PATH REPOSITORY COMMON
-backstitch obligation ID check REPOSITORY COMMON
-backstitch obligation check --all REPOSITORY COMMON
-backstitch obligation ID deactivate --expected-manifest HASH REPOSITORY COMMON
-backstitch obligation ID skip --reason TEXT REPOSITORY COMMON
-backstitch obligation ID unskip REPOSITORY COMMON
-```
-
-At the first token after `obligation`, only `reference`, `list`, and `check
---all` are aggregate addresses; every other value is parsed as the obligation
-ID or shorthand. After an ID, `resolve`, `validate`, `activate`, `check`,
-`deactivate`, `skip`, and `unskip` are the closed action literals. An ambiguous
-shorthand is rejected with the canonical choices. This fixed ID position lets
-an agent extend `backstitch obligation ID` from summary to detail or mutation
-without reconstructing another argument order.
-
-`--limit` may reduce a page but may not exceed the configured page ceiling.
-Candidate source pages split only on UTF-8 line boundaries with self-contained
-cursors and no partial line; a single line larger than
-`maximum_response_bytes` fails with `BUDGET_EXHAUSTED` whose action is to
-raise the reviewed byte limit or select a narrower structural candidate. It
-never returns a silently truncated line. Proposal paths resolve under the
-repository root; activation output resolves under the configured case root.
-There is no flag that disables containment, snapshot checking, source-edit
-compare-and-swap, or budget enforcement.
-
-### 8.3.1 Closed Operation Contracts [EVC-8.3.1]
-
-The core payload for each named operation is closed. JSON object key order is
-irrelevant because [SEM-3] canonical JSON sorts keys. Every array uses the
-order stated here; unknown fields, duplicate identities, invalid order, or a
-value outside its declared type is `INVALID_INPUT`. A nullable field is always
-present with JSON null when absent.
-
-The reference, installed guide, and MCP resources return this exact artifact
-payload:
-
-```text
-{artifact_id, artifact_version, media_type, sha256, text}
-```
-
-`artifact_id` is respectively `obligation-reference`, `evidence-assembly-guide`,
-or `evidence-proposal-schema`; `artifact_version` is a positive integer;
-`media_type` is respectively `application/json`, `text/markdown`, or
-`application/schema+json`; `sha256` is `sha256:<64 lowercase hex>` over the
-exact UTF-8 `text` bytes. The
-CLI guide and the matching MCP resource return byte-identical `text` and
-metadata. The proposal schema text is the canonical JSON Schema document for
-the exact [EVC-8.4] input object. CLI `--help` remains ordinary deterministic
-terminal help, not a core-result payload.
-
-These shared records are exact:
-
-```text
-obligation_summary = {
-  obligation_id, target_kind, path, start_line, evaluation_disposition,
-  skip_reason, skip_path, skip_line,
-  active_case_id, active_case_hash, case_evidence_hash, case_verifiable
+{
+  entry_type: "obligation",
+  entry_identity,
+  obligation_id, kind, path, start_line, title,
+  intent_state, alignment_state, disposition, obligation_rung, gate_state,
+  blocking_reason_codes
 }
+```
+
+or:
+
+```text
+{
+  entry_type: "unaddressable_intent",
+  entry_identity,
+  diagnostic: {code, path, line, message},
+  excerpt,
+  action
+}
+```
+
+For an obligation, `entry_identity = obligation_id`. For unaddressable intent,
+it is `"unaddressable:sha256:" + SHA256(canonical JSON of {code, path, line,
+ordinal})`; ordinal is the zero-based same-code/path/line issue occurrence in
+parser source order. `start_line` for ordering is the diagnostic line. Null
+diagnostic line sorts as zero and is serialized as null.
+
+No discoverable intent returns exit 0 with an empty array,
+`bootstrap_state = "no_intent"`, and action `ADD_OR_CONFIGURE_SPEC_INTENT`.
+Otherwise bootstrap state is `intent_found`. Untraced obligations are normal
+obligation rows and are never hidden among errors.
+
+Default obligation detail returns exactly one compact orientation record with
+identity, source locator, kind, the four readiness facts, required roles,
+counts by evidence role and candidate trace state, ordered blocking reasons,
+snapshot identity, and ordered next actions. It does not inline snippets and
+makes no artifact-currentness claim.
+
+The operation-specific results are closed:
+
+```text
+obligation.list result = {
+  bootstrap_state,
+  entries,
+  next_cursor
+}
+
+obligation.get result = {
+  obligation_id, kind, path, start_line, end_line, title,
+  intent_state, alignment_state, disposition, obligation_rung, gate_state,
+  required_roles,
+  evidence_counts: {implementation, test, binding_test},
+  candidate_counts: {
+    declared, partially_declared, untraced, conflicted
+  },
+  blocking_reasons: [{code, role, relation_kind, issue_identity}],
+  next_actions
+}
+```
+
+`bootstrap_state` is `no_intent` or `intent_found`. `kind` is `section` or
+`invariant`. Count fields are nonnegative integers. Nullable `role`,
+`relation_kind`, and `issue_identity` are present on every blocking row.
+Blocking reason code is one of `IMPLEMENTATION_UNTRACED`,
+`IMPLEMENTATION_PARTIAL`, `TEST_UNTRACED`,
+`TEST_PARTIAL`, `INVARIANT_TARGET_MISSING`, `BINDING_TEST_MISSING`,
+`TRACE_CONFLICT`, `OUT_OF_GATE_SCOPE`, or `SKIPPED`. Rows sort by this
+declaration order, then role, relation kind, and issue identity. `next_actions`
+is an ordered array of [EVC-8.4] guidance codes.
+
+`--summarize-evidence` returns exact declared evidence rows. Each row contains
+role, source path, symbol, owner, start/end lines, declared relation kinds,
+reciprocity state (`complete`, `one_sided`), receipt, bounded excerpt, and a
+nullable `declared_target`. For a valid atomic code owner, source coordinates
+and receipt name that owner. A one-sided or broken mapping atom preserves its
+authored target token in `declared_target`; a complete reciprocal row may
+represent more than one mapping and therefore leaves that scalar null. Its
+ordered declaration entries preserve every authored target instead. A broken
+mapping is an honest one-sided declaration row: source coordinates and receipt
+name the spec mapping line, while `declared_target` preserves its unresolved or
+ineligible target token. Broken declarations never masquerade as code receipts.
+Every row also carries ordered `declarations` entries with exact
+`relation_kind`, source `path`, source `line`, one-line receipt, and nullable
+`declared_target`. Thus a complete reciprocal row exposes both the spec mapping
+and code backlink declaration locations; the row's primary code receipt never
+stands in for a declaration it does not cover.
+
+`--find-evidence` returns the candidate rows defined by [EVC-7].
+`--candidate` returns the exact full receipt span and bounded structural
+neighbors for one discovery-minted candidate. It never accepts an arbitrary
+path as a substitute identity.
+
+Their closed results are:
+
+```text
+obligation.summarize_evidence result = {
+  obligation_id,
+  alignment_state,
+  disposition,
+  items: [{
+    role, path, symbol, owner, start_line, end_line,
+    relation_kinds, reciprocity_state,
+    receipt, excerpt, declared_target,
+    declarations: [{relation_kind, path, line, receipt, declared_target}]
+  }],
+  next_cursor
+}
+
+candidate_relation = {
+  relation_kind, source_candidate_id, target_candidate_id,
+  source_locator, target_locator
+}
+
+trace_advice = {
+  guidance_code, target_id, evidence_role,
+  supported_forms, review_warning
+}
+
 candidate = {
-  candidate_id, candidate_kind, path, symbol, structural_locator,
-  receipt_hash, proof_obligation_ids, relation_kinds
+  candidate_id, candidate_kind, path, owner, start_line, end_line,
+  structural_locator, receipt,
+  discovery_bases, lexical_score: {
+    shared_token_count, shared_token_byte_count
+  },
+  static_relations, declared_relations,
+  trace_state, suggested_trace_edits
 }
-obligation_evidence_item =
-  {
-    item_type: "candidate", proof_obligation_id, evidence_kind,
-    decision, reason, candidate, span_start_line, span_end_line, text
-  }
-  | {
-    item_type: "open_question", proof_obligation_id, question, reason
-  }
-budget = {
-  items_returned, payload_bytes, response_bytes,
-  maximum_items, maximum_response_bytes
-}
-case_diagnostic = {
-  code, short_code, obligation_id, case_id, case_hash,
-  proof_obligation_id, candidate_id, path, message,
-  default_severity, severity, winning_policy_rule
-}
-```
 
-`skip_reason`, `skip_path`, `skip_line`, the three active-case identity
-fields, `symbol`, diagnostic `case_id`, `case_hash`,
-`proof_obligation_id`, `candidate_id`, `path`, and
-`winning_policy_rule` are nullable strings, integers, or the exact nullable
-[SEM-6] rule record as appropriate; all other scalar strings are nonblank.
-`evaluation_disposition` is `evaluate` or `skip`. Skip fields are all null
-for `evaluate` and are respectively a nonblank reason, canonical
-repository-relative spec path, and positive directive line for `skip`.
-`case_verifiable` is always false while skipped. `target_kind` is
-`section` or `invariant`.
-`candidate_kind` uses [EVC-7]. Candidate proof-obligation IDs sort by Unicode
-code point; relation kinds use [EVC-4.1] order. Candidate rows sort by
-`candidate_id`. Obligation summaries sort by `obligation_id`. Candidate
-evidence items sort by `(proof_obligation_id, evidence_kind, candidate_id,
-decision, reason)`; open-question items follow candidate items and sort by
-`(proof_obligation_id, question, reason)`. `evidence_kind` is
-`implementation`, `test`, or `counterevidence`; `decision` is
-`selected`, `considered`, or `omitted`. Evidence-view items admit only
-selected implementation/test candidates. Counterevidence-view items admit
-considered/omitted candidates and open questions. Diagnostic rows use [SC-15]
-registry order, then obligation,
-proof-obligation, candidate, and path. Counts are nonnegative integers.
-`maximum_items` is non-null only for candidate and neighbor item-page
-operations, obligation-list pages, and evidence/counterevidence pages and is
-their effective limit after applying a smaller requested limit. It is null
-for candidate-source and non-page operations. `payload_bytes` is
-the UTF-8 length of canonical JSON for the complete payload or problem object.
-The common core result, not an individual payload, carries this budget record
-as specified in [EVC-8.5].
-
-The exact operation payloads are:
-
-```text
-obligation.reference | guide.evidence-assembly | MCP resource read:
-  artifact
-
-obligation.list:
-  {
-    counts: {total, evaluate, skipped, with_active_case, verifiable},
-    items: [obligation_summary],
-    next_cursor
-  }
-
-obligation.get:
-  {
-    obligation: obligation_summary,
-    active_manifest_hash, repository_snapshot,
-    candidate_counts: {
-      implementation, test, static_reference,
-      unresolved_reference, report_issue
-    },
-    unresolved_count, case_verifiable,
-    analyze_request_bytes, verify_request_upper_bound_bytes
-  }
-
-obligation.evidence | obligation.counterevidence:
-  {
-    obligation_id, evaluation_disposition, evidence_mode,
-    items: [obligation_evidence_item], next_cursor
-  }
-
-obligation.find-evidence:
-  {
-    obligation_id, evidence_kind,
-    items: [{evidence_kind, candidate}], next_cursor
-  }
-
-obligation.candidate-source:
-  {
-    obligation_id, candidate_id, receipt_hash, path, structural_locator,
-    span_start_line, span_end_line, chunk_start_line, chunk_end_line,
-    text, next_cursor
-  }
-
-obligation.candidate-neighbors:
-  {
-    obligation_id, candidate_id,
-    items: [{relation_kind, direction, candidate}],
-    next_cursor
-  }
-
-obligation.resolve-candidate:
-  {obligation_id, candidate, expanded_universe_count}
-
-obligation.validate:
-  {
-    obligation_id, valid, proposal_sha256, case_id, case_evidence_hash,
-    repository_snapshot, active_manifest_hash, universe_count,
-    analyze_request_bytes, verify_request_upper_bound_bytes,
-    case_object_bytes, active_manifest_bytes, discrepancies
-  }
-
-obligation.activate:
-  {
-    changed, obligation_id, case_id, case_hash, case_evidence_hash,
-    active_manifest_hash, repository_snapshot, object_path
-  }
-
-obligation.check:
-  {
-    obligation: obligation_summary,
-    valid, case_verifiable, diagnostics
-  }
-
-obligation.check-all:
-  {
-    active_manifest_hash,
-    obligation_count, evaluated_count, skipped_count,
-    case_count, valid, case_verifiable_count,
-    obligations: [obligation_summary],
-    diagnostics
-  }
-
-obligation.deactivate:
-  {changed, obligation_id, previous_case_hash, active_manifest_hash}
-
-obligation.skip | obligation.unskip:
-  {
-    changed, obligation_id, evaluation_disposition, reason,
-    path, line, previous_repository_snapshot, repository_snapshot
-  }
-```
-
-Each page cursor is nullable. List counts describe the complete obligation
-inventory, not only the returned page; `total = evaluate + skipped`,
-`with_active_case` counts retained active-manifest entries in either
-disposition, and `verifiable` counts only evaluated obligations satisfying
-the complete [EVC-9] predicate. `evidence_mode` is `case`, `trace`, or
-`none`: current active-case evidence uses `case`; an evaluated obligation
-without an active case uses the existing deterministic trace projection; a
-skipped obligation uses `none` and returns no evidence items. Trace
-counterevidence is empty because it contains no reviewed universe decisions.
-
-Find-evidence rows sort by evidence-kind order `implementation`, `test`,
-`counterevidence`, then candidate ID. The same candidate may occur in more
-than one kind because the row records a possible proof role, not another
-candidate identity. Neighbor `direction` is `incoming` or `outgoing` and
-rows sort by `(relation_kind, direction, candidate.candidate_id)`. A
-candidate source covers inclusive positive line ranges and chunks sort in
-source order. Summary `unresolved_count` is the number of this target's
-derived proof obligations whose active-case status is `unresolved`; when no
-active case exists and disposition is `evaluate`, every derived proof
-obligation counts as unresolved. It is zero while skipped and never counts
-`unresolved_reference` candidates. Resolution `expanded_universe_count` is
-the total unique mandatory-universe member count after the resolved candidate
-is added as a closure seed and closure reaches its fixed point, not merely the
-number of members newly added by that seed.
-`valid`, `case_verifiable`, and `changed` are booleans. `previous_case_hash`
-is nullable. Mutation `reason`, `path`, and `line` are nonblank/canonical/
-positive for every skip result and for a changed unskip; they are nullable for
-an idempotent unskip. A changed unskip returns the removed reason and its
-former location. Validation
-`case_evidence_hash`, the two request-size fields,
-`case_object_bytes`, and `active_manifest_bytes` are nullable until their
-respective trusted projections are complete. `object_path` is a canonical
-repository-relative POSIX path, never an absolute clone path. Discrepancies
-sort by code, proof obligation, candidate, and message.
-
-Proposal `valid` is true exactly when no discrepancy is blocking and the proposal
-can activate against the echoed snapshot and manifest without changing input.
-The proposal's self-contained `obligation_id` must equal the command/tool
-address after normalization. This deliberate duplicate address keeps the
-portable proposal self-identifying outside one invocation; a mismatch is a
-true conflict, never silently derived in either direction. A malformed
-proposal is a problem, not `valid = false`.
-
-`obligation.check.valid` is true for an evaluated obligation exactly when
-deterministic [EVC-9] validation produces none of BSE001 through BSE004,
-BSE008, or BSE009; structural corruption is a problem rather than a payload.
-Its `case_verifiable` additionally requires the checked hash to be active and
-every [EVC-9] readiness predicate. A skipped obligation validates only its
-directive and any retained manifest/object structural integrity; it does not
-run currency, universe, relation, coverage, packet, analyze, or verify checks,
-and its `case_verifiable` remains false. `obligation.check-all.valid` is true
-exactly when every evaluated obligation check is valid, every retained skipped
-object is structurally valid, and no BSE007 is present for an evaluated
-required obligation. `case_verifiable_count` counts only evaluated
-obligations satisfying the full predicate. A valid proposal with an open
-question activates as visible coverage debt and is not case-verifiable.
-Applied diagnostic policy affects exit `0` or `1`, never either boolean.
-
-A discrepancy contains exactly `code`, boolean `blocking`, nullable
-`proof_obligation_id`, nullable `candidate_id`, `message`, and `action`. Its code is one of
-`SNAPSHOT_STALE`, `MANIFEST_STALE`, `CANDIDATE_MISSING`,
-`UNIVERSE_UNACCOUNTED`, `ROLE_MISMATCH`, `PROOF_OBLIGATION_UNRESOLVED`,
-`RELATION_UNAVAILABLE`, `ANALYZE_PROMPT_OVERSIZED`, or
-`VERIFY_PROMPT_OVERSIZED`, or `CASE_ARTIFACT_OVERSIZED`. Every code is blocking except one conditional
-branch: `PROOF_OBLIGATION_UNRESOLVED` is nonblocking only when the exact
-proposal contains at least one open-question row naming that proof obligation.
-That branch records deliberate visible debt. The same code is blocking when a
-proof obligation lacks selected support and has no named open question; an
-omitted or considered candidate does not silently acknowledge missing support.
-Discrepancies describe a well-formed proposal's readiness.
-Malformed, unsafe, or unknown input is a problem and never a discrepancy.
-
-`analyze_request_bytes` is the exact analyzer prompt plus canonical packet
-request length from [SEM-3], computed from the reconstructed current v3 model
-projection. When analyze `maximum_prompt_bytes` is greater than zero, a value
-over it adds blocking `ANALYZE_PROMPT_OVERSIZED`; zero retains [SEM-9]'s exact
-disabled-maximum meaning. The verify request upper bound is the exact byte
-count from [EVC-3.1]
-using the reconstructed case projection, the longest allowed BSA code and
-classification strings, and one canonical claim evidence row for every
-available trusted packet region. Claim evidence is an ordered unique subset of
-those regions, so no real request can exceed this bound. The summary view reports
-analyze bytes for a reconstructable active packet and null otherwise; its
-verify bound is null unless that active case is verifier-complete. Proposal
-validation reports analyze bytes after universe/decision reconstruction, even
-for a nonblocking open question, and reports the verify bound only when every
-proof obligation is verifier-complete. A bound over
-`verify.maximum_prompt_bytes` is `VERIFY_PROMPT_OVERSIZED` and prevents
-activation. The exact per-claim check still runs before each cache lookup.
-`case_object_bytes` is the byte length of [EVC-4.1]'s exact indented UTF-8 case
-file including its terminal LF. `active_manifest_bytes` measures the same exact
-stored representation for the manifest that a successful activation would switch.
-A value over `maximum_case_bytes` for either adds blocking
-`CASE_ARTIFACT_OVERSIZED`; validation and activation create no staging file.
-
-The MCP input objects are also closed:
-
-```text
-list_obligations:
-  {cursor, limit}
-get_obligation:
-  {obligation_id, view, cursor, limit}
-find_obligation_evidence:
-  {obligation_id, evidence_kind, cursor, limit}
-get_obligation_candidate:
-  {obligation_id, candidate_id, detail, cursor, limit}
-resolve_obligation_candidate:
-  {obligation_id, path, symbol}
-validate_obligation_proposal:
-  {obligation_id, proposal}
-```
-
-Here `cursor`, `limit`, and `symbol` are always present and nullable; a
-non-null limit is a positive integer excluding booleans. `view` is
-`summary`, `evidence`, or `counterevidence`. Summary requires null cursor
-and limit. `evidence_kind` is `all`, `implementation`, `test`, or
-`counterevidence`. `detail` is `source` or `neighbors`; source requires a
-null limit. `proposal` is the direct closed [EVC-8.4] object, not a path.
-The server's repository root is bound at startup and is not a tool input. The
-CLI proposal path is an adapter input; the core operation receives the parsed
-closed proposal. MCP exposes no activation, skip/unskip, deactivation, or
-check operation in v1.
-
-On a first item page, the effective page size is the smaller of a non-null
-requested limit and the configured page size, or the configured page size when
-limit is null. An item cursor carries that effective size. On continuation, a non-null limit
-must equal the cursor `page_size`; null means use the cursor value. A mismatch
-is `INVALID_INPUT`, never a resized continuation.
-
-A cursor is self-contained and is one of two exact preimages:
-
-```text
-item page:
-{
-  version: 1,
-  cursor_kind: "items",
-  operation,
-  repository_snapshot,
+obligation.find_evidence result = {
   obligation_id,
-  selector_sha256,
-  next_item_index,
-  page_size
+  candidates: [candidate],
+  next_cursor
 }
 
-source span:
-{
-  version: 1,
-  cursor_kind: "source_lines",
-  operation: "obligation.candidate-source",
-  repository_snapshot,
+obligation.get_candidate result = {
   obligation_id,
-  selector_sha256,
-  candidate_id,
-  receipt_hash,
-  next_line
+  candidate,
+  source: {receipt, text, text_sha256},
+  neighbors: [{candidate_id, relation_kind, direction}]
 }
 ```
 
-`selector_sha256` is `sha256:<64 lowercase hex>` of canonical JSON for the
-operation's semantic selector fields: `{}` for the obligation list,
-`{view}` for evidence/counterevidence, `{evidence_kind}` for discovery, and
-`{candidate_id, detail}` for candidate source or neighbors. Obligation and
-operation are separate cursor fields; `obligation_id` is null only for the
-repository-wide obligation list. Cursor and page controls, including nullable
-`limit`, are excluded; item `page_size` already binds the effective limit.
-The
-token is unpadded base64url of the preimage's canonical UTF-8 bytes, one ASCII
-period, then lowercase SHA-256 hex of those same bytes. This digest is a
-corruption checksum, not an authority boundary. On every page read Backstitch
-decodes with strict base64url, rejects duplicate JSON keys and unknown fields,
-checks the digest, exact operation/snapshot/obligation/selector match,
-nonnegative integer item index and positive page size no greater than the
-current item ceiling, or a positive next line inside the bound inclusive span.
-The line cursor's candidate and receipt must equal the selected current
-observation; `next_line` is the first not-yet-returned complete source line.
-Item cursors apply only to obligation-list, evidence/counterevidence,
-find-evidence, and candidate-neighbor pages; line cursors apply only to
-candidate-source spans. A malformed, altered, stale, cross-variant,
-cross-operation, or selector-mismatched cursor is `INVALID_INPUT` and exit `2`; it never
-restarts at page one. A changed response-byte ceiling may change the number of
-later lines per span chunk but cannot skip or repeat a line.
+`owner`, `symbol`, source/target candidate IDs, and source/target locators are
+present and nullable where a relation kind has no such endpoint. Static and
+declared relation fields are arrays of `candidate_relation`.
+`suggested_trace_edits` is an array of `trace_advice`, including an empty array
+when no supported advice applies. `direction` is `incoming` or `outgoing`.
+Relation rows sort by `(relation_kind, source_locator, target_locator,
+source_candidate_id, target_candidate_id)`, treating null as empty string.
+Discovery bases use [EVC-7]'s order. `supported_forms` is a nonempty ordered
+subset of `spec_mapping`, `code_backlink`, and `binding_test`.
+`review_warning` is the fixed sentence `Advice is not evidence; review the
+source relation before editing.` Suggested edits sort by guidance-code order,
+target ID, role, and supported forms. Candidate neighbors sort by
+`(relation_kind, direction, candidate_id)`.
 
-The closed problem-code vocabulary is `INVALID_INPUT`, `UNSAFE_PATH`,
-`SNAPSHOT_UNSTABLE`, `SNAPSHOT_CONFLICT`, `MANIFEST_CONFLICT`, `NOT_FOUND`, `AMBIGUOUS`,
-`BUDGET_EXHAUSTED`, `DEPENDENCY_MISSING`, `HANDSHAKE_FAILED`,
-`ARTIFACT_CORRUPT`, `LOCK_TIMEOUT`, `PUBLICATION_FAILED`, and
-`INTERNAL_ERROR`. Its `details` object is the one exact variant selected by
-the code:
+Candidate source `receipt` equals the candidate receipt. `text` is its exact
+raw span decoded as UTF-8 with replacement for invalid byte sequences and no
+newline normalization. `text_sha256` hashes the resulting UTF-8 bytes. Raw
+receipt identity still hashes original bytes; replacement-decoded text never
+substitutes for it.
 
-```text
-INVALID_INPUT:       {field, reason}
-UNSAFE_PATH:         {path, reason}
-SNAPSHOT_UNSTABLE:   {attempts}
-SNAPSHOT_CONFLICT:   {expected_snapshot, current_snapshot, changed_candidate_ids}
-MANIFEST_CONFLICT:   {expected_manifest_hash, current_manifest_hash}
-NOT_FOUND:           {entity, identity}
-AMBIGUOUS:           {field, value, candidates}
-BUDGET_EXHAUSTED:    {budget, limit, observed}
-DEPENDENCY_MISSING:  {distribution, extra}
-HANDSHAKE_FAILED:    {protocol, reason}
-ARTIFACT_CORRUPT:    {path, reason}
-LOCK_TIMEOUT:        {lock_path, timeout_seconds}
-PUBLICATION_FAILED:  {path, operation, reason}
-INTERNAL_ERROR:      {operation}
-```
+_Implementation mapping_:
 
-`AMBIGUOUS.candidates` is a nonempty array of strings in Unicode code-point
-order; `SNAPSHOT_CONFLICT.changed_candidate_ids` is a unique candidate-ID-order
-array. `NOT_FOUND.entity` is `obligation`, `candidate`, `case`, `artifact`,
-`path`, or `symbol`. `BUDGET_EXHAUSTED.budget` is `candidate_items`,
-`catalog_items`, `snapshot_files`, `file_bytes`, `snapshot_bytes`,
-`request_bytes`, `proposal_bytes`, `proposal_text_bytes`, `case_bytes`,
-`response_bytes`, `wall_time`, or `verify_prompt_bytes`.
-Candidate identity arrays use candidate-ID order. Budget observations are
-integers, except wall-time observations and limits are finite nonnegative
-decimal numbers. `SNAPSHOT_UNSTABLE.attempts` is the exact configured positive
-capture-attempt count exhausted without one coherent image; this problem needs
-no expected or current snapshot because neither was established.
-`timeout_seconds` is finite and positive. Publication
-operation is `mkdir`, `create_stage`, `write`, `chmod`, `fsync`, `link`,
-`replace`, or `unlink`; internal operation is one of the closed core operation
-strings.
-These details do
-not expose tracebacks, local secrets, provider responses, or bytes outside the
-repository. Every problem has the line-safe message, action, and repair
-guidance required by [EVC-8.5].
+- `backstitch/cli.py`
+- `backstitch/evidence_discovery.py`
+- `backstitch/evidence_summary.py`
+- `backstitch/obligation_api.py`
+- `backstitch/obligations.py`
 
-The initial non-secret configuration contract is:
+#### 8.3.1 Configuration [EVC-8.3.1]
+
+The initial configuration is:
 
 ```toml
-[tool.backstitch.evidence]
-repository_id = "github.com/VanL/backstitch"
-case_root = "docs/evidence-cases"
-required_obligations = []
-page_size = 25
+[tool.backstitch.obligations]
+section_required_roles = ["implementation"]
+page_size = 5
 maximum_page_size = 100
 maximum_response_bytes = 65536
-maximum_candidate_items = 1000
+maximum_candidate_items = 2000
 maximum_catalog_items = 100000
+maximum_lexical_seeds = 10
 maximum_snapshot_files = 20000
 maximum_file_bytes = 5000000
 maximum_snapshot_bytes = 100000000
-maximum_request_bytes = 1100000
-maximum_proposal_bytes = 1000000
-maximum_proposal_text_bytes = 4096
-maximum_case_bytes = 10000000
+maximum_work_units = 2000000
+maximum_packet_bytes = 10000000
+maximum_packet_report_bytes = 10000000
 maximum_call_seconds = 10.0
 snapshot_capture_attempts = 3
 static_neighbor_depth = 1
 ```
 
-`repository_id` and every required obligation are nonblank and canonical;
-repository ID is UTF-8 NFC, at most 255 code points, with no leading/trailing
-whitespace, control character, or backslash. It is case-sensitive. Duplicates
-are errors. `case_root` is a nonblank canonical repository-relative POSIX
-directory string with no empty, dot, dot-dot, backslash, control-character, or
-absolute component. Its existing components and every later filesystem object
-must remain contained regular directories without symlinks; activation creates
-missing final directories one component at a time only after rechecking the
-contained parent. The entire configured case root is an exact built-in
-exclusion from the semantic snapshot, parser, candidate catalog, and universe;
-active case loading is the sole trusted read path for those artifacts. It may
-therefore be nested under a broad source, spec, or test root. A file at the
-path, an escape, a symlink, or a case root equal to or containing any configured
-source/spec/test root is invalid configuration because it would exclude real
-semantic inputs. All integer limits except `static_neighbor_depth` are
-positive; `maximum_response_bytes` is at least 16384;
-`maximum_call_seconds` is finite and greater than zero; `page_size`
-cannot exceed `maximum_page_size`; and `static_neighbor_depth` is in `[0, 3]`.
-`maximum_snapshot_bytes` is at least `maximum_file_bytes`;
-`maximum_request_bytes` is at least `maximum_proposal_bytes`;
-`maximum_case_bytes` is at least `maximum_proposal_bytes`; and
-`maximum_proposal_bytes` is at least `maximum_proposal_text_bytes`.
-Catalog, candidate-universe, or snapshot exhaustion is
-exit `2`, never silent truncation and never a smaller claimed universe.
-Changing either item ceiling, `static_neighbor_depth`, candidate eligibility,
-profile classification, roots, exclusions, or a reconstruction algorithm
-invalidates the universe identity. Presentation page sizes do not.
+`section_required_roles` is a unique ordered subset of `implementation` then
+`test` and must contain `implementation`. All integer values except
+`static_neighbor_depth` are positive; that depth may be zero.
+`maximum_response_bytes >= 16384`; `page_size <= maximum_page_size`;
+`maximum_snapshot_bytes >= maximum_file_bytes`; `maximum_packet_bytes >=
+16384`; `maximum_packet_report_bytes >= 16384`; `maximum_call_seconds` is
+finite and positive;
+`snapshot_capture_attempts` is in `[1, 10]`; and `static_neighbor_depth` is in
+`[0, 3]`.
 
-### 8.3.2 Obligation Skip Annotation [EVC-8.3.2]
+Page and response limits affect presentation only. Candidate, catalog,
+lexical-seed, snapshot, file, work, packet, role, and static-depth settings
+enter the snapshot identity because they can change readiness, packet
+membership, or whether the complete audit artifact can be emitted. A deadline
+aborts an operation but never truncates its deterministic result.
 
-An obligation may carry one exact section-scoped disposition:
+There is no repository ID, case root, manifest path, proposal limit,
+activation option, or source-write option. Clone-local absolute paths do not
+enter semantic identities.
+
+_Implementation mapping_:
+
+- `backstitch/repository_snapshot.py`
+- `backstitch/settings.py`
+
+#### 8.3.2 Source-Authored Skip [EVC-8.3.2]
+
+One obligation may carry one exact source disposition:
 
 ```markdown
-## 4. Trace Graph [SC-4] <!-- backstitch: skip-obligation [SC-4] "Generated code is checked downstream." -->
+## Trace Graph [SC-4] <!-- backstitch: skip-obligation [SC-4] "Generated code is checked downstream." -->
 ```
 
-The bracketed value is the exact local section or invariant ID. The quoted
-value is one JSON string. After strict JSON decoding it must be nonblank, at
-most 4096 UTF-8 bytes, and contain no CR, LF, U+2028, or U+2029. The canonical
-writer first computes `token = json.dumps(reason, ensure_ascii=True)`, then
-replaces every raw `--` in `token` with `\u002d\u002d`, raw `<` with
-`\u003c`, and raw `>` with `\u003e`, in that order. These are JSON escapes,
-so strict decoding recovers the exact reason while no raw HTML open, close, or
-double-hyphen delimiter can occur inside the token. It uses that token and the
-owner ID in the exact inline HTML comment above at the parser-derived heading
-content insertion offset defined in [EVC-8.6]. The same HTML comment as a
-standalone directive-block line and the equivalent italic directive-block form
-are accepted:
+The equivalent directive-block forms are accepted before body text:
 
 ```markdown
 <!-- backstitch: skip-obligation [SC-4] "Generated code is checked downstream." -->
 _Traceability: skip-obligation [SC-4] "Generated code is checked downstream."_
 ```
 
-All forms use [EXC-4]'s parser-owned Markdown boundary. The marker must occur
-on one section heading or in its directive block before body text. Its target
-must be that section's own ID or one invariant ID declared in that same
-Markdown section; an invariant target may be resolved after the complete
-section is parsed. This explicit target lets several obligations in one
-section carry independent reasons without making the marker part of an
-invariant statement. The marker is invalid in a file preamble, inside other
-prose or a code block, on a non-obligation section, for an ID owned elsewhere,
-or more than once for one obligation. All accepted positions and spellings are
-aliases, not independent dispositions. Malformed/duplicate syntax is
-`SUPPRESSION_INVALID_SYNTAX`; a missing or blank reason is
-`SUPPRESSION_REASON_MISSING`; an otherwise valid marker with no obligation
-owner is `SUPPRESSION_UNUSED`. No invalid form changes evaluation.
+One ordinary [EXC-4] `_Traceability: meta` or `_Traceability: ignore ...`
+directive may coexist in the same block. Its canonical position is first,
+followed immediately by the standalone skip line. An inline heading skip is
+followed by the ordinary directive on the next line. More than one ordinary
+directive, a standalone skip before the ordinary directive, interleaving body
+text, or a second skip for the same target is invalid syntax. Ordinary
+traceability policy and skip disposition are parsed independently; neither
+consumes or suppresses the other.
 
-The inline form is valid only at [EVC-8.6]'s parser-derived insertion offset
-with exactly one preceding ASCII space and the exact comment delimiters. An
-inline lookalike elsewhere in heading content is invalid syntax, not prose and
-not a best-effort suppression. Inline and standalone HTML forms require the
-JSON token itself to contain no raw `--`, `<`, or `>`; manually authored
-reasons use the canonical escapes when needed. The italic form is parsed from
-the exact physical directive line and admits the ordinary strict JSON token.
-All forms compare the decoded reason, not its spelling. This makes canonical
-unskip's byte range unambiguous even for manually authored markers.
+The target is the owning section ID or one invariant declared in that same
+Markdown section. The reason is one strict JSON string. Decoded text must be
+nonblank, at most 4096 UTF-8 bytes, and contain no CR, LF, U+2028, or U+2029.
+HTML forms must contain no raw `--`, `<`, or `>` inside the JSON token; authors
+use JSON Unicode escapes when needed.
 
-The parsed disposition is exactly `evaluate` when no marker exists and
-`skip` when one valid marker exists. A skip:
+The marker is invalid in a preamble, prose, code block, non-owning section,
+Python source, or more than once for one obligation. Malformed syntax,
+placement, target ownership, coexistence order, or duplicate skip emits
+`SUPPRESSION_INVALID_SYNTAX`/`BSX004`; a missing or blank reason emits
+`SUPPRESSION_REASON_MISSING`/`BSX010`; a well-formed target with no parsed
+owner emits `SUPPRESSION_UNUSED`/`BSX001`. All three have packaged level
+`warning`, are reported through ordinary hygiene policy/audit, and leave
+`disposition = evaluate`. They do not cause strict-loader exit 2 merely
+because the recognized skip form is bad. `allow_unknown_keys` has no effect on
+this reserved grammar. Invalid config or invocation syntax remains exit 2
+under [EXC-8]. Valid syntax sets `disposition = skipped`; absence sets
+`evaluate`.
 
-- leaves the obligation in the inventory and every total denominator;
-- creates `OBLIGATION_SKIPPED`/BSE010 at the obligation and suppresses that
-  audit record with the exact decoded reason through the ordinary [EXC-7]
-  `--show-suppressions` path;
-- prevents case-currency, universe, relation, coverage, packet, analyze, and
-  verify work for that obligation;
-- suppresses no parser, identity, duplicate-ID, malformed-directive,
-  containment, manifest-corruption, or immutable-object-corruption failure;
-- leaves any active-manifest entry and immutable case untouched as retained
-  audit history; and
-- never counts as covered, verifiable, analyzed, or verified.
+The parser excludes a valid directive from requirement text and model input
+but retains its exact reason in audit output. The source bytes still enter the
+repository snapshot. `--show-suppressions` lists every valid skip with target,
+reason, source locator, and effective policy. A skip suppresses semantic
+evaluation only. It suppresses no trace, identity, syntax, containment,
+currentness, or artifact-integrity problem.
 
-BSE010 has packaged level `info` and follows ordinary effective-level
-suppression policy. If repository policy makes its effective level
-non-suppressible, [EXC-6.2]'s unsuppressible-suppression behavior applies and
-BSE010 remains unsuppressed and auditable; its effective level, the resulting
-suppression-hygiene diagnostic, and `fail_on` determine the exit. A repository
-that intends to prohibit skips uses an exact BSE010 error rule and includes
-`error` in `fail_on`. This reuses the existing policy path rather than adding a
-second skip-authorization configuration.
+Every valid marker also emits `OBLIGATION_SKIPPED`/`BSE001` as [EVC-6]
+defines. This is the policy hook for a repository that prohibits skips; no
+second `allow_skips` setting exists.
 
-Every accepted skip marker is parser metadata and is excluded from target
-requirement text, candidate text, the report-issue projection, and model input.
-The canonical inline marker is also excluded from the target normalized/raw
-receipt without changing physical line coordinates. Its source file bytes
-still change the repository snapshot, so adding or removing only the canonical
-inline marker invalidates cursors but does not by itself stale a retained case.
-A standalone directive alias contributes no semantic text, but its physical
-line exists in parser-owned locators; manually adding it, or removing it with
-`unskip`, can change target or later invariant coordinates and therefore can
-make a retained case stale after evaluation resumes. Backstitch reports that
-refresh action rather than pretending line-number churn is coordinate-stable.
+Backstitch does not write or remove this marker. CLI, guide, and implemented
+MCP output may show the exact form and location an agent or human could edit.
+The resulting source diff remains subject to ordinary human review.
 
-`backstitch obligation ID skip --reason TEXT` inserts or updates this exact
-marker. `backstitch obligation ID unskip` removes either accepted form. These
-are the only Backstitch operations allowed to edit a spec. They never edit the
-obligation statement, IDs, mappings, invariants, evidence proposal, source,
-tests, configuration, or policy.
+A code-only invariant has no valid v1 skip location. Backstitch does not infer
+a related Markdown section or suggest inserting a skip in Python. To make such
+an invariant skippable, a human must first move or add its declaration to an
+ID-bearing Markdown section through an ordinary reviewed source change.
 
-The editable v1 set is exactly section obligations and invariants declared in
-a Markdown spec. A code-only invariant has no spec-owned annotation point;
-`skip` returns `INVALID_INPUT` for field `obligation_id` with an action to move
-the declaration to an ID-bearing Markdown spec section if the owner intends it
-to be skippable. Backstitch never inserts a suppression into a Python docstring
-or guesses a related section from backlinks. `unskip` remains an idempotent
-no-op when the addressed obligation has no marker.
+_Implementation mapping_:
 
-### 8.4 Agent Proposal [EVC-8.4]
+- `backstitch/check_pipeline.py`
+- `backstitch/exclusions.py`
+- `backstitch/markdown_specs.py`
+- `backstitch/models.py`
+- `backstitch/reporting.py`
 
-The agent emits one atomic, agent-shaped proposal rather than editing the
-case storage schema. The proposal contains exactly:
+### 8.4 Evidence Summary And Discovery Results [EVC-8.4]
 
-```json
+The transport-neutral core result envelope is:
+
+```text
 {
-  "obligation_id": "invariant::INV.RES.1",
-  "repository_snapshot": "sha256:<digest>",
-  "active_manifest_hash": "sha256:<digest>",
-  "expanded_candidates": [
-    {"candidate_id": "candidate:sha256:<digest>", "reason": "<nonblank>"}
-  ],
-  "implementation_evidence": [
-    {
-      "proof_obligation_id": "invariant::INV.RES.1::implementation",
-      "candidate_id": "candidate:sha256:<digest>",
-      "reason": "<nonblank>"
-    }
-  ],
-  "test_evidence": [
-    {
-      "proof_obligation_id": "invariant::INV.RES.1::binding-test",
-      "candidate_id": "candidate:sha256:<digest>",
-      "reason": "<nonblank>"
-    }
-  ],
-  "counterevidence_considered": [
-    {
-      "proof_obligation_id": "invariant::INV.RES.1::counterevidence",
-      "candidate_id": "candidate:sha256:<digest>",
-      "reason": "<nonblank>"
-    }
-  ],
-  "omissions": [
-    {
-      "proof_obligation_id": "invariant::INV.RES.1::counterevidence",
-      "candidate_id": "candidate:sha256:<digest>",
-      "reason": "<nonblank>"
-    }
-  ],
-  "open_questions": [
-    {
-      "proof_obligation_id": "invariant::INV.RES.1::implementation",
-      "question": "<nonblank>",
-      "reason": "<nonblank>"
-    }
-  ]
+  schema_version: 1,
+  operation,
+  snapshot: {snapshot_hash, file_count, byte_count, unreadable_count} | null,
+  result,
+  guidance: [{code, message, action}],
+  problems: [{code, message, action, details}]
 }
 ```
 
-Every `reason` and `question` is measured as its exact UTF-8 bytes after JSON
-decoding and must be nonblank and at most `maximum_proposal_text_bytes`.
-After closed-shape validation, safe identifier normalization, and the canonical
-array ordering in [EVC-4.1], the complete proposal's [SEM-3] canonical JSON
-must be at most `maximum_proposal_bytes`. Either overflow is
-`BUDGET_EXHAUSTED` (`proposal_text_bytes` with observed string length, or
-`proposal_bytes` with observed canonical length) before universe
-reconstruction, hashing, or filesystem work.
+`operation` is one of `obligation.list`, `obligation.get`,
+`obligation.summarize_evidence`, `obligation.find_evidence`, or
+`obligation.get_candidate`. Success has an operation-specific `result` and no
+problems. Failure has null result and one or more ordered problems. Snapshot is
+null exactly when failure occurs before one capture is accepted. Core JSON
+contains no absolute root, timestamps, transport IDs, ANSI text, or provider
+metadata.
 
-The CLI reads a proposal file through a `maximum_request_bytes + 1` bounded
-reader and rejects raw input over `maximum_request_bytes` before JSON parsing.
-The MCP stdio adapter enforces the same limit on each complete JSON-RPC message
-before SDK parsing; if the approved SDK cannot expose a bounded message-reader
-seam, the MCP dependency gate fails and that adapter is not implemented.
-Adapter overflow is `BUDGET_EXHAUSTED` with budget `request_bytes` and observed
-`limit + 1`; CLI uses the addressed `obligation.validate` or
-`obligation.activate` core problem envelope,
-while a pre-parse MCP overflow has no knowable core operation and uses SDK
-JSON-RPC error `-32600` with no `data`, then closes the local stdio connection.
-No partial request is processed.
+The closed guidance codes are:
 
-Backstitch derives mandatory-universe membership, paths, locators, exact and
-normalized digests, structural relations, budget totals, and receipts. A
-proposal cannot override a derived value. `semantic_support` and
-`counterevidence` relations are untrusted proposal relations created only from
-the agent's explicit proof-obligation binding and reason. Evidence selected
-under the wrong role remains in the validation receipt under the submitted
-proof obligation and receives `EVIDENCE_ROLE_MISMATCH`; it is not silently
-reclassified and cannot satisfy coverage until corrected.
+- `ADD_OR_CONFIGURE_SPEC_INTENT`;
+- `FIX_OBLIGATION_IDENTITY`;
+- `ADD_RECIPROCAL_MAPPING`;
+- `ADD_RECIPROCAL_BACKLINK`;
+- `ADD_INVARIANT_BIND`;
+- `ADD_BINDING_TEST`;
+- `REVIEW_UNTRACED_CANDIDATE`;
+- `REVIEW_CONFLICTED_TRACE`;
+- `REVIEW_SKIP_REASON`;
+- `RUN_DETERMINISTIC_CHECK`;
+- `RUN_CURRENT_ANALYSIS`.
 
-The allowed binding matrix is closed:
+Every success carries at least one applicable guidance row. Failure guidance
+is carried by each problem's required action and the top-level guidance array
+is empty. Guidance rows sort by the declaration order above, then message and
+action. Message and action are nonblank, line-safe strings. Guidance is closed
+advice. It is never evidence and never applied automatically.
 
-| Candidate kind | Allowed proof-obligation suffixes |
-|---|---|
-| `implementation` | `::implementation`, `::counterevidence` |
-| `test` | section `::test`, invariant `::binding-test`, `::counterevidence` |
-| `static_reference` | `::counterevidence` |
-| `unresolved_reference` | `::counterevidence` |
-| `report_issue` | `::counterevidence` |
+The closed operation problem codes are:
 
-Root role and target kind select the exact row. No other binding is valid.
+- `INVALID_INPUT`;
+- `UNSUPPORTED_PLATFORM`;
+- `NOT_FOUND`;
+- `CURSOR_INVALID`;
+- `SNAPSHOT_UNSTABLE`;
+- `SOURCE_UNREADABLE`;
+- `BUDGET_EXHAUSTED`;
+- `DEADLINE_EXCEEDED`;
+- `INTERNAL_ERROR`.
 
-`expanded_candidates` may contain only candidate IDs that the global captured
-candidate catalog can resolve exactly for the addressed snapshot. Validation
-reconstructs each coordinate, makes it a closure seed, and returns every newly
-mandatory member.
-The proposal is incomplete until that fixed-point universe is fully accounted
-for.
-
-`validate_obligation_proposal` and `backstitch obligation ID validate` are
-deterministic, read-only operations. They return a compact validation receipt,
-the current repository snapshot, discrepancies, and actionable guidance.
-They do not activate, approve, publish, skip, or mutate the repository.
-
-### 8.5 Guidance And Result Economy [EVC-8.5]
-
-Every success, finding, conflict, and tool failure carries a nonempty
-`guidance` array. Each guidance entry contains exactly `code`, `message`, and
-`action`; `action` is mandatory and tells the caller what to do next. The
-initial closed guidance-code vocabulary is:
-
-| Code | Required action class |
-|---|---|
-| `IDENTIFIER_NORMALIZED` | Reuse the returned canonical identity |
-| `CANDIDATE_RESOLVED` | Use the broker-minted candidate ID in the proposal or discard it |
-| `PAGE_CONTINUE` | Request the named next page with its continuation token |
-| `READ_COMPLETE` | Use the returned canonical evidence or request another named read |
-| `EVIDENCE_INCOMPLETE` | Request or account for the named missing evidence |
-| `EVIDENCE_ROLE_MISMATCH` | Bind the candidate to an allowed proof obligation or replace it |
-| `PROPOSAL_VALID` | Review the compact validation receipt before activation |
-| `SNAPSHOT_CONFLICT` | Re-read the obligation, inspect the diff, revalidate, and retry |
-| `CASE_ACTIVATED` | Review the rendered case and active-manifest diff, then run obligation check |
-| `CASE_DEACTIVATED` | Review the active-manifest diff and run repository case validation |
-| `OBLIGATION_SKIP_RECORDED` | Review the spec diff and use unskip when evaluation should resume |
-| `OBLIGATION_SKIP_REMOVED` | Review the spec diff and check or rebuild the obligation evidence |
-| `REQUEST_REJECTED` | Correct the named invalid, ambiguous, unsafe, or unavailable input and retry |
-| `BUDGET_EXHAUSTED` | Narrow the read or change the reviewed configured budget before retrying |
-
-The transport-neutral success result contains exactly `schema_version`,
-`operation`, `repository`, `payload`, `guidance`, and `budget`; a problem result
-contains the same fields except that `problem` replaces `payload`.
-`schema_version` is exactly `1`. The closed operation strings are
-`obligation.reference`, `guide.evidence-assembly`,
-`resource.obligation-reference`, `resource.evidence-assembly-guide`,
-`resource.evidence-proposal-schema`, `mcp.startup`, `obligation.list`,
-`obligation.get`, `obligation.evidence`,
-`obligation.counterevidence`, `obligation.find-evidence`,
-`obligation.candidate-source`, `obligation.candidate-neighbors`,
-`obligation.resolve-candidate`, `obligation.validate`,
-`obligation.activate`, `obligation.check`, `obligation.check-all`,
-`obligation.deactivate`, `obligation.skip`, and `obligation.unskip`.
-`mcp.startup` is problem-only;
-every other operation has the success payload defined above. CLI and MCP
-adapters use the same semantic operation string for the same core evidence
-call.
-
-The CLI uses `mcp.startup` for a missing-extra startup failure before stdio
-framing. Successful MCP initialization uses the SDK's protocol-owned standard
-InitializeResult unchanged and is outside core-result parity. A protocol or
-handshake failure uses the SDK/JSON-RPC error shape; its optional structured
-`data` is the exact `mcp.startup` core problem result with no traceback. MCP
-tool/resource results after initialization use the exact SDK mappings below.
-
-`repository` contains exactly `repository_id` and `snapshot` on repository-
-bound success. It is null on successful `obligation.reference`,
-`guide.evidence-assembly`, and static MCP resource reads because those
-packaged artifacts perform no repository discovery. Those operations and
-pre-config `mcp.startup` problems use the packaged
-`maximum_response_bytes`; every other operation uses resolved repository
-config. On a pre-resolution failure `repository` is null; after partial
-resolution it contains those same two nullable fields, using only values
-already established safely. A
-problem has exactly `code`, `message`, `action`, and `details`. Guidance and
-budget remain present on problems. Guidance entries are unique by code and
-sort in the vocabulary-table order above. Normalization guidance therefore
-cannot depend on parser encounter order.
-
-`budget.response_bytes` is the unique nonnegative integer `n` equal to the
-UTF-8 length of [SEM-3] canonical JSON for the complete core result when that
-field contains `n`. Backstitch computes it by starting with zero and replacing
-the field with the newly measured length until it is unchanged.
-`payload_bytes` measures canonical JSON for only `payload` or `problem`.
-`items_returned` is the length of a top-level `items` array when present, else
-the length of `obligations`, `diagnostics`, or `discrepancies` in that priority, else
-one for a success and zero for a problem. `maximum_items` is the effective page
-limit for obligation lists, evidence/counterevidence, discovery, and neighbor
-item pages and is null for source spans and non-paged calls. Every core result
-must have `response_bytes <=
-maximum_response_bytes`; the CLI envelope, its terminal newline, text
-projection, and MCP `_meta` are transport bytes and are excluded.
-
-Paged operations choose the largest ordered prefix that satisfies both item
-and complete-core-response limits after adding the exact continuation cursor
-and guidance. If even one item cannot fit, they return `BUDGET_EXHAUSTED` with
-no partial page. A non-paged success that cannot fit does the same. If another
-problem would exceed the ceiling, it is replaced by the compact
-`BUDGET_EXHAUSTED` response whose `observed` is that problem's fixed-point byte
-count. Configuration requires `maximum_response_bytes >= 16384`, which is
-large enough for the fixed problem envelope after line-safe bounded fields;
-agent-supplied operation, obligation, path, symbol, and cursor strings are
-each limited to 4096 UTF-8 bytes before interpretation. Thus the ceiling
-applies to the actual transport-neutral result, including locators, cursors,
-guidance, and budget metadata, not just snippets.
-
-Obligation and guide commands accept `--format json|text`, default `json`, as
-enumerated in [EVC-8.3]. The CLI JSON transport envelope contains exactly
-`local_root` and `result`; `result` is the core result and `local_root` is the
-resolved absolute root string for a repository-bound call or null for a
-packaged reference/guide call. Exit-0/1 writes one canonical line to stdout
-with empty stderr; exit-2 writes that one problem envelope to stderr with empty
-stdout. For text format, repository-bound exit 0/1 writes the deterministic
-human projection to stdout beginning with `Repository root: <local_root>` and
-leaves stderr empty. Packaged `obligation reference` and `guide
-evidence-assembly` text success writes exactly the artifact payload's `text`
-bytes to stdout and empty stderr; each packaged text artifact is UTF-8 and
-ends in exactly one LF. Text exit 2 writes exactly one line to stderr,
-`backstitch: error: <message>; action: <action>`, and leaves stdout empty.
-
-For a tool call, the MCP SDK `CallToolResult` contains exactly
-`content`, `structuredContent`, `isError`, and `_meta`. `content` is a
-one-element array containing exactly `{type: "text", text}`; `text` is the
-[SEM-3] canonical JSON bytes of the complete core result decoded as UTF-8,
-with no trailing LF. `structuredContent` is that same core result as an object.
-`isError` is false for a core success and true for a core problem. `_meta`
-contains exactly `local_root`, using the resolved absolute root string. The
-canonical bytes in `content[0].text`, parsed and reserialized canonically,
-must equal `structuredContent` and the adapter-independent core result byte for
-byte.
-
-For a successful static resource read, the SDK `ReadResourceResult` contains
-exactly `contents` and `_meta`. `contents` has one `TextResourceContents` row
-containing exactly `uri`, `mimeType`, and `text`; `uri` is the requested exact
-`backstitch://guides/evidence-assembly`,
-`backstitch://reference/obligations`, or
-`backstitch://schemas/evidence-proposal` URI; `mimeType` is
-`application/json`; and `text` is the canonical UTF-8 JSON of the matching
-complete `resource.*` core success with no trailing LF. `_meta` is the empty
-object because resource reads perform no repository discovery. Resource
-results have no `isError` field. An unknown resource URI is JSON-RPC invalid
-params `-32602` with the SDK's ordinary line-safe message and no `data`; it has
-no core operation. A known resource whose packaged artifact cannot be
-validated is JSON-RPC internal error `-32603` whose `data` is the exact
-matching `resource.*` `ARTIFACT_CORRUPT` core problem result, with no traceback. Other
-protocol errors remain SDK-owned and do not masquerade as core operation
-results. Removing these exact SDK envelopes yields the same canonical core
-result bytes as the CLI adapter.
-
-`guidance[].message`, `guidance[].action`, `problem.message`, and
-`problem.action` are nonblank and contain no CR, LF, U+2028, or U+2029. Any
-other string interpolated into text output follows the same rule. When
-untrusted parser, filesystem, provider, or path text contributes to one of
-those fields, each line separator is rendered as a literal six-character
-`\u000a`-style escape using lowercase hexadecimal before the core result is
-built; existing spaces are not collapsed. This same normalized field supplies
-JSON, text, and MCP, so hostile text cannot create a second stderr line or a
-transport-dependent message.
-
-Mutation responses are context-small: activation returns the case ID, case
-hash, active-manifest hash, repository snapshot, written object path, and
-guidance, never the full case. Skip/unskip return the disposition, reason
-location, old/new freshness tokens, and guidance, never the obligation body.
-The default obligation view is the explicit read for state; detail reads are
-explicit.
-Adding or removing a guidance code is an enumerable contract change and must
-update its firing tests.
-
-Agent-facing draft input canonicalizes safe near-misses and reports every
-normalization in-band. Unknown but safe free-form material may be preserved
-only inside the existing reason or open-question fields. Unknown executable
-fields, relation types, or trusted case fields are unsafe because they would
-change canonical meaning; they are rejected with repair guidance as specified
-in [EVC-4].
-
-### 8.6 Activation, Skip, Conflict Recovery, And Trust [EVC-8.6]
-
-Activation is an explicit CLI/library operation, not an MCP tool. It validates
-the proposal against the addressed snapshot, freezes the immutable case by
-recomputing the mandatory universe and all derived fields, and publishes
-through this exact layout:
+Problem details are a closed union:
 
 ```text
-<case_root>/objects/<bare-case-hash-hex>.json
-<case_root>/objects/.backstitch-evidence-object-<bare-case-hash-hex>-<owner-token>.tmp
-<case_root>/active.json
-<case_root>/.backstitch-evidence-active.lock
-<case_root>/.backstitch-evidence-active.next
+INVALID_INPUT:       {field, reason}
+UNSUPPORTED_PLATFORM:{platform}
+NOT_FOUND:           {identity}
+CURSOR_INVALID:      {reason}
+SNAPSHOT_UNSTABLE:   {attempts}
+SOURCE_UNREADABLE:   {path, error_class}
+BUDGET_EXHAUSTED:    {budget, limit, observed}
+DEADLINE_EXCEEDED:   {limit_milliseconds}
+INTERNAL_ERROR:      {}
 ```
 
-The object file is one authoritative deterministic, indented JSON envelope;
-its exact excerpts, relations, reasons, and proof-obligation bindings are the
-human review projection. There is no second trusted Markdown sidecar. The
-closed active manifest contains exactly `schema_version = 1`, `object_type =
-"evidence-case-active-manifest"`, `repository_id`, `active_cases`, and
-`manifest_hash`. `active_cases` is a JSON object whose canonical obligation-ID
-keys map to case-hash strings. Duplicate keys are rejected and canonical JSON
-sorts the keys. `manifest_hash` is `sha256:<64 lowercase hex>` of the [SEM-3]
-canonical JSON object containing exactly the first four fields, excluding only
-`manifest_hash`.
-Before the first activation, an absent `active.json` is treated as the canonical
-empty manifest for the configured repository ID and its derived manifest hash.
-Duplicate JSON keys are rejected at parse time.
+Fields and reasons are nonblank line-safe strings. Attempts, limits,
+observations, and milliseconds are nonnegative integers. Budget is one of
+`candidate_items`, `catalog_items`, `snapshot_files`, `file_bytes`,
+`snapshot_bytes`, `work_units`, or `response_bytes`.
+`error_class` uses [EVC-8.2]. Problems sort by the code declaration order,
+then path, field, identity, reason, and canonical details bytes, with absent
+sort fields as empty strings.
 
-The manifest uses the same exact indented on-disk serialization and terminal
-newline as [EVC-4.1]. Existing-object and idempotence comparisons use these
-authoritative bytes after independently validating their semantic hashes.
+Each problem has a line-safe message, one required action, and only bounded
+non-secret details. Tracebacks, secrets, provider raw responses, and source
+bytes outside the addressed repository are forbidden.
 
-The repository-root `.gitignore` must contain the exact patterns
-`**/.backstitch-evidence-active.lock` and
-`**/.backstitch-evidence-active.next`, and
-`**/objects/.backstitch-evidence-object-*.tmp`, plus the exact source-edit
-patterns `/.backstitch-obligation-edit.lock` and
-`**/.backstitch-obligation-edit-*.tmp`, before the matching mutation is
-allowed. Those
-reserved names cover every contained configured `case_root`; a missing rule is
-exit `2` with an action to add it. `active.json` and final object JSON files
-must not be ignored by a matching repository rule. Backstitch validates these
-facts but never edits ignore files itself.
+Artifact, provider, output, cache, and semantic-normalization failures belong
+to [SEM-7]'s analysis problem union, not this five-operation read envelope.
 
-Activate and deactivate acquire the same process-scoped single-writer lock before
-reading the active manifest and hold it through file/directory fsync and final
-manifest replace. Process death releases the operating system lock; failure to
-acquire it within `maximum_call_seconds` is exit `2`. The lock and staging
-paths are never symlinks and enter no committed identity.
+A page cursor is unpadded base64url canonical JSON followed by a period and
+the lowercase SHA-256 of those decoded JSON bytes. Its object has exactly
+`cursor_version = 1`, `operation`, `snapshot_hash`, nullable
+`obligation_id`, `selector`, `limit`, and `after`. `after` is the complete
+last-row ordering tuple. A malformed digest, changed snapshot, wrong operation,
+wrong obligation, wrong selector, or changed limit is `CURSOR_INVALID`.
+Evidence-summary rows order by `(role_order, path, start_line, end_line,
+symbol_or_empty, ordered_relation_kinds, declared_target_or_empty)`, where role
+order is `implementation`, `test`, then `binding_test`. The evidence cursor's
+`after` is exactly that seven-field tuple; its relation-kinds member is an
+ordered array on the wire.
 
-Under that lock, activation first removes stale regular, non-symlink object staging
-files matching the reserved pattern. Any non-regular or symlink match is
-`ARTIFACT_CORRUPT` and is not removed. It then creates one staging file in the
-same `objects/` directory using `O_CREAT|O_EXCL|O_NOFOLLOW`, mode `0600`, the
-case hash, and a fresh 32-byte lowercase-hex owner token. It writes the exact
-[EVC-4.1] bytes, fsyncs the file, closes it, reopens without following symlinks,
-and revalidates its bytes and case hash. It publishes no-replace by creating a
-hard link from that staging inode to the final hash path. If the final path
-already exists, the existing-object rule below applies. On a new link it fsyncs
-the `objects/` directory, unlinks the staging name, and fsyncs the directory
-again. It never opens the final path for write. Death before the link leaves
-only one ignored staging file; death after the link leaves a complete,
-already-fsynced immutable object. The next writer performs the bounded cleanup.
+_Implementation mapping_:
 
-Activation then rechecks repository snapshot and expected active-manifest hash.
-It writes the exact manifest bytes to the single
-`.backstitch-evidence-active.next` path with exclusive, no-follow creation,
-mode `0600`, file fsync, and byte/hash revalidation; atomically replaces
-`active.json`; and fsyncs the case-root directory. A stale regular staging file
-is removed before exclusive creation; a symlink or non-regular path is
-corruption. Readers use only hashes referenced by a valid active manifest. An
-object published before a failed manifest switch is inert history, not
-partially active state. It may remain for audit.
+- `backstitch/cli.py`
+- `backstitch/evidence_discovery.py`
+- `backstitch/evidence_summary.py`
+- `backstitch/obligation_api.py`
+- `backstitch/obligations.py`
 
-If the content-addressed object path already exists, activation requires a regular,
-non-symlink file, validates its canonical bytes and path/hash identity, and
-continues only when those bytes equal the object it would publish. Different
-bytes at the same hash path are corruption and exit `2`; activation never replaces
-or repairs the object in place. After an identical-object validation it unlinks
-its private staging name and fsyncs `objects/` before continuing.
+### 8.5 Result Economy And Repair [EVC-8.5]
 
-If the repository snapshot changed, activation writes nothing to active state and
-returns `SNAPSHOT_CONFLICT` with the current snapshot and
-the complete recovery sequence: re-read the obligation, inspect changed candidates,
-revalidate, retry. If only the active manifest changed, `MANIFEST_CONFLICT`
-returns its current hash and requires another obligation read. A caller may not force or bypass
-either compare-and-swap check.
+Text output is a rendering of the same core result. JSON is authoritative for
+automation. Default detail orients; evidence and candidates require explicit
+selectors; full candidate source requires an exact candidate ID. Excerpts are
+bounded by response limits and never silently alter receipt spans. If a full
+required response cannot fit, the operation returns `BUDGET_EXHAUSTED` rather
+than claiming completion.
 
-Activation activates or replaces exactly one obligation entry.
-`backstitch obligation ID check` validates the addressed active obligation;
-`backstitch obligation check --all` validates the inventory, active manifest,
-and every retained object. `deactivate` is the only case-removal operation:
-it atomically removes one active entry after manifest compare-and-swap and
-retains the immutable object. Duplicate inactive hashes are harmless;
-duplicate obligation identities, missing referenced objects, path/hash
-mismatches, or malformed manifests are exit `2`. A required obligation with no
-active case is the [EVC-9] missing-case diagnostic unless it carries a valid
-skip disposition, so deleting or deactivating an evaluated gate cannot
-silently weaken CI.
+Safe normalization may accept a uniquely resolvable bare obligation ID and
+return its canonical identity with a guidance note. Backstitch never
+normalizes an ambiguous ID, arbitrary path, guessed symbol, candidate digest,
+or source edit.
 
-Activation is idempotent when the addressed snapshot, expected manifest hash,
-obligation entry, and immutable object already match: it returns exit `0`,
-`changed = false`, and `CASE_ACTIVATED` without rewriting the object or manifest.
-Deactivate is idempotent only for a non-required obligation when the addressed
-manifest already lacks the entry: it returns exit `0`, `changed = false`, and
-`CASE_DEACTIVATED` without a write. Deactivating an absent required obligation
-still reports `CASE_REQUIRED_MISSING` through policy; idempotence cannot weaken
-the required-case contract.
+### 8.6 Optional Local MCP Adapter [EVC-8.6]
 
-`skip` and `unskip` use a separate repository-root
-`.backstitch-obligation-edit.lock`. They capture the immutable repository
-image, resolve exactly one obligation and marker byte range through the
-Markdown parser, acquire the process-scoped lock, and re-read the target spec
-without following symlinks. The current exact file hash must equal the captured
-hash before any staging write; otherwise they return `SNAPSHOT_CONFLICT`.
-The lock is held through final file and directory fsync. Timeout is
-`LOCK_TIMEOUT`, and process death releases the operating-system lock.
+This adapter is an optional product phase, not setup required by another phase.
+Its owner records `implemented` or `deferred` under [EVC-10.2]. A deferred
+adapter has no MCP command or advertised tools and creates no parity or semantic
+qualification requirement. An implemented adapter starts as
+`backstitch mcp --repo-root PATH`, uses local stdio only, and exposes exactly:
 
-The canonical skip writer changes only the marker bytes:
+```text
+list_obligations
+get_obligation
+summarize_obligation_evidence
+find_obligation_evidence
+get_obligation_candidate
+```
 
-- insertion adds one ASCII space and the canonical HTML comment, including the
-  exact local target ID, at a parser-derived offset in the owning heading's
-  content line. For an ATX heading the offset is before the whitespace that
-  introduces an optional CommonMark closing-hash sequence, or otherwise before
-  trailing spaces/tabs and LF, CRLF, or end of file. For a setext heading it is
-  before trailing spaces/tabs on the final content line above the underline,
-  never on the underline. The Markdown parser, not a second regular expression,
-  supplies the heading form, content line, and optional closing-hash boundary.
-  Existing heading content, suffix bytes, underline, and terminator state are
-  unchanged; multiple canonical skip comments append at that same semantic
-  content boundary in invocation order;
-- a changed reason replaces only the accepted marker bytes and preserves its
-  inline or directive-block spelling and the line's terminator state;
-- unskip removes the canonical inline marker and its one writer-owned leading
-  ASCII space, restoring the exact heading bytes, or removes only an accepted
-  directive-block marker line and its
-  following terminator; and
-- every other source byte, including surrounding blank lines, remains
-  byte-identical.
+It also exposes static resource `backstitch://guides/alignment`.
 
-The operation creates one sibling
-`.backstitch-obligation-edit-<owner-token>.tmp` with
-`O_CREAT|O_EXCL|O_NOFOLLOW`, mode `0600`, then applies the original regular
-file's permission bits. It writes the complete edited bytes, fsyncs, closes,
-reopens without following symlinks, and revalidates the expected bytes. While
-still holding the lock it revalidates the original path/hash once more,
-atomically replaces that one spec file, and fsyncs its parent directory.
-Symlink/non-regular targets or staging paths are `ARTIFACT_CORRUPT`; a write,
-mode, fsync, or replace failure is `PUBLICATION_FAILED`. Death before replace
-leaves only one ignored staging file; the next skip/unskip removes stale
-regular matching staging files and refuses symlink/non-regular matches. No
-failure leaves a partial spec file.
+Tool inputs are exactly:
 
-Skipping with the same canonical reason and unskipping an evaluated obligation
-are idempotent `changed = false` operations with no source write. Updating a
-reason is `changed = true`. Skip/unskip never changes the active manifest.
-Before writing, Backstitch derives the exact post-edit repository snapshot by
-substituting the staged spec bytes into the captured immutable image. The
-successful response returns that token after the target-file compare-and-swap;
-it performs no fallible post-commit recapture. A concurrent change to another
-file may make the returned token immediately stale, as any edit after a read
-may, but cannot be overwritten by this one-file mutation. All old cursors are
-stale after a changed edit. An idempotent mutation returns the unchanged
-snapshot and does not itself stale a cursor. Activation of a skipped obligation is
-`INVALID_INPUT` with an action to unskip first; validation remains available
-so evidence can be prepared while an obligation is skipped.
+```text
+list_obligations:
+  {repo_root, cursor, limit}
+get_obligation:
+  {repo_root, obligation_id}
+summarize_obligation_evidence:
+  {repo_root, obligation_id, cursor, limit}
+find_obligation_evidence:
+  {repo_root, obligation_id, cursor, limit}
+get_obligation_candidate:
+  {repo_root, obligation_id, candidate_id}
+```
 
-MCP v1 is local stdio only, started as `backstitch mcp --stdio --repo-root
-<path>`. It has no network listener, no provider/model calls, no repository
-writes, and no activate, skip/unskip, deactivate, or approval tool. The CLI is
-the canonical CI,
-validation, and artifact-publication surface. CLI and MCP responses for the
-same library read must contain byte-identical canonical payloads after the
-transport envelope is removed.
+Nullable `cursor` and `limit` keys remain present. Other fields are nonblank
+strings except positive integer `limit`. Unknown keys are invalid input.
 
-A case created by activation is still a proposal until a human reviews its
-rendered diff and it lands through the repository's ordinary change-control
-workflow. A skip/unskip edit likewise has no review authority beyond its
-visible repository diff and ordinary landing. No
-agent-supplied `reviewed_by`, approval flag, or similar field can cross this
-trust boundary.
+Every repository tool requires `repo_root`, which must resolve to the server's
+startup root after symlink and containment checks. Addressed tools also require
+`obligation_id`; candidate detail requires `candidate_id`. List, summary, and
+discovery accept nullable `cursor` and `limit`. Tools return the same canonical
+core result object as CLI JSON. MCP framing and server metadata live outside
+that object. Golden tests byte-compare canonical core JSON from both adapters.
+
+Tool and guide descriptors include installed Backstitch version, contract
+version, and guide content hash. The server may cache immutable indexes by
+snapshot hash in memory, but every call is stateless and independently
+addressed. It performs no source write, provider import, network call,
+approval, arbitrary filesystem read, or remote transport.
 
 ### 8.7 Exit Semantics [EVC-8.7]
 
-Obligation commands preserve [SEM-7]'s exit classes:
+Exit behavior is:
 
-- exit `0`: the requested read, proposal validation, activation,
-  skip/unskip, deactivation, or check completed and applied policy allows it
-- exit `1`: the operation completed and found a target condition whose
-  effective diagnostic level is in `fail_on`
-- exit `2`: malformed or ambiguous input, unsafe unknown fields, snapshot
-  conflict, path escape, pagination mismatch, budget exhaustion, publication
-  failure, MCP dependency/handshake failure, or internal/tool failure
+| Condition | Exit |
+|---|---:|
+| Successful read, guide output, packet-only historical report, or report-only semantic result with no applied gate failure | 0 |
+| A valid current repository gate runs and effective policy finds a configured failure | 1 |
+| Invalid input/config, unresolved required source, snapshot instability/change, budget/deadline, corrupt/stale required artifact, provider/tool/internal failure | 2 |
 
-No failure path emits a traceback. MCP maps the same problem records into its
-structured error envelope without changing their code, message, action, or
-trusted payload.
+Current analyze applies this first-matching precedence:
 
-For a well-formed proposal, `obligation validate` exits `0` even when
-`valid = false`; discrepancies and guidance are its requested read result.
-`activate` accepts only `valid = true` and disposition `evaluate`.
-Snapshot and manifest staleness use their specific conflict problems; another
-well-formed but non-activatable proposal is
-`INVALID_INPUT` exit `2` with an action to run validation and resolve every
-discrepancy. Activation never publishes a partial case. Reads and resolution
-exit `0` on success. Checks, activation, deactivation, and skip may exit `1`
-only through applied BSE policy after completing the requested check or
-mutation. A policy-forbidden skip therefore leaves the visible annotation in
-the spec and returns the BSE010 finding; it never pretends the source write
-rolled back. Unskip does not run semantic analysis, but its guidance requires
-an obligation check before relying on the resumed gate.
-Structural corruption, conflict, unsafe input, or incomplete tool work is
-always exit `2`, regardless of policy.
+| Order | Condition | Calls/report | Exit |
+|---:|---|---|---:|
+| 1 | Invalid CLI/config, required qualification unavailable, unsupported platform, output/cache overlap, or initial capture/input/readiness-construction failure | zero provider calls; no current report | 2 |
+| 2 | No active obligation, active alignment debt, or blocked readiness | zero provider calls; no current report | 2 |
+| 3 | Any effective deterministic issue, including BSE001, has severity in `fail_on` | zero provider calls; no current report | 1 |
+| 4 | All active obligations are validly skipped | zero provider calls; final recapture and `not_run_all_skipped` report | 0 |
+| 5 | Selected packet count/kind/prompt preflight violates a semantic completeness or budget setting | zero provider calls; no current report | 2 |
+| 6 | Cache/provider/verify/normalization/runtime/source-change/output/internal failure, or `require_complete` is true and any selected packet lacks a valid result | attempted calls remain auditable; no current-success report | 2 |
+| 7 | `finding_handling = "require_disposition"` and one semantic finding lacks an exact disposition | complete report with finding debt | 2 |
+| 8 | One failure-authoritative semantic diagnostic has effective severity in `fail_on` | complete current report | 1 |
+| 9 | Otherwise | complete current report | 0 |
 
-## 9. CI Validation Of Frozen Cases [EVC-9]
+Row 4 is reached only after row 3, so setting BSE001 or another retained trace
+diagnostic to a failing level prohibits the skip or fails its unresolved trace
+without turning it into a tool error. Non-failing deterministic issues remain
+in packet/report context.
 
-CI never re-runs stochastic or agent-guided discovery for a frozen case. It
-does deterministically reconstruct trusted fields and the mandatory universe.
-Every active-manifest and immutable-case read is limited to
-`maximum_case_bytes + 1` before JSON parsing. Oversize input is
-`BUDGET_EXHAUSTED` with budget `case_bytes`, observed `limit + 1`, and exit
-`2`; it is never partially parsed. Activation applies the same ceiling to both
-proposed stored files before creating staging.
-Validation is, in order:
+Legacy semantic completeness keys apply only when at least one row is
+`selected`: `minimum_packets` compares selected count;
+`required_kinds` requires each named packet kind among selected rows;
+`maximum_packets` and `maximum_prompt_bytes` are fail-closed ceilings;
+`require_complete` requires one valid result per selected packet. All-skipped
+bypasses these semantic
+packet/result requirements because no packet is eligible. No-active-intent and
+alignment debt were already rejected by row 2. Historical replay skips rows 2 through 4 and
+applies artifact validation, semantic completeness, provider/tool, finding
+handling, semantic policy, and output rows in the same precedence.
 
-1. **Obligation inventory and disposition.** Resolve every section/invariant
-   obligation and its [EVC-8.3.2] disposition before selecting cases. Invalid
-   skip syntax is suppression hygiene and never changes disposition. A valid
-   skip creates BSE010 and runs it through ordinary suppression policy with the
-   exact reason. For a skipped obligation, validate any retained manifest and
-   immutable object through steps 2 and 3 for structural integrity, then stop
-   before currency, universe, relation, coverage, packet, analyze, or verify
-   work. It has no `CASE_REQUIRED_MISSING` diagnostic.
-2. **Active manifest check.** The manifest schema, repository ID, hash,
-   obligation ordering, referenced object paths, and object availability are
-   exact. Structural corruption or ambiguity is exit `2`.
-3. **Schema and identity check.** The case uses a supported closed schema;
-   its canonical identities, trusted digests, receipt references, and
-   `case_hash` recompute exactly. The stored guide record is validated for
-   closed shape and digest format as historical provenance but is not compared
-   with current installed guide bytes; a guide-only edit does not stale the
-   case. Agent-shaped fields cannot occupy trusted fields.
-4. **Target requirement check.** The current target section or invariant is
-   resolved by canonical obligation ID and its normalized digest is compared
-   with the frozen target receipt. A missing or changed target fires
-   `CASE_REQUIREMENT_STALE` and invalidates every derived proof obligation.
-   Raw-only target churn preserves case currency but changes packet identity.
-5. **Span check.** Every cited span's normalized digest is recomputed from
-   the current repository. Mismatches mark the citing obligations stale. A
-   raw-byte-only change preserves case currency but is reported as provenance
-   churn because it changes any newly generated model-visible packet.
-6. **Universe contract check.** A snapshot, broker, or universe-construction
-   algorithm version, eligibility, root, exclusion, or identity-affecting parameter change fires
-   `CASE_UNIVERSE_CONFIG_CHANGED`; a case cannot silently adopt it. Under the
-   same contract, the mandatory universe is recomputed and diffed ([EVC-7]).
-   New stable candidate IDs fire `CASE_UNIVERSE_EXPANDED`; raw receipt churn
-   does not.
-7. **Relation check.** `declared_mapping`, `declared_backlink`,
-   `invariant_binding`, and `static_reference` relations are re-derived from
-   repository structure. `semantic_support` and `counterevidence` remain
-   explicitly untrusted, proof-obligation-bound proposal relations. Missing or
-   changed trusted structural relations fire `CASE_RELATION_STALE`. A static
-   reference is never upgraded to runtime reach or assertion coverage.
-8. **Coverage check.** Every implementation obligation is bound to allowed
-   current evidence or has a structured unresolved request. A section test
-   obligation is `complete` with selected allowed test evidence or
-   `unresolved`. An invariant binding-test obligation may additionally be
-   `complete_absent` only when the complete universe has zero eligible test
-   candidates. Counterevidence is
-   complete only when every universe member is selected, considered, or omitted
-   with a nonblank reason. Gaps or an unresolved request fire
-   `CASE_COVERAGE_INCOMPLETE`; applied diagnostic policy decides whether that
-   debt fails the target. A blank reason is malformed case input and exit `2`,
-   not a repository finding.
-9. **Packet selection.** The sole producer emits schema-v3 packets for every
-   evaluated eligible section and invariant. A skipped obligation emits no
-   semantic packet and can reach no analyze or verify path. An active case
-   produces `evidence_mode =
-   "case"`, binding its case hash and current selected implementation/test
-   bytes. A target without an active case produces `evidence_mode = "trace"`
-   from the existing deterministic mappings, backlinks, and binds and cannot
-   reach `independently_verified`. If its obligation is listed in
-   `required_obligations`, it also fires `CASE_REQUIRED_MISSING`. A valid
-   skip is the explicit exception and remains visible as BSE010 in the
-   suppression audit. A stale case
-   remains case-mode and visible but cannot reach `independently_verified`
-   until refreshed. The producer never silently falls back from an active
-   malformed case to trace mode.
-10. **Verdict reuse.** Analyze results reuse the current packet identity;
-   case-mode verify events reuse exact `claim_hash`, `case_evidence_hash`,
-   `verifier_case_hash`, epoch, and verify inference identity. Trace mode has
-   no verify event. A reason, guide-provenance, or other audit-only change that
-   changes `case_hash` but preserves `case_evidence_hash` reuses the verify
-   event. Under `cache_mode = "require"`, a miss caused by
-   raw-byte churn or any other identity change is incomplete analysis, even
-   when normalized case validity remains current.
-11. **Policy.** Findings project through [SEM-6]/[EVC-6] to the applied
-   policy and `fail_on`.
+Every schema-3 analysis report, in current-repository or historical-snapshot
+scope, requires `packet_warning_count = 0` and `packet_warning_debt = []`.
+Warning-debt vocabulary retained by the legacy schema-1 report validator is
+historical validation/presentation only and has no schema-3 policy authority.
 
-`case_verifiable` is policy-independent and true only when the obligation is
-evaluated, the case is active,
-its target/span/universe/relation/config checks are current, its universe and
-structural relations are complete, every member is accounted for, every proof
-obligation is `complete` or validly `complete_absent` with no open request,
-and every omitted universe span can be included in the closed verifier
-projection. Thus
-none of BSE001 through BSE004, BSE007 through BSE009, malformed input, or an
-unresolved request may be present. Applied policy may let such debt exit `0`
-for report-only adoption, but it cannot make the case verifiable or allow a
-verify call.
-
-### 9.1 Semantic Packet Schema V3 [EVC-9.1]
-
-The v3 artifact row is closed and contains exactly:
+Schema-3 analysis problems retain [SEM-7]'s closed rows and add nullable
+`obligation_id` plus required `details`. New stage/code/detail pairs are:
 
 ```text
-schema_version = 3
-packet_id
-packet_hash
-kind                         # section | invariant
-evidence_mode                # trace | case
-case_id                      # null in trace mode
-case_hash                    # null in trace mode
-case_evidence_hash           # null in trace mode
-content_hash                 # null for section; required for invariant
-subject
-requirement
-implementation_evidence
-test_evidence
-counterevidence
-evidence_decisions
-open_questions
-issues
-packet_warnings
+alignment/no_active_intent:       {}
+alignment/alignment_incomplete:   {obligation_ids}
+alignment/readiness_blocked:      {obligation_ids}
+snapshot/snapshot_unstable:       {attempts}
+snapshot/source_changed:          {before_snapshot, after_snapshot}
+input/mutable_path_overlap:       {mutable_path, semantic_input}
+input/unsupported_platform:       {platform}
+input/packet_report_budget_exhausted: {limit_bytes, observed_bytes}
+qualification/required_qualification_unavailable: {
+  selectors, reason, qualification_report_raw_sha256,
+  expected_derivation_identity, current_derivation_identity,
+  expected_qualification_identity, current_qualification_identity,
+  expected_composition_sha256, current_composition_sha256
+}
 ```
 
-`subject` is a closed variant. Section subject contains exactly `spec_path`,
-`section_id`, and `title`. Invariant subject contains exactly `invariant_id`,
-`tier`, and the existing closed declaration record. `requirement` contains
-exactly `path`, `start_line`, `end_line`, `excerpt`, `raw_sha256`,
-`normalized_sha256`, and `receipt_hash`.
+Obligation IDs are unique and canonical-sorted; hashes are lowercase SHA-256;
+paths are canonical absolute local diagnostic paths excluded from content
+identity; attempts, limits, and observed byte counts are positive. Existing
+SEM stage/code pairs use empty details unless their coordinated migration
+defines a narrower object. Every new pair is an exit-2 problem and has a firing
+test. Packet generation uses the same code and details in its traceback-free
+CLI error projection when it exceeds [EVC-8.3.1]'s report-byte bound.
 
-Every item in the three evidence arrays contains exactly `candidate_id`,
-`candidate_kind`, `path`, nullable `symbol`, `start_line`, `end_line`,
-`snippet`, `raw_sha256`, `normalized_sha256`, and `receipt_hash`.
-`snippet` is nonblank except that an empty-module candidate has the exact
-virtual span `1..1` and empty snippet defined by [EVC-7.1]. No other blank
-snippet or virtual range is valid.
-`evidence_decisions` contains exactly `proof_obligation_id`, `candidate_id`,
-`decision` (`selected`, `considered`, or `omitted`), and nonblank `reason`.
-`open_questions` contains exactly `proof_obligation_id`, nonblank `question`,
-and nonblank `reason`. `issues` retains the exact v2 closed issue record.
-Unknown fields, duplicate candidate/decision identities, role mismatch, or
-non-canonical order are invalid packet input.
+Qualification selectors are unique long `SEMANTIC_*`-code/context strings in
+[SEM-6] declaration order; a configured `BSA00*` alias is normalized before
+this projection. Reason is `missing`, `corrupt`, `failed`, or
+`identity_mismatch`.
+The raw report hash is null only for `missing`; otherwise it is bare lowercase
+SHA-256 of the exact read bytes, including the required final LF. It is distinct
+from configured `qualification_report_sha256`, which hashes the canonical
+object without that LF. Composition SHA-256 hashes canonical JSON for exactly
+`{analysis_composition_sha256, verify_composition_sha256}` under [EVC-10.1].
+Expected composition is null for `missing` or `corrupt`; otherwise the stored
+objects and all three hashes are recomputed from the report. Current composition
+uses the same closed objects and hash rules over resolved installed/configured
+values before cache/provider construction and is null only when verification
+is disabled or cannot resolve. Derivation identity has exactly
+`snapshot_algorithm_version`, `obligation_algorithm_version`,
+`discovery_algorithm_version`, `packet_contract_version`, and
+`normalization_version`; expected is null for `missing` or `corrupt` and
+otherwise comes from the validated report, while current comes from code-owned
+values. Qualification identity has exactly `corpus_sha256`, `mode`, `trials`,
+and `eval_config`; expected is null for `missing` or `corrupt` and otherwise
+comes from the validated report, while current uses the resolved enforce
+configuration and configured corpus digest. Current is null only when no
+complete enforce configuration can be resolved. This problem's line-safe
+message uses [EVC-6]'s required requalification action.
 
-The three evidence arrays sort by `(candidate_id, path, start_line, end_line,
-receipt_hash)`. `evidence_decisions` sorts by `(proof_obligation_id,
-candidate_id, decision, reason)`. `open_questions` sorts by
-`(proof_obligation_id, question, reason)`. Issues retain [SEM-3]'s canonical
-issue order. Packet warnings are unique and sort by Unicode code point. Null
-symbols compare as the empty string wherever a nested tie-break needs them.
+Untraced candidates do not cause exit 1. Deterministic trace findings affect
+`backstitch check` and current analyze through existing configured severity and
+`fail_on` rules. Active/evaluate alignment debt blocks current semantic
+analysis and is exit 2 before provider work. A valid skip or non-active rung is
+non-executable but not a tool failure. An all-skipped corpus follows the same
+matrix: a failing deterministic issue exits 1 without a report; otherwise it
+publishes the recapture-validated `not_run_all_skipped` report and exits 0.
+No-active-intent is exit 2. A bootstrap read still exits 0 and reports every
+readiness fact.
 
-The model-visible projection contains exactly `packet_contract_version = 3`,
-`packet_id`, `kind`, `evidence_mode`, nullable `case_id`, nullable
-`case_evidence_hash`, nullable `content_hash`, `subject`, text-free
-`requirement`, `evidence_sources`, reason-free `evidence_states`, reason-free
-`proof_obligation_status`, `issues`, and `packet_warnings`. It excludes the
-artifact evidence arrays, `case_hash`, every decision reason, every open
-question string/reason, and all guide/proposal provenance. Model-visible
-`requirement` contains exactly artifact requirement `path`, `start_line`,
-`end_line`, `raw_sha256`, `normalized_sha256`, and `receipt_hash`.
-`evidence_states`
-contains exactly `proof_obligation_id`, `candidate_id`, and `decision` in the
-same order as artifact `evidence_decisions`; `proof_obligation_status` contains
-exactly `proof_obligation_id` and `status` (`complete`, `complete_absent`, or
-`unresolved`) in ID order.
+All exits are traceback-free. MCP returns the same problem code and core result
+but has no process-exit contract per call.
 
-An `evidence_sources` row contains exactly `role`, `path`, `start_line`,
-`end_line`, `shown_text`, ordered `candidates`, and ordered `receipt_hashes`.
-A candidate subrow contains exactly `candidate_id` and `candidate_kind`.
-Backstitch seeds one interval from the requirement and each artifact evidence
-item, grouped by `(role, path)`. It sorts by `(start_line, end_line,
-candidate_id-or-empty, receipt_hash)` and merges intervals whose inclusive
-line ranges overlap; adjacent non-overlapping intervals remain separate. A
-merged row spans the minimum start through maximum end and reads `shown_text`
-once from those exact current inclusive source lines. Its candidates and
-receipt hashes are the unique unions in candidate-ID and hash order. The
-requirement seed has no candidate and one target receipt. Rows sort by role,
-path, start, and end using role order `requirement`, `implementation`, `test`,
-`counterevidence`. This produces one maximal region for any model evidence
-coordinate, and each source line appears at most once per role. Trusted [SEM-5]
-normalization therefore matches model `{role, path, start_line, end_line}` to
-exactly one row and reconstructs the excerpt from `shown_text`.
-The one exception to physical-line slicing is [EVC-7.1]'s empty-module
-candidate: its row retains virtual coordinate `1..1`, has empty `shown_text`,
-and carries its candidate and receipt identity. It does not assert that a
-physical line exists. This exact row is a valid trusted model citation with an
-empty excerpt and SHA-256 of empty UTF-8 bytes. No other empty `shown_text` row
-is valid.
+## 9. Current CI Gate [EVC-9]
 
-`packet_hash` is SHA-256 of the canonical model-visible projection. Current raw
-bytes supply every `shown_text`; candidate-specific artifact snippets never
-enter the request a second time.
+The current CI lane is:
 
-Case mode includes every selected implementation/test item as its support role.
-Every other universe member, whether considered or omitted and regardless of
-its original candidate kind, appears in `counterevidence` as its full current
-receipt span with original `candidate_kind`; a selected support candidate is
-already visible and is not duplicated. Thus no accounted evidence-bearing
-candidate is hidden from analyze, even when an agent labels it an omission.
-Case mode never truncates or drops evidence: an unreadable span, or a packet
-over a positive configured `maximum_prompt_bytes`, is exit `2` with an action
-to narrow the universe or raise the reviewed ceiling. A zero ceiling retains
-[SEM-9]'s disabled-maximum meaning. Proposal reasons and open-question
-prose remain only in the review artifact and never enter analyzer or verifier
-request bytes. Reason-only edits preserve `case_evidence_hash`, packet hash,
-and both model requests while changing the audit `case_hash`.
+```text
+capture current source
+  -> resolve obligation inventory and reciprocal trace graph
+  -> run deterministic check
+  -> select executable, evaluate-disposition obligations
+  -> derive packet v3 from the same captured image
+  -> analyze and normalize
+  -> independently verify
+  -> project policy
+  -> recapture current source
+  -> publish only if snapshot is unchanged
+```
 
-Trace mode derives implementation and test evidence from the same ordered
-mapping/backlink/bind edges used by v2. It admits at most eight implementation
-spans and eight test spans, each at most 120 lines, ordered by path, symbol,
-and start line. Module evidence uses the first 120 lines. It leaves
-`counterevidence`, `evidence_decisions`, and `open_questions` empty and adds a
-packet warning when an eligible span is omitted by these bounds. Unlike v2,
-section test edges resolve and include current test snippets. Trace-mode
-warnings preserve [SEM-2]/[SEM-7] packet-completeness handling and trace mode
-is never independently verified.
+No committed packet, cache result, historical replay, semantic success, or
+policy override may replace the first four steps. Zero-selected behavior is
+the closed all-skipped/no-active/debt matrix in [EVC-2.1], never an ambient
+repository rule.
 
-Packet v2 remains a read-only legacy artifact during the migration window. No
-v2 producer remains after v3 activation, and no analysis result bound to a v2
-packet hash can satisfy a v3 cache key. The canonical analyze result row stays
-at schema version 2 and the cache object stays at version 1 because their
-closed shapes do not change; their existing packet hash and inference identity
-bind the v3 projection. Unsupported legacy packet input receives an explicit
-migration action.
+Packet and result caches are performance layers. Every read revalidates the
+complete object and keyed preimage. Cache corruption, stale identity, or
+missing required cached data in require mode fails closed without provider
+traffic.
 
-Staleness and insufficiency are **diagnostics, not new exit codes**. The
-[SEM-7] exit contract is unchanged: exit `2` remains tool/invocation/
-completeness failure; exit `1` remains an effective target finding; exit
-`0` otherwise. A strict repository makes staleness an effective `error`
-(exit `1`); a tolerant one reports it. The diagnostics:
+### 9.1 Source-Aligned Evidence Packet V3 [EVC-9.1]
 
-| Code | Short | Packaged level | Meaning |
-|---|---|---|---|
-| `CASE_EVIDENCE_STALE` | `BSE001` | warning | A cited span's normalized digest no longer matches |
-| `CASE_UNIVERSE_EXPANDED` | `BSE002` | warning | Recomputed universe contains unconsidered members |
-| `CASE_COVERAGE_INCOMPLETE` | `BSE003` | warning | A proof obligation or universe member is not accounted for |
-| `CASE_RELATION_STALE` | `BSE004` | warning | A trusted structural relation no longer re-derives |
-| `CASE_VERDICT_MISSING` | `BSE005` | info | No verify result exists for a claim configured to require one |
-| `CASE_DISPUTED_BY_VERIFIER` | `BSE006` | info | Verify returned `unsupported` |
-| `CASE_REQUIRED_MISSING` | `BSE007` | warning | A configured required obligation has no active case |
-| `CASE_UNIVERSE_CONFIG_CHANGED` | `BSE008` | warning | Universe identity or construction parameters differ from the frozen case |
-| `CASE_REQUIREMENT_STALE` | `BSE009` | warning | The target section or invariant no longer matches the frozen requirement receipt |
-| `OBLIGATION_SKIPPED` | `BSE010` | info | The obligation carries an explicit reasoned skip disposition |
+One executable obligation produces one packet artifact row with exactly:
 
-BSE010 is created before semantic packet selection and is the one audit
-representative for a skip. Under packaged policy the skip directive suppresses
-it into [EXC-7]'s `suppressed_issues` with the exact reason and scope. If
-applied policy makes BSE010 non-suppressible, it remains visible under the
-ordinary suppression-hygiene rules and may fail through `fail_on`; no other
-BSE diagnostic is synthesized for work the skip deliberately did not run.
+```text
+{
+  schema_version: 3,
+  packet_id,
+  packet_hash,
+  kind,
+  obligation_id,
+  source_snapshot: {
+    snapshot_hash, obligation_state_hash, derivation_config_hash
+  },
+  readiness: {
+    intent_state, alignment_state, disposition, obligation_rung, gate_state,
+    required_roles
+  },
+  requirement,
+  declared_evidence,
+  counterevidence,
+  trace_summary,
+  evidence_regions,
+  issues,
+  packet_warnings
+}
+```
 
-The refresh workflow is author-pays: the change that invalidates a case is
-the change responsible for refreshing it, exactly as a change that breaks a
-test fixes the test. Validation output must name the invalidated cases and
-the specific stale obligations so a refresh is targeted, not a rediscovery.
+`packet_id` equals the canonical obligation ID. `kind` is `section` or
+`invariant`. Nested records are closed:
 
-## 10. Measurement [EVC-10]
+```text
+requirement = {
+  role: "requirement",
+  path, identity, title, start_line, end_line, text
+}
 
-Four quantities are targetable and must be measurable from committed
-artifacts before any error promotion:
+declared_source = {
+  source_role, receipt_hash, relation_kinds, reciprocity_state
+}
 
-- **Candidate capture:** how often deterministic discovery includes the code
-  and tests an adjudicator identifies as necessary. Report implementation,
-  test, and counterevidence capture separately; a good verifier cannot repair
-  evidence it never receives.
-- **Evidence sufficiency:** how often a frozen case contains what an
-  adjudicator needs, measured as the rate at which sufficiency review and CI
-  verify complete without adjudicator-requested evidence additions.
-- **Verdict quality conditional on sufficiency:** precision, recall,
-  indeterminate rate, and uncached flip rate of verify verdicts on the
-  [SEM-8] labelled corpus, reported per verify model, end to end through
-  the assembled-case path.
-- **Maintenance cost:** cases invalidated per changed line, refresh
-  frequency, and refresh cost. A case invalidated by unrelated churn is
-  over-cited; evidence minimality is a quality dimension and high
-  invalidation rates are reported as case-quality debt, not hidden.
+declared_region = {
+  role, path, symbol, start_line, end_line, snippet,
+  sources: [declared_source]
+}
 
-Agent interaction cost is reported with candidate capture and sufficiency:
-named calls, pages, bytes returned, budget exhausted events, normalization
-events, and adjudicator-requested evidence additions per completed obligation. The qualifying
-corpus includes agents that start with only the reference surface and agents
-that use the optional repository skill. This distinguishes interface quality
-from hidden prompt or session knowledge.
+counterevidence_source = {
+  candidate_id, candidate_kind, receipt_hash, trace_state,
+  discovery_bases, relation_kinds
+}
 
-Skip visibility is never denominator laundering. Every obligation-coverage
-report carries `total_obligations`, `evaluated_obligations`,
-`skipped_obligations`, and `covered_obligations`, plus both
-`covered_obligations / total_obligations` and
-`covered_obligations / evaluated_obligations` (null at a zero denominator).
-Skipped obligations remain in the first denominator and never enter the
-covered numerator. A qualification fixture or manifest unit carrying a skip
-annotation is invalid corpus input; gate qualification must measure the
-interface, not exempt its hard examples.
+counterevidence_region = {
+  role: "counterevidence",
+  path, start_line, end_line, snippet,
+  candidates: [counterevidence_source]
+}
 
-End-to-end seeded-violation recall is the qualifying metric: a seeded
-misalignment must be captured by some case's obligations, survive assembly,
-and be flagged through policy. Verifier-only metrics cannot qualify a gate.
+trace_summary = {
+  declared_counts: [{
+    source_role, total, complete, one_sided
+  }],
+  candidate_counts: [{
+    candidate_kind, declared, partially_declared, untraced, conflicted
+  }],
+  relation_counts: [{relation_kind, count}]
+}
 
-### 10.1 Verify Evaluation And Promotion Artifact [EVC-10.1]
+evidence_region = {role, path, start_line, end_line}
+```
 
-Verify evaluation has its own closed table; it does not inherit analysis-lane
-thresholds:
+Requirement identity is the local section ID or invariant ID. Section title is
+nonblank; invariant title is null. For a section, the parser takes the complete
+physical section span, removes the inline skip token, and masks every
+parser-owned mapping or traceability/skip directive line to an empty line. For
+an invariant, it takes the exact declaration span and statement. In both cases
+it UTF-8 replacement-decodes raw bytes, normalizes CRLF to
+LF, preserves a bare CR that is not part of a CRLF pair as literal
+in-line content, preserves exactly one output line per LF-delimited
+physical source line, and joins lines with `\n` without a final
+terminator. That exact string is `text`; its physical first/last lines are the
+stored inclusive coordinates. No prose summarization enters requirement.
+
+A snippet uses the same decode/newline rule over its complete receipt span,
+without masking. It has exactly `end_line - start_line + 1` logical lines,
+where an empty single-line span is one empty line. `symbol` is present and
+nullable. Declared source role is `implementation`, `test`, or
+`binding_test`. Model role is `implementation` for source role implementation
+and `test` for source role test or binding_test. Thus invariant binding tests
+reuse [SEM-5]'s model-facing `test` role without erasing the source role.
+Reciprocity state uses [EVC-8.3]'s vocabulary. Relation kinds, discovery bases,
+candidate kinds, and trace states use their closed EVC orders.
+
+Declared regions sort by `(role, path, start_line, end_line, symbol)` with null
+symbol as empty. Sources sort by `(source_role, receipt_hash,
+relation_kinds)`. Counterevidence regions sort by `(path, start_line, end_line,
+first_candidate_id)`; candidate sources sort by candidate ID. Trace summary
+contains one row for every vocabulary member, including zero-count rows, in
+[EVC-2.2]/[EVC-7] declaration order. Counts are nonnegative and recompute from
+the unmerged source/candidate inventory. A relation count is the number of
+unique `(inventory_side, source_identity, relation_kind)` memberships, where
+`inventory_side` is `declared` or `candidate`, declared source identity is
+`(source_role, receipt_hash)`, and candidate source identity is `candidate_id`.
+Each source contributes at most one membership for a relation kind even when
+multiple internal graph rows project the same kind.
+
+Issues use [SC-6]'s canonical model-visible issue shape and order.
+`packet_warnings` is exactly the empty list for schema 3. Packet construction
+emits no truncation warning: any required text or universe budget overflow is
+fatal.
+
+Packet construction includes all required declared evidence and the complete
+closed counterevidence universe from [EVC-7]. No caller, agent, or model selects
+rows. `declared` candidates whose exact receipt duplicates declared evidence
+remain represented in trace summary but do not duplicate visible snippet
+text. Untraced and conflicted candidates remain explicit counterevidence.
+
+Within each model role and path, identical and fully contained snippet spans
+merge to the first maximal span. Equal later duplicates are omitted. The
+maximal region accumulates every source or candidate subrow. Its symbol is
+retained only when every accumulated source has the same symbol; otherwise it
+is null. Partial or disjoint spans remain separate. Text-free candidate and
+receipt identities therefore remain represented and merging never hides
+universe membership.
+
+`evidence_regions` is derived after merging. It begins with the nonblank
+requirement region, then every nonblank declared region, then every nonblank
+counterevidence region. Its role vocabulary is exactly `requirement`,
+`implementation`, `test`, and `counterevidence`; it sorts in that role order,
+then path and span. Duplicate coordinates are impossible after merging.
+Analyzer and verifier model evidence contains exactly role/path/start/end and
+must equal one `evidence_regions` row. `counterevidence` is a permitted
+advisory citation. It never satisfies a required `implementation` or `test`
+role and never changes alignment.
+
+The model-visible projection contains exactly:
+
+```text
+{
+  packet_contract_version: 3,
+  packet_id,
+  kind,
+  obligation_id,
+  requirement,
+  declared_evidence,
+  counterevidence,
+  trace_summary,
+  evidence_regions,
+  issues,
+  packet_warnings
+}
+```
+
+It excludes `schema_version`, `packet_hash`, `source_snapshot`, readiness,
+full receipt objects, guide text, skip reason, local absolute paths, policy,
+cache, and provenance. Nested receipt hashes remain visible as source identity.
+`packet_hash` is SHA-256 of canonical JSON for this exact model-visible
+projection. Exact visible source bytes therefore own the semantic identity; an
+unrelated captured file may change snapshot identity without changing this
+packet hash.
+
+`obligation_state_hash` is SHA-256 of canonical JSON for:
+
+```text
+{
+  obligation_state_version: 1,
+  obligation_id, kind, obligation_rung,
+  intent_state, alignment_state, disposition, gate_state,
+  required_roles,
+  declared_sources: [{
+    source_role, receipt_hash, relation_kinds, reciprocity_state
+  }]
+}
+```
+
+Declared sources use the same sorted unique inventory that feeds merged
+regions. `derivation_config_hash` is SHA-256 of canonical JSON for:
+
+```text
+{
+  derivation_config_version: 1,
+  section_required_roles,
+  maximum_candidate_items, maximum_catalog_items, maximum_lexical_seeds,
+  maximum_work_units, maximum_packet_bytes, maximum_packet_report_bytes,
+  static_neighbor_depth,
+  obligation_algorithm_version, discovery_algorithm_version,
+  packet_contract_version, normalization_version
+}
+```
+
+Every field is required and uses the effective captured setting/version. Page,
+response, deadline, retry, output, provider, and policy settings are excluded.
+
+The packet report is exactly:
+
+```text
+{
+  schema_version: 2,
+  artifact: "backstitch-packet-report",
+  packet_schema_version: 3,
+  scope: "source_snapshot",
+  source_snapshot: {
+    snapshot_hash, file_count, byte_count, unreadable_count
+  },
+  derivation_contract: {
+    obligation_algorithm_version,
+    discovery_algorithm_version,
+    packet_contract_version,
+    normalization_version,
+    semantic_config_sha256
+  },
+  packet_jsonl_sha256,
+  packet_count,
+  packet_bytes,
+  selection_status,
+  readiness_counts: {
+    total, active, out_of_scope, selected, skipped, alignment_debt, blocked
+  },
+  alignment_audit: [{
+    obligation_id, kind, path, start_line,
+    intent_state, alignment_state, disposition, obligation_rung, gate_state,
+    skip
+  }],
+  deterministic_issues: [{
+    issue_identity, code, short_code, context,
+    severity, default_severity,
+    path, line, message, obligation_id
+  }],
+  packets: [{packet_id, packet_hash}],
+  packet_report_content_sha256,
+  tool_version,
+  created_at
+}
+```
+
+Packet rows use JSONL order. Counts are nonnegative and satisfy `total =
+out_of_scope + selected + skipped + alignment_debt + blocked` and `active =
+selected + skipped + alignment_debt + blocked`. Buckets are the disjoint
+[EVC-2.1] corpus matrix. `selection_status` is `selected`,
+or `not_run_all_skipped`; debt, blocked, and no-active runs publish no packet
+report. `packet_count` equals the length of `packets` and `selected`.
+
+`alignment_audit` contains every addressable obligation in the captured
+inventory, including out-of-scope and skipped rows. It sorts by path, start
+line, and obligation ID. `skip` is null for `evaluate`; for `skipped` it is
+exactly `{reason, path, line}` from the valid source marker. The facts use
+[EVC-2.1]'s closed vocabularies. Kind is `section` or `invariant`; paths are
+canonical repository-relative POSIX strings; lines are positive integers; and
+the reason uses [EVC-8.3.2]'s validation. The rows deterministically reproduce
+every readiness count. They are audit projection only and cannot alter packet
+selection or alignment.
+
+`deterministic_issues` is the complete ordered projection of every effective,
+non-`off`, unsuppressed issue retained by the ordinary deterministic report for
+the same snapshot. It uses [SC-4]'s canonical code, short code, nullable
+context, effective severity, packaged default severity, nullable path/line,
+and message. `obligation_id` is the canonical attributed obligation or null.
+`issue_identity` is lowercase SHA-256 of canonical JSON for exactly
+`{code, context, path, line, obligation_id, ordinal}`; `ordinal` is the
+zero-based occurrence among otherwise equal preceding fields in ordinary
+deterministic issue order. The array preserves that ordinary order. It never
+contains an `off` or suppressed issue; those remain recoverable only through
+the existing suppression audit. A successful current report can contain only
+issues whose effective severity is outside `fail_on`, because [EVC-8.7] row 3
+precedes publication.
+
+`packet_report_content_sha256` is lowercase SHA-256 of canonical JSON for
+exactly this object:
+
+```text
+{
+  schema_version, artifact, packet_schema_version, scope,
+  source_snapshot, derivation_contract,
+  packet_jsonl_sha256, packet_count, packet_bytes, selection_status,
+  readiness_counts, alignment_audit, deterministic_issues, packets
+}
+```
+
+It covers every packet-report field except itself and the two provenance fields
+`tool_version` and `created_at`. Current generation recomputes it before
+publication. Historical replay recomputes it before using any audit, count,
+snapshot, derivation, or packet identity field; mismatch is corrupt input,
+exit 2, with no analysis report. Successful validation proves internal report
+integrity only. The named source derivation remains `claimed_unverified` until
+an explicit repository comparison succeeds.
+
+`packet_bytes` is the exact JSONL byte length. `created_at` is RFC 3339 UTC
+provenance. It and `tool_version` are excluded from content identity; all
+packet-derived fields are recomputed from packet bytes. In current generation,
+the snapshot owner also validates the source-snapshot and derivation fields. A
+packet-only loader can validate their shape and internal use but treats their
+historical source provenance as a claim until repository comparison.
+`semantic_config_sha256` hashes the `semantic_config` object in [EVC-8.2]. The
+canonical JSON bytes of the complete packet report, including content hash and
+provenance, must not exceed `maximum_packet_report_bytes`. The loader applies
+that bound before JSON parsing. Generation applies it after complete assembly
+and before staging. Overflow is exit 2 and publishes no packet report, packet
+JSONL, analysis report, cache entry, or policy result; the report is never
+truncated and no partial audit is permitted.
+
+Packet overflow is fatal. There is no warning-based truncation of requirement,
+required declared evidence, or counterevidence universe. A report-only
+bootstrap command may describe why a packet is unavailable, but must not emit
+a semantic packet for a non-executable obligation. `maximum_packet_bytes`
+limits the complete canonical packet JSONL artifact, including its line-feed
+terminators, not each row independently. Exact-limit output succeeds;
+limit-plus-one fails before any packet or report publication.
+
+The standalone `backstitch packets` inspection command may filter packet JSONL
+with `--kind`, but schema-2 `--report` is valid only with `--kind all`. A
+filtered JSONL file has no complete-corpus packet report and therefore cannot
+be supplied to historical analysis. Current `analyze --repo-root` and its
+optional packet/report output pair always compile the unfiltered selected
+corpus.
+
+The analysis report revision retains [SEM-7]'s closed analysis, finding,
+problem, debt, cost, and cache records and changes its top-level schema to 3.
+It adds exactly these required top-level fields:
+
+```text
+scope
+semantic_status
+artifact_integrity
+artifact_currentness
+source_provenance
+source_snapshot
+packet_report_content_sha256
+alignment_summary
+alignment_audit
+deterministic_issues
+verification
+```
+
+`scope` is `current_repository` or `historical_snapshot`.
+`semantic_status` is `evaluated`, `not_run_all_skipped`, or
+`historical_replay`. Current selected runs use the first, current all-skipped
+runs the second, and packet mode the third.
+`artifact_integrity` is `valid`; corrupt input publishes no report.
+`artifact_currentness` uses [EVC-4.1]. `source_provenance` is
+`captured_current`, `compared_match`, `compared_mismatch`, or
+`claimed_unverified`. `source_snapshot` is the packet-report snapshot record.
+`packet_report_content_sha256` is the validated packet-report value above.
+`alignment_summary` is the packet report's exact `readiness_counts`.
+`alignment_audit` and `deterministic_issues` are byte-for-byte canonical JSON
+copies of the packet-report arrays. Thus a zero-packet all-skipped report still
+shows every skipped obligation's alignment state, source reason, and retained
+BSE001 or trace issue. Historical replay preserves the captured audit without
+reinterpreting it as current source state.
+`verification` is the following closed tagged object:
+
+```text
+{
+  state,
+  contract,
+  events,
+  aggregate_counts: {
+    independently_verified,
+    disputed,
+    verification_indeterminate
+  },
+  cache_hits,
+  cache_misses,
+  provider_calls
+}
+```
+
+`state` is `disabled` or `enabled`. Disabled verification requires
+`contract = null`, an empty `events` array, all three aggregate counts equal to
+zero, and zero cache hits, misses, and provider calls. It projects no
+independent verification context. Enabled verification requires `contract`
+with exactly:
+
+```text
+{
+  verify_contract_version,
+  prompt: {id, version, sha256},
+  provider: {
+    backend_id, plugin_id, model_id, model_revision,
+    adapter_id, adapter_version,
+    llm_distribution_version,
+    plugin_distribution_name, plugin_distribution_version
+  },
+  request: {json_mode, temperature, seed, max_tokens},
+  search_epochs,
+  required_verdicts,
+  minimum_support_score,
+  indeterminate
+}
+```
+
+These fields are the common projection of [EVC-3.1] and [EVC-5]; epochs retain
+configured order. Enabled verification with zero selected findings, including
+an all-skipped corpus, has this non-null contract but requires empty events,
+zero aggregate counts, and zero cache/provider counters. With selected
+findings, events and counters are recomputed under [EVC-3.1]. Counts and cache/
+provider counters are nonnegative integers and aggregate counts equal the
+number of events in each state.
+Current reports require `artifact_currentness = current`. Packet-only reports
+require `unverifiable` and `claimed_unverified`; compare mode reports
+`current`/`compared_match` or `stale`/`compared_mismatch` while scope remains
+historical. Current mode reports `current`/`captured_current`. Corruption is
+returned in the exit-2 problem envelope and no analysis report is published.
+
+_Implementation mapping_:
+
+- `backstitch/markdown_specs.py`
+
+## 10. Measurement And Promotion [EVC-10]
+
+Qualification measures distinct product questions separately:
+
+- obligation identification and unaddressable-intent recall;
+- readiness-state correctness for every state transition;
+- declared-evidence locator, reciprocity, and receipt correctness;
+- candidate recall by kind and trace-state precision;
+- guidance usefulness, first-reviewed-diff correctness, and absence of source
+  mutation;
+- authoring cost from untraced or partial intent to the first executable
+  obligation, including elapsed time, reviewed source-diff attempts, changed
+  source files/lines, and Backstitch calls;
+- candidate disposition counts and rates for human-reviewed `accepted`,
+  `rejected`, and `irrelevant` labels;
+- public-help-only bootstrap completion and comprehension of the source-authority
+  boundary;
+- packet evidence sufficiency and counterevidence capture;
+- analyzer conditional precision/recall;
+- composed analyze-to-adversarial-verify conditional precision/recall,
+  false-positive rate, indeterminate rate, and uncached flip rate;
+- end-to-end recall from source intent through independently verified claim;
+- CLI call count, pages, and response bytes, plus MCP cost and parity only when
+  Phase D is implemented;
+- invalidation under relevant edits versus unrelated edits;
+- cold/warm latency, deterministic work units, and peak RSS.
+
+Candidate recall does not imply declared-evidence correctness. Alignment
+completion does not imply semantic conformance. Semantic precision does not
+repair missing trace. Aggregate dashboards must preserve these denominators.
+Qualification judges the exact composed analyzer/verifier configuration on the
+committed corpus. It does not estimate cross-model correlation or award credit
+for a distinct model tuple. Stability alone is insufficient: stronger policy
+requires measured precision, sensitivity, critical-case capture, and replay.
+
+The deterministic scale fixture contains at least 1,000 obligations, 5,000
+Python modules, 20,000 candidates, and 50 MiB captured source. The provisional
+design targets at spec promotion are 30 seconds for full discovery or packet
+generation, 5 seconds for cache-only current analyze, 2 seconds for warm
+list/detail, and 1 GiB peak RSS on the pinned Linux CI runner. No
+pre-implementation benchmark is required to promote this spec. Once the
+relevant operation exists, its implementation slice must create a comparable
+baseline and meet these values as hard acceptance ceilings before that slice or
+the overall implementation is called qualified. Tests also assert deterministic
+work counts. If the first comparable baseline misses a ceiling, stop the slice,
+diagnose the cause, and independently review an explicit spec revision; do not
+silently relax the ceiling during implementation.
+
+The pinned runner identity is owned by committed
+`tests/performance/runner-contract.json`, with exactly:
+
+```text
+{
+  schema_version: 1,
+  workflow_path: ".github/workflows/ci.yml",
+  job_id: "semantic-scale",
+  runs_on,
+  runner_image_os,
+  runner_image_version,
+  architecture,
+  cpu_model,
+  logical_cpu_count,
+  memory_bytes,
+  python_version,
+  uv_version,
+  uv_lock_sha256
+}
+```
+
+Strings are nonblank and contain no wildcard; counts are positive integers;
+the lock hash is exact lowercase SHA-256. The workflow probes the runtime and
+requires exact equality before applying time/RSS ceilings. A mismatch makes
+performance qualification unavailable, not failed or silently comparable.
+Changing runner image, hardware, Python, uv, or lock identity requires a
+reviewed contract update and baseline rerun. The first implementation slice
+that claims performance qualification must add this file and the named job.
+Their absence makes qualification unavailable; it does not block promotion of
+an otherwise reviewed pre-implementation contract.
+
+### 10.1 Evaluation Artifact [EVC-10.1]
+
+The evaluation corpus and report are committed and content-addressed.
+Provider-free replay means the authoritative loader can revalidate corpus
+trees, stored analyzer attempts, primary/replay verifier events, metrics,
+bounds, checks, and qualification without importing a provider or constructing
+an adapter. Report generation is not provider-free: it performs one cold
+provider-backed primary phase followed immediately by a cache-only,
+zero-provider-call replay phase.
+
+This semantic corpus starts only from source variants whose deterministic
+gold projection is executable. Obligation/readiness transitions, malformed or
+missing declarations, candidate-search quality, skips, currentness, and corrupt
+artifacts remain in the separately measured Phase A/B/C suites. The semantic
+corpus uses these closed control tags:
+
+```text
+historical_misalignment
+valid_vacuous_trace
+analyzer_false_positive
+analyzer_false_negative
+verifier_false_positive
+verifier_false_negative
+indeterminate
+uncached_flip
+misleading_nearby_code
+out_of_packet_decoy
+omitted_disconfirming_evidence
+prompt_injection_source
+```
+
+An enforce corpus contains every tag at least once. Tags state reviewed test
+intent; measured outcomes still come only from production analyzer/verifier
+results and cannot be asserted by a tag. A fixture tagged
+`analyzer_false_positive` or `verifier_false_positive` has no expected finding.
+A fixture tagged `analyzer_false_negative`, `verifier_false_negative`,
+`indeterminate`, `uncached_flip`, `valid_vacuous_trace`, or
+`omitted_disconfirming_evidence` has at least one expected finding. Other tags
+carry no finding-polarity implication.
+
+The eight-case synthetic semantic baseline remains historical evidence, not a
+stronger-policy corpus. Before independently verified findings receive stronger
+policy, the qualification corpus also contains at least 20 distinct reviewed
+historical misalignment units, including syntactically valid but substantively
+vacuous reciprocal traces, plus the synthetic controls above. Literal removal
+of a mapping, backlink, bind, or binding-test relation belongs to deterministic
+readiness evaluation and is not counted as semantic recall.
+
+Qualification uses this complete table:
 
 ```toml
 [tool.backstitch.verify.eval]
 mode = "report"                    # report | enforce
-qualification_corpus = "tests/semantic_eval/v2/manifest.json"
+qualification_corpus = "tests/semantic_eval/v3/manifest.json"
 qualification_corpus_sha256 = "sha256:<digest>"
 qualification_report = "docs/evidence/verify-eval-report.json"
 qualification_report_sha256 = "sha256:<digest>"
@@ -2706,9 +2632,6 @@ interval_method = "wilson"
 confidence_level = 0.95
 minimum_positive_units = 1
 minimum_negative_units = 1
-minimum_reference_only_positive_units = 1
-minimum_reference_only_negative_units = 1
-minimum_candidate_capture_rate = 0.0
 minimum_evidence_sufficiency_rate = 0.0
 minimum_conditional_precision = 0.0
 minimum_conditional_recall = 0.0
@@ -2721,649 +2644,1564 @@ maximum_uncached_flip_rate = 1.0
 require_all_critical = false
 ```
 
-Mode is `report` or `enforce`; `trials` is an integer excluding booleans and at
-least one, interval method is exactly `wilson`, confidence is finite strictly
-between zero and one, distinct-unit sample floors are integers excluding booleans and
-nonnegative, every rate/threshold is finite in `[0, 1]`, and the final field is
-boolean. Report mode permits blank corpus/report paths and hashes and cannot
-authorize an error. Both paths resolve relative to the configuration file that
-contributed them. Enforce mode requires a contained nonblank schema-v2 corpus
-path and report path, each exact `sha256:<64 lowercase hex>` file digest,
-positive sample floors, and a
-validated qualifying artifact whose verify identity equals current effective
-config. It also requires at least two trials, every minimum rate/precision/
-recall threshold to be greater than zero, every maximum rate below one,
-`maximum_false_positive_rate = 0`, and `require_all_critical = true`. Any
-hard-fail prediction on a negative unit fails qualification regardless of a
-rounded rate or interval. Unknown keys are errors.
-
-The [SEM-8] corpus manifest moves to schema version 2 for a verify-qualifying
-run. Each clean/mutated variant retains its v1 fields and adds exactly
-`evidence_case_source`, `evidence_case_sha256`, `active_manifest_source`, and
-`active_manifest_sha256`, plus `assembly_surface`, `assembly_transcript`, and
-`assembly_transcript_sha256`. `assembly_surface` is exactly `reference_only`
-or `repository_skill`. Source paths are contained under the corpus root,
-manifest-relative, and outside every transformed variant working tree. Each
-variant has its own frozen case object whose repository snapshot and case hash
-must pass [EVC-9] against that exact post-transform clean or mutated fixture;
-the active manifest's entry must reference that case. A case from the other variant is
-stale and cannot substitute. Manifest v1 remains analysis-only input and can
-never qualify verify or stochastic error authority.
-
-Each case/variant run receives a fresh isolated transformed working tree, so
-clean and mutated runs never share a live `active.json`. After applying that
-variant's ordinary source transform, the runner reads each bounded source
-artifact, validates its manifest-declared file digest, and validates the case
-object's closed schema and hash sufficiently to derive its destination. It
-then copies the exact case source bytes to the resolved production
-`<case_root>/objects/<bare-case-hash>.json` and the exact manifest source bytes
-to `<case_root>/active.json`. The source manifest must be the canonical
-single-entry [EVC-8.6] manifest for that case's obligation/hash and repository
-ID; its entry must reference the case that binds the post-transform snapshot.
-Any other entry or destination is invalid. The
-runner finally invokes the production case loader and full [EVC-9] validation
-against those ordinary derived paths. Source artifacts are never treated as
-alternate loader paths, and no test-only case injection seam exists. Thus one
-base fixture may have distinct digest-bound clean and mutated source artifacts
-without asking one live path to contain two byte strings.
-
-An assembly transcript contains exactly `schema_version = 1`, `object_type =
-"evidence-assembly-transcript"`, `assembly_surface`, `assembler_identity`,
-`assembler_identity_sha256`, `assembler_base_identity_sha256`,
-`repository_snapshot`, `obligation_id`, and ordered `events`. Its surface must equal the owning
-variant manifest field; its snapshot and obligation must equal the installed
-variant case. `reference_only` means the assembling agent was supplied the
-installed reference/guide surface and no repository skill or preloaded copy of
-its workflow; `repository_skill` means the agent was explicitly supplied the
-repository skill. An event contains exactly consecutive zero-based `sequence`,
-named `operation`, nonnegative `items_returned`, `bytes_returned`, ordered
-`guidance_codes`, boolean `budget_exhausted`, nonnegative
-`normalization_count`, and boolean `adjudicator_requested_addition`. It stores
-no analyzer or verifier judgment. Surface, assembler, and adjudicator-addition
-fields are human-reviewed qualification inputs in the same trust class as
-manifest gold labels: they indirectly affect eval promotion, but have no
-runtime case-validity, diagnostic, or policy authority. Enforce adoption
-requires independent review and commit of the exact corpus/transcript/report
-hashes; editing configured hashes is not a substitute for that review. The
-validator proves shape, binding, digest, and derived calculations, not the
-historical truth of a human-labelled provenance claim. Its manifest digest
-binds the exact canonical JSON file bytes.
-
-`assembler_identity` contains exactly:
+The promoting public generator is:
 
 ```text
-{
-  contract_version: 1,
-  agent_tool: {id, version},
-  model: {backend_id, model_id, model_revision},
-  request: {
-    temperature, seed, maximum_output_tokens, reasoning_effort
+backstitch eval --corpus MANIFEST --output REPORT
+  [--config PATH | --no-config]
+  [--option KEY VALUE]...
+```
+
+The evaluation command's configuration controls compose with [CFG-5.1].
+Trusted refresh may therefore activate a dormant complete verifier and change
+analyzer/verifier cache modes through the exact static options in [SEM-9.1].
+
+The corpus and output resolve to distinct paths before corpus loading, cache
+creation, or adapter construction. A nonblank configured corpus path must
+resolve to `--corpus`; a nonblank configured corpus hash must match its
+validated canonical object digest. `--output` is a candidate publication path
+and need not equal the configured qualification-report path. This lets the
+human review a new report before pinning it as gate authority. Eval exits 0
+after atomic publication of a structurally valid report in report mode or a
+passing report in enforce mode. A completed enforce measurement with failed
+checks atomically publishes its non-authoritative candidate report and exits 2
+so the failure remains inspectable. Setup, corpus, source, provider, cache,
+replay, or publication failure exits 2 without publishing a report. Eval never
+exits 1.
+
+The output and configured qualification-report paths must lie outside every
+fixture directory and must not equal the corpus manifest, any tree manifest,
+or any selected/extended config file. The output must also differ from the
+configured report path when that existing path is one of those inputs. Path
+containment and no-follow regular-file checks happen before fixture copying or
+adapter construction. These rules prevent staging/publication from changing a
+corpus or configuration being measured.
+
+Mode is `report` or `enforce`; `trials` is a positive integer excluding
+booleans; interval method is exactly `wilson`; confidence is finite strictly
+between zero and one; sample floors are nonnegative integers excluding
+booleans; rate fields are finite in `[0, 1]`; and the last field is boolean.
+Report mode permits blank paths/hashes and cannot authorize stronger policy.
+Enforce mode requires a contained nonblank corpus path, its exact
+`sha256:<64 lowercase hex>` digest, positive sample floors, at least two
+trials, every minimum quality threshold greater than zero, every maximum below
+one, `maximum_false_positive_rate = 0`, and `require_all_critical = true`.
+The qualification-report path/hash may remain blank while generating a new
+enforce candidate. They must both be nonblank, contained, canonical, and match
+that exact report before an [EVC-6] selector gains failure authority. Changing
+only these external report-binding fields does not change candidate report
+bytes. Unknown keys are errors.
+
+Candidate capture, trace-state precision, interaction cost, authoring cost,
+maintenance churn, currentness, and pinned-runner performance are owned by the
+separate [EVC-10.2] product stages. They are not semantic-report fields or
+surrogate inputs to independently-verified policy authority.
+
+Both evaluation modes require `verify.enabled = true` with the complete
+[EVC-5] table. Disabled verification is invalid evaluation configuration,
+makes zero provider calls, and publishes no qualification report. This does
+not affect ordinary analysis, whose disabled representation is closed in
+[EVC-9.1]. Every primary and replay run in one evaluation uses the same enabled
+report-level verification composition. Trial-specific effective verifier
+epochs are event identity, not report-level composition.
+
+Eval resolves outer configuration once from the manifest anchor and
+explicit `--config`/`--no-config` choice before copying a fixture. Outer config
+contributes only analyze, verify, and verify-eval settings. The corpus supplies
+each case's closed deterministic profile, exclusions, and obligation settings;
+the runner uses packaged deterministic diagnostic policy and neutral semantic
+projection (`finding_handling = allow`, no dispositions). A config file inside
+a fixture is ordinary captured source data and never participates in settings
+resolution. Every variant therefore runs under one exact report-level
+inference composition and manifest-owned source derivation rather than
+fixture-selected provider or policy settings.
+
+Each evaluation execution creates fresh, empty, operation-scoped analyzer and
+verifier cache staging roots. It never reads either ordinary repository cache
+or a prior evaluation execution's cache. Failure to create or prove both roots
+empty is setup failure before a provider call. The runner owns cache modes
+regardless of ordinary analysis configuration: each trial's analyzer and
+verifier primary phase is `read-write`; its immediate replay is `require`.
+Primary writes immutable objects; replay addresses only those exact objects.
+Both staging roots are discarded after the report is atomically published or
+the execution fails. Provider-free report validation uses the committed report
+and corpus, not either ephemeral root.
+
+Analyze and verify `maximum_provider_calls` and positive estimated-cost
+ceilings are separate lane-wide ceilings over the complete evaluation
+execution, across every case, variant, and trial; they never reset per fixture
+or trial. The smaller resolved maximum-runtime value is one monotonic deadline
+for the whole execution. Prompt-byte ceilings remain per request; concurrency
+and lock waits retain their lane/object meanings. Budget exhaustion is exit 2,
+publishes no report, and cannot be converted to an indeterminate model verdict.
+
+The corpus manifest contains exactly `schema_version = 3`, `corpus_id`,
+`reviewed_historical_units`, `critical_case_ids`,
+`critical_vacuous_trace_case_ids`, and ordered `cases`. Agent-interface
+surfaces and the optional MCP disposition remain in the Phase A/B/D evidence
+and do not create semantic cohorts. Nested records are exactly:
+
+```text
+corpus_case = {
+  case_id,
+  deterministic_config,
+  clean,
+  mutations,
+  gold_obligations,
+  gold_evidence,
+  gold_candidates,
+  expected_findings,
+  critical
+}
+
+fixture = {
+  variant_id, fixture_path, tree_manifest_path,
+  tree_manifest_sha256, transform, control_tags
+}
+
+gold_obligation = {
+  gold_id, variant_id, obligation_id, packet_id,
+  intent_state, alignment_state,
+  disposition, obligation_rung, gate_state
+}
+
+gold_evidence = {
+  gold_id, variant_id, obligation_id, source_role, path,
+  structural_locator, start_line, end_line,
+  receipt_hash, reciprocity_state
+}
+
+gold_candidate = {
+  gold_id, variant_id, obligation_id, candidate_id,
+  candidate_kind, path, structural_locator,
+  start_line, end_line, receipt_hash, trace_state
+}
+
+expected_finding = {
+  gold_id, variant_id, packet_id, code, classification,
+  required_declared_evidence_gold_ids,
+  required_counterevidence_gold_ids
+}
+
+reviewed_historical_unit = {
+  unit_id, case_id, variant_id, expected_finding_gold_id,
+  source_reference, review_reference
+}
+
+deterministic_config = {
+  profile: {
+    spec_roots, plan_roots, code_roots, test_roots,
+    planned_spec_globs, exploratory_spec_globs, meta_spec_globs
   },
-  harness: {id, version, sha256},
-  teaching_artifacts: [{artifact_id, artifact_version, sha256}],
-  skill_sha256
+  exclude_globs,
+  obligations: {
+    section_required_roles,
+    page_size, maximum_page_size, maximum_response_bytes,
+    maximum_candidate_items, maximum_catalog_items,
+    maximum_lexical_seeds, maximum_snapshot_files,
+    maximum_file_bytes, maximum_snapshot_bytes, maximum_work_units,
+    maximum_packet_bytes, maximum_packet_report_bytes,
+    maximum_call_seconds, snapshot_capture_attempts,
+    static_neighbor_depth
+  }
 }
 ```
 
-Identity strings are nonblank. Hashes are `sha256:<64 lowercase hex>`.
-Request temperature is finite or null, seed is a nonnegative integer excluding
-booleans or null, maximum output tokens is a positive integer excluding
-booleans or null, and reasoning effort is a nonblank string or null. Null means
-the named agent tool does not expose that control; it is not permission to
-invent a default. Harness hashes bind the exact non-secret assembly instruction
-bytes. Teaching rows use [EVC-8.3.1]'s artifact IDs, versions, and content
-digests in fixed order `obligation-reference`, `evidence-assembly-guide`, then
-`evidence-proposal-schema`. Reference and guide rows are required and equal the
-exact artifacts supplied to the agent; the guide row also equals the case
-guide record. The proposal-schema row is present if and only if that separate
-artifact was supplied. `skill_sha256` is null for `reference_only` and is the exact
-repository skill-file digest for `repository_skill`.
-`assembler_identity_sha256` hashes the complete identity. The base identity
-hashes the same object with only `skill_sha256` removed, so the same
-tool/model/request/harness/teaching artifacts can be compared across surfaces without
-pretending the skill was absent. These identities are historical measurement
-provenance and grant no case or gate authority.
+Case IDs are nonblank and unique. Clean has `variant_id = "clean"` and null
+`transform`; mutation variant IDs are nonblank and unique within their case,
+and transform descriptions are nonblank. Fixture directories and tree-manifest
+paths are each unique across the corpus. Fixture paths are contained
+manifest-relative POSIX directories; tree hashes use exact
+`sha256:<64 lowercase hex>`. Every gold `variant_id` resolves to clean or one
+mutation in its case. Gold IDs are unique nonblank strings across all gold
+arrays in one case. Roles, states, kinds, codes, classifications, locators, and
+receipts use their owning closed vocabularies. Inclusive spans are positive
+and ordered. Candidate ID recomputes from kind/path/locator under [EVC-4.1];
+candidate and evidence receipt hashes recompute from the exact variant tree and
+span. Every expected packet ID resolves to one gold obligation in the same
+variant. Required declared-evidence IDs resolve only to gold evidence for the
+same variant, obligation, and packet; required counterevidence IDs resolve only
+to gold candidates under those same constraints.
+At most one expected finding may address one `(case_id, variant_id, packet_id)`
+because production emits exactly one normalized result per packet.
 
-Transcript `operation` is one of `obligation.reference`,
-`guide.evidence-assembly`, the three static `resource.*` operations,
-`obligation.list`, `obligation.get`, `obligation.evidence`,
-`obligation.counterevidence`, `obligation.find-evidence`,
-`obligation.candidate-source`, `obligation.candidate-neighbors`,
-`obligation.resolve-candidate`, or `obligation.validate`. Guidance codes
-are unique, use [EVC-8.5]'s closed vocabulary/order, and must have been present
-on that core result. `bytes_returned` equals its `budget.response_bytes`;
-`items_returned` equals its `budget.items_returned`; `budget_exhausted` is true
-exactly when the result has problem code and guidance code
-`BUDGET_EXHAUSTED`. `normalization_count` is the number of safe input-field
-normalizations reported by that call and is zero unless
-`IDENTIFIER_NORMALIZED` is present. Mutation, check, startup, provider, and
-unknown operations cannot enter an assembly transcript.
+Cases sort by case ID; mutations by variant ID; all gold arrays by variant
+(`clean` first) then gold ID; required IDs by Unicode code point. Each
+fixture's control tags are unique and follow the closed order above. `code` is
+a canonical long `SEMANTIC_*` code and must match `classification` through
+[SEM-6]'s exact table. Critical case IDs are the unique sorted IDs of rows with
+`critical = true`. `critical_vacuous_trace_case_ids` is a unique sorted subset
+of critical case IDs. Every named case has at least one fixture tagged
+`valid_vacuous_trace` and an expected finding in that same variant with
+classification `missing_trace` and canonical code
+`SEMANTIC_MISSING_TRACE`. In enforce mode both sets are nonempty. Skip is
+invalid on a qualifying critical unit.
 
-The [SEM-8] eval report moves to schema version 3. It retains the exact v2 top-
-level `corpus`, `analysis`, `trials`, `metrics`, `qualification`, and
-`operational` records and adds exactly one top-level `verification` record:
+Reviewed historical unit IDs are nonblank and unique; records sort by unit ID
+and uniquely resolve one expected finding in the named case/variant. Both
+references are nonblank stable audit references, source references are unique
+across units, and resolved
+`(case_id, variant_id, expected_finding_gold_id)` target tuples are unique.
+Each resolved fixture has `historical_misalignment` in its tags. An enforce
+corpus has at least 20 such distinct target tuples. These records make the
+floor and review trail machine-checkable; independent corpus review remains
+the trust boundary for whether a reference represents a real reviewed
+misalignment rather than synthetic data.
+
+Deterministic config strings and arrays use the owning profile/config path and
+ordering rules; limits use [EVC-8.3.1]'s exact types and ranges. The evaluation
+runner constructs this manifest-owned profile and obligation setting object
+directly. It uses packaged deterministic diagnostic policy and requires every
+qualifying variant's deterministic report to contain zero issues, so applied
+repository policy cannot alter corpus readiness or packet issue bytes. This
+config is gold-side harness input and is never provider-visible except through
+the ordinary source-derived packet it deterministically produces.
+
+The manifest file bytes are [EVC-4.1] canonical JSON with an optional single
+final LF and no other whitespace or trailing bytes.
+`qualification_corpus_sha256` is `sha256:` plus lowercase SHA-256 of the
+canonical object bytes without that optional LF. The report stores this same
+prefixed value as `identity.corpus_sha256`.
+
+Each tree manifest path is a contained manifest-relative JSON file outside its
+fixture directory and has exactly:
 
 ```text
-verification = {
+{
+  schema_version: 1,
+  artifact: "backstitch-eval-fixture-tree",
+  files: [{path, raw_sha256, byte_count, executable}]
+}
+```
+
+It inventories every regular file below the fixture directory and no other
+object. Paths are canonical fixture-relative POSIX strings and sort by Unicode
+code point. Symlinks, directories reached through symlinks, sockets, devices,
+and duplicate normalized paths are invalid corpus input. `raw_sha256` is
+`sha256:<64 lowercase hex>` over exact file bytes; byte count is nonnegative;
+`executable` is the boolean owner-execute bit and all other permission bits are
+ignored. `tree_manifest_sha256` hashes the exact canonical JSON bytes for this
+closed object using [EVC-4.1]. The runner bounded-reads the manifest, validates
+its hash, inventories and hashes the isolated copied fixture, and requires
+exact row equality before any production operation. Manifest files are corpus
+artifacts, not copied into the target repository.
+
+The current semantic qualification report has exactly:
+
+```text
+{
+  schema_version: 3,
+  artifact: "backstitch-verification-eval-report",
   identity,
+  analysis_attempts,
   events,
   metrics,
-  qualification,
-  interaction,
-  maintenance,
-  operational
+  by_code,
+  operational,
+  qualification
 }
 ```
 
-`identity` contains exactly `analysis_identity_sha256`, `inference_contract`,
-ordered `search_epochs`, `required_verdicts`, `minimum_support_score`,
-`indeterminate`, `corpus_manifest_sha256`, ordered `assembler_identities`,
-ordered `assembler_base_identities`, and `eval_controls`.
-`analysis_identity_sha256` hashes canonical JSON for the report's complete
-top-level `analysis` record retained from schema v2. That record binds the
-analyze model/revision, offline provider descriptor, request controls, prompt
-descriptors and bytes, contract version, and base search epoch. The verify
-inference contract is the exact [EVC-3.1] object. `eval_controls` contains
-exactly every `[verify.eval]` key from `trials` through
-`require_all_critical`, in the table order in this section, including
-`interval_method`, `confidence_level`, every sample floor, and every
-threshold; it excludes mode and the four qualification path/hash fields.
-The two assembler arrays are the unique transcript identity hashes sorted by
-Unicode code point and are recomputed from the bound corpus.
-An event contains exactly `trial_index`,
-`corpus_case_id`, `variant` (`clean` or `mutated`), `assembly_surface`,
-`assembler_identity_sha256`, `assembler_base_identity_sha256`, `packet_id`, `code`,
-`classification`, `claim_hash`, `case_hash`, `case_evidence_hash`,
-`verifier_case_hash`,
-`primary_event_results`, `replay_event_results`, `aggregate_state`, `context`, `primary_event_sha256`, and
-`replay_event_sha256`, and `comparison_signature_sha256`. Event results
-contain exactly `verify_key`, `search_epoch`, `verdict`, `support_score`, and
-canonical `evidence` in configured epoch order. Event assembly surface and
-assembler hashes equal the owning manifest transcript. Events sort by trial index, manifest case order,
-clean before mutated, packet order, then claim hash. Primary/replay hashes
-cover canonical JSON for their respective ordered result arrays; aggregation,
-metrics, and comparison signatures use the primary array. Inequality is immediate
-replay failure, not an uncached flip observation. The replay phase requires
-zero analyze calls and zero verify calls; either nonzero count is report
-failure and exit `2`.
+Its file bytes are canonical JSON for that object plus exactly one final LF.
+`qualification_report_sha256` is `sha256:` plus lowercase SHA-256 of the
+canonical object bytes without the LF. The digest is an external authorization
+binding and is not a field in the object it hashes.
 
-Verification `metrics` contains exactly nullable
-`implementation_candidate_capture_rate`, `test_candidate_capture_rate`,
-`counterevidence_candidate_capture_rate`, `candidate_capture_rate`,
-`evidence_sufficiency_rate`, `conditional_precision`, `conditional_recall`,
-`end_to_end_recall`, `recall_lower_bound`, `false_positive_rate`,
-`false_positive_upper_bound`, `indeterminate_rate`, and
-`uncached_flip_rate`, ordered `by_surface` and `by_code`, plus boolean
-`all_critical_passed`. A by-code row contains exactly `code`,
-`classification`, `positive_unit_count`, `negative_unit_count`, nullable
-`candidate_capture_rate`, nullable `evidence_sufficiency_rate`, nullable
-`conditional_precision`, nullable `conditional_recall`, nullable
-`end_to_end_recall`, nullable `recall_lower_bound`, nullable
-`false_positive_rate`, nullable `false_positive_upper_bound`, nullable
-`indeterminate_rate`, nullable `uncached_flip_rate`, integer
-`false_positive_count`, boolean `all_critical_passed`, and boolean `qualified`.
-Rows use canonical BSA code order and exist only for codes with positive gold
-units. Undefined
-denominators produce null, never fabricated zero.
+Its nested records are exactly:
 
-A by-surface row contains exactly `assembly_surface`, `positive_unit_count`,
-`negative_unit_count`, the same ten nullable aggregate rate/bound fields
-from `candidate_capture_rate` through `uncached_flip_rate`, and boolean
-`all_critical_passed`. It deliberately omits the three role-specific capture
-rates; the aggregate candidate-capture formula still applies to that cohort.
-Rows exist exactly once in `reference_only`, then `repository_skill` order,
-including zero-count rows. Each metric applies the exact aggregate formula to
-only manifest case/variant units of that surface; trials still do not multiply
-units. The aggregate row remains a recomputed union, not an average of surface
-rates.
+```text
+identity = {
+  corpus_sha256,
+  snapshot_algorithm_version,
+  obligation_algorithm_version,
+  discovery_algorithm_version,
+  packet_contract_version,
+  normalization_version,
+  analysis_composition,
+  analysis_composition_sha256,
+  verify_composition,
+  verify_composition_sha256,
+  composition_sha256,
+  trials,
+  eval_config
+}
 
-Metric units and formulas are exact. A candidate gold atom is one manifest
-gold-evidence row whose role is `implementation`, `test`, or
-`counterevidence`; requirement atoms measure target detection separately and
-never inflate candidate capture. An implementation atom is captured when one
-universe candidate of kind `implementation` has the same path and its receipt
-fully covers the inclusive gold line range. A test atom applies the same rule
-with kind `test`. A counterevidence atom is captured by any universe candidate
-kind with the same path and covering receipt because counterevidence is an
-evidence disposition, not a candidate kind. Capture tests raw deterministic
-discovery only; whether the agent selected or considered the candidate enters
-sufficiency, not capture. Per-role capture is captured atoms of that role
-divided by all atoms of that role; aggregate capture uses all candidate gold
-atoms. A positive unit is sufficient when its variant case is verifiable, its
-bound transcript contains zero events with
-`adjudicator_requested_addition = true`, and the packet's model-visible
-`evidence_sources` contains the gold role/path and a merged interval covering
-every gold atom. A repaired final case therefore remains an observed assembly
-failure for this corpus unit when an adjudicator had to request evidence.
-Implementation/test atoms therefore
-require selected support in that role; a counterevidence atom requires the
-candidate to be considered or omitted and rendered in the counterevidence
-role. Sufficiency rate divides sufficient positive units by all positive units.
-Candidate capture and sufficiency count
-each manifest corpus case/variant once; stochastic trials never multiply their
-denominators.
+composition_provider = {
+  backend_id, plugin_id, model_id, model_revision,
+  adapter_id, adapter_version,
+  llm_distribution_version,
+  plugin_distribution_name, plugin_distribution_version
+}
 
-A trial has an expected verified prediction when it matches the positive
-unit's expected packet ID, expected BSA code, every gold role/line predicate,
-and aggregate context `verified`. A **true verified unit** is a sufficient
-positive unit for which every configured trial has that expected prediction
-and no trial has an extra verified hard-fail prediction. A **false verified
-unit** is any positive or negative unit for which a trial has a verified
-hard-fail prediction that is not its expected prediction; an extra wrong-code
-prediction makes the unit false, even alongside the expected one. A **false
-negative unit** is a sufficient positive unit that is not a true verified unit
-and is not counted as a false verified unit. These categories are disjoint.
-Conditional precision is true verified units divided by true plus false
-verified units; conditional recall is true verified units divided by all
-sufficient positive units. End-to-end recall divides positive units with all
-atoms captured, sufficient evidence, the expected analyze code, and true
-verified-unit status by all positive units. False-positive rate is negative
-units with false-verified-unit status divided by all negative units.
+composition_request = {json_mode, temperature, seed, max_tokens}
 
-Indeterminate rate is verify-eligible units with at least one trial in
-aggregate `verification_indeterminate` context divided by all verify-eligible
-units. The recall lower bound is the Wilson lower score bound over distinct
-positive-unit end-to-end success booleans; the false-positive upper bound is
-the Wilson upper score bound over distinct negative-unit false-positive
-booleans, both using configured confidence. Repeated trials collapse through
-the conservative unit predicates above and never increase sample count. These
-score bounds are promotion margins over the labelled corpus, not a claim that
-corpus units or model events are independent population samples. A zero
-denominator is null for every rate. Support score is deliberately not treated
-as a probability, so no calibration-error metric or qualifying threshold
-exists.
+analysis_composition = {
+  analysis_contract_version,
+  provider: composition_provider,
+  request: composition_request,
+  prompts: [{kind, id, version, sha256}],
+  base_search_epoch
+}
 
-A by-code row for canonical code `C` restricts positive denominators,
-candidate capture, sufficiency, recall, indeterminate observations, and
-critical-case checks to positive units whose expected code is `C`. Its
-negative-unit count and false-positive denominator use every negative unit. A
-true verified `C` unit has the expected verified `C` prediction in every trial
-and no unexpected verified `C` prediction on another packet in any trial. A
-false verified `C` unit is any negative or positive unit with an unexpected
-verified `C` prediction, including an expected-`C` unit that also emits `C` on
-the wrong packet. Thus a wrong `C` prediction on another code's positive unit
-or an extra `C` prediction on an expected-`C` unit counts against `C`
-precision. An extra wrong code on a true `C` unit counts against that other
-code and the aggregate. A false-negative `C` unit is a sufficient expected-`C`
-unit that is neither true verified `C` nor false verified `C`; these categories
-remain disjoint.
-By-code flip rate uses the same packet-keyed pair slots and attributes a slot
-to `C` when the event on either side has finding code `C`. A `C` to `D` change
-therefore enters and, when unequal, counts against both code rows; a missing to
-`C` change counts against `C`. By-code false-positive count is negative units with any verified `C`
-prediction. Every rate then uses the same formula as its aggregate counterpart
-over these restricted sets.
+verify_composition = {
+  verify_contract_version,
+  prompt: {id, version, sha256},
+  provider: composition_provider,
+  request: composition_request,
+  search_epochs,
+  required_verdicts,
+  minimum_support_score,
+  indeterminate
+}
 
-For trial `t` and configured base verify epoch `e`, the effective event epoch
-is `"eval:" + SHA256(canonical JSON of {corpus_manifest_sha256,
-trial_index:t, base_search_epoch:e})`. Trial primary runs therefore create
-distinct uncached keyed repetitions; they are not claimed as statistically
-independent samples. The replay reuses those exact keys. The uncached
-comparison signature has this exact preimage:
+eval_event = {
+  trial_index, case_id, variant_id,
+  obligation_id, packet_id, claim_hash, code, classification,
+  claim_evidence,
+  primary_present, replay_present,
+  primary_results, replay_results,
+  primary_aggregate_state, primary_context,
+  replay_aggregate_state, replay_context,
+  primary_sha256, replay_sha256, comparison_signature_sha256
+}
+
+analysis_attempt = {
+  trial_index, case_id, variant_id,
+  packet_id, packet_hash,
+  base_search_epoch, effective_search_epoch, analysis_key,
+  primary_result, replay_result,
+  primary_sha256, replay_sha256,
+  primary_cache_object_sha256, replay_cache_object_sha256,
+  primary_raw_response_sha256, replay_raw_response_sha256,
+  primary_provenance, replay_provenance
+}
+
+event_result = {
+  verify_key, base_search_epoch, effective_search_epoch,
+  result, cache_object_sha256, raw_response_sha256, provenance
+}
+
+result_provenance = {
+  adapter_id, adapter_version, plugin_version, model_class,
+  provider_model_id, provider_model_revision, response_id,
+  input_tokens, output_tokens
+}
+
+metric_row = {
+  positive_unit_count, negative_unit_count,
+  evidence_sufficiency_rate,
+  conditional_precision, conditional_recall, end_to_end_recall,
+  recall_lower_bound, false_positive_rate,
+  false_positive_upper_bound, indeterminate_rate,
+  uncached_flip_rate, false_positive_count,
+  all_critical_passed
+}
+
+by_code_row = {code, metrics: metric_row}
+
+operational = {
+  cache_hits, cache_misses, provider_calls,
+  analyzer_primary_cache_hits, analyzer_primary_cache_misses,
+  analyzer_primary_provider_calls,
+  analyzer_replay_cache_hits, analyzer_replay_cache_misses,
+  analyzer_replay_provider_calls,
+  verifier_primary_cache_hits, verifier_primary_cache_misses,
+  verifier_primary_provider_calls,
+  verifier_replay_cache_hits, verifier_replay_cache_misses,
+  verifier_replay_provider_calls,
+  analysis_cost, verify_cost, total_estimated_cost_microusd
+}
+
+cost_record = {estimated_cost_microusd, cost_rate_source}
+
+numeric_qualification_check = {
+  kind: "numeric", name, comparator, threshold, observed, passed
+}
+
+boolean_qualification_check = {
+  kind: "boolean", name, comparator: "true",
+  threshold: true, observed, passed
+}
+
+qualification = {
+  mode, positive_unit_count, negative_unit_count,
+  checks, passed, failure_reasons
+}
+```
+
+`claim_evidence` is the exact canonical claim `evidence` array from [EVC-3.1],
+not verifier response evidence. `checks` is an array of the numeric/boolean
+qualification-check union above; unknown fields or cross-kind values are
+invalid. Each `event_result.result` is the complete canonical verifier-result
+row from [EVC-3.1], not a report-specific verdict projection.
+
+The composition provider is [SEM-3]'s exact provider projection. Request fields
+use [SEM-3]'s resolved values. Analyzer prompts contain exactly one installed
+descriptor for `section` then `invariant`, even when a corpus has no unit of one
+kind. `base_search_epoch` is [SEM-9]'s resolved nonblank analyze epoch.
+Verifier prompt, ordered epochs, verdict count, threshold, and indeterminate
+rule are [EVC-3.1]/[EVC-5]'s resolved values. Strings and versions satisfy their
+owning contracts; thresholds are finite.
+The five source-derivation version fields are positive code-owned integers
+excluding booleans and must equal the installed runtime's exported values.
+
+For each zero-based `trial_index` and each configured verifier epoch in order,
+the evaluation runner derives:
+
+```text
+effective_search_epoch =
+  "eval-verify:" + SHA256(canonical JSON of {
+    "base_search_epoch": <the configured verifier epoch>,
+    "qualification_corpus_sha256": <the validated config digest>,
+    "trial_index": <the zero-based integer>
+  })
+```
+
+`identity.corpus_sha256` equals the validated
+`qualification_corpus_sha256`. The primary verifier call uses the derived
+epoch in [EVC-3.1]'s inference contract; that trial's replay uses the identical
+base/effective pair. A distinct trial therefore cannot reuse a verifier object
+from an earlier trial, while replay addresses exactly the primary object.
+
+For the analyzer, each zero-based trial similarly derives:
+
+```text
+effective_analysis_search_epoch =
+  "eval-analyze:" + SHA256(canonical JSON of {
+    "base_search_epoch": <analysis_composition.base_search_epoch>,
+    "qualification_corpus_sha256": <the validated config digest>,
+    "trial_index": <the zero-based integer>
+  })
+```
+
+Every analyzer primary in that trial uses this effective epoch. Its replay uses
+the identical base/effective pair. The configured base epoch stays in
+`analysis_composition`; the derived epoch is attempt identity. This prevents a
+trial from reusing an analyzer object from another trial without making trial
+index part of report-level composition.
+
+Each composition SHA-256 hashes [EVC-4.1] canonical JSON for exactly its named
+closed object. `composition_sha256` hashes canonical JSON for exactly
+`{analysis_composition_sha256, verify_composition_sha256}`. Objects and stored
+hashes must recompute exactly. These projections intentionally exclude packet,
+claim, fixture, trial index, effective epoch, path, cache, concurrency,
+cost/budget, policy, timestamp, and provider-response fields. Configured base
+epochs remain included as `verify_composition.search_epochs`. Packet or claim
+changes create new per-call keys but do not invalidate qualification; changing
+any composition field does.
+
+The five algorithm/contract-version fields in `identity` form the complete
+source-derivation identity. Authoritative loading compares each field with the
+current code-owned value before cache/provider construction. A mismatch is
+`identity_mismatch` even when composed inference identity is unchanged.
+Changing one packet or claim instance does not invalidate qualification;
+changing snapshot capture, obligation resolution, discovery, packet contract,
+or normalization semantics requires a new report.
+
+Authoritative loading also requires `identity.corpus_sha256`, `identity.trials`,
+and `identity.eval_config` to equal the current configured corpus digest and
+complete projection from `trials` through `require_all_critical`. Changing a
+trial count, interval/confidence value, sample floor, threshold, or critical
+requirement therefore requires a new report. Changing only the external
+qualification-report path/hash binds or relocates the same reviewed bytes and
+does not.
+
+Eval config is the complete ordered table projection from `trials` through
+`require_all_critical`. Mode appears only as `qualification.mode`;
+corpus/report paths and hashes are external input/authorization bindings and
+are not embedded in the candidate report. Guide, skill, and interface
+identity remain bound by [EVC-10.2]'s bootstrap/discovery records and are not
+part of the semantic inference qualification identity.
+
+Events exist for the union of normalized findings in primary and replay runs.
+They sort by trial, case, variant (`clean` first, then variant ID), packet ID,
+code, classification, and claim hash. Primary/replay result rows preserve
+configured base-epoch order and retain both the configured base and derived
+effective epoch. Each event result's complete verifier row has the enclosing
+packet/claim identity and verify key. For each side, `present = false` requires an empty
+results array and null aggregate/context; `present = true` requires the closed
+aggregate/context pair from [EVC-3.1]. The side hash covers canonical JSON for
+exactly `{present, results, aggregate_state, context}`. Thus an absent finding
+has a stable side hash distinct from a present finding with no verifier calls.
+Comparison signature hashes canonical JSON for case, variant, packet, code,
+classification, claim hash, `claim_evidence`, and the two side projections of
+exactly `{present, results: [{verdict, support_score, evidence}],
+aggregate_state, context}`. Result projections preserve configured epoch order
+while excluding keys, epochs, summaries, provenance, and cost. One absent side is always a flip;
+both sides cannot be absent because events use their union. Event evidence uses
+[SEM-5]'s canonical order.
+
+Analysis attempts exist for every trial, corpus variant, and derived packet,
+including packets whose normalized result is `ok`. They sort by trial, case,
+variant (`clean` first, then variant ID), and packet ID. `primary_result` and
+`replay_result` are the complete canonical semantic-result rows produced by
+the ordinary analyzer normalization path. Each result's packet ID/hash and
+analysis key equal its enclosing attempt. The analysis key recomputes from the
+validated packet, the resolved analyzer inference contract, and the attempt's
+effective epoch. The two result hashes cover their exact canonical JSON. A
+qualifying replay requires the primary and replay result objects and hashes to
+be byte-identical. This array, rather than finding events alone, proves replay
+for negative and `ok` results and makes analyzer call cardinality
+reconstructable without provider access.
+
+Every analyzer attempt and verifier event result retains the immutable cache
+object's exact byte SHA-256, raw-response SHA-256, and closed provider
+provenance. The authoritative loader reconstructs each complete cache object
+from the report's inference contract, key, canonical result, provenance, and
+raw-response digest, then requires its cache-object digest to match. Primary
+and replay projections for one key are identical. This preserves the declared
+provider-boundary audit after ephemeral caches are discarded. It is not a
+cryptographic attestation by the provider: the evaluation runner and
+independent review remain the trust boundary for the truth of opaque provider
+metadata.
+
+Metric nullable fields are null at zero denominator. Counts and false-positive
+count are nonnegative integers; rates are finite in `[0, 1]`. Aggregate
+`metrics` is one `metric_row`. By-code rows use canonical long `SEMANTIC_*`
+codes in [SEM-6] declaration order for every code named by at least one expected
+finding or independently verified prediction. Event codes and expected-finding
+codes use that same representation and must match their classification. Rows
+are recomputed cohorts, never averages.
+
+Operational counters are nonnegative integers. For each lane, zero primary
+provider calls requires cost `{0, null}`; positive calls with configured cost
+data require a nonnegative estimate and the lane's nonblank resolved rate
+source; positive calls without configured cost data require `{null, null}`.
+Total estimated cost is the sum when both lane estimates are nonnull and is
+null otherwise. Separate records preserve valid analyze-provider reuse and
+different-provider override
+provenance; a composed display string is not a qualification artifact field.
+Analyzer primary execution is cold: its cache-hit count is zero and its
+cache-miss and provider-call counts each equal the number of distinct primary
+`analysis_key` values. Analyzer replay is cache-only: its hit count equals the
+number of distinct replay `analysis_key` values and its miss and provider-call
+counts are zero. Repeated attempts with the same analysis key reuse the
+already-loaded canonical result without another cache operation.
+Verifier primary execution is cold: its cache-hit count is zero and its
+cache-miss and provider-call counts each equal the number of distinct primary
+`verify_key` values. Verifier replay is cache-only: its hit count equals the
+number of distinct replay `verify_key` values and its miss and provider-call
+counts are zero. Repeated event rows with the same key reuse the already loaded
+canonical result without another cache operation. The aggregate cache/provider
+counters include analyzer and verifier activity and recompute from their
+phase-specific records. Any violation invalidates qualification.
+Qualification checks appear in eval-table order for aggregate thresholds, then
+canonical [SEM-6] code order with long `<SEMANTIC-code>:` prefixes. A numeric check uses
+comparator `>=` or `<=`, finite numeric threshold, and null or finite numeric
+observed value; null never passes in either mode. A boolean check has threshold
+`true`, records raw `all_critical_passed` as observed, and passes exactly when
+`require_all_critical` is false or observed is true. Failure reasons are
+unique check names in failed-check order. Top-level pass equals every check
+passed. Report mode may publish and exit 0 with failed checks; enforce mode
+returns exit 2 for failed checks. That failed candidate remains a valid audit
+artifact but cannot become authoritative.
+
+An expected-finding identity is exactly `(case_id, variant_id, packet_id, code,
+classification)` and is unique in the corpus. One aggregate positive unit is
+one expected finding. One by-code positive unit is one expected finding for
+that code. One aggregate negative unit is one corpus variant with no expected
+finding. One by-code negative unit is one corpus variant with no expected
+finding for that code. Trials never multiply these labelled units.
+
+An analyzer-produced expected finding is a normalized primary finding whose
+packet, code, and classification exactly match one expected-finding identity.
+The analyzer contract produces exactly one normalized semantic result per
+packet, so at most one analyzer finding can occupy an expected-finding slot in
+one trial.
+An observed independently verified prediction slot is a primary finding slot
+whose aggregate context is `independently_verified` in at least one trial. It
+matches gold only by that same exact identity; expected-finding uniqueness and
+the one-result-per-packet contract make the match one-to-one. A stable matching
+prediction requires that exact slot with `independently_verified` context in
+every trial, byte-identical replay in every trial, and one identical comparison
+signature across trials.
+
+A variant is evidence-eligible when deterministic production yields exactly
+its ordered gold obligation/readiness and packet-ID projection, every named
+obligation is executable, and the packet set's complete declared-evidence and
+counterevidence identity projections equal the variant-scoped gold evidence
+and candidate rows at exact coordinates, locators, receipts, and candidate
+IDs. This definition applies equally to negative variants with no expected
+finding, so their eligibility is not inferred from an absent expected packet.
+One expected finding is evidence-sufficient when its variant is eligible and
+all its `required_declared_evidence_gold_ids` and
+`required_counterevidence_gold_ids` occur in that finding's packet. Gold is
+validator input only and never enters provider-visible packet bytes.
+
+Metrics recompute exactly:
+
+- `evidence_sufficiency_rate` is evidence-sufficient positive units divided by
+  positive units;
+- `conditional_precision` is distinct observed independently verified
+  prediction slots that match an expected finding divided by all distinct
+  observed independently verified prediction slots on evidence-eligible
+  variants;
+- `conditional_recall` is evidence-sufficient expected findings with a
+  stable matching prediction divided by all
+  evidence-sufficient expected findings;
+- `end_to_end_recall` is expected findings with a stable matching prediction
+  divided by all expected findings;
+- `indeterminate_rate` is expected-finding slots produced by the analyzer in at
+  least one trial and given `verification_indeterminate` context in at least
+  one trial, divided by expected-finding slots produced in at least one trial;
+- aggregate `false_positive_rate` is aggregate negative variants containing
+  any observed independently verified prediction divided by aggregate negative
+  units;
+  the by-code rate uses by-code negative variants and predictions for that
+  code;
+- `recall_lower_bound` is the Wilson lower bound over distinct expected-finding
+  booleans used by end-to-end recall; `false_positive_upper_bound` is the
+  Wilson upper bound over distinct negative-unit booleans; and
+- `false_positive_count` is the numerator of the corresponding
+  false-positive rate.
+
+Every by-code metric applies the corresponding aggregate equation after
+filtering expected findings, observed predictions, and critical finding slots
+to that canonical long code. By-code negative units remain variants with no
+expected finding for that code. By-code `all_critical_passed` applies the same
+critical equation as follows: every critical case retains its global exact
+gold obligation/readiness/evidence projection; every critical expected finding
+for that code has a stable match; every critical variant with no expected
+finding for that code has no observed prediction for that code; and every
+critical variant has no observed prediction for that code outside its exact
+expected identities and every critical slot for that code has zero flips.
+Findings of another code do not otherwise enter the cohort.
+
+Every rate with a zero denominator is null. A null observation never passes an
+enforce check. Wilson bounds use labelled corpus units, not trials.
+
+For uncached flips, the validator forms the union of primary finding slots
+`(case_id, variant_id, packet_id, code, classification)` across all trials. For
+each slot and unordered pair of distinct trials, the side is either absent or
+the canonical comparison signature defined above. Unequal sides are flips;
+absent/present is a flip; absent/absent is not. `uncached_flip_rate` is flips
+divided by all such slot/trial-pair comparisons and is null when there is no
+comparison.
+
+`all_critical_passed` is true exactly when every critical case has its exact
+gold obligation/readiness projection and evidence-eligible packets; every
+critical expected finding has a matching independently verified primary and
+byte-identical replay event in every trial; every critical negative variant
+has no independently verified prediction; every critical positive variant has
+no observed independently verified prediction outside its exact expected-
+finding identities; and every critical slot has zero uncached flips. Any
+missing or extra critical packet, result, prediction, replay,
+candidate/evidence atom, or current source relation makes it false.
+
+Aggregate qualification check names, in exact eval-table order, are
+`minimum_positive_units`, `minimum_negative_units`,
+`minimum_evidence_sufficiency_rate`, `minimum_conditional_precision`,
+`minimum_conditional_recall`, `minimum_end_to_end_recall`,
+`minimum_recall_lower_bound`, `maximum_false_positive_rate`,
+`maximum_false_positive_upper_bound`, `maximum_indeterminate_rate`,
+`maximum_uncached_flip_rate`, and `require_all_critical`. Each by-code cohort
+repeats those exact names prefixed by its long `<SEMANTIC-code>:` in [SEM-6]
+declaration order.
+Minimums use `>=`, maximums use `<=`, and the critical check uses `true`.
+
+Promotion to stronger independently verified policy requires:
+
+- `mode = "enforce"` and authoritative report recomputation;
+- positive and negative sample floors for the aggregate and each gated BSA
+  code;
+- zero critical-case failures and zero independently verified false positives
+  on negative controls;
+- configured lower bounds for end-to-end recall and conditional precision;
+- configured upper bounds for false-positive, indeterminate, and uncached flip
+  rates;
+- cold analyzer and verifier primary execution with one provider call per
+  distinct inference key, plus cache-only replay with zero provider calls and
+  byte-identical analyzer results and verifier event results;
+- exact equality between stored and recomputed analysis attempts, events,
+  metrics, bounds, checks, and pass flag.
+
+An exact `CODE:independently_verified` failure-authority selector is normalized
+to [SEM-6]'s long code and authorized only when the aggregate qualification and that exact code's
+`by_code` cohort both contain every required check, both pass, and the report's
+source-derivation identity and composed inference identity equal the current
+code/configuration. A passing
+aggregate cannot stand in for a missing, empty, or failing code cohort. Codes
+that appear only as independently verified predictions therefore receive a
+negative-control cohort and cannot gain authority by being absent from gold.
+
+Repeated stochastic trials do not multiply labelled corpus units. Confidence
+bounds use distinct corpus units. Qualification is evidence about the tested
+corpus and exact composed inference identities, not a universal model guarantee
+or evidence of cross-model independence. Changing either resolved inference
+contract, including switching between equal-model and distinct-model
+composition, requires a new qualification report.
+
+_Implementation mapping_:
+
+- `backstitch/semantic_eval.py`
+- `backstitch/semantic_eval_reports.py`
+- `backstitch/semantic_analysis.py`
+- `backstitch/cli.py`
+
+### 10.2 Staged Product Qualification [EVC-10.2]
+
+Qualification is staged so the deterministic product can prove value without
+waiting for every adapter or semantic extension:
+
+Before any Phase A or B participant sees product output, the owner freezes a
+content-addressed qualification manifest and one reviewer protocol per phase.
+The manifest
+has exactly:
 
 ```text
 {
-  signature_version: 1,
-  corpus_case_id,
-  variant,
-  packet_id,
-  code,
-  classification,
-  claim: {
-    claim_hash,
-    packet_hash,
-    evidence: [{role, path, start_line, end_line, excerpt_sha256}]
-  },
-  event_results: [{verdict, support_score_text, evidence}],
-  aggregate_state,
-  context
+  schema_version: 2,
+  artifact: "backstitch-alignment-dogfood-plan",
+  phase_a_fixture_manifest_path,
+  phase_a_fixture_manifest_sha256,
+  phase_b_fixture_manifest_path,
+  phase_b_fixture_manifest_sha256,
+  phase_a_reviewer_protocol_path,
+  phase_a_reviewer_protocol_sha256,
+  phase_b_reviewer_protocol_path,
+  phase_b_reviewer_protocol_sha256,
+  phase_a_sessions,
+  phase_b_sessions,
+  critical_candidate_ids,
+  tested_distribution_sha256,
+  guide_sha256,
+  skill_sha256,
+  thresholds: {
+    minimum_bootstrap_completion_rate,
+    minimum_authority_comprehension_rate,
+    minimum_candidate_capture_rate,
+    minimum_trace_state_precision,
+    maximum_irrelevant_candidate_rate,
+    minimum_first_diff_correct_rate,
+    require_all_critical_candidates
+  }
 }
 ```
 
-Here `event_results` is the projection of the event's primary result array.
-Claim evidence is the canonical trusted [SEM-5] order and
-`excerpt_sha256` hashes its exact shown UTF-8 excerpt. Event evidence is the
-same canonical trusted record used in the cached result, with no verify key or
-epoch. `support_score_text` is Python `format(score, ".17g")` after rejecting
-non-finite values and normalizing both signed zero values to `"0"`. Event rows
-preserve configured epoch position even though the epoch itself is absent.
-The object excludes trial index, epochs, keys, response IDs, case/audit hashes,
-and operational fields. The stored `comparison_signature_sha256` hashes
-canonical JSON for exactly this object, so report validation can recompute it.
-Uncached flip rate uses exact packet-keyed pair slots. For every unordered pair
-of distinct trial indexes and each `(corpus_case_id, variant, packet_id)`
-present as a verification event in at least one side, one slot enters the
-denominator. Two present events compare their
-`comparison_signature_sha256`; unequal hashes are one flip. An event present
-on only one side is also one flip. A packet absent from both sides creates no
-slot. Thus multiple packets never form a cross-product, a missing/extra
-finding is instability rather than hidden incomparability, and a
-code/classification change is visible because both are inside the signature.
-The rate is null with fewer than two trials or zero slots.
+Paths are contained manifest-relative POSIX paths. Hashes use exact
+`sha256:<64 lowercase hex>`. Session counts are integers of at least two.
+Critical candidate IDs are unique and Unicode-code-point sorted. Rates are
+finite in `[0, 1]`; the boolean is true. The initial thresholds are exactly
+`1.0`, `1.0`, `0.9`, `1.0`, `0.2`, `1.0`, and `true` in field order. Phase A's
+content-addressed fixtures include at least one each for no intent, untraced,
+partial, complete, and skipped state. Phase B covers every candidate kind and
+trace state, includes accepted, rejected, irrelevant, and disconfirming
+examples, and marks every candidate whose omission would hide a known
+alignment failure as critical.
 
-Verification `qualification` contains exactly `mode`,
-`positive_unit_count`, `negative_unit_count`, ordered `checks`, `passed`, and
-`failure_reasons`. One check is emitted in the TOML key order above for every
-sample floor, metric threshold, replay requirement, and critical-case rule; it
-contains exactly `name`, `comparator` (`>=`, `<=`, or `true`), `threshold`,
-nullable `observed`, and `passed`. A null observation never passes enforce
-mode. The two reference-only sample-floor keys observe the matching by-surface
-unit counts; other unprefixed keys observe aggregate metrics. For every by-code
-row, the aggregate positive/negative sample-floor and applicable
-quality/critical checks repeat with `name` prefixed by `<canonical-code>:`;
-the two `minimum_reference_only_*` keys never repeat by code. A code is
-qualified only when its positive sample floor and every per-code quality check pass and its
-false-positive count is zero. Failure reasons are unique strings in check
-order. After the aggregate TOML/replay/critical checks and before by-code
-checks, two assembly-surface checks appear in `reference_only`, then
-`repository_skill` order. Each is named
-`assembly_surface:<value>`, uses comparator `>=`, threshold `1`, and observes
-the number of distinct `assembler_base_identity_sha256` values represented by
-at least one manifest case/variant unit on both surfaces. Enforce qualification
-therefore requires at least one same tool/model/request/harness/guide base
-identity in both cohorts; stochastic trials never multiply the count. Surface
-comparisons remain observational because fixture mix is not paired in v1; the
-report must not call a difference a causal skill effect. Next, checks prefixed
-`reference_only:` apply every configured candidate-capture, sufficiency,
-precision, recall, false-positive, indeterminate, flip, and critical-case
-threshold to the reference-only by-surface row. Enforce `passed` requires all
-aggregate, surface-coverage, reference-only, and by-code checks to pass. The
-repository-skill quality row is observational and cannot compensate for a
-failed reference-only check. `operational`
-contains exactly `cache_hits`, `cache_misses`, `provider_calls`, nullable
-`estimated_cost_microusd`, and nullable `cost_rate_source`.
+The top manifest is a closed index over both phases. Each result instead binds
+one phase-owned qualification projection so a valid Phase-B-only change cannot
+invalidate accepted Phase A evidence. The projection has exactly:
 
-`interaction` contains exactly nonnegative integer `agent_calls`, `pages`,
-`bytes_returned`, `budget_exhausted_events`, `normalization_events`, and
-`adjudicator_requested_additions`, plus ordered `by_surface`, summed from the
-bound assembly transcripts for the variant cases. A `by_surface` row contains
-exactly `assembly_surface`, `variant_count`, and those same six count fields;
-rows exist exactly once in `reference_only`, then `repository_skill` order.
-`variant_count` is the number of distinct manifest case/variant units of that
-surface. Each total equals the sum of the two rows; absent observations produce
-a zero row rather than omitting the surface. `agent_calls` counts transcript
-events. `pages` counts events whose operation is one of
-`obligation.list`, `obligation.evidence`,
-`obligation.counterevidence`, `obligation.find-evidence`,
-`obligation.candidate-source`, or `obligation.candidate-neighbors`.
-`bytes_returned` and `normalization_events` sum
-their corresponding event integers; `budget_exhausted_events` and
-`adjudicator_requested_additions` count true event booleans. `maintenance` contains exactly nonnegative integer
-`changed_line_count`, `invalidated_case_count`,
-`invalidated_obligation_count`, `refresh_count`, `refresh_agent_calls`,
-`refresh_bytes`, and `unrelated_invalidation_count`, plus nullable
-`invalidations_per_changed_line`. That rate is invalidated cases divided by
-changed lines and is null at zero lines. These records are measurement and
-review inputs, not provider identity or standalone failure authority.
+```text
+{
+  schema_version: 1,
+  artifact: "backstitch-alignment-dogfood-phase-plan",
+  phase,
+  fixture_manifest_path,
+  fixture_manifest_sha256,
+  reviewer_protocol_path,
+  reviewer_protocol_sha256,
+  session_count,
+  tested_distribution_sha256,
+  guide_sha256,
+  skill_sha256,
+  thresholds,
+  critical_candidate_ids  // Phase B only
+}
+```
 
-Outside `backstitch eval`, configuration validation grants
-`CODE:verified` error eligibility only after reading the configured committed
-corpus and report, checking both exact file hashes, validating the corpus's
-manifest-v2 schema, gold records, variant case/manifest objects through the
-production loader, and matching the report's corpus identity. It then checks
-the report schema; recomputes the retained top-level `analysis` record from the
-current analyze provider/request/prompt/contract/search-epoch configuration;
-matches that record and `analysis_identity_sha256`; and matches the current
-verify inference contract, ordered base `search_epochs`, required verdicts,
-support threshold, indeterminate mode, and exact `eval_controls`. This
-comparison therefore includes trials, interval method, confidence level,
-sample floors, and all thresholds. It recomputes every assembler full/base
-identity and requires each required reference/guide descriptor, and any
-supplied proposal-schema descriptor, to equal the currently installed
-[EVC-8.3.1] artifact. A `repository_skill` identity must also equal the current
-raw SHA-256 of `skills/evidence-assembly/SKILL.md`; a missing or changed skill
-fails currentness. A teaching-artifact change does not stale a frozen case, but
-it does invalidate old assembly-quality qualification until reevaluated.
-It also validates replay hashes, requires
-`mode = "enforce"`, and requires `passed = true` only after authoritative
-recomputation. The validator reconstructs each production packet, claim,
-verifier-case projection, identity, key, evidence binding, aggregate state,
-context, primary/replay digest, and comparison signature from the bound
-corpus, cases, manifests, transcripts, and closed report event rows. It then
-recomputes every capture and sufficiency atom, conservative unit predicate,
-aggregate, by-surface, and by-code metric, Wilson bound, interaction row, qualification
-check, failure reason, per-code `qualified`, and top-level `passed` value and
-requires exact equality with the report. Maintenance fields remain review-only
-and cannot enter a qualification check. Any altered event, metric, bound,
-check, by-code row, or pass flag invalidates the qualification artifact; a
-matching configured file hash does not bless self-consistent but
-non-recomputed claims. The exact policy-selected BSA code must also have a by-code
-row with `qualified = true`; a passing aggregate cannot authorize an unmeasured
-classification. The eval command computes the candidate report from the
-current production path and never treats the output it is still producing as
-a pre-existing qualification artifact. Eval remains exit `0`/`2`; it never
-turns seeded fixture findings into target-repository exit `1`.
+Phase A's `thresholds` object contains only minimum bootstrap completion and
+authority comprehension. Phase B's contains only candidate capture, trace-state
+precision, maximum irrelevant rate, first-diff correctness, and critical
+capture. `phase_qualification_sha256` is SHA-256 of canonical JSON for this
+exact projection. The top manifest file must be canonical JSON with at most one
+final LF; that LF is transport formatting. Referenced fixture manifests and
+phase protocols retain their explicitly declared raw-byte hashes. The complete
+top-manifest digest remains useful as an audit identity but is not a phase
+result identity.
 
-## 11. Anti-Gaming Requirements [EVC-11]
+The three product identities are preregistered judged inputs, not values first
+asserted by a result. `tested_distribution_sha256` hashes canonical JSON for an
+ordered inventory of `pyproject.toml`, `uv.lock`, and every regular non-cache
+file under `backstitch/`; each inventory row has canonical repository-relative
+path, exact raw-byte SHA-256, byte count, and executable bit. Cache directories
+named `__pycache__`, `.mypy_cache`, `.pytest_cache`, or `.ruff_cache` and regular
+`.pyc`/`.pyo` files are excluded. `guide_sha256` hashes the exact installed
+`backstitch/guides/alignment.md` bytes. `skill_sha256` hashes the exact
+`skills/backstitch-alignment/SKILL.md` bytes. Plan and result loading recompute
+these values from the current authoritative files and reject a missing,
+renamed, symlinked, non-regular, or byte-drifted input. Result values must equal
+the manifest-derived values exactly.
 
-The assembling agent will often be the agent that authored the code under
-claim. Required countermeasures, all of which must hold simultaneously:
+The tested-distribution identity object is exactly:
 
-- the mandatory universe cannot be shrunk, and omissions require recorded
-  reasons visible in review ([EVC-7]);
-- agent proposals contain only broker-minted candidate IDs,
-  proof-obligation bindings, and reasons;
-  agent-supplied locators, digests, derived relations, universe state, and
-  review claims are rejected rather than trusted;
-- direct repository access may help an agent reason or propose additional
-  candidates, but only broker-resolvable candidate IDs and derived receipts can enter a
-  frozen case as evidence;
-- the verifier is blinded to assembler rationale and score ([EVC-3]); its
-  closed projection contains universe selected/considered/omitted state but
-  no assembler reason;
-- insufficient verifier evidence resolves `indeterminate`; v1 has no verifier
-  evidence-request loop or undeclared second discovery phase;
-- dispositions on verified findings follow the exact-match, reasoned,
-  auditable form of [SEM-6]; there is no family-wide semantic suppression;
-- the [SEM-8] corpus includes assembly-bias mutations: cases whose frozen
-  evidence is curated to omit the disconfirming span. An unaccounted omission
-  fails the universe check; a reasoned omission remains valid but its complete
-  current span is analyzer-visible as counterevidence. If analyze emits a
-  claim, verify sees the same span. If analyze emits no claim, verify has
-  nothing to assess; evaluation counts the miss against end-to-end recall.
-  This design prevents the assembler from hiding the span but does not claim
-  that one stochastic analyze run must recognize its meaning.
+```text
+{
+  schema_version: 1,
+  artifact: "backstitch-tested-distribution-inventory",
+  files: [{path, raw_sha256, byte_count, executable}]
+}
+```
+
+Rows are unique and Unicode-code-point sorted by NFC path. `raw_sha256` uses the
+prefixed hash form above, byte count is nonnegative, and executable is boolean.
+
+The phase protocols give participants only installed public help, the installed
+guide and repository skill, and their assigned fixture. They fix task prompts,
+timing boundaries, label definitions, and first-diff rules. Phase A additionally
+fixes these four authority-comprehension propositions: repository source is the
+alignment authority; candidates are advice; Backstitch neither edits nor
+ratifies source relations; semantic success cannot repair incomplete alignment.
+A session passes comprehension only when all four are answered correctly.
+
+For each Phase B task, the runner also supplies the exact Unicode-sorted
+`candidate_id` projection of the frozen human `accepted` rows. This projection
+is participant input, not an answer and not a Backstitch verdict. Rejected,
+irrelevant, critical, and expected-trace-state labels remain hidden. Each task
+records the supplied projection as `human_accepted_candidate_ids`, and the
+validator requires exact equality with frozen gold. Phase B never scores a
+participant's ability to infer the human disposition.
+
+A changed phase fixture, threshold, prompt, rubric, or other phase-owned judged
+input creates a new phase qualification digest and fresh phase result; the old
+result remains in the record. A common tested distribution, guide, or skill
+change invalidates both. Human labels are evaluation ground truth only and
+never enter runtime alignment state. The manifest and both protocols receive
+independent review before the run, so output cannot tune the test that judges
+it.
+
+Each participant receives phase fixtures one at a time in frozen order. A task
+timer starts at the handoff that first exposes that fixture and prompt, not at
+the first product call, and stops at the participant's final task submission.
+The runner records those boundaries from a monotonic wall clock. Later fixtures
+must remain unavailable until their own handoff. Installed help, guide, and
+skill orientation may happen before the first timed task.
+
+Each phase fixture manifest has exactly:
+
+```text
+{
+  schema_version: 1,
+  artifact: "backstitch-alignment-dogfood-fixtures",
+  phase,
+  fixtures: [{
+    fixture_id, fixture_path, tree_manifest_path, tree_manifest_sha256,
+    candidate_artifact_path, candidate_artifact_sha256,
+    task_obligation_id, expected_bootstrap_outcome, expected_diagnosis,
+    first_diff_required,
+    required_trace_declarations,
+    gold_candidates: [{
+      gold_id, candidate_id, candidate_kind, path, start_line, end_line,
+      structural_locator, receipt, trace_state, disposition_label, critical
+    }]
+  }]
+}
+```
+
+`phase` is `A` or `B`; fixture IDs and gold IDs are unique nonblank strings and
+fixtures sort by ID. Fixture paths, tree manifests, hashing, containment, and
+object rules are [EVC-10.1]'s. `expected_bootstrap_outcome` is `completed` or
+`correctly_diagnosed` for Phase A and null for Phase B. Phase A's initial state
+is derived from the exact task obligation's production inventory and readiness
+record before the run; a null target is `no_intent` only when that exact
+inventory contains no addressable obligation. No repository-wide issue-code
+heuristic may substitute. The five-fixture coverage rule applies to that
+derived state, not to the final outcome. An initially
+untraced, partial, or skipped fixture may therefore preregister `completed`
+when the task requires source repair. `task_obligation_id` is the nonblank
+target ID for a completed Phase A task and every Phase B task; it is nullable
+only for a Phase A diagnosis.
+`expected_diagnosis` is null for completed and Phase B tasks; otherwise it is
+exactly `{bootstrap_state, blocking_reason_codes, next_action_codes}` using
+[EVC-8.3]'s closed values and orders. Phase A has `first_diff_required = false`,
+empty declarations and gold candidates, and null candidate-artifact fields.
+Phase B uses null bootstrap outcome and diagnosis, a nonblank task ID, nonnull
+candidate-artifact fields, and a complete reviewed gold-candidate set.
+Disposition label is `accepted`, `rejected`, or `irrelevant`. A critical row is
+listed in the parent manifest as `<fixture_id>#<gold_id>`; the two projections
+must be exactly equal and the set is nonempty. A critical row has disposition
+`accepted` or `rejected`; an `irrelevant` negative control cannot be critical.
+Inclusive spans and vocabularies use [EVC-10.1]. `candidate_id` recomputes from
+the candidate kind, canonical path, and structural locator under [EVC-7]. The
+receipt recomputes byte-for-byte from that locator, span, and frozen tree.
+
+Each Phase B candidate artifact has exactly:
+
+```text
+{
+  schema_version: 1,
+  artifact: "backstitch-alignment-dogfood-candidates",
+  obligation_id,
+  snapshot: {snapshot_hash, file_count, byte_count, unreadable_count},
+  candidates
+}
+```
+
+Its path and exact canonical-JSON hash are fixture-manifest fields. Loading the
+preregistration reruns production snapshot capture, report construction, and
+`obligation.find_evidence` discovery for the fixture's exact tree, task
+obligation, profile, and settings. The derived artifact must be byte-identical,
+including candidate IDs, receipts, locators, relations, trace states, advice,
+ordering, and snapshot identity. This artifact is the frozen production
+observation under test, not expected-label ground truth. It is evaluation input
+only and never a runtime evidence or alignment authority.
+
+One required trace declaration is exactly
+`{form, target_id, evidence_role, gold_id}`.
+`form` is `spec_mapping`, `code_backlink`, or `binding_test`; the other values
+use their owning closed vocabularies and
+`gold_id` must resolve to an accepted row in the same fixture. Rows are unique
+and sort by form in that order, then target, role, and gold ID. The required set
+is derived exactly from human-accepted candidates that the frozen production
+artifact actually surfaced. The complete section relation is `spec_mapping`
+plus `code_backlink` for the candidate's owning implementation or test role;
+the required diff set is that complete relation minus declarations already in
+the original fixture. Thus a partial candidate contributes only its missing
+side and an untraced candidate contributes both. A spec-invariant
+implementation target similarly contributes a missing `spec_mapping`, and an
+invariant binding-test target contributes a missing `binding_test`. A
+one-sided, already-present, or extra required set is invalid preregistration. A Phase B
+fixture with at least one surfaced accepted candidate whose trace state is not
+`declared` sets `first_diff_required = true` and declares one cumulative,
+complete set of declarations missing from the original tree for every such
+row. An accepted
+already-declared candidate requires no diff and no new declarations. An
+accepted candidate absent from production discovery is a capture miss, not an
+impossible authoring task; it contributes no required declaration until the
+product surfaces it. A fixture with no surfaced accepted non-declared row uses
+false and an empty set. At least one fixture requires a first diff and at least
+one fixture contains a surfaced accepted already-declared row. Gold candidates
+label every candidate in the production-derived artifact exactly once by exact
+candidate ID, locator, receipt, span, and kind. Expected `trace_state` is an
+independently reviewed label; it is neither copied from nor required to equal
+the artifact's discovered state at plan load. The reviewed gold set may also
+contain source-bound candidates absent from production output. Each such row
+must exist in the production parser's complete captured candidate catalog before
+obligation selection, and its kind, ID, locator, span, and receipt must exactly
+equal that catalog fact. It must be `accepted` or `rejected` rather than
+`irrelevant`, enters the eligible capture denominator, and is uncaptured unless
+output surfaces that exact ID. Human acceptance is independent of product
+output; an absent source-bound row may therefore be accepted or rejected.
+Candidate
+IDs and full coordinates are unique. The corpus covers every reachable
+kind/expected-state pair;
+`report_issue` contributes only `partially_declared` and `conflicted`. An
+unmatched, ambiguous, duplicate, or conflicting output invalidates the run
+rather than acquiring a post-output label. A known contradicting declared
+candidate is critical because omitting it would hide a known alignment failure.
+
+Each phase produces its own independently content-addressed result. The common
+result has exactly:
+
+```text
+{
+  schema_version: 2,
+  artifact: "backstitch-alignment-dogfood-result",
+  phase,
+  phase_qualification_sha256,
+  prior_phase_result_sha256,
+  tested_distribution_sha256,
+  guide_sha256,
+  skill_sha256,
+  sessions,
+  candidate_runs,
+  metrics,
+  checks,
+  passed,
+  failure_reasons
+}
+
+session = {
+  session_id, participant_kind, participant_identity_sha256,
+  public_help_only,
+  tasks: [{
+    fixture_id, human_accepted_candidate_ids, bootstrap_outcome,
+    elapsed_milliseconds, backstitch_call_count,
+    reviewed_diff_attempt_count, review_round_count,
+    changed_source_paths, changed_source_line_count,
+    source_revisions,
+    backstitch_calls,
+    cli_observations
+  }],
+  authority_answers: [{proposition, answer}]
+}
+
+source_revision = {
+  ordinal, diff_path, diff_sha256,
+  result_tree_manifest_path, result_tree_manifest_sha256,
+  observed_trace_declarations
+}
+
+backstitch_call = {
+  ordinal, argv, source_revision_ordinal
+}
+
+cli_observation = {
+  ordinal, argv, source_revision_ordinal,
+  source_tree_manifest_path, source_tree_manifest_sha256,
+  output_path, output_sha256
+}
+
+candidate_run = {
+  fixture_id, obligation_id,
+  source_tree_manifest_path, source_tree_manifest_sha256,
+  output_path, output_sha256,
+  candidates: [{
+    candidate_id, candidate_kind, path, start_line, end_line,
+    trace_state, matched_gold_id
+  }]
+}
+
+phase_a_metrics = {
+  bootstrap_task_count, bootstrap_success_count,
+  authority_session_count, authority_session_pass_count,
+  bootstrap_completion_rate, authority_comprehension_rate
+}
+
+phase_b_metrics = {
+  eligible_gold_candidate_count, captured_eligible_gold_candidate_count,
+  captured_trace_state_correct_count,
+  surfaced_candidate_count, irrelevant_candidate_count,
+  first_diff_required_count, first_diff_correct_count,
+  critical_candidate_count, critical_candidate_captured_count,
+  candidate_capture_rate, trace_state_precision,
+  irrelevant_candidate_rate, first_diff_correct_rate,
+  all_critical_candidates_captured
+}
+
+check = {name, comparator, threshold, observed, passed}
+```
+
+All hashes use exact `sha256:<64 lowercase hex>`. Artifact paths are contained
+result-relative POSIX paths. Session IDs are unique within a phase. Participant
+kind is `human` or `agent`; participant hashes are unique within a phase, so
+the minimum two sessions are independent. `public_help_only` is true. Every
+session runs every fixture for its phase exactly once in fixture order.
+Session-array length equals the corresponding preregistered session count.
+
+`backstitch_calls` records every task-scoped product call in execution order;
+one-time help/guide orientation before a task timer is not a task call.
+Ordinals are contiguous, `source_revision_ordinal` binds the exact original or
+revised tree in force for the call, and `backstitch_call_count` equals the call
+array length. The closed read-only grammar permits obligation list/detail,
+evidence summary, discovery, candidate detail, and pagination plus deterministic
+`check` with optional suppression audit. It rejects mutation, packets, model,
+provider, cache, and arbitrary command surfaces. Every recorded call binds
+`--repo-root .`; `--format` is optional and, when present, is `text` or `json`.
+Thus authoring-cost call count is not reduced to the smaller proof-observation
+set.
+
+A source revision is a complete unified diff from the original tree-verified
+fixture, not from a prior attempt. Ordinals start at one and are contiguous.
+The runner applies each exact diff to a fresh original fixture copy and requires
+the result-tree manifest to match. `reviewed_diff_attempt_count` equals the
+source-revision count. Changed paths and changed lines recompute from the final
+tree's byte delta against the original tree, independent of diff headers, or
+are empty and zero when there is no revision. The production declaration
+parsers derive each revision's ordered declarations against its exact result
+tree and bind them to the frozen gold candidate's kind, path, and structural
+locator. The stored rows preserve multiplicity until duplicate or conflicting
+gold-bound relations are rejected. An apply, tree, parse, gold binding, or
+stored-declaration mismatch is an invalid observation.
+First-diff correctness additionally requires the revised target obligation's
+production readiness record to be `gate_state = "executable"`; a later repair
+does not rescue the first diff. For Phase B, revision one is one cumulative diff
+from the original fixture containing the exact complete missing-declaration set for all
+surfaced, human-accepted, nondeclared candidates. Separate candidate-local
+diffs do not satisfy this rule.
+
+CLI observations are nonempty, ordered with contiguous ordinals, and bind exact
+argv, source tree, snapshot, and canonical public JSON output.
+`source_revision_ordinal` is null for the original fixture or resolves to a
+source revision in the same task; its tree hash must equal that revision's
+result tree hash. The only canonical command arrays are `backstitch obligation
+list --repo-root . --format json`, `backstitch obligation <OBL> --repo-root .
+--format json`, and `backstitch obligation <OBL> --find-evidence --limit 100
+--repo-root . --format json` for their respective operations. The validator
+reruns each recorded proof command from the bound exact tree through the public
+module entry point and requires byte-identical stdout, exit zero, and empty
+stderr.
+Every proof observation must also occur in `backstitch_calls` at the same source
+revision. The call log may contain additional read-only interactions whose
+outputs are not qualification evidence.
+
+An initially partial, untraced, or skipped Phase A task records the original
+tree's `obligation.list` output first, has at least one source revision, and
+records the exact target's `obligation.get` output from the final revision last.
+An initially complete task records the target `obligation.get` output without a
+revision. A no-intent diagnosis records `obligation.list` without a revision.
+For `completed`, the final core result contains the preregistered target with
+`gate_state = "executable"`; for `correctly_diagnosed`, its projection of
+bootstrap state, blocking reasons, and next actions exactly equals the
+preregistered diagnosis. Stored `bootstrap_outcome` equals this recomputation.
+
+Each Phase B task records exactly one complete public `obligation.find_evidence
+--limit 100 --format json` observation for its preregistered obligation and
+original fixture tree. The limit is the closed evaluation proof limit and must
+be large enough for every frozen candidate set; default-page calls and cursor
+pages remain task interactions but are not substituted for the complete proof
+run. The complete run must have `next_cursor = null`. Its source-tree manifest
+path and hash plus output path, hash, and raw bytes exactly equal that fixture's
+canonical candidate run and byte-exact public rerun. Equal or synthesized bytes
+under a different path are not the bound observation. Phase B stores
+null outcome. Counts, milliseconds, and changed-line counts are nonnegative
+integers; paths are unique canonical source-relative POSIX strings in Unicode
+order. The human-accepted projection is task input. The participant may flag a
+believed preregistration defect outside the result; the owner must stop and
+review it rather than coaching the participant or silently changing gold. A
+confirmed defect creates new preregistered bytes and a new result.
+
+Phase A uses `phase = "A"`, null `prior_phase_result_sha256`, exactly the
+preregistered Phase A session count, empty candidate runs, `phase_a_metrics`,
+and checks only `minimum_bootstrap_completion_rate` then
+`minimum_authority_comprehension_rate`. Its sessions have the four authority
+propositions in their declared order and empty
+`human_accepted_candidate_ids`. It can pass and receive an owner stop/continue
+disposition before a Phase B run or result exists; the complete Phase B
+preregistration is still part of the frozen top plan.
+
+Phase B uses `phase = "B"`; `prior_phase_result_sha256` is the exact canonical
+JSON hash of a passing Phase A result whose Phase A qualification projection
+matches the current top plan and whose tested distribution, guide, and skill
+match Phase B. Phase B binds its own distinct qualification projection. It has
+exactly the preregistered Phase B session count, `phase_b_metrics`, and checks
+the remaining five thresholds in manifest order. Its authority-answer arrays
+are empty. Each task's `human_accepted_candidate_ids` exactly equals the sorted
+accepted gold projection, including accepted rows discovery omitted. Candidate runs exist
+exactly once per Phase B fixture and sort by fixture ID. Each run's candidates
+array must exactly equal the candidates reconstructed from its bound canonical
+CLI JSON. The run binds the fixture's exact nonblank obligation ID and original
+tree-manifest hash. Its snapshot and full candidate rows must equal the
+production-rederived preregistration artifact. Relation kinds, source and target
+IDs, locators, directions, row uniqueness, candidate-coordinate uniqueness,
+trace states, advice, and [EVC-7] order are all validated. Each projection
+matches the preregistered exact candidate ID and records that row's gold ID.
+Unmatched, ambiguous, duplicate, or cross-obligation rows are invalid.
+
+Metrics are recomputed, never averaged across session rates:
+
+- bootstrap completion is Phase A tasks whose recomputed outcome equals their
+  fixture's expected outcome divided by all Phase A tasks;
+- authority comprehension is Phase A sessions whose four recorded raw boolean
+  answers equal the frozen proposition rubric divided by all Phase A sessions;
+- candidate capture is distinct captured `(fixture_id, gold_id)` rows whose
+  gold disposition is `accepted` or `rejected`, matched by the exact candidate
+  ID and source-bound gold identity projection, divided by all distinct Phase B gold
+  rows with one of those two dispositions;
+- trace-state precision is every surfaced candidate row whose discovered trace
+  state equals its matched gold row divided by all surfaced candidate rows;
+- irrelevant-candidate rate is surfaced candidate rows whose matched gold label
+  is `irrelevant` divided by all surfaced candidate rows;
+- first-diff correctness is Phase B session tasks for fixtures with at least one
+  surfaced, human-accepted, nondeclared candidate whose first cumulative source
+  revision's parser-derived declaration set exactly equals the fixture's
+  required set and makes the target obligation executable, divided by all such
+  session tasks; and
+- all-critical-candidates-captured is true exactly when the captured critical
+  count equals the nonzero gold critical count.
+
+A zero numeric denominator serializes its rate as null and cannot pass. Counts
+are nonnegative integers and rates are null or finite in `[0, 1]`. Comparators
+are `>=` for minimums, `<=` for the maximum, and `true` for the boolean. Each
+stored count, rate, check, pass flag, and failure-reason list must exactly equal
+recomputation. Failure reasons are failed check names in order, preceded by
+`INVALID_OBSERVATION` when any participant task, candidate run, bound artifact,
+candidate match, or parser-derived declaration is invalid. A malformed outer
+result or preregistration is rejected before metric recomputation. One phase
+result passes only when no invalid observation exists and every applicable
+check passes. Its exact
+canonical JSON digest is recorded in that phase's owner-visible stage record;
+neither result confers runtime alignment authority. A later product review may
+cite both exact artifacts, but the semantic qualification report neither embeds
+nor replaces either phase result or owner disposition.
+
+1. **Obligation core:** inventory, readiness, evidence summary, guide, and CLI
+   bootstrap qualify first. A public-help-only user must identify source intent,
+   inspect declared evidence, explain that Backstitch does not ratify or edit
+   traces, and reach or correctly diagnose the first executable obligation.
+2. **Discovery and guidance:** Phase B asks, "Given obligation X, what current
+   code or tests are plausible candidates for fulfilling X?" Candidate
+   discovery qualifies against independent reviewed gold. After human
+   disposition is supplied as input, authoring guidance qualifies against the
+   cumulative source diff. It records search-set capture, false surfacing,
+   trace-state correctness, and post-selection authoring correctness. It does
+   not measure whether human disposition itself is easy, fast, or correct.
+3. **Packets and currentness:** packet v3, current repository analysis, and
+   historical replay qualify only after evidence sufficiency, mutation
+   sensitivity, unrelated-edit stability, and stale-result rejection pass.
+4. **Optional MCP:** MCP qualifies only after the CLI read model is stable and
+   measured CLI call count, response bytes, or agent context cost shows a
+   concrete adapter benefit. It additionally requires installed-wheel stdio
+   parity. Semantic-policy success is not an MCP prerequisite.
+5. **Semantic verification and policy:** analyzer/verifier qualification uses
+   [EVC-10.1]. Stronger policy remains blocked until that artifact passes for
+   the selected provider, model, prompt, and canonical semantic code.
+
+The implementation chain is obligation core to discovery to
+packets/currentness to semantic qualification. Qualification authority remains
+separate: semantic policy requires the passing Phase C source-pipeline record
+and [EVC-10.1] report, not a current Phase A/B human-session artifact. Current
+bootstrap/discovery product claims still require current Phase A/B results.
+Optional MCP branches after discovery; it does not depend on packet or semantic
+qualification and neither one depends on MCP.
+
+The obligation-core record includes elapsed time, reviewed source-diff attempts,
+changed source files and lines, and Backstitch calls from the starting
+untraced/partial state to the first executable obligation. Discovery labels are
+evaluation ground truth chosen by a human reviewer: `accepted` means the
+candidate appears in the final reviewed trace, `rejected` means it was plausible
+but not selected, and `irrelevant` means it does not implement or test the
+obligation. These records are qualification evidence, not runtime alignment
+state or a second evidence manifest.
+
+Phase B call count, elapsed time, review rounds, and changed lines measure the
+cost of using Backstitch after the human disposition is handed off. They do not
+measure selection burden. Candidate report usefulness is instead evidenced by
+capture, irrelevant rate, exact trace state, complete advice, and successful
+first-diff authoring. Re-running discovery against later repository snapshots
+is part of the shipped bootstrap workflow, not a new source of authority.
+
+For Phase B measurement, `accepted` and `rejected` rows are eligible discovery
+gold: both are relevant candidates the tool should surface for human judgment.
+`irrelevant` rows are negative controls the tool should omit. They are excluded
+from the candidate-capture denominator and measured when surfaced through
+`irrelevant_candidate_count` and `irrelevant_candidate_rate`. Every surfaced
+row, including a tolerated irrelevant row, remains in the trace-state-precision
+denominator because trace state is an independent deterministic claim. Every
+critical row has disposition `accepted` or `rejected`; an `irrelevant` row
+cannot be critical. This keeps capture and false-surfacing measurements
+disjoint: a correct implementation is never required to surface a negative
+control to pass capture, and every state it does surface must still be exact.
+
+_Implementation mapping_:
+
+- `backstitch/alignment_eval.py`
+
+Each stage has an owner-visible stop/continue review. A failed or unavailable
+later stage does not invalidate an already qualified earlier stage, but it
+blocks every dependent stage and any claim that includes it. Stage records must
+state the tested source identity, guide identity, interface surface, observed
+values, threshold or correctness rule, and reviewer disposition.
+
+## 11. Anti-Gaming And Trust Requirements [EVC-11]
+
+All of these must hold:
+
+- repository source is the only alignment authority;
+- every satisfied section implementation role has reciprocal source trace;
+- invariant readiness uses the existing declaration/bind/binding-test graph;
+- derived artifacts cannot add, remove, or override evidence links;
+- discovery exposes untraced and conflicted candidates instead of silently
+  curating them away;
+- over-approximate candidates remain advisory unless a closed source-based
+  readiness rule says otherwise;
+- packet membership is deterministic and complete under the configured
+  universe, never agent or model selected;
+- the verifier is blinded to analyzer and author reasons;
+- skip remains reasoned, visible, denominator-preserving, and unable to grant
+  coverage or conformance;
+- semantic results cannot upgrade incomplete alignment or skipped disposition;
+- packet-only replay is historical and cannot claim current repository
+  conformance;
+- no deterministic read or MCP operation imports a provider, reads credentials,
+  makes network traffic, or writes repository source;
+- semantic CI may treat repository bytes as hostile input only when the
+  executable, locked dependencies, config, prompt, provider controls, mutable
+  roots, and workflow definition are independently trusted;
+- secret-bearing hostile-target workflows obtain generic CLI option keys and
+  values only from static trusted workflow text; event payload fields and
+  target bytes cannot select or construct configuration;
+- no secret-bearing semantic step executes or installs target-repository code,
+  hooks, plugins, workflows, configuration, or commands;
+- a report-only pull-request run binds to an API-confirmed exact head revision,
+  rechecks that binding immediately before provider work, and has no repository
+  write or semantic failure authority;
+- restored semantic cache bytes remain untrusted and cannot bypass complete
+  packet, identity, provenance, schema, and evidence validation;
+- public enumerations, schemas, ordering, budgets, and exits have firing tests.
+
+The main Goodhart risks are fake trace links and irrelevant broad mappings.
+Reciprocity proves declared reach, not relevance. The semantic corpus must
+therefore include broad, vacuous, and misleading declared-evidence mutations.
+The semantic lane may report weak or mismatched evidence, but cannot silently
+rewrite the trace graph.
 
 ## 12. Verification Expectations [EVC-12]
 
-Executable gates cover, at minimum:
+Implementation is not complete until real-boundary tests prove:
 
-- verify cache keys are disjoint from analyze keys; identical claim with
-  changed `claim_hash`, epoch, semantic `case_evidence_hash`, verify
-  prompt/model/controls misses; reason, guide, audit-only case-hash, and policy
-  changes do not miss
-- dependency and plugin distribution version changes miss verify cache; exact
-  verifier projection/request/key/cache golden bytes reject every unknown or
-  reordered field, prove assembler reasons never enter, and show each current
-  source line at most once per role even when overlapping candidates are
-  omitted
-- `analyze` and `eval` are the only verify runners; disabled/enabled report-v2
-  records, debt modes, verify problems, aggregate score, and 2-before-1 exit
-  precedence fire while `summarize-analysis` makes no verify access
-- the verifier request contains no analyzer rationale or score bytes
-- `supported`/`unsupported`/`indeterminate` each fire and project to the
-  documented contexts; mixed N-event sets follow [EVC-5]; tool failure never
-  projects to `unsupported`
-- an unsupported-plus-failed mixed set retains BSE005/BSE006 audit rows but
-  has no aggregate event, debt, or disputed BSA projection and exits `2`
-- unknown calibration keys are rejected; uncalibrated `support_score` is never
-  named or rendered as probability
-- obligation reference, list, compact default view, evidence/counterevidence,
-  discovery, and candidate detail form a complete progressive-disclosure path;
-  a fresh process can continue a page from its full address without `init`, a
-  hidden handle, or server-side session state
-- CLI and MCP expose the named operations in [EVC-8], not a generic query
-  surface; every [EVC-8.3.1] payload, nullable field, ordering rule, problem
-  variant, and mutation `changed` result has golden parity across adapters
-- cursor golden vectors resume in a fresh process; altered digest, unknown
-  field, stale snapshot, selector mismatch, cross-variant or cross-operation
-  reuse, bad item index/line, and current item-ceiling violation each fail
-  without silently restarting; a changed response ceiling resumes a source
-  span without line loss or duplication
-- canonical obligation shorthand normalizes with `IDENTIFIER_NORMALIZED`;
-  ambiguity is rejected with candidates and `REQUEST_REJECTED`
-- portable repository ID produces the same candidate, case, and manifest
-  hashes across two clone roots; an absolute local root enters none of them
-- golden snapshot, case/candidate/receipt, proposal/universe, case-object, and
-  active-manifest preimages reproduce every digest and exact indented file byte
-- snapshot capture builds resolver, parser, universe, and receipts from one
-  immutable byte image; a mid-capture mutation retries or exits `2`, and a
-  pre-publication mutation returns `SNAPSHOT_CONFLICT`
-- seed and closure ordering is byte-stable; every supported Python relation
-  form resolves, every unsupported or ambiguous form becomes an exact
-  unresolved candidate, and depth zero includes only seeds
-- module-resolution golden fixtures cover import-base and package roots,
-  `__init__.py`, relative levels, overlapping-root agreement/conflict, duplicate
-  modules, aliases, lexical shadowing, wildcard imports, and submodule-versus-
-  definition ambiguity
-- candidate-span golden fixtures cover decorated/nested definitions, modules,
-  multiline references using their lexical owner, binding tests, report issues,
-  empty and unterminated files, and tree-sitter end points at column zero
-- contained candidate resolution mints a stable candidate ID without trusting
-  agent locators; adding it expands closure to a fixed point that the proposal
-  must account for
-- stable candidate IDs survive raw and normalized non-structural content
-  churn; a structural-locator edit intentionally changes identity; receipt
-  hashes change on raw churn, so universe diff never mistakes non-structural
-  content change for a new member
-- an edit to an unrelated semantic file changes the audit repository snapshot
-  but not unchanged candidate, receipt, semantic-case, packet, analyze-cache,
-  or verify-cache identities for an unaffected obligation
-- normalization golden vectors cover lone CR, CRLF, trailing spaces and tabs,
-  empty spans, multiple terminal newlines, strict UTF-8 rejection, and content
-  whose bytes resemble a delimiter; structural-locator vectors cover nested
-  definitions, aliased calls, identical occurrences, and both invariant
-  locator variants
-- every guidance code in [EVC-8.5] has a firing test and every response has a
-  nonblank action; terminal reads remain compact and use `READ_COMPLETE`
-- JSON stdout/stderr framing, text projection, MCP success/error envelopes,
-  and CLI/MCP core-result parity fire for exits 0, 1, and 2
-- candidate-source paging never splits a UTF-8 line; one over-budget line fails with
-  the exact raise-limit-or-select-narrower-candidate action
-- proposal validation accepts candidate IDs, proof-obligation bindings, and
-  reasons; derives trusted fields; preserves wrong-role selections with
-  `EVIDENCE_ROLE_MISMATCH`; and rejects attempts to override trusted fields
-- fixed bootstrap, raw request, proposal string/canonical, captured file/image,
-  and case/manifest byte ceilings reject at exact observed counts before parse,
-  reconstruction, or staging; every budget variant fires
-- a deliberate open question is a nonblocking proposal discrepancy that
-  activates as BSE003-visible, nonverifiable debt and makes zero verify calls;
-  other discrepancy codes block activation
-- zero eligible tests deterministically produces `complete_absent` only for an
-  invariant binding-test obligation and permits its weak-binding absent-test
-  verifier branch; a section test remains unresolved, and one eligible test
-  makes invariant absence completion invalid
-- every cell in the closed candidate-kind/proof-obligation role matrix has an
-  acceptance or `EVIDENCE_ROLE_MISMATCH` test
-- activation is deterministic: the same repository snapshot and canonical
-  proposal produce byte-identical case objects and `case_hash`
-- repeated matching activation and non-required absent deactivation return their
-  exact no-write, `changed = false` idempotent responses; required absent
-  deactivation remains visible through `CASE_REQUIRED_MISSING`
-- activation publishes an immutable object then switches the active manifest last;
-  snapshot or manifest conflict changes no active state, returns the complete
-  recovery sequence, and cannot be forced; inactive objects are never treated
-  as active cases
-- death injection before object fsync, before hard-link publication, after the
-  hard link, before manifest fsync, and after manifest replace proves that no
-  partial final object or partial active manifest is observable; the next
-  writer cleans only exact regular staging names
-- a pre-existing identical object is validated and reused; a symlink,
-  non-regular object, hash/path mismatch, or different bytes at the same object
-  path exits `2` without replacement
-- obligation listing, activation replacement, deactivation, missing required cases,
-  malformed manifests, referenced-object loss, and stable staging cleanup all
-  fire through the [EVC-8.6] lifecycle
-- section and invariant skip markers parse only on the owner heading or in its
-  directive region; parser-derived ATX closing-hash and setext insertion,
-  italic/HTML aliases, HTML-safe JSON escaping for `-->`, `<`, `>`, quotes,
-  backslashes, controls, and delimiter-like text, missing/blank/oversized
-  reasons, duplicates, non-obligation owners, and fenced/prose mimicry each
-  fire their exact [EVC-8.3.2] behavior
-- skip and unskip preserve every non-marker source byte across LF, CRLF, and
-  unterminated owner lines; matching skip and absent unskip are no-write
-  idempotent operations, while a reason update changes only the marker bytes;
-  canonical inline markers preserve target coordinates, while standalone
-  aliases expose their expected coordinate-staling refresh action
-- skip/unskip source edits use real sibling staging, no-follow checks, lock,
-  file/directory fsync, and compare-and-swap; concurrent edit, permission
-  failure, symlink/non-regular path, and death before/after replace expose no
-  partial spec and retain only the exact ignored staging residue
-- a skipped obligation remains in list totals, appears as BSE010 with its exact
-  reason under `--show-suppressions`, creates no packet/analyze/verify work,
-  retains any active immutable case, and resumes ordinary currentness checks
-  after unskip; parser and artifact corruption remain fatal while skipped
-- applied policy that makes BSE010 non-suppressible exercises the ordinary
-  unsuppressible-suppression path; exact effective level and `fail_on` decide
-  the exit, an exact BSE010 error rule prohibits skips, skip counts never enter
-  the covered numerator, and a skipped qualification fixture is rejected
-- broad roots such as `code_roots = ["."]` and `spec_roots = ["docs"]` still
-  discover ordinary inputs while the exact configured case root, final
-  objects, manifests, and transient files never enter the semantic snapshot
-- MCP stdio performs no network, provider/model, repository-write, activate,
-  skip/unskip, deactivate, or approval action; its missing dependency and handshake failures are
-  structured exit-`2` equivalents without tracebacks
-- the installed guide and MCP guide resource return the same bytes; the
-  repository skill adds workflow only and duplicates no normative contract;
-  a guide-only digest change preserves case validity while changing assembly
-  evaluation provenance
-- every relation type fires; trusted structural relations re-derive, while
-  `semantic_support` and `counterevidence` remain visibly proposed; a static
-  reference never projects as runtime reach or assertion coverage
-- line-ending, trailing-whitespace, and terminal-newline edits do not
-  invalidate the case, but do change a packet containing current raw bytes and
-  therefore require an exact cache hit or trusted refresh; indentation,
-  comment, docstring, token, and line-order edits make the obligation stale
-- target requirement normalization churn fires `CASE_REQUIREMENT_STALE` and
-  invalidates every derived proof obligation; raw-only target churn preserves
-  case validity but changes packet identity
-- a new caller/implementation/test in the recomputed universe fires
-  `CASE_UNIVERSE_EXPANDED` on a previously green case
-- obligation-scoped invalidation: an edit invalidates only citing
-  obligations; refresh touches only those
-- every `BSE*` diagnostic fires and respects packaged-versus-applied policy
-  layering, including promotion of staleness to error by an applied policy
-- an omission without a reason fails activation, not merely CI
-- assembly-bias corpus cases prove that changing a disconfirming candidate from
-  selected/considered to reasoned omission does not remove its current span
-  from analyzer or verifier input; an analyze no-finding is recorded as an
-  end-to-end false negative and fails qualification when thresholds require it
-- one huge omitted span and many bounded omitted spans can exceed the exact
-  analyze or verify request ceiling; proposal validation rejects the exact
-  analyze overflow or conservative verify overflow, and analyze's defensive
-  exact checks make zero provider/cache writes
-- verify-eval manifest v2 and report v3 validate exact committed cases,
-  identities, events, replay hashes, metrics, null denominators, checks, and
-  report hash; distinct trial epochs are measured as keyed repetitions, not
-  independent samples, and increasing trials never increases positive/negative
-  unit counts; report mode cannot authorize error, while enforce mode requires
-  a current passing artifact and exact `CODE:verified` policy
-- clean and mutated source artifacts install into isolated config-derived case
-  paths and pass the production loader; reference-only and repository-skill
-  transcripts bind exact assembler full/base identities, both surfaces share
-  at least one base identity, and interaction counts recompute per surface
-- a transcript with an adjudicator-requested addition makes its otherwise
-  complete positive unit insufficient; event/metric/check/by-code/pass tamper
-  fixtures and multi-packet missing/changed-code flip fixtures all fail
-  authoritative report validation
-- source text containing prompt injection, fake tool instructions, or forged
-  candidate IDs remains quoted untrusted data; symlink and containment attacks
-  are rejected before any read or write
-- section and invariant semantic packets include the selected implementation
-  and test bodies under schema v3; case and trace modes both fire; stale cases
-  cannot reach independent verification; changing semantic case evidence or
-  current raw evidence bytes changes packet and cache identity, while an
-  audit-reason-only case-hash change does not; v2 never satisfies v3
-- schema-v3 golden tests cover every closed top-level and nested field, exact
-  model-visible projection, maximal source-region merge/deduplication, unique
-  SEM-5 citation binding, role source, ordering, case-mode fail-closed cap,
-  trace-mode truncation warning, and legacy-v2 migration action
-- pre-resolution and partially resolved failures exercise the exact nullable
-  repository envelopes, plus JSON and text exit-2 framing; CR/LF and Unicode
-  line separators in hostile path/parser text remain escaped inside one line
-- exit precedence matches [SEM-7] with staleness expressed only through
-  diagnostics
+1. Empty and no-spec repositories return the bootstrap state and action.
+2. Mixed addressable obligations and unaddressable intent paginate in exact
+   order with self-contained cursor validation.
+3. Every readiness transition fires for sections and invariants, including
+   missing, one-sided, duplicate, ambiguous, and complete relations.
+4. Valid, malformed, duplicate, and ownerless skips preserve alignment facts,
+   audit reasons, and evidence reads; no Backstitch command changes source.
+5. Evidence summary returns exact coordinates, receipts, roles, and broken
+   reciprocity.
+6. Every candidate/relation/trace-state branch fires, including conservative
+   unresolved and negative static-relation fixtures.
+7. Repeated discovery is byte-identical; unrelated edits do not change
+   obligation-local packet hash when its visible projection is unchanged.
+8. Candidate/catalog/work/file/snapshot/packet budgets fail closed without a
+   partial page, cursor, packet, cache, or policy result.
+9. Mid-capture add, remove, replace, and permission mutations discard the
+   entire attempt, retry at most the configured three times, and never mix
+   bytes.
+10. Stable symlink and non-regular inputs fail without traversal; replacing an
+    intermediate directory during descriptor walk discards the attempt;
+    unsupported platforms return the exact problem before traversal.
+11. Current analyze rejects every output, staging, cache, lock, guard, audit,
+    or provider-local mutable path that overlaps a captured semantic input.
+12. After successful capture, resolver, parsers, readiness, discovery, and
+    packet construction survive live replacement/deletion because they never
+    reopen source; current analyze's final recapture detects the change.
+13. Phase D has an explicit `implemented` or `deferred` owner disposition. If
+    implemented, CLI JSON and a real installed-wheel stdio MCP client return
+    byte-identical canonical core results for every success and problem family.
+    If deferred, the distribution advertises no MCP command, tools, or resource.
+14. Obligation reads, deterministic discovery, guide, packet generation, and
+    `check` neither import a provider nor make network traffic; the same holds
+    for MCP when Phase D is implemented.
+15. Packet v3 recomputes from source, includes the full closed evidence and
+    counterevidence universe, and has no alternate manifest authority.
+16. Current analyze publishes only after equal start/end snapshots; historical
+    packet replay is labelled and structurally unable to claim a current gate.
+17. Analyze and verify call counts, exact outbound bytes, identities, cache
+    hits/misses, evidence reconstruction, failure aggregation, and policy
+    projection have firing tests without live providers.
+18. Every public command, flag, state, candidate kind, relation kind, trace
+    state, guidance code, problem code, schema version, config key, and exit
+    path has at least one firing test.
+19. The scale fixture meets [EVC-10]'s time, work-count, and memory ceilings.
+20. The full self-corpus gate exits 0 with zero errors and warnings; all
+    suppressions remain exact and auditable through `--show-suppressions`.
+21. Every row of [EVC-8.7]'s combined exit matrix fires, including failing
+    non-skip trace diagnostics on an all-skipped corpus and every legacy
+    completeness key's selected/all-skipped behavior.
+22. Eval primary-only, replay-only, equal, and divergent findings reconstruct
+    exact nullable side states, hashes, comparison signatures, and flip counts.
+23. Fixture tree manifests reject missing/extra/changed/symlink files, and the
+    performance gate refuses a runtime that differs from the committed runner
+    contract.
+24. Selected and zero-packet all-skipped reports reproduce readiness counts
+    from exact alignment-audit rows and preserve every non-failing
+    deterministic issue; a skipped untraced obligation is distinguishable
+    from a skipped completely aligned obligation.
+25. Mutating only an alignment-audit or deterministic-issue row corrupts the
+    packet-report content identity; packet-report input and generated output
+    over the exact byte ceiling fail before partial packet, audit, cache,
+    analysis, or policy publication.
+26. [EVC-10.2]'s obligation and discovery manifests, fixtures, thresholds,
+    critical IDs, prompts, and rubric are content-addressed and independently
+    reviewed before their dogfood; at least two sessions per phase run before
+    claiming current bootstrap or discovery product qualification. Their
+    records keep bootstrap cost, candidate quality, packet quality, and
+    semantic quality in separate denominators. Every result count, rate,
+    zero-denominator value, critical-capture flag, check, and pass value
+    recomputes exactly from the bound fixture, CLI-output, diff, and session
+    observations. A stale or absent Phase A/B result cannot enter or silently
+    block semantic-report authority.
+27. Enabled verify accepts the exact same analyze provider/model tuple in
+    `provider_source = "analyze"` mode and an optional complete override tuple.
+    Analyze mode requires no distinct credential configuration or duplicate
+    cost table; override mode rejects every partial/fallback shape. A different
+    `--model` or `LLM_MODEL` cannot retain stale revision/cost metadata under
+    reuse. Same-model and distinct-model compositions receive separate
+    inference identities when their resolved contracts differ, but both face
+    the identical corpus precision, recall, critical-case, stability, and
+    replay qualification gate.
+28. An exact failure-authority selector with missing, corrupt, failing, or
+    identity-mismatched qualification exits 2 before cache/provider work and
+    emits the requalification action. Firing probes cover equal CLI/environment
+    model values, rejected different CLI/environment values, complete analyze
+    descriptor changes, complete verifier-override changes, and equal-to-
+    distinct composition changes. Every analyzer/verifier composition and
+    source-derivation-version field invalidates the selector; packet/claim
+    instance, per-event trial index/effective epoch, path, budget, and policy
+    changes do not. Changing configured `verify.eval.trials`, any threshold, or
+    another qualification-identity field does invalidate authority. With no
+    failure-authority selector, the same unavailable artifacts remain
+    report-only and non-promoting.
+29. Evaluation derives a distinct effective analyzer epoch per trial and a
+    distinct effective verifier epoch for every ordered configured base epoch
+    and trial. Primary analyzer/verifier execution makes one call per distinct
+    key; require-mode replay makes zero calls. Stored `analysis_attempts`
+    include `ok` results and exact cache-object/provenance records. Stored
+    events retain and recompute both base and effective epochs; changing only
+    trial index does not invalidate report-level composition identity.
+30. Variant-scoped obligation, evidence, candidate, packet, receipt, and
+    required-evidence gold reject every cross-variant reference. Historical
+    unit references, duplicate historical target tuples, multiple expected
+    findings for one packet, the 20-target floor, required control tags,
+    nonempty critical cases, and a critical valid-vacuous-trace subset all have
+    failure probes.
+31. Expected findings, event rows, by-code cohorts, and check prefixes use long
+    `SEMANTIC_*` codes in [SEM-6] order. Long and `BSA00*` selectors normalize
+    to the same cohort; aggregate pass never substitutes for a missing or
+    failing exact-code cohort.
+32. Report-mode and enforce-mode checks use the same raw observations. A false
+    `require_all_critical` setting makes its boolean check nonbinding without
+    rewriting `observed`; enforce requires true. Negative variants qualify only
+    through their exact variant gold projection, and every by-code equation is
+    independently recomputed.
+33. Eval output and configured report paths reject corpus, fixture, tree-
+    manifest, and config aliasing before adapter construction. Corpus case,
+    variant, fixture path, tree-manifest path, historical-unit, and expected-
+    finding identities each have duplicate and ordering failure probes.
+34. Public-CLI cache lifecycle probes use real temporary cache roots and
+    provider call counters to fire `off`, `read-write`, and `require`; exact
+    hit, miss, packet-change, policy-only, search-epoch, deleted-cache,
+    corrupt-cache, restore-failure-reset, fresh-publishable-report, and
+    pre-report-failure branches all preserve [SEM-4] and [SEM-7].
+35. Trusted semantic workflow probes bind the tool checkout to the run's exact
+    default-branch SHA, bind the target checkout to the API-confirmed readable
+    head repository and SHA, revalidate immediately before provider work, keep
+    secrets and every executable/configurable input outside the target, move
+    only immutable packet/result cache trees under distinct trusted workflow
+    prefixes, and give the pull-request lane no repository write or semantic
+    failure authority. Real hostile-target subprocess fixtures prove successful
+    data-only analysis separately from fail-closed captured-root symlink
+    rejection.
+
+Acceptance probes use real temporary repositories, Markdown and Python
+parsers, resolver, filesystem, CLI subprocesses, packet/cache/report loaders,
+and, when Phase D is implemented, real installed-wheel stdio MCP framing.
+Provider adapters may be controlled, but request
+bytes, identities, normalization, cache, and failures remain real. Tests must
+not mock the resolver for readiness, parser for guidance, candidate index for
+CLI or implemented MCP, or cache for packet identity.
+
+### 12.1 Required Cross-Spec Promotion [EVC-12.1]
+
+This revision changed active contracts through one coordinated spec change;
+EVC does not silently override them. The promotion recorded in the related
+plan required the following exact reconciliations and one independent review:
+
+- [SC-5], [SC-8], and [SC-16] register `obligation`, `guide alignment`, and,
+  when Phase D is implemented, `mcp`; add current `analyze --repo-root`;
+  preserve lazy provider imports; and state that no obligation or implemented
+  MCP operation writes repository source. SC-16 also removes every remaining
+  `evidence case` and `frozen case` authority phrase in favor of source
+  alignment and derived packets. SC-16 defines verifier independence as
+  blinded adversarial procedure, not provider/model or statistical
+  independence. SC-16's metric-identity rule replaces its final sentence with:
+  `Semantic qualification reports exact counts, rates, confidence bounds, and
+  pass checks bound to one committed corpus and exact composed inference
+  identities; Backstitch emits no blended correctness percentage or calibrated
+  model score.`
+- [SC-6], [SC-7], [SC-13], [INV-5], and [SEM-3] through [SEM-9] adopt packet
+  schema 3, packet-report schema 2, exact model projection, current/historical
+  scope, deferred current-result publication, and new cache identities as one
+  migration. Packet schema 2 remains readable only for bounded historical
+  diagnostics and cannot satisfy a schema-3 gate.
+- [CFG-3], [CFG-5], [CFG-6], [CFG-8], and [CFG-9] register the exact
+  `[tool.backstitch.obligations]` table, config anchor behavior for repo-root
+  current analysis and packet replay, verify `provider_source` plus its
+  all-or-nothing provider override, the exact `[tool.backstitch.verify.eval]`
+  qualification table, MCP optional dependency, and no-op-prevention tests.
+  `[tool.backstitch.verify.eval]` is the sole promoting evaluation path;
+  superseded `[tool.backstitch.analyze.eval]` is always rejected as settings;
+  only its schema-2 report fields remain explicit historical artifact input and
+  grant no policy authority. Superseded case/proposal/activation keys are
+  rejected as unknown, not ignored. [CFG-5]'s model/revision pair rule applies whenever
+  enabled verify uses `provider_source = "analyze"`, even if analyze is
+  cache-off: `--model` and `LLM_MODEL` may be absent or equal the complete
+  config-declared analyze model, but cannot replace it while retaining revision
+  or cost metadata. A different reused model requires an atomic config change
+  to the complete analyze descriptor.
+- [EXC-4], [EXC-6], [EXC-7], and [EXC-8] adopt [EVC-8.3.2]'s skip grammar,
+  audit projection, malformed behavior, and source-read-only boundary. Skip
+  suppresses semantic execution only. It neither changes alignment nor
+  suppresses ordinary trace diagnostics; repositories that also want those
+  diagnostics non-gating use existing exact reasoned issue suppression.
+  BSX010 is allocated as reserved during the spec-only checkpoint and becomes
+  implemented atomically with its skip-reason emitter and firing test;
+  BSX004, BSX010, and BSX001 take the exact packaged warning behavior stated
+  there instead of EXC-8's strict-loader exit for this recognized
+  repository-source grammar.
+- [INV-5] makes a spec-declared invariant without a valid bound target
+  non-executable instead of producing a warning-bearing semantic packet. A
+  code-declared invariant's declaration owner is its implementation target.
+  Both forms still require a valid binding test. Code-only invariants remain
+  unskippable in v1.
+- [SC-4]'s unreadable-file continuation is preserved for deterministic check
+  and read operations through [EVC-8.2]'s stable unreadable manifest row.
+  Discovery, packet generation, and current semantic analysis fail when an
+  unreadable included input prevents a complete candidate catalog.
+- `SEMANTIC_MISSING_TRACE`/`BSA003` is not emitted for a syntactically missing
+  mapping, backlink, bind, or binding-test relation. Those defects stop current
+  semantic execution through deterministic readiness. BSA003 remains only for
+  a syntactically complete reciprocal graph whose packet content is judged not
+  to establish the claimed behavioral trace. The old
+  `trace_reference_removed` semantic mutation moves to deterministic alignment
+  evaluation; its semantic replacement preserves valid syntax but makes the
+  declared relation substantively vacuous.
+- [SEM-6]'s setting `candidate_handling` is renamed `finding_handling` because
+  this spec uses candidate for discovered source. The old name is a one-release
+  deprecated alias that cannot coexist with the new name; equal or conflicting
+  dual specification is invalid configuration rather than precedence magic.
+  [SEM-7]'s `candidate_debt` report field becomes `finding_debt`, and all help,
+  defaults, reports, tests, and prose make the same vocabulary migration.
+- [SEM-5], [SEM-6], and [SEM-7] adopt [EVC-6]'s full context vocabulary,
+  first-match precedence, packaged-level matrix, failure-authority rules, and
+  report values: `evidence_bound`, `verification_indeterminate`,
+  `independently_verified`, `mechanically_verified`, `human_verified`,
+  `disputed_by_verifier`, and `human_rejected`. Legacy `corroborated`
+  normalizes read-only to `evidence_bound`; producers stop emitting generic
+  `disputed`. Every transition and precedence pair gets a firing test.
+  Independently verified remains advisory unless the exact current
+  [EVC-10.1] qualification artifact passes for the selected BSA code;
+  mechanical and human contexts keep their distinct authority.
+- [SC-15] allocates only `OBLIGATION_SKIPPED`/`BSE001` and no case-lifecycle
+  BSE codes. Existing trace and invariant diagnostics remain authoritative;
+  EVC operation problems use [EVC-8.4]'s non-suppressible problem vocabulary.
+- Proposed [COV-6] removes its broker, proposal, activation, and frozen-case
+  wording and consumes obligation discovery as advice whose accepted outcome
+  is an ordinary human-reviewed source diff. [COV-9] tests deterministic
+  worklist ranking and source-diff outcomes, not `uncovered_next` proposal
+  objects. EVC promotion cannot leave the related proposed spec describing the
+  superseded flow.
+
+Promotion evidence includes exact hashes for every coordinated spec, default
+self-corpus exit 0 with zero errors and warnings, suppression audit, and an
+independent PASS with no open P1/P2 finding. Those bytes and observed results
+are recorded in the related plan; a later normative change requires the same
+review discipline.
+
+### 12.2 Canonical Configuration Resolution [EVC-12.2]
+
+Firing tests must prove the full defaults/config/environment/CLI cascade
+through the public CLI and the canonical resolver. They cover every
+`--option` value family and error family in [CFG-5.1], the exact
+dedicated-setting alias map, operational non-aliases, minimal and dormant
+disabled verifier shapes, arbitrary explicit and extended TOML filenames,
+command-specific anchors, single resolution per invocation, direct
+typed-settings injection below the boundary, and rejection before
+provider/cache/output effects.
+
+Workflow contract tests must prove that trusted refresh and hostile-target PR
+analysis explicitly select the trusted checkout's `pyproject.toml`, use the
+exact reviewed literal options from [SEM-9.1], and never derive config or
+option text from event payload or target repository data. Tests use real
+temporary files, TOML parsing, environment mappings, CLI parsing, and command
+dispatch. They must not mock the canonical resolver, config discovery,
+`extend`, settings validation, or the trusted/target path split.
+
+_Implementation mapping_:
+
+- `tests/test_cli.py`
+- `tests/test_cli_config.py`
+- `tests/test_doctor.py`
+- `tests/test_release_workflow.py`
+- `tests/test_semantic_analysis.py`
+- `tests/test_semantic_settings.py`
+- `tests/test_settings.py`
 
 ## Related Plans
 
 - `docs/plans/2026-07-15-agent-guided-evidence-cases-plan.md`
+- `docs/plans/2026-07-27-semantic-analysis-lifecycle-plan.md`
+- `docs/plans/2026-07-27-canonical-config-resolution-plan.md`
+  (implementation and verification recorded)

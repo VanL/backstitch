@@ -27,11 +27,11 @@ To refresh this inventory:
 
 ## Current Observed Availability
 
-Last refreshed: not yet refreshed in this repository
+Last refreshed: 2026-07-14
 
 | Agent family | Status | Notes |
 |--------------|--------|-------|
-| Claude | not yet checked | |
+| Claude | usable; review-ineligible pending containment probe | Liveness passed on 2026-07-14, but the documented `--permission-mode plan` gating review timed out after writing a plan under `~/.claude`; a corrected `dontAsk` plus explicit read-only `--tools` probe passed, while its write-attempt containment probe remains pending. |
 | Codex | not yet checked | |
 | Gemini | not yet checked | |
 | Qwen | not yet checked | |

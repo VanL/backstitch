@@ -448,6 +448,29 @@ _Implementation mapping_:
 - `backstitch/semantic_analysis.py`
 - `backstitch/semantic_reports.py`
 
+### 5.1 Configuration Inputs [SC-5.1]
+
+Every command that consumes Backstitch settings accepts the configuration
+selection and repeatable generic override grammar defined in [CFG-5.1]:
+
+```bash
+backstitch --config PATH --option KEY VALUE <command> ...
+backstitch --no-config --option KEY VALUE <command> ...
+```
+
+`--config PATH` may name any TOML filename. It is explicit selection, not an
+additional discovery convention. `--config`, `--no-config`, and `--option`
+must all be rejected rather than silently ignored by commands that do not
+consume configuration. Invalid option syntax or an invalid effective
+configuration is exit `2` before command side effects.
+
+_Implementation mapping_:
+
+- `backstitch/settings.py`
+- `backstitch/cli.py`
+- `tests/test_cli_config.py`
+- `tests/test_settings.py`
+
 ## 6. Report And Data Contracts [SC-6]
 
 The deterministic JSON report must contain at least:
@@ -1325,6 +1348,8 @@ _Implementation mapping_:
   (implementing)
 - `docs/plans/2026-07-15-agent-guided-evidence-cases-plan.md`
   (implementing)
+- `docs/plans/2026-07-27-canonical-config-resolution-plan.md`
+  (implementation and verification recorded)
 - `docs/plans/2026-07-10-local-default-live-llm-tests-plan.md`
   (implemented)
 - `docs/plans/2026-07-09-backstitch-invariant-traceability-plan.md`

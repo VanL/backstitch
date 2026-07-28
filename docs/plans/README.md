@@ -53,7 +53,7 @@ Risky plans are blocked if they do not make explicit:
 | 2026-07-16-evidence-spike-hardening-plan.md | slices 0-6 implemented, review-confirmed; Slice 7 (post-review residuals) added 2026-07-17, scoped outside review PASS — cleared for implementation |
 | 2026-07-17-agent-guidance-delta-wave-propagation-plan.md | active — landing the hub delta `a4b4345..b248e1c` (source `b248e1c`) |
 | 2026-07-27-semantic-analysis-lifecycle-plan.md | same-model and Claude plan reviews PASS; Slices 1-4 implemented and final review PASS; landing gate pending an owner-authorized commit |
-| 2026-07-27-canonical-config-resolution-plan.md | draft — Class 5 with CLI/trust hardening; independent plan and spec-delta review pending |
+| 2026-07-27-canonical-config-resolution-plan.md | implemented and verified; Claude implementation findings addressed; uncommitted pending landing authorization |
 | 2026-07-27-serial-benchmark-lane-plan.md | completed — normal xdist and serial benchmark lanes split; independent completed-work review PASS |
 
 (Existing plans carry status via each spec's `## Related Plans` tags;

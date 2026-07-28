@@ -1,0 +1,4 @@
+interface:
+  display_name: "Backstitch Alignment"
+  short_description: "Turn aligned intent into an executable Backstitch gate."
+  default_prompt: "Use $backstitch-alignment to inspect obligations and prepare an authorized, human-reviewed traceability diff."

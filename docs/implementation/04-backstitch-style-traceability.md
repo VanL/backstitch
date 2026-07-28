@@ -26,7 +26,8 @@ Load-bearing boundaries:
 
 - **Purity.** `resolve()` is pure: parsed records in, `Report` out. All
   filesystem truth (path existence, symbol inventories, scan file lists) is
-  gathered by `scan_repository` and passed in, so graph policy is testable
+  derived from the accepted `RepositorySnapshot` by
+  `scan_snapshot_with_artifacts` and passed in, so graph policy is testable
   without IO and reruns are byte-stable.
 - **Markdown structure belongs to `markdown-it-py`.** `markdown_specs.py`
   interprets Backstitch traceability constructs over CommonMark tokens; it
@@ -61,18 +62,23 @@ Load-bearing boundaries:
   references. `resolve()` owns shared-namespace uniqueness, valid binds,
   unknown references, no-cascade duplicates, and untested findings. It does
   not inspect snippets or semantic state ([INV-3], [INV-4]).
-- **Packets and results are discriminated unions.** New section and invariant
-  artifacts carry `kind`; only the three exact pre-invariant legacy shapes are
-  normalized. Invariant packets bound targets and test definitions to eight
-  records and 120 lines each, then hash only the final statement/target/test
-  projection. The hash is comparison metadata, not a cache key or persistence
-  feature ([INV-5], [SC-6]).
-- **Binding quality stays at the model boundary.** `analyze` validates every
-  cited path and line against shown target/test snippets, injects trusted
-  packet kind/hash metadata, and converts evidence-deficient invariant `ok`
-  results to `weak_binding`. `summarize-analysis` has no packet snippets, so it
-  validates row identity and shape but deliberately does not re-prove locality
-  ([INV-5], [SC-7]).
+- **Packets and results are discriminated unions with two distinct hashes.**
+  New section and invariant artifacts carry `kind`; only the exact legacy
+  shapes named by the compatibility contract are normalized. Invariant
+  `content_hash` keeps its original bounded statement/target/test comparison
+  meaning and is not a persistence key. Universal `packet_hash` covers the
+  complete kind-specific model-visible projection. It enters the larger
+  `analysis_key` with prompt, provider, request, contract, and search-epoch
+  identity; that analysis key owns immutable cache addressing ([INV-5],
+  [SC-6], [SEM-3]).
+- **Binding quality stays at the packet-local evidence boundary.** `analyze`
+  validates every cited path and line against shown target/test snippets,
+  reconstructs exact excerpts and hashes, injects trusted packet and inference
+  metadata, and converts evidence-deficient invariant `ok` results to
+  `weak_binding`. `summarize-analysis` has no packet snippets, so it validates
+  row identity and shape but deliberately does not re-prove locality. The
+  unified runner, not the presentation command, owns cache, policy,
+  completeness, and exit authority ([INV-5], [SC-7], [SEM-5], [SEM-7]).
 - **The llm quarantine.** `check` and `packets` are structurally incapable
   of importing `llm`: the import lives inside `analysis_llm.default_adapter`
   and the `analyze` CLI handler, and a subprocess test asserts

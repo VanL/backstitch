@@ -261,78 +261,44 @@ _Implementation mapping_:
 
 ## 5. Semantic Binding Analysis [INV-5]
 
-`backstitch packets` emits discriminated section and invariant records.
-`--kind {section,invariant,all}` defaults to `section`. `all` emits existing
-section order first, then invariant order. Filtering occurs after the full
-deterministic report, so diagnostics and exit status remain whole-repository.
-For one corpus and policy, every kind has the same policy-driven exit code.
+`backstitch packets --kind {section,invariant,all}` defaults to section.
+Filtering occurs after the full deterministic report, so every kind shares the
+same deterministic policy exit. `all` emits section order followed by
+invariant order.
 
-New packets always carry `kind`. Loaders normalize the legacy section shape
-without kind. An invariant packet exists only for an invariant with a valid
-bind and contains `packet_id = "invariant::<ID>"`, kind, ID, tier, statement,
-declaration locator, bounded `targets`, bounded `binding_tests`, relevant
-issues, `packet_warnings`, instructions, and `content_hash`. A bound
-spec-declared invariant without a resolved target has `targets: []` plus a
-warning. An untested invariant has no semantic packet.
-Every named envelope key is required; array-valued fields may be empty but may
-not be omitted.
+A packet-schema-3 invariant is emitted only for an executable obligation under
+[EVC-2.1] and [EVC-9.1]. A spec-declared invariant without a valid bound
+implementation target is non-executable and emits no semantic packet; it does
+not become a warning-bearing targetless packet. A code-declared invariant's
+declaration owner is its implementation target. Both forms still require one
+valid binding test. Code-only invariants have no valid v1 skip location.
 
-An invariant packet's `issues` are exactly report issues whose
-`invariant_id` equals that packet's invariant ID, ordered by path, nullable
-line (null before numbered lines), canonical code, and message.
+The packet's requirement, declared implementation, binding-test evidence,
+counterevidence, trace summary, readiness, snapshot identity, regions, issues,
+and hashes are the exact closed [EVC-9.1] shape. Packet membership is complete
+or fails closed; the old bounded target/test truncation contract is historical
+only. The code-owned invariant prompt asks for a concrete target-code change
+that violates the invariant while shown tests pass, or the exact shown
+assertion spans that prevent one.
 
-The invariant-only packet keys are `invariant_id`, `tier`, `statement`,
-`declaration`, `targets`, `binding_tests`, and `content_hash`. `declaration` is
-an object with `kind`, `path`, `line`, nullable `symbol`, and nullable
-`section_id`; exactly one of `symbol` and `section_id` is non-null.
+Invariant classifications are `ok`, `weak_binding`,
+`confirmed_mismatch`, `probable_mismatch`, and `ambiguous`. Canonical model
+evidence is the closed role/path/span shape in [SEM-5]. Invariant `ok`
+requires test evidence. An `ok` row without it normalizes to
+`weak_binding` only when requirement and implementation evidence are valid;
+otherwise it is malformed. Weak binding intentionally requires no test role.
+Every present span must match exactly one shown declaration, target, or binding
+test region for its role. Empty/omitted snippets provide no evidence.
 
-For a code declaration, `targets` contains only the declaring path and symbol
-and never consults mappings. A module declaration uses the reserved symbol
-`<module>`, which cannot collide with a Python identifier, `start_line = 1`,
-and the first 120 lines of the whole file's UTF-8 replacement-decoded text read
-at packet generation. For a spec declaration,
-`targets` contains unique resolved mapping edges of the enclosing section;
-backlinks are excluded. A spec declaration with zero mapping targets uses
-`targets: []` and a warning containing
-`no target code resolved for spec-declared invariant`.
+Packet ID, kind, packet hash, analysis key, and verification state
+are trusted metadata, not model fields. Malformed/provider failures follow
+[SC-7]'s problem-only contract and exit 2. `summarize-analysis` validates row
+shape and identity but cannot re-prove locality without packets.
 
-Targets and binding tests both sort by path, nullable symbol (null as empty
-string), and start line. Retain at most eight targets and eight binding tests.
-Each snippet is capped to its first 120 lines with no inserted ellipsis;
-omission and truncation are represented only in `packet_warnings`. Empty
-snippets require an explicit unreadable, missing-symbol, or file-race warning.
-
-The prompt asks: "Describe a concrete target-code change that violates this
-invariant while every shown test still passes. If none exists, cite the
-specific assertion lines in shown binding-test snippets that would fail."
-
-Invariant packets allow `ok`, `weak_binding`, `confirmed_mismatch`,
-`probable_mismatch`, and `ambiguous`. Section packets retain `ok`,
-`confirmed_mismatch`, `probable_mismatch`, `missing_trace`, and `ambiguous`.
-The result's existing `evidence` field is an array of `{path, line}` objects.
-A shown snippet's inclusive evidence range is `start_line` through
-`start_line + len(snippet.splitlines()) - 1`; an empty snippet has no valid
-line range. During `analyze`, invariant `ok` requires at least one evidence item
-inside a shown `binding_tests` range. If it has none, normalize it to
-`weak_binding`, even when it cites target-code evidence. V1 does not
-syntactically recognize all assertion idioms. Any evidence path or line outside
-the packet's shown target and binding-test ranges is malformed output. More
-precisely, zero evidence items are valid and evidence-deficient; every present
-item's path must equal the shown item's path and its line must fall in that
-item's range, or the whole result is malformed. This includes evidence for a
-binding test omitted by the eight-test packet cap.
-
-The model must return the existing packet ID; a mismatch is malformed. Model
-output does not need `kind` or `content_hash`, and any supplied values are
-ignored. The canonical result copies packet ID, kind, and invariant hash from
-the packet. Hash the final ordered and truncated packet projection
-exactly as defined in [SC-6]. `summarize-analysis` validates identity, kind, row
-shape, and hash shape, but not snippet locality because it has no packet. It
-renders section and invariant advisory blocks separately. V1 adds no cache and
-no automatic test-helper expansion.
-
-`summarize-analysis` is not a trust boundary for evidence locality. Only
-`analyze`, while holding the source packet, can validate those ranges.
+Packet-schema-2 and unversioned invariant forms are bounded historical
+validation/presentation input under [SC-6]. They cannot produce a current or
+qualification report and have no schema-3 gate authority. There is no
+automatic test-helper expansion.
 
 _Implementation mapping_:
 - `backstitch/analysis_packets.py`
@@ -347,12 +313,9 @@ The first implementation must not include:
 
 - automatic invariant extraction from code or prose
 - test generation or test repair
-- mutation testing. It is the execution-based ground truth for the same
-  question and the natural calibration path for the semantic judge (run
-  mutations on a sample of invariants; compare against `ok` verdicts to
-  measure the judge's false-`ok` rate) — but it is a separate spec if
-  adopted, because it changes the execution boundary.
-- CI failures from semantic classifications
+- mutation execution as part of ordinary invariant checking. The repository-
+  owned semantic evaluation corpus is separately governed by [SEM-8].
+- CI failure authority outside [SEM-5] through [SEM-9]
 - cross-repository invariants
 - runtime assertion checking (this spec is about tests, not `assert`)
 
@@ -370,13 +333,15 @@ The tool must handle these cases explicitly:
   (existing `FILE_UNREADABLE` / `PYTHON_SYNTAX_ERROR` behavior; the scan
   continues per [SC-4])
 - binding references outside test roots
-- invariants whose owning code or binding tests exceed packet bounds
-  (truncate with `packet_warnings`, never silently)
-- a bound spec invariant with no resolved implementation mapping still emits a
-  packet with statement, bounded binding tests, `targets: []`, and an explicit
-  warning; its ordinary section-mapping finding remains
-- malformed model output for invariant packets (per-packet containment per
-  [SC-7])
+- invariants whose complete requirement, implementation, binding-test, or
+  counterevidence universe exceeds packet/report bounds are non-executable;
+  packet construction fails closed and never truncates required evidence
+- a spec invariant with no resolved implementation target is non-executable,
+  emits no semantic packet, and retains its ordinary deterministic mapping
+  and readiness findings
+- malformed/provider output for invariant packets emits no canonical result or
+  verifier event, records the [SC-7]/[EVC-8.7] structured problem, and exits
+  `2`
 - an invariant declared and bound in the same file (legal but reported as
   `INVARIANT_BINDING_NOT_TEST` when that file is not under a test root)
 
@@ -411,26 +376,29 @@ Required proof:
   (prose containing the word "Invariant:", fenced-code-block content)
 - resolver tests proving each [INV-8] code fires, and that a bound
   invariant produces a `binds` edge and no finding
-- assertion-laundering fixture: fake-adapter tests prove the refutation prompt
-  and deterministic `ok` to `weak_binding` normalization when no evidence
-  falls inside a shown binding-test range
+- assertion-laundering fixture: controlled-adapter tests prove the code-owned
+  refutation prompt and deterministic `ok` to `weak_binding` normalization;
+  role-matrix tests cover every invariant classification, forged roles/spans/
+  excerpts, declaration evidence, and the intentional no-test weak-binding set
 - marker-isolation tests covering every documented marker position plus
   adversarial CST fixtures and proving no ordinary `code_refs` or section
   backlink edges for those cases
-- packet-bound tests for invariant packets, including truncation warnings
-- content-hash tests: every invariant result carries a 64-character lowercase
-  hexadecimal `content_hash`, every section result omits that key, identical
-  triads hash identically across runs, and changing the statement, target code,
-  or binding tests changes the invariant hash
+- packet completeness and byte-ceiling tests for invariant packets; a missing
+  target or binding test is non-executable, and overflow fails closed rather
+  than truncating required evidence
+- packet-hash independence tests: declaration excerpt/span and every other
+  model-visible projection field affect `packet_hash`, while prompt-only edits
+  affect prompt identity/analysis key and do not widen `content_hash`
 - dogfood: `backstitch`'s own deterministic core declares its load-bearing
   invariants (at minimum: byte-stable resolver output, no guessed edges,
   deterministic commands never import `llm`) bound to the existing tests
   that enforce them, and the self-corpus check reports zero
   `INVARIANT_UNTESTED`
-- self-acceptance for new report, packet, and result forms and all three
-  documented legacy artifact forms: deterministic report without all three
-  invariant additions; section packet without `kind`; section result without
-  `kind`
+- self-acceptance for packet-schema-3, packet-report-schema-2,
+  analysis-report-schema-3, result, cache-hit, and replay forms; schema-2 and
+  unversioned forms remain historical-only under [SC-6]
+- skip tests prove spec-declared skips are auditable and code-only invariants
+  remain unskippable
 - both `INVARIANT_UNTESTED` contexts and every BSI code have firing coverage
 
 Fakes only at the model boundary, per [SC-10].
@@ -454,7 +422,61 @@ reciprocal spec and code traceability chain.
 _Implementation mapping_:
 - `tests/test_backstitch_corpus_traceability.py`
 
+## 11. Phase Hardening Invariants [INV-11]
+
+Invariant: [INV.CANON.1] exactly one production implementation of canonical
+JSON serialization, of the sha256-hex token grammar, of the deterministic
+issue sort key, and of bounded no-follow file reading exists in the package;
+every consumer imports the owner module named in the closed allowed-owner
+table in `tests/test_canonical_owners.py`, proven by AST-level enumeration
+of the package.
+
+Invariant: [INV.LINE.1] production line-number arithmetic over source bytes
+or snippet text splits on `\n` only, through the one shared line-slicing
+helper; no production module outside the closed exemption table in
+`tests/test_canonical_owners.py` calls `splitlines`, performs ad-hoc
+`split("\n")` line splitting outside the shared helper, or does manual
+newline-count arithmetic — the enumeration test covers all three call-site
+forms. Receipts, packet spans, and shown-region reconstruction agree
+byte-for-byte on any input, including `\r`, `\f`, `\v`, `\x85`, U+2028, and
+U+2029.
+
+Invariant: [INV.SCAN.1] one scan pipeline exists: every repository read used
+by resolve, discovery, packets, and reports consumes the captured immutable
+byte image, and only the owner modules named in the closed allowed-owner
+table in `tests/test_canonical_owners.py` open repository files, proven by
+AST-level enumeration; no live-filesystem twin path exists in the package.
+
+Invariant: [INV.PERF.1] the advertised default `backstitch check` invocation
+performs zero static-syntax parses and at most one repository snapshot
+capture; `backstitch obligation list` parses each unique file at most once
+per invocation. Wall-clock budgets are non-normative and live only in marked
+performance tests.
+
+Invariant: [INV.CFG.2] for every config key whose settings-dataclass default
+is a concrete value, the packaged-default TOML value equals that dataclass
+default; keys whose dataclass default is None-means-packaged are exempt. On
+conflict the packaged TOML is canonical and the dataclass is corrected. A
+single enumerating test proves the equality.
+
+_Implementation mapping_:
+- `backstitch/canonical.py`
+- `backstitch/contract_validation.py`
+- `backstitch/grammar.py`
+- `backstitch/models.py`
+- `backstitch/repository_snapshot.py`
+- `backstitch/settings.py`
+- `backstitch/semantic_packets.py`
+- `backstitch/code_parser.py`
+- `backstitch/obligation_runtime.py`
+
 ## Related Plans
 
+- `docs/plans/2026-07-11-deterministic-semantic-gate-plan.md`
+  (implementing)
+- `docs/plans/2026-07-15-agent-guided-evidence-cases-plan.md`
+  (implementing)
 - `docs/plans/2026-07-09-backstitch-invariant-traceability-plan.md`
   (implemented)
+- `docs/plans/2026-07-16-evidence-spike-hardening-plan.md`
+  (implementing)

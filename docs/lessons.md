@@ -210,3 +210,127 @@ authority. If a server enforces schemas only for nonstreaming requests, bridge
 that response back to the unchanged streaming client without repairing the
 assistant content. Transport control, decoder control, and semantic validation
 are three distinct proofs.
+
+## Give semantic models closed evidence coordinates (2026-07-15)
+
+A probabilistic model should select trusted evidence, not reconstruct source
+coordinates. Derive exact end lines locally, expose a closed list of allowed
+regions, and require the response to copy one of those regions verbatim. Remove
+fully contained duplicate regions before inference so one returned span cannot
+match two allowed choices. Provider schemas can guide generation, but the local
+normalizer remains authoritative unless strict enforcement has been proved at
+the transport boundary.
+
+## Repository policy and eval-fixture policy are separate scopes (2026-07-15)
+
+An isolated semantic-eval fixture inherits request, evidence, cache, and budget
+controls from repository configuration. It must not inherit full-repository
+inventory floors or human disposition requirements. Those controls describe a
+different corpus and can make a valid fixture fail before inference begins.
+Neutralize them explicitly in the eval projection, then test the effective
+settings rather than trusting the source configuration.
+
+## Cached model and revision form one identity pair (2026-07-15)
+
+An environment model override cannot safely replace only the configured model
+while retaining its declared revision. That creates a false cache identity and
+can send unsupported parameters to a different provider model. In cached modes,
+reject a model override that disagrees with a nonblank configured model unless
+configuration declares the matching model and revision together.
+
+## Pin actions before a workflow receives a secret (2026-07-15)
+
+A manual-only workflow is still a secret-bearing supply-chain boundary.
+Mutable major tags on checkout or tool-setup actions can run before the trusted
+command and exfiltrate a job-scoped credential. Pin every third-party action in
+that workflow to an exact reviewed commit, and expose the secret only on the
+small set of steps that validate or consume it. Trigger restrictions and
+read-only repository permissions do not replace either control.
+
+## Manual dispatch is branch-selectable (2026-07-15)
+
+Checking out `main` does not make a `workflow_dispatch` run main-only. GitHub
+selects the workflow definition before checkout, and a manual dispatch can
+target another ref. For a repository-secret workflow that must use only the
+default-branch definition, use an event whose documented `GITHUB_REF` and
+`GITHUB_SHA` are the default branch, such as a typed `repository_dispatch`.
+If branch-selectable dispatch is required, move the credential to a protected
+environment secret restricted to the trusted branch.
+
+## A recorded digest does not bind an artifact to its source (2026-07-15)
+
+Cross-row consistency can prove that every trial repeats the same claimed
+manifest facts, but it cannot prove those facts came from the manifest named by
+a digest string inside the artifact. Promotion-grade validation must read the
+authoritative source, verify its bytes against the digest, and compare every
+source-owned field. Keep manifest-free validation explicitly scoped to
+internal consistency so callers cannot mistake coherence for provenance.
+
+## Expected labels must not be projections of the system under test (2026-07-16)
+
+A content-addressed evaluation can still be tautological. If frozen production
+output defines the complete gold set or supplies the expected classification,
+candidate capture and precision cannot fail without first making the observation
+malformed. Keep the production artifact as the observation under test. Bind
+independently reviewed gold to source-derived identities and allow eligible
+source candidates that output omitted to remain in the denominator. Mutation
+tests should make each quality metric fail through a valid observation, not
+launder product errors into `INVALID_OBSERVATION`.
+
+## Proof observations are not an interaction-cost log (2026-07-16)
+
+A minimal set of byte-bound outputs can prove a task outcome while omitting the
+summary, discovery, detail, pagination, or check calls that the participant
+needed to reach it. Do not infer authoring cost from proof artifacts. Record a
+complete ordered log of the allowed task-scoped product calls, recompute the
+count from that log, bind each entry to the source revision in force, and
+require every proof observation to occur in the log. Keep unproved auxiliary
+outputs out of the qualification evidence boundary.
+
+## A path-only trace names one source owner, not every parser node (2026-07-16)
+
+A whole-file mapping can be complete reciprocal evidence without declaring
+every definition and reference inside that file. Candidate discovery must seed
+the exact module owner for a path-only Python declaration. Treating every AST
+node in the file as declared both overstates human authority and explodes the
+counterevidence closure. Keep source-owner identity separate from the static
+graph nodes used to find nearby advice.
+
+## Parse once per snapshot, derive separately per obligation (2026-07-16)
+
+Repository-wide candidate discovery has a large obligation-independent parse
+and static-resolution phase. Rebuilding it for each obligation makes runtime
+roughly proportional to obligations times repository size and cannot satisfy a
+scale gate. Prepare one snapshot-bound catalog, then clone only mutable
+obligation derivation state. Preserve deterministic work accounting as if the
+catalog were read for each addressed operation; a cache must improve execution
+without changing budget truth or leaking trace state between obligations.
+
+## Structured-output support must be proved at the wire and normalization layers (2026-07-16)
+
+A wrapper may advertise an option name that the selected provider model no
+longer accepts, and a local server may accept a JSON Schema request yet return
+non-JSON text. Resolve the exact wire parameter before traffic, retain the
+logical request identity and output ceiling, inspect the forwarded schema in a
+live contract test, and still run the closed local normalizer. Transport
+acceptance is not semantic or syntactic conformance.
+
+## Authority preflight and execution must share the same resolved input (2026-07-16)
+
+A CLI can correctly reject unqualified failure authority before repository or
+provider work, yet the shared runner can still make the qualified path
+impossible if it repeats the check without the resolved qualification settings.
+Pass the complete authority input through the request boundary and fire a test
+at the shared runner, not only at the CLI preflight. Preserve the structured
+problem details at the outer error boundary; a line-safe message alone is not
+enough to diagnose selector, digest, derivation, and composition mismatches.
+
+## Run the exact CI scope before closure (2026-07-16)
+
+Focused type, lint, and format checks can all pass while the release command
+still fails on newly added test modules or frozen adversarial fixture trees.
+Before closure, run the exact CI command over its full configured paths. Keep
+frozen fixture bytes outside the package's lint, format, and type surfaces;
+their manifests and drift tests are the correct validators. Fix real test-code
+typing defects with precise annotations and casts instead of broad file
+exclusions or blanket ignores.

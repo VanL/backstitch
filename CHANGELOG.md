@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- Added deterministic semantic evidence discovery, immutable analysis and
+  verification caches, qualification-gated model use, bounded trusted refresh
+  workflows, and report-only hostile pull-request analysis.
+- Added the aligned-intent obligation read model, evidence candidate workflow,
+  public obligation commands, alignment guides, and frozen product-evaluation
+  corpora.
+- Centralized configuration in one invocation-scoped resolver with packaged
+  defaults, explicit or discovered TOML, defined environment inputs, and
+  repeatable `--option KEY VALUE` overlays. Dedicated CLI flags share the same
+  final layer, and commands receive the resolved typed settings snapshot.
+- Removed filename-specific refresh configuration. Trusted semantic workflows
+  now select the trusted checkout's `pyproject.toml` explicitly and apply the
+  reviewed literal runtime overrides.
+- Expanded acceptance, adversarial, semantic-evaluation, configuration,
+  workflow-boundary, coverage, and scale tests.
+
 ## 0.3.0 - 2026-07-10
 
 - Added first-class invariant traceability. Code and spec declarations can use

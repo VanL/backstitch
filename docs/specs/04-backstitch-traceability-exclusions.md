@@ -193,6 +193,22 @@ both.
 - Markers must not suppress diagnostics whose effective level is outside
   `diagnostics.suppressible_levels`.
 
+### 4.5 Obligation skip marker
+
+The only source-authored obligation skip grammar is [EVC-8.3.2], including its
+inline-heading, HTML-comment, and directive-block forms; strict JSON reason;
+placement, ownership, coexistence order, byte/character limits; and code-only
+invariant exclusion. This spec does not define a second spelling. One ordinary
+`meta` or `ignore` directive may coexist in the exact EVC order. Ordinary
+traceability policy and skip disposition are parsed independently.
+
+A valid marker changes only the obligation disposition to `skipped`, excludes
+semantic execution, and emits auditable `OBLIGATION_SKIPPED`/`BSE001`. It does
+not change alignment or suppress trace, invariant, identity, syntax,
+containment, currentness, or artifact-integrity findings. Backstitch never
+writes or removes skip markers. A code-only invariant has no valid v1 skip
+location.
+
 _Implementation mapping_:
 
 - `backstitch/cli.py`
@@ -265,6 +281,9 @@ warn_unused_ignores = true
 Path keys are repo-relative globs or exact paths. Section keys use
 `relative/spec/path.md::SECTION_ID`.
 
+Skip has no configuration key and no `allow_skips` switch. Repositories that
+prohibit valid skips promote `BSE001` through ordinary diagnostic policy.
+
 ### 6.2 Precedence
 
 Later steps override earlier steps for the same diagnostic code and location:
@@ -321,6 +340,11 @@ scope.
 Default output omits suppressed findings entirely. Findings disabled by
 `level = "off"` use the same audit view with reason `diagnostic level off`.
 
+`--show-suppressions` also lists every valid obligation skip with obligation
+ID, decoded reason, source path and line, and effective `BSE001` policy. The
+skip remains visible even when BSE001 is off; it is an audit record, not proof
+that ordinary trace findings were suppressed.
+
 _Implementation mapping_:
 
 - `backstitch/reporting.py`
@@ -333,6 +357,16 @@ Exit code `2` when strict loading sees:
 
 - a suppression names an unknown diagnostic code
 - malformed `_Traceability:` syntax
+
+Recognized `skip-obligation` source syntax is the exception defined by
+[EVC-8.3.2]. Malformed syntax, placement, ownership, coexistence, or duplicate
+markers emit warning-level `SUPPRESSION_INVALID_SYNTAX`/`BSX004` and leave the
+disposition `evaluate`; missing/blank reasons emit
+`SUPPRESSION_REASON_MISSING`/`BSX010`; and a well-formed target without a
+parsed owner emits `SUPPRESSION_UNUSED`/`BSX001`. These repository-source
+diagnostics do not become strict-loader exit `2`, and
+`allow_unknown_keys` does not alter this reserved grammar. Invalid config or
+invocation syntax still exits `2`.
 
 Under `allow_unknown_keys = true`, unknown or malformed suppressions that arise
 from repository files or repository configuration are downgraded into
@@ -383,6 +417,10 @@ Required proof:
 - precedence tests: inline beats config; meta does not suppress errors
 - invariant tests prove required and draft untested under packaged defaults,
   plus an explicit policy override and `off` audit recovery
+- every valid and invalid [EVC-8.3.2] form fires its exact disposition,
+  BSE001/hygiene code, policy, and audit result; valid skip leaves ordinary
+  trace findings intact, malformed skip remains `evaluate`, code-only
+  invariants reject skip, and no command mutates source
 - DOM fixture: zero `SPEC_SECTION_UNMAPPED` with `meta_spec_globs`, sections
   still parsed
 
@@ -407,6 +445,8 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-07-15-agent-guided-evidence-cases-plan.md`
+  (implementing)
 - `docs/plans/2026-07-09-backstitch-invariant-traceability-plan.md`
   (implemented)
 - `docs/plans/2026-07-08-configurable-diagnostics-plan.md` (implementing)
