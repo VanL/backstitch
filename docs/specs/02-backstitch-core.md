@@ -844,9 +844,29 @@ Required proof surfaces:
   repository-variable activation switch, and use least-privilege permissions
 - wall-clock benchmark tests carry the registered `benchmark` marker. Normal
   xdist and coverage lanes explicitly select `not benchmark`; a dedicated
-  serial lane runs every `benchmark` test without xdist. The serial lane may
-  not convert failures into skips. An ordinary serial local pytest run may
-  include both normal and benchmark tests
+  serial lane runs every `benchmark` test without xdist. Each command receives
+  one unmeasured warm-up and five measured runs. The result reports every
+  sample and the median. A latency qualification is available only when the
+  current runtime exactly matches the wall-clock runner contract, which uses
+  the closed [EVC-10] identity schema, and a content-bound baseline exists; the
+  median must not exceed 120% of that baseline. A missing baseline, a baseline
+  bound to another contract, or a missing, invalid, unobserved, or mismatched
+  runner identity reports `unavailable` without failing CI or release. Command
+  failure, timeout, malformed committed baseline, or breach of the code-owned
+  catastrophic median ceiling remains fatal. Unavailable qualification is a
+  measured passing outcome, not a pytest skip; no benchmark failure may be
+  converted into a skip. An ordinary serial local pytest run may include both
+  normal and benchmark tests.
+  The wall-clock runner contract path is
+  `tests/performance/wall-clock-runner-contract.json`; an observed identity is
+  read from the test-harness-only
+  `BACKSTITCH_BENCHMARK_RUNNER_IDENTITY_PATH`. The baseline path is
+  `tests/performance/wall-clock-baseline.json`, with exactly
+  `schema_version = 1`, the lowercase SHA-256 of the runner contract,
+  `measured_runs = 5`, `allowed_regression_fraction = 0.2`, and positive
+  finite medians for exactly `default-check` and `obligation-list`. Extra
+  fields or command IDs are invalid. A baseline bound to another runner
+  contract reports `unavailable`
 - `ruff` over the CI-listed source/test files, and `mypy` over `backstitch`,
   `bin/release.py`, and tests (excluding fixture target repositories)
 
@@ -879,7 +899,9 @@ _Implementation mapping_:
 - `tests/conftest.py`
 - `tests/live/test_live_llm.py`
 - `tests/test_pytest_policy.py`
+- `tests/performance/wall_clock.py`
 - `tests/performance/test_evidence_spike_wall_clock.py`
+- `tests/test_wall_clock_benchmark.py`
 - `tests/test_release_script.py`
 - `tests/test_release_workflow.py`
 

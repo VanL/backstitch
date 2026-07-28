@@ -442,6 +442,12 @@ $ uv run pytest tests -q -n 0 -m benchmark
 $ uv run pytest tests/live/test_live_llm.py -q -o run_live_llm=false
 ```
 
+The serial benchmark lane runs each real self-corpus command once to warm up
+and five times for a reported median. It always fails command errors, timeouts,
+and catastrophic regressions. Relative regression checks remain explicitly
+unavailable until the repository pins a matching wall-clock runner contract
+and content-bound baseline.
+
 To reproduce the CI coverage report locally:
 
 ```bash

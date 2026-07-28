@@ -17,7 +17,9 @@
   reviewed literal runtime overrides.
 - Expanded acceptance, adversarial, semantic-evaluation, configuration,
   workflow-boundary, coverage, and scale tests. Wall-clock tests use one
-  `benchmark` marker and run in the dedicated serial lane.
+  `benchmark` marker and run in the dedicated serial lane. Each command now
+  uses a warm-up plus a five-run median, with runner-qualified relative
+  comparisons and loose always-on catastrophic ceilings.
 
 ## 0.3.0 - 2026-07-10
 

@@ -55,6 +55,7 @@ Risky plans are blocked if they do not make explicit:
 | 2026-07-27-semantic-analysis-lifecycle-plan.md | same-model and Claude plan reviews PASS; Slices 1-4 implemented and final review PASS; landing gate pending an owner-authorized commit |
 | 2026-07-27-canonical-config-resolution-plan.md | implemented and verified; Claude implementation findings addressed; uncommitted pending landing authorization |
 | 2026-07-27-serial-benchmark-lane-plan.md | completed — normal xdist and serial benchmark lanes split; independent completed-work review PASS |
+| 2026-07-28-stable-wall-clock-benchmark-plan.md | completed — sampled median reporting, qualified relative limits, and always-on catastrophic ceilings; independent rereview PASS |
 
 (Existing plans carry status via each spec's `## Related Plans` tags;
 rows are added here as plans open or the coalescing sweep needs them.)

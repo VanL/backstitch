@@ -142,3 +142,12 @@ Local release process changes should prove:
 - `uv run backstitch check --repo-root .`
 
 The last command must exit `0` with zero errors and zero warnings.
+
+The serial benchmark command performs one warm-up and five measured runs per
+self-corpus command. It reports all samples and the median. Command errors,
+timeouts, malformed committed baselines, and code-owned catastrophic ceilings
+remain blocking. Relative comparison is blocking only when the runtime exactly
+matches `tests/performance/wall-clock-runner-contract.json` and the
+content-bound `tests/performance/wall-clock-baseline.json` is valid. Until
+those artifacts are reviewed and committed, the lane runs fully and reports
+qualification as unavailable.

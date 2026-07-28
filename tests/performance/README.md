@@ -1,7 +1,7 @@
-# Semantic scale qualification
+# Performance qualification
 
 This directory owns the deterministic [EVC-10] scale-fixture generator and the
-pinned-runner availability check. The generated tree is exact: 1,000
+pinned-runner availability checks. The generated tree is exact: 1,000
 obligations, 5,000 Python modules, 20,000 discovery candidates, and 50 MiB of
 captured Python source.
 
@@ -26,7 +26,21 @@ commit `runner-contract.json` and add the `semantic-scale` job together. The
 job must recompute the live identity and refuse to measure when any field
 differs.
 
+The [SC-10] serial wall-clock lane is separate. It runs one warm-up and five
+measured self-corpus invocations for each command, reports the samples and
+median, and always enforces the loose code-owned catastrophic ceilings.
+Relative regression qualification requires both
+`wall-clock-runner-contract.json` and `wall-clock-baseline.json`, plus a live
+identity supplied through the test-only
+`BACKSTITCH_BENCHMARK_RUNNER_IDENTITY_PATH`. The runner contract uses the
+[EVC-10] identity schema but is a distinct instance because the wall-clock
+tests run in the `benchmark` job, not the future `semantic-scale` job. Both
+wall-clock files are intentionally absent today, so the lane reports
+qualification as unavailable while still running and checking every command.
+
 Governing sources:
 
 - `docs/specs/07-verification-and-evidence-cases.md` [EVC-10]
+- `docs/specs/02-backstitch-core.md` [SC-10]
 - `docs/plans/2026-07-15-agent-guided-evidence-cases-plan.md` Slice 8.6
+- `docs/plans/2026-07-28-stable-wall-clock-benchmark-plan.md`
