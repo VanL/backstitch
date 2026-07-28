@@ -1,0 +1,9 @@
+{
+  "candidates_per_module": 4,
+  "discovery_candidate_count": 20000,
+  "generator_version": 1,
+  "obligation_count": 1000,
+  "python_module_count": 5000,
+  "python_source_bytes": 52428800,
+  "schema_version": 1
+}
