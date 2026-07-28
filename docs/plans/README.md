@@ -52,6 +52,7 @@ Risky plans are blocked if they do not make explicit:
 | 2026-07-15-agent-guided-evidence-cases-plan.md | implemented, uncommitted — report-only; current bootstrap/discovery, semantic-policy, and performance qualification remain explicitly unavailable |
 | 2026-07-16-evidence-spike-hardening-plan.md | slices 0-6 implemented, review-confirmed; Slice 7 (post-review residuals) added 2026-07-17, scoped outside review PASS — cleared for implementation |
 | 2026-07-17-agent-guidance-delta-wave-propagation-plan.md | active — landing the hub delta `a4b4345..b248e1c` (source `b248e1c`) |
+| 2026-07-28-agent-guidance-delta-wave-propagation-plan.md | completed — hub delta b248e1c..e42762c landed; scoped review no-blocker; declared-derivation repair applied per repair-in-sweep |
 | 2026-07-27-semantic-analysis-lifecycle-plan.md | same-model and Claude plan reviews PASS; Slices 1-4 implemented and final review PASS; landing gate pending an owner-authorized commit |
 | 2026-07-27-canonical-config-resolution-plan.md | implemented and verified; Claude implementation findings addressed; uncommitted pending landing authorization |
 | 2026-07-27-serial-benchmark-lane-plan.md | completed — normal xdist and serial benchmark lanes split; independent completed-work review PASS |

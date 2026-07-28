@@ -10,6 +10,8 @@ Quick pointers to the key guidance documents in this repository.
 | `CLAUDE.md` | Alias for tools that expect Claude-style root guidance |
 | `pyproject.toml` | Package metadata, dependency declarations, console script, and Python tool configuration |
 | `bin/release.py` | Maintainer release helper for version updates, checks, release commit, and tag push |
+| `bin/check-doc-paths` | Guidance-corpus gate: every backticked repo-relative path claim in agent-context, specs, implementation docs, and skills must resolve |
+| `bin/coalesce-check` | Coalescing-layer gate: resolves `docs/coalescing.md` SHA claims and retrieval cues (locally, in siblings, and against `origin/main`) and derives the lessons-tier count |
 
 ## Source Package
 

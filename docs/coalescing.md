@@ -17,7 +17,7 @@ authorized maintenance task (`skills/coalescing/SKILL.md`).
 
 **Local format adaptation:** this ledger uses dated H2 sections, not
 dated bullets. Derivation command:
-`grep -cE '^## 20[0-9]{2}-' docs/lessons.md` (sections after the
+`grep -cE '^## (20[0-9]{2}-|.*\(20[0-9]{2}-[0-9]{2}-[0-9]{2}\)$)' docs/lessons.md` (both dated-H2 shapes: leading-date and trailing-parenthesized-date; repaired 2026-07-28 — the prior leading-date-only command counted 1 of 22 real sections) (sections after the
 watermark date).
 
 **Fold unit and progress model (per [DOM-14]):** the lessons ledger is a
