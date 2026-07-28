@@ -39,6 +39,10 @@ def test_default_registry_has_unique_short_codes() -> None:
     assert registry.require("SPEC_FILE_MISSING").short_code == "BSS001"
     assert registry.canonical_code("BSS001") == "SPEC_FILE_MISSING"
     assert "CONFIG_TOML_INVALID" not in registry.implemented_codes()
+    assert registry.require("SUPPRESSION_REASON_MISSING").status == "implemented"
+    assert registry.require("SUPPRESSION_REASON_MISSING").short_code == "BSX010"
+    assert registry.require("OBLIGATION_SKIPPED").status == "implemented"
+    assert registry.require("OBLIGATION_SKIPPED").short_code == "BSE001"
 
 
 def test_registry_rejects_duplicate_short_codes() -> None:
@@ -48,11 +52,13 @@ def test_registry_rejects_duplicate_short_codes() -> None:
                 "ONE": {
                     "short": "BST999",
                     "status": "implemented",
+                    "family": "deterministic",
                     "summary": "one",
                 },
                 "TWO": {
                     "short": "BST999",
                     "status": "implemented",
+                    "family": "deterministic",
                     "summary": "two",
                 },
             },
@@ -66,17 +72,20 @@ def test_registry_canonical_code_follows_replacement_chains_and_short_aliases() 
             "CURRENT": {
                 "short": "TST003",
                 "status": "implemented",
+                "family": "deterministic",
                 "summary": "current",
             },
             "MIDDLE": {
                 "short": "TST002",
                 "status": "redirected",
+                "family": "deterministic",
                 "summary": "middle",
                 "replacement": "CURRENT",
             },
             "OLD": {
                 "short": "TST001",
                 "status": "deprecated",
+                "family": "deterministic",
                 "summary": "old",
                 "replacement": "MIDDLE",
             },
@@ -97,12 +106,14 @@ def test_registry_canonical_code_rejects_replacement_cycles() -> None:
                 "ONE": {
                     "short": "TST001",
                     "status": "deprecated",
+                    "family": "deterministic",
                     "summary": "one",
                     "replacement": "TWO",
                 },
                 "TWO": {
                     "short": "TST002",
                     "status": "redirected",
+                    "family": "deterministic",
                     "summary": "two",
                     "replacement": "ONE",
                 },
@@ -118,12 +129,14 @@ def test_registry_canonical_code_rejects_reserved_terminal() -> None:
                 "OLD": {
                     "short": "TST001",
                     "status": "deprecated",
+                    "family": "deterministic",
                     "summary": "old",
                     "replacement": "RESERVED",
                 },
                 "RESERVED": {
                     "short": "TST002",
                     "status": "reserved",
+                    "family": "deterministic",
                     "summary": "reserved",
                 },
             },
@@ -150,6 +163,19 @@ def test_policy_selectors_match_long_short_family_and_context() -> None:
     assert (
         resolve_level("SPEC_SECTION_AMBIGUOUS", context="weak", policy=policy) == "info"
     )
+
+
+@pytest.mark.parametrize("family", [None, "unknown"])
+def test_registry_rejects_missing_or_unknown_family(family: str | None) -> None:
+    definition: dict[str, str] = {
+        "short": "TST001",
+        "status": "implemented",
+        "summary": "test",
+    }
+    if family is not None:
+        definition["family"] = family
+    with pytest.raises(DiagnosticConfigError, match="invalid family"):
+        parse_registry({"TEST": definition}, source="test")
 
 
 def test_later_policy_rules_win_and_star_can_override_defaults() -> None:

@@ -41,11 +41,43 @@ KNOWN_WEFT_DEBT = {
     ("SPEC_SECTION_AMBIGUOUS", "weft/core/taskspec/model.py", "TS-1"),
     ("SPEC_SECTION_MISSING", "weft/commands/run.py", "MF-1"),
     ("SPEC_SECTION_MISSING", "weft/commands/types.py", "CLI-1"),
+    (
+        "SPEC_SECTION_HEADING_INVALID",
+        "docs/specifications/00A-Overview_and_Architecture_Planned.md",
+        None,
+    ),
+    (
+        "SPEC_SECTION_HEADING_INVALID",
+        "docs/specifications/01A-Core_Components_Planned.md",
+        None,
+    ),
+    (
+        "SPEC_SECTION_HEADING_INVALID",
+        "docs/specifications/03A-Manager_Architecture_Planned.md",
+        None,
+    ),
+    (
+        "SPEC_SECTION_HEADING_INVALID",
+        "docs/specifications/04A-SimpleBroker_Integration_Planned.md",
+        None,
+    ),
+    (
+        "SPEC_SECTION_HEADING_INVALID",
+        "docs/specifications/05A-Message_Flow_and_State_Planned.md",
+        None,
+    ),
+    (
+        "SPEC_SECTION_HEADING_INVALID",
+        "docs/specifications/10A-CLI_Interface_Planned.md",
+        None,
+    ),
 }
 # 32 -> 24 when ref_context gained the asserted/prose split (post-review
 # remediation): eight docstring-PROSE ambiguity instances became warnings;
 # the remaining ambiguity errors sit on genuine `Spec:` marker lines.
-KNOWN_WEFT_ERROR_TOTAL = 24
+# Planned documents now retain heading diagnostics even though their
+# obligations are out of the active gate: 21 concrete heading instances.
+KNOWN_WEFT_ERROR_TOTAL = 45
 
 
 @pytest.mark.integration

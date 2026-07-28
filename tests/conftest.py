@@ -60,6 +60,19 @@ def _live_llm_enabled(config: _IniConfig) -> bool:
     )
 
 
+@pytest.fixture(autouse=True)
+def isolate_backstitch_config_environment(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep non-live tests independent of the invoking shell's config inputs."""
+
+    if request.node.get_closest_marker("live_llm") is not None:
+        return
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("BACKSTITCH_WEFT_ROOT", raising=False)
+
+
 @pytest.fixture
 def repo_root() -> Path:
     """Absolute path to this repository's root."""

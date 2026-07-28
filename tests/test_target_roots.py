@@ -5,12 +5,13 @@ Spec: docs/specs/02-backstitch-core.md [SC-12]
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from backstitch.settings import BackstitchSettings, TargetRootSettings
+from backstitch.settings import BackstitchSettings, TargetRootSettings, resolve_config
 from backstitch.target_roots import (
     discover_weft,
     git_main_repo_root,
@@ -76,7 +77,8 @@ def test_env_override_beats_sibling(
     override = tmp_path / "elsewhere-weft"
     override.mkdir()
     monkeypatch.setenv("BACKSTITCH_WEFT_ROOT", str(override))
-    assert discover_weft(anchor=worktree) == override.resolve()
+    settings = resolve_config(worktree, environment=dict(os.environ))
+    assert discover_weft(anchor=worktree, settings=settings) == override.resolve()
 
 
 def test_config_override_beats_sibling(
@@ -103,7 +105,16 @@ def test_env_beats_config(
     config_dir = tmp_path / "config-weft"
     config_dir.mkdir()
     monkeypatch.setenv("BACKSTITCH_WEFT_ROOT", str(env_dir))
-    settings = BackstitchSettings(target_roots=TargetRootSettings(weft=str(config_dir)))
+    config = tmp_path / "settings.toml"
+    config.write_text(
+        f'[target_roots]\nweft = "{config_dir}"\n',
+        encoding="utf-8",
+    )
+    settings = resolve_config(
+        worktree,
+        explicit=config,
+        environment=dict(os.environ),
+    )
     assert discover_weft(anchor=worktree, settings=settings) == env_dir.resolve()
 
 

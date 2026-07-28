@@ -42,8 +42,15 @@ from backstitch.exclusions import (
     parse_noqa_text,
 )
 from backstitch.markdown_specs import parse_markdown_spec
+from backstitch.obligation_runtime import build_obligation_runtime
 from backstitch.profiles import get_profile
-from backstitch.resolver import scan_repository_with_artifacts
+from backstitch.semantic_identity import (
+    InferenceIdentity,
+    ProviderIdentity,
+    RequestIdentity,
+    build_inference_identity,
+)
+from backstitch.settings import BackstitchSettings
 
 PROFILE = get_profile("backstitch-style-v1").with_overrides(
     spec_roots=("docs/specs",), plan_roots=(), code_roots=("pkg",)
@@ -52,6 +59,26 @@ PROFILE = get_profile("backstitch-style-v1").with_overrides(
 # [SC-7] hermetic testing: a name no local `llm` alias could plausibly
 # resolve, so CLI tests can never construct a real adapter or call a model.
 HERMETIC_MODEL = "backstitch-hermetic-model-that-must-not-exist"
+_REPORT_PROVIDER = ProviderIdentity(
+    "controlled",
+    "backstitch-tests",
+    "controlled-adapter",
+    "1",
+    "backstitch.controlled",
+    1,
+    "controlled",
+    "controlled",
+    "controlled",
+)
+_REPORT_REQUEST = RequestIdentity("require", 0.0, 0, 512)
+
+
+def _report_identities(
+    rows: tuple[dict[str, object], ...],
+) -> tuple[InferenceIdentity, ...]:
+    return tuple(
+        build_inference_identity(row, _REPORT_PROVIDER, _REPORT_REQUEST) for row in rows
+    )
 
 
 def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
@@ -122,7 +149,13 @@ def test_analyze_concurrency_from_config_is_validated(tmp_path: Path) -> None:
         ".backstitch.toml",
         "[analyze]\nconcurrency = 0\n",
     )
-    result = run_cli("analyze", "--packets", str(tmp_path / "packets.jsonl"))
+    result = run_cli(
+        "analyze",
+        "--packets",
+        str(tmp_path / "packets.jsonl"),
+        "--packet-report",
+        str(tmp_path / "packet-report.json"),
+    )
     # The configured value is consulted: 0 fails validation with exit 2.
     assert result.returncode == 2
     assert "concurrency" in result.stderr
@@ -187,7 +220,10 @@ def test_section_marker_overrides_file_level_ignore(tmp_path: Path) -> None:
         + "\n",
     )
     _write(tmp_path, "pkg/mod.py", '"""Mod."""\n')
-    report, artifacts = scan_repository_with_artifacts(tmp_path, PROFILE)
+    pipeline = build_obligation_runtime(
+        tmp_path, PROFILE, BackstitchSettings()
+    ).pipeline
+    artifacts = pipeline.artifacts
     assert ("docs/specs/01-x.md", "OV-1") in artifacts.sections_with_markers
     # OV-2 has no marker: file-level ignore applies (suppressed at CLI).
     # OV-1 overrides file level: its SPEC_SECTION_UNMAPPED must survive.
@@ -461,19 +497,30 @@ def test_config_show_and_path_honor_config_flags(tmp_path: Path) -> None:
 
 
 def _full_packet(**overrides: object) -> dict:
+    from backstitch.semantic_packets import semantic_packet_hash
+
     packet: dict = {
+        "schema_version": 2,
         "packet_id": "docs/specs/01-x.md#X-1",
+        "kind": "section",
         "spec_path": "docs/specs/01-x.md",
         "section_id": "X-1",
         "title": "One",
         "section_text": "## One [X-1]",
         "section_start_line": 3,
-        "owners": [],
+        "owners": [
+            {
+                "path": "pkg/x.py",
+                "symbol": None,
+                "start_line": 1,
+                "snippet": "x = 1",
+            }
+        ],
         "tests": [],
         "issues": [],
         "packet_warnings": [],
-        "instructions": "Respond with JSON.",
     }
+    packet["packet_hash"] = semantic_packet_hash(packet)
     packet.update(overrides)
     return packet
 
@@ -481,9 +528,12 @@ def _full_packet(**overrides: object) -> dict:
 def _run_analyze(
     tmp_path: Path, *packet_lines: str
 ) -> subprocess.CompletedProcess[str]:
+    from backstitch.artifact_contracts import load_packets
+    from backstitch.semantic_reports import build_packet_report
+
     packets = tmp_path / "packets.jsonl"
     packets.write_text("".join(line + "\n" for line in packet_lines), encoding="utf-8")
-    return run_cli(
+    arguments = [
         "analyze",
         "--packets",
         str(packets),
@@ -492,70 +542,30 @@ def _run_analyze(
         "--no-config",
         "--output",
         str(tmp_path / "out.jsonl"),
-    )
-
-
-def test_empty_object_packet_is_invocation_error(tmp_path: Path) -> None:
-    # [SC-5]/[SC-6]: a malformed packets file exits 2; it must never come
-    # back as an `ambiguous` analysis row with an invented packet ID.
-    result = _run_analyze(tmp_path, "{}")
-    assert result.returncode == 2, result.stdout + result.stderr
-    assert "malformed packet" in result.stderr
-    assert "<missing packet_id>" not in result.stdout
-    assert not (tmp_path / "out.jsonl").exists()
-
-
-def test_packet_missing_instructions_is_invocation_error(tmp_path: Path) -> None:
-    packet = {k: v for k, v in _full_packet().items() if k != "instructions"}
-    result = _run_analyze(tmp_path, json.dumps(packet))
-    assert result.returncode == 2
-    assert "instructions" in result.stderr
-
-
-def test_packet_with_wrong_field_type_is_invocation_error(tmp_path: Path) -> None:
-    result = _run_analyze(tmp_path, json.dumps(_full_packet(owners="not-a-list")))
-    assert result.returncode == 2
-    assert "owners" in result.stderr
+    ]
+    try:
+        validated = load_packets(packets)
+    except ValueError:
+        pass
+    else:
+        report_path = tmp_path / "packet-report.json"
+        rows = tuple(packet.to_dict() for packet in validated)
+        report = build_packet_report(
+            packet_jsonl=packets.read_bytes(),
+            packets=validated,
+            identities=_report_identities(rows),
+            kind="all",
+            eligible_counts={
+                "section": sum(row["kind"] == "section" for row in rows),
+                "invariant": sum(row["kind"] == "invariant" for row in rows),
+            },
+        )
+        report_path.write_bytes(report.to_json_bytes())
+        arguments.extend(("--packet-report", str(report_path)))
+    return run_cli(*arguments)
 
 
 # --- Round 6 P2: packet validation covers nested structures ----------------
-
-
-def test_packet_with_malformed_nested_content_is_invocation_error(
-    tmp_path: Path,
-) -> None:
-    # [SC-6] defines owners, issues, and packet_warnings as structured
-    # content; corrupted items must be rejected at the boundary, not
-    # prompted on.
-    for overrides in (
-        {"owners": ["bad-owner"]},
-        {"issues": ["bad-issue"]},
-        {"packet_warnings": [123]},
-        {"tests": [42]},
-        {
-            "owners": [
-                {"path": "p.py", "symbol": None, "start_line": True, "snippet": ""}
-            ]
-        },
-    ):
-        result = _run_analyze(tmp_path, json.dumps(_full_packet(**overrides)))
-        assert result.returncode == 2, (overrides, result.stdout, result.stderr)
-        assert "malformed packet" in result.stderr, (overrides, result.stderr)
-
-
-def test_analyze_unknown_model_is_invocation_error(tmp_path: Path) -> None:
-    # [SC-5]: an unknown model name is an invocation error -> exit 2 with a
-    # clear one-line diagnostic, never "internal error" and never the
-    # KeyError repr quoting. The total-model-failure -> exit 2 rule
-    # (analyze never exits 1; semantic findings are advisory) is pinned at
-    # the unit level in test_analysis_llm.py::test_analyze_exit_code_rules.
-    result = _run_analyze(tmp_path, json.dumps(_full_packet()))
-    assert result.returncode == 2
-    assert "internal error" not in result.stderr, result.stderr
-    assert HERMETIC_MODEL in result.stderr, result.stderr
-    assert f"'Unknown model: {HERMETIC_MODEL}'" not in result.stderr, (
-        "KeyError repr quoting leaked into the diagnostic"
-    )
 
 
 # --- Round 8 P1: exclude semantics ------------------------------------------
@@ -660,59 +670,55 @@ def test_config_show_rejects_invalid_suppression_code(tmp_path: Path) -> None:
 # --- Round 8 P2: packet issue records must be real issue records ------------
 
 
-def test_packet_with_bogus_issue_record_is_invocation_error(
-    tmp_path: Path,
-) -> None:
-    bogus = {"code": "NOT_A_BACKSTITCH_CODE", "severity": "bogus", "message": "x"}
-    result = _run_analyze(tmp_path, json.dumps(_full_packet(issues=[bogus])))
-    assert result.returncode == 2
-    assert "issues" in result.stderr
-
-
 # --- Round 8 P2: model evidence stays packet-local ---------------------------
 
 
 def test_evidence_outside_packet_is_rejected() -> None:
     from backstitch.analysis_llm import analyze_packets
 
-    packet = {
-        "packet_id": "docs/specs/01-x.md#X-1",
-        "spec_path": "docs/specs/01-x.md",
-        "section_id": "X-1",
-        "title": "One",
-        "section_text": "## One [X-1]",
-        "owners": [
-            {"path": "pkg/mod.py", "symbol": None, "start_line": 1, "snippet": "x"}
-        ],
-        "tests": [],
-        "issues": [],
-        "packet_warnings": [],
-        "instructions": "Respond with JSON.",
-    }
+    packet = _full_packet(
+        owners=[{"path": "pkg/mod.py", "symbol": None, "start_line": 1, "snippet": "x"}]
+    )
     response = json.dumps(
         {
             "packet_id": packet["packet_id"],
             "classification": "ok",
+            "confidence": 0.5,
             "summary": "fine",
             "rationale": "because",
-            "evidence": [{"path": "not-in-packet.py", "line": 999}],
+            "evidence": [
+                {
+                    "role": "implementation",
+                    "path": "not-in-packet.py",
+                    "start_line": 999,
+                    "end_line": 999,
+                }
+            ],
         }
     )
     rows, errors = analyze_packets([packet], lambda prompt: response)
-    assert rows[0]["classification"] == "ambiguous"
-    assert any("not part of the packet" in e for e in errors)
+    assert rows == []
+    assert any("exactly one shown" in e for e in errors)
     # bool is an int subclass; line=true must not validate.
     bool_line = json.dumps(
         {
             "packet_id": packet["packet_id"],
             "classification": "ok",
+            "confidence": 0.5,
             "summary": "fine",
             "rationale": "because",
-            "evidence": [{"path": "pkg/mod.py", "line": True}],
+            "evidence": [
+                {
+                    "role": "implementation",
+                    "path": "pkg/mod.py",
+                    "start_line": True,
+                    "end_line": 1,
+                }
+            ],
         }
     )
     rows, errors = analyze_packets([packet], lambda prompt: bool_line)
-    assert rows[0]["classification"] == "ambiguous"
+    assert rows == []
 
 
 # --- Round 8 P2: summarize packet-ID universe = sections with packets --------
@@ -962,40 +968,6 @@ def test_root_outside_repo_is_clear_invocation_error(tmp_path: Path) -> None:
 # --- Round 9 P2: evidence is line-local, not just path-local ---------------
 
 
-def test_evidence_line_outside_snippet_is_rejected() -> None:
-    from backstitch.analysis_llm import analyze_packets
-
-    packet = _full_packet(
-        owners=[
-            {
-                "path": "pkg/mod.py",
-                "symbol": None,
-                "start_line": 10,
-                "snippet": "a\nb\nc",
-            }
-        ]
-    )
-
-    def respond(line: int) -> str:
-        return json.dumps(
-            {
-                "packet_id": packet["packet_id"],
-                "classification": "ok",
-                "summary": "fine",
-                "rationale": "because",
-                "evidence": [{"path": "pkg/mod.py", "line": line}],
-            }
-        )
-
-    rows, errors = analyze_packets([packet], lambda prompt: respond(999999))
-    assert rows[0]["classification"] == "ambiguous"
-    assert any("outside the packet's shown content" in e for e in errors)
-    # A line inside the snippet range (10..12) is accepted.
-    rows, errors = analyze_packets([packet], lambda prompt: respond(11))
-    assert rows[0]["classification"] == "ok"
-    assert errors == []
-
-
 # --- Round 9 P2: summarize-analysis validates the report shape --------------
 
 
@@ -1019,23 +991,6 @@ def test_summarize_rejects_summary_only_report(tmp_path: Path) -> None:
 
 
 # --- Round 9 P2: packet issue metadata types ---------------------------------
-
-
-def test_packet_issue_with_malformed_metadata_is_invocation_error(
-    tmp_path: Path,
-) -> None:
-    bad = {
-        "code": "SPEC_SECTION_UNMAPPED",
-        "severity": "info",
-        "message": "x",
-        "path": "docs/specs/01-x.md",
-        "line": True,
-        "section_id": 42,
-        "symbol": [],
-    }
-    result = _run_analyze(tmp_path, json.dumps(_full_packet(issues=[bad])))
-    assert result.returncode == 2
-    assert "issues" in result.stderr
 
 
 # --- Round 9 P3: stale error-code noqa warns without a matching finding -----
@@ -1165,55 +1120,16 @@ def test_summarize_rejects_malformed_edge_records(tmp_path: Path) -> None:
 # --- Round 10 P2: evidence line-locality covers spec text and tests ----------
 
 
-def test_evidence_into_spec_text_and_tests_is_line_local() -> None:
-    from backstitch.analysis_llm import analyze_packets
-
-    packet = _full_packet(
-        section_start_line=10,
-        section_text="## One [X-1]\n\nBody line.",
-        tests=["tests/test_x.py"],
-    )
-
-    def respond(path: str, line: int) -> str:
-        return json.dumps(
-            {
-                "packet_id": packet["packet_id"],
-                "classification": "ok",
-                "summary": "fine",
-                "rationale": "because",
-                "evidence": [{"path": path, "line": line}],
-            }
-        )
-
-    # Spec citation outside the shown section text (lines 10..12): rejected.
-    rows, errors = analyze_packets(
-        [packet], lambda p: respond("docs/specs/01-x.md", 999999)
-    )
-    assert rows[0]["classification"] == "ambiguous"
-    # Spec citation inside the section text: accepted.
-    rows, errors = analyze_packets(
-        [packet], lambda p: respond("docs/specs/01-x.md", 11)
-    )
-    assert rows[0]["classification"] == "ok", errors
-    # Tests are named by path only; line evidence into them is fabricated.
-    rows, errors = analyze_packets(
-        [packet], lambda p: respond("tests/test_x.py", 999999)
-    )
-    assert rows[0]["classification"] == "ambiguous"
-    assert any("fabricated" in e for e in errors)
+# --- Round 10 P2: resolved model reaches the provider boundary ---------------
 
 
-# --- Round 10 P2: LLM_MODEL overrides analyze.model --------------------------
-
-
-def test_llm_model_env_overrides_configured_model(
+def test_model_helper_does_not_reread_backstitch_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from backstitch.analysis_llm import resolve_model_name
 
-    # [CFG-5] assembly order: CLI > env > config > built-in default.
     monkeypatch.setenv("LLM_MODEL", "from-env")
-    assert resolve_model_name(None, configured="from-config") == "from-env"
+    assert resolve_model_name(None, configured="from-config") == "from-config"
     assert resolve_model_name("from-cli", configured="from-config") == "from-cli"
     monkeypatch.delenv("LLM_MODEL")
     assert resolve_model_name(None, configured="from-config") == "from-config"
@@ -1235,57 +1151,28 @@ def test_empty_owner_snippet_rejects_line_evidence() -> None:
         {
             "packet_id": packet["packet_id"],
             "classification": "ok",
+            "confidence": 0.5,
             "summary": "fine",
             "rationale": "because",
-            "evidence": [{"path": "pkg/", "line": 1}],
+            "evidence": [
+                {
+                    "role": "implementation",
+                    "path": "pkg/",
+                    "start_line": 1,
+                    "end_line": 1,
+                }
+            ],
         }
     )
     rows, errors = analyze_packets([packet], lambda prompt: response)
-    assert rows[0]["classification"] == "ambiguous"
-    assert any("fabricated" in e for e in errors)
+    assert rows == []
+    assert any("exactly one shown" in e for e in errors)
 
 
 # --- Round 11 P2: start lines must be positive --------------------------------
 
 
-def test_non_positive_start_lines_are_invocation_errors(tmp_path: Path) -> None:
-    zero_section = _full_packet(section_start_line=0)
-    result = _run_analyze(tmp_path, json.dumps(zero_section))
-    assert result.returncode == 2
-    assert "section_start_line" in result.stderr
-
-    zero_owner = _full_packet(
-        owners=[{"path": "p.py", "symbol": None, "start_line": 0, "snippet": "x"}]
-    )
-    result = _run_analyze(tmp_path, json.dumps(zero_owner))
-    assert result.returncode == 2
-    assert "owners" in result.stderr
-
-
 # --- Round 12 P2: packet locators must be non-empty and consistent -----------
-
-
-@pytest.mark.parametrize(
-    ("overrides", "fragment"),
-    [
-        ({"spec_path": ""}, "spec_path"),
-        (
-            {"section_id": "", "packet_id": "docs/specs/01-x.md#"},
-            "section_id",
-        ),
-        ({"packet_id": "other.md#Y-9"}, "does not match"),
-        (
-            {"owners": [{"path": "", "symbol": None, "start_line": 1, "snippet": "x"}]},
-            "owners",
-        ),
-    ],
-)
-def test_empty_or_mismatched_packet_locators_are_invocation_errors(
-    tmp_path: Path, overrides: dict, fragment: str
-) -> None:
-    result = _run_analyze(tmp_path, json.dumps(_full_packet(**overrides)))
-    assert result.returncode == 2
-    assert fragment in result.stderr
 
 
 def test_empty_paths_never_become_evidence_paths() -> None:
@@ -1301,13 +1188,21 @@ def test_empty_paths_never_become_evidence_paths() -> None:
         {
             "packet_id": packet["packet_id"],
             "classification": "ok",
+            "confidence": 0.5,
             "summary": "fine",
             "rationale": "because",
-            "evidence": [{"path": "", "line": 1}],
+            "evidence": [
+                {
+                    "role": "implementation",
+                    "path": "",
+                    "start_line": 1,
+                    "end_line": 1,
+                }
+            ],
         }
     )
     rows, errors = analyze_packets([packet], lambda prompt: response)
-    assert rows[0]["classification"] == "ambiguous"
+    assert rows == []
 
 
 # --- Round 12 P2: report edges need non-empty locators ------------------------
@@ -1344,15 +1239,6 @@ def test_summarize_rejects_empty_edge_locators(tmp_path: Path) -> None:
 # --- Round 13 P2: blank means absent, everywhere a locator appears ------------
 
 
-def test_whitespace_only_packet_locators_are_invocation_errors(
-    tmp_path: Path,
-) -> None:
-    packet = _full_packet(spec_path="   ", packet_id="   #X-1")
-    result = _run_analyze(tmp_path, json.dumps(packet))
-    assert result.returncode == 2
-    assert "spec_path" in result.stderr
-
-
 def test_whitespace_paths_never_become_evidence_paths() -> None:
     from backstitch.analysis_llm import analyze_packets
 
@@ -1364,13 +1250,21 @@ def test_whitespace_paths_never_become_evidence_paths() -> None:
         {
             "packet_id": packet["packet_id"],
             "classification": "ok",
+            "confidence": 0.5,
             "summary": "fine",
             "rationale": "because",
-            "evidence": [{"path": "   ", "line": 1}],
+            "evidence": [
+                {
+                    "role": "implementation",
+                    "path": "   ",
+                    "start_line": 1,
+                    "end_line": 1,
+                }
+            ],
         }
     )
     rows, errors = analyze_packets([packet], lambda prompt: response)
-    assert rows[0]["classification"] == "ambiguous"
+    assert rows == []
 
 
 def _report_with_edge(
@@ -1513,70 +1407,16 @@ def test_incomplete_analysis_rows_are_rejected(row: dict, fragment: str) -> None
     assert fragment in load.errors[0]
 
 
-def test_error_records_are_contract_shaped() -> None:
-    from backstitch.analysis_llm import analyze_packets, render_results_jsonl
-    from backstitch.analysis_results import load_analysis_results
+def test_model_failure_produces_a_problem_and_no_result_row() -> None:
+    from backstitch.analysis_llm import analyze_packets
 
-    # A model failure row must itself satisfy the [SC-7] record contract,
-    # or summarize-analysis would reject the very rows analyze wrote.
     packet = _full_packet()
     rows, errors = analyze_packets([packet], lambda prompt: "not json")
-    load = load_analysis_results(render_results_jsonl(rows), None)
-    assert load.errors == ()
-    assert load.results[0].classification == "ambiguous"
+    assert rows == []
+    assert len(errors) == 1
 
 
 # --- Round 14 P2: every packet locator goes through one validator -------------
-
-
-@pytest.mark.parametrize(
-    ("overrides", "fragment"),
-    [
-        ({"tests": ["   "]}, "tests"),
-        (
-            {"section_id": "not an id", "packet_id": "docs/specs/01-x.md#not an id"},
-            "section_id",
-        ),
-        (
-            {
-                "issues": [
-                    {
-                        "code": "SPEC_SECTION_UNMAPPED",
-                        "severity": "info",
-                        "message": "m",
-                        "path": "   ",
-                        "line": None,
-                        "section_id": None,
-                        "symbol": None,
-                    }
-                ]
-            },
-            "issues",
-        ),
-        (
-            {
-                "issues": [
-                    {
-                        "code": "SPEC_SECTION_UNMAPPED",
-                        "severity": "info",
-                        "message": "m",
-                        "path": "docs/specs/01-x.md",
-                        "line": None,
-                        "section_id": "not an id",
-                        "symbol": None,
-                    }
-                ]
-            },
-            "issues",
-        ),
-    ],
-)
-def test_malformed_packet_locators_fail_validation(
-    tmp_path: Path, overrides: dict, fragment: str
-) -> None:
-    result = _run_analyze(tmp_path, json.dumps(_full_packet(**overrides)))
-    assert result.returncode == 2
-    assert fragment in result.stderr
 
 
 def test_summarize_rejects_invalid_edge_section_id(tmp_path: Path) -> None:
@@ -1810,30 +1650,11 @@ def test_summarize_rejects_malformed_issue_records(tmp_path: Path) -> None:
 
 
 def test_bool_concurrency_in_config_is_rejected(tmp_path: Path) -> None:
-    from backstitch.settings import ConfigLoadError, load_settings
+    from backstitch.settings import ConfigLoadError, resolve_config
 
     _write(tmp_path, ".backstitch.toml", "[analyze]\nconcurrency = true\n")
     with pytest.raises(ConfigLoadError, match="concurrency"):
-        load_settings(tmp_path)
-
-
-def test_zero_line_issue_in_packet_is_invocation_error(tmp_path: Path) -> None:
-    packet = _full_packet(
-        issues=[
-            {
-                "code": "SPEC_SECTION_UNMAPPED",
-                "severity": "info",
-                "message": "m",
-                "path": "docs/specs/01-x.md",
-                "line": 0,
-                "section_id": "X-1",
-                "symbol": None,
-            }
-        ]
-    )
-    result = _run_analyze(tmp_path, json.dumps(packet))
-    assert result.returncode == 2
-    assert "issues" in result.stderr
+        resolve_config(tmp_path)
 
 
 def test_zero_line_issue_in_report_is_rejected(tmp_path: Path) -> None:
@@ -1998,46 +1819,6 @@ def test_blank_optional_paths_are_rejected(
 
 
 # --- [SC-13] promotion: enumerated blank-string tightenings -------------------
-
-
-@pytest.mark.parametrize(
-    ("overrides", "fragment"),
-    [
-        ({"title": "   "}, "title"),
-        (
-            {
-                "owners": [
-                    {"path": "p.py", "symbol": "   ", "start_line": 1, "snippet": "x"}
-                ]
-            },
-            "owners",
-        ),
-        (
-            {
-                "issues": [
-                    {
-                        "code": "SPEC_SECTION_UNMAPPED",
-                        "severity": "info",
-                        "message": "m",
-                        "path": "docs/specs/01-x.md",
-                        "line": None,
-                        "section_id": None,
-                        "symbol": "   ",
-                    }
-                ]
-            },
-            "issues",
-        ),
-    ],
-)
-def test_blank_optional_names_in_packets_are_rejected(
-    tmp_path: Path, overrides: dict, fragment: str
-) -> None:
-    # [SC-13] blank-means-absent: present means a real name; blank is
-    # an omission.
-    result = _run_analyze(tmp_path, json.dumps(_full_packet(**overrides)))
-    assert result.returncode == 2
-    assert fragment in result.stderr
 
 
 @pytest.mark.parametrize(

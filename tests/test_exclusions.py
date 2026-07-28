@@ -170,6 +170,15 @@ def test_unknown_suppression_code_in_inline_marker_raises() -> None:
     assert "docs/specs/01-x.md:3" in str(excinfo.value)
 
 
+def test_reserved_obligation_skip_is_not_an_ordinary_suppression() -> None:
+    assert parse_traceability_marker_line(
+        '<!-- backstitch: skip-obligation [X-1] "Reason." -->'
+    ) == (False, frozenset(), [])
+    assert parse_traceability_marker_line(
+        '_Traceability: skip-obligation [X-1] "Reason."_'
+    ) == (False, frozenset(), [])
+
+
 def test_reserved_suppression_code_in_inline_marker_raises() -> None:
     with pytest.raises(UnknownSuppressionCodeError) as excinfo:
         parse_traceability_marker_line(

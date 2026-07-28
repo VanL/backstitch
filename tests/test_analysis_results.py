@@ -3,19 +3,23 @@
 Spec: docs/specs/02-backstitch-core.md [SC-6], [SC-7]
 """
 
+import hashlib
 import json
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from backstitch.analysis_results import (
     load_analysis_results,
     packet_identities_from_report,
     render_analysis_summary,
 )
+from backstitch.obligation_runtime import build_obligation_runtime
 from backstitch.profiles import get_profile
-from backstitch.resolver import scan_repository
+from backstitch.settings import BackstitchSettings
 
 FIXTURES = Path(__file__).parent / "fixtures"
 CLEAN = FIXTURES / "clean_project"
@@ -67,11 +71,104 @@ def _invariant_row(**overrides: object) -> str:
     return json.dumps(row)
 
 
+def _v2_result_row(kind: str, classification: str) -> str:
+    packet_id = PACKET_ID if kind == "section" else "invariant::INV.CLEAN.1"
+    row: dict[str, object] = {
+        "schema_version": 2,
+        "packet_id": packet_id,
+        "kind": kind,
+        "packet_hash": "a" * 64,
+        "analysis_key": "b" * 64,
+        "classification": classification,
+        "confidence": 0.5,
+        "rationale": "bounded evidence",
+        "summary": "Reviewed.",
+        "evidence": [],
+        "verification_state": "evidence_bound",
+    }
+    if kind == "invariant":
+        row["content_hash"] = "c" * 64
+    return json.dumps(row)
+
+
 def test_invariant_result_variant_loads() -> None:
     load = load_analysis_results(_invariant_row(), None)
     assert load.errors == ()
     assert load.results[0].kind == "invariant"
     assert load.results[0].content_hash == "a" * 64
+
+
+def test_current_invariant_result_omits_legacy_content_hash() -> None:
+    row = json.loads(_v2_result_row("invariant", "ambiguous"))
+    row.pop("content_hash")
+    excerpt = "Invariant must remain true."
+    row["evidence"] = [
+        {
+            "role": "requirement",
+            "path": "docs/specs/invariants.md",
+            "start_line": 3,
+            "end_line": 3,
+            "excerpt": excerpt,
+            "excerpt_sha256": hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
+        }
+    ]
+
+    load = load_analysis_results(json.dumps(row), None)
+
+    assert load.errors == ()
+    assert load.results[0].content_hash is None
+
+
+def test_current_result_accepts_packet_region_with_trailing_blank_lines() -> None:
+    row = json.loads(_v2_result_row("section", "ambiguous"))
+    excerpt = "Requirement text.\n\n"
+    row["evidence"] = [
+        {
+            "role": "requirement",
+            "path": "docs/specs/01-Clean.md",
+            "start_line": 3,
+            "end_line": 5,
+            "excerpt": excerpt,
+            "excerpt_sha256": hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
+        }
+    ]
+
+    load = load_analysis_results(json.dumps(row), None)
+
+    assert load.errors == ()
+
+
+def test_current_result_presentation_accepts_advisory_counterevidence() -> None:
+    row = json.loads(_v2_result_row("section", "ambiguous"))
+    evidence = []
+    for role, path, line, excerpt in (
+        ("requirement", "docs/specs/01-Clean.md", 3, "Must return one."),
+        ("counterevidence", "pkg/decoy.py", 8, "return 2"),
+    ):
+        evidence.append(
+            {
+                "role": role,
+                "path": path,
+                "start_line": line,
+                "end_line": line,
+                "excerpt": excerpt,
+                "excerpt_sha256": hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
+            }
+        )
+    row["evidence"] = sorted(
+        evidence,
+        key=lambda item: (
+            item["role"],
+            item["path"],
+            item["start_line"],
+            item["end_line"],
+            item["excerpt_sha256"],
+        ),
+    )
+
+    load = load_analysis_results(json.dumps(row), None)
+
+    assert load.errors == ()
 
 
 def test_analysis_result_kind_vocabulary_is_closed() -> None:
@@ -81,6 +178,30 @@ def test_analysis_result_kind_vocabulary_is_closed() -> None:
     )
     assert any("classification" in error for error in section.errors)
     assert any("classification" in error for error in invariant.errors)
+
+
+@pytest.mark.parametrize(
+    ("kind", "classification"),
+    [
+        ("section", "confirmed_mismatch"),
+        ("section", "probable_mismatch"),
+        ("section", "missing_trace"),
+        ("section", "ambiguous"),
+        ("invariant", "ok"),
+        ("invariant", "weak_binding"),
+        ("invariant", "confirmed_mismatch"),
+        ("invariant", "probable_mismatch"),
+        ("invariant", "ambiguous"),
+    ],
+)
+def test_v2_presentation_rejects_every_missing_required_role_set(
+    kind: str, classification: str
+) -> None:
+    load = load_analysis_results(_v2_result_row(kind, classification), None)
+
+    assert load.results == ()
+    assert len(load.errors) == 1
+    assert "missing required evidence roles" in load.errors[0]
 
 
 def test_analysis_result_legacy_and_partial_union_rules() -> None:
@@ -159,7 +280,9 @@ def test_missing_required_field_is_analysis_error() -> None:
 
 
 def test_summary_separates_deterministic_from_semantic() -> None:
-    report = scan_repository(CLEAN, CLEAN_PROFILE)
+    report = build_obligation_runtime(
+        CLEAN, CLEAN_PROFILE, BackstitchSettings()
+    ).pipeline.raw_report
     load = load_analysis_results(
         _row(classification="probable_mismatch") + "\n" + _invariant_row(),
         None,
@@ -238,9 +361,9 @@ def test_cli_summarize_analysis(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 0, result.stderr
-    assert "semantic findings (advisory)" in result.stdout
-    assert "analysis input problems" in result.stdout
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "invalid analysis results" in result.stderr
 
 
 def test_cli_summarize_analysis_malformed_report_exits_two(

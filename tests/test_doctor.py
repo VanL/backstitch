@@ -1,6 +1,8 @@
 """Contract tests for `backstitch doctor` ([SC-14]).
 
 Spec: docs/specs/02-backstitch-core.md [SC-14], [SC-5], [SC-8]
+Spec: docs/specs/03-backstitch-configuration.md [CFG-5.1], [CFG-9]
+Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-12.2]
 
 The llm model boundary is the one acceptable fake (monkeypatched
 `llm.get_model`/`llm.get_key`); HTTP reachability is proven against real
@@ -130,7 +132,7 @@ def test_all_pass_for_keyless_api_base_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_fake_llm(monkeypatch, _fake_model(api_base="http://127.0.0.1:9/v1"))
-    results = run_doctor("some-model", configured=None, probe=False)
+    results = run_doctor("some-model", model_source="--model", probe=False)
     by_name = _by_name(results)
     assert [result.name for result in results] == list(CHECK_ORDER)
     assert by_name["llm-import"].status == "pass"
@@ -156,7 +158,7 @@ def test_unresolvable_model_fails_and_dependents_skip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_fake_llm(monkeypatch, None)
-    results = run_doctor("nope", configured=None, probe=True)
+    results = run_doctor("nope", model_source="--model", probe=True)
     by_name = _by_name(results)
     assert by_name["model"].status == "fail"
     assert "nope" in by_name["model"].detail
@@ -175,7 +177,9 @@ def test_missing_credential_fails_with_remedy(
         _fake_model(needs_key="provider-alias", key_env_var="PROVIDER_KEY"),
         key=None,
     )
-    results = run_doctor(None, configured="configured-model", probe=False)
+    results = run_doctor(
+        "configured-model", model_source="config [analyze].model", probe=False
+    )
     by_name = _by_name(results)
     assert by_name["credential"].status == "fail"
     assert "provider-alias" in by_name["credential"].detail
@@ -185,7 +189,7 @@ def test_missing_credential_fails_with_remedy(
 
 def test_present_credential_passes(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_fake_llm(monkeypatch, _fake_model(needs_key="provider-alias"), key="sk-x")
-    results = run_doctor("m", configured=None, probe=False)
+    results = run_doctor("m", model_source="--model", probe=False)
     assert _by_name(results)["credential"].status == "pass"
 
 
@@ -198,7 +202,7 @@ def test_credential_attached_to_model_passes_before_stored_lookup(
     model = cast(Any, _fake_model(needs_key="provider-alias"))
     model.key = "attached-key"
     _install_fake_llm(monkeypatch, model, key=None)
-    results = run_doctor("m", configured=None, probe=False)
+    results = run_doctor("m", model_source="--model", probe=False)
     check = _by_name(results)["credential"]
     assert check.status == "pass"
     assert "attached" in check.detail
@@ -208,30 +212,43 @@ def test_json_mode_absence_is_reported_not_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_fake_llm(monkeypatch, _fake_model(json_object=False))
-    results = run_doctor("m", configured=None, probe=False)
+    results = run_doctor("m", model_source="--model", probe=False)
     check = _by_name(results)["json-mode"]
     assert check.status == "pass"
     assert "not available" in check.detail
     assert doctor_exit_code(results) == 0
 
 
-def test_model_source_reports_env_config_and_default(
+def test_model_source_uses_resolved_provenance_without_reading_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_fake_llm(monkeypatch, _fake_model())
-    monkeypatch.setenv("LLM_MODEL", "env-model")
+    monkeypatch.setenv("LLM_MODEL", "ambient-value-that-must-not-be-read")
     assert (
         "LLM_MODEL"
-        in _by_name(run_doctor(None, configured="c", probe=False))["model"].detail
+        in _by_name(
+            run_doctor(
+                "env-model",
+                model_source="LLM_MODEL environment variable",
+                probe=False,
+            )
+        )["model"].detail
     )
-    monkeypatch.delenv("LLM_MODEL")
     assert (
         "config"
-        in _by_name(run_doctor(None, configured="c", probe=False))["model"].detail
+        in _by_name(
+            run_doctor(
+                "configured-model",
+                model_source="config [analyze].model",
+                probe=False,
+            )
+        )["model"].detail
     )
     assert (
         "default"
-        in _by_name(run_doctor(None, configured=None, probe=False))["model"].detail
+        in _by_name(run_doctor(None, model_source="llm default model", probe=False))[
+            "model"
+        ].detail
     )
 
 
@@ -246,7 +263,7 @@ def test_probe_passes_when_served_model_listed(
             monkeypatch,
             _fake_model(api_base=endpoint, model_name="served-name"),
         )
-        results = run_doctor("alias", configured=None, probe=True)
+        results = run_doctor("alias", model_source="--model", probe=True)
     check = _by_name(results)["endpoint"]
     assert check.status == "pass"
     assert doctor_exit_code(results) == 0
@@ -260,7 +277,7 @@ def test_probe_fails_when_model_absent_and_names_seen_ids(
             monkeypatch,
             _fake_model(api_base=endpoint, model_name="served-name"),
         )
-        results = run_doctor("alias", configured=None, probe=True)
+        results = run_doctor("alias", model_source="--model", probe=True)
     check = _by_name(results)["endpoint"]
     assert check.status == "fail"
     assert "other-a" in check.detail
@@ -274,7 +291,7 @@ def test_probe_membership_falls_back_to_model_id(
         _install_fake_llm(
             monkeypatch, _fake_model(api_base=endpoint, model_id="the-id")
         )
-        results = run_doctor("alias", configured=None, probe=True)
+        results = run_doctor("alias", model_source="--model", probe=True)
     assert _by_name(results)["endpoint"].status == "pass"
 
 
@@ -283,7 +300,7 @@ def test_probe_auth_challenge_counts_as_reachable(
 ) -> None:
     with _models_server({"error": "auth"}, status=401) as endpoint:
         _install_fake_llm(monkeypatch, _fake_model(api_base=endpoint))
-        results = run_doctor("alias", configured=None, probe=True)
+        results = run_doctor("alias", model_source="--model", probe=True)
     check = _by_name(results)["endpoint"]
     assert check.status == "pass"
     assert "authentication" in check.detail
@@ -314,7 +331,7 @@ def test_probe_connection_refused_fails(
         _install_fake_llm(
             monkeypatch, _fake_model(api_base=f"http://127.0.0.1:{port}/v1")
         )
-        results = run_doctor("alias", configured=None, probe=True)
+        results = run_doctor("alias", model_source="--model", probe=True)
     finally:
         stop.set()
         broken.close()
@@ -326,13 +343,13 @@ def test_probe_connection_refused_fails(
 def test_probe_other_http_error_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     with _models_server({"error": "gone"}, status=500) as endpoint:
         _install_fake_llm(monkeypatch, _fake_model(api_base=endpoint))
-        results = run_doctor("alias", configured=None, probe=True)
+        results = run_doctor("alias", model_source="--model", probe=True)
     assert _by_name(results)["endpoint"].status == "fail"
 
 
 def test_probe_skips_without_api_base(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_fake_llm(monkeypatch, _fake_model())
-    results = run_doctor("m", configured=None, probe=True)
+    results = run_doctor("m", model_source="--model", probe=True)
     assert _by_name(results)["endpoint"].status == "skip"
 
 
@@ -341,7 +358,7 @@ def test_probe_auth_forbidden_also_counts_as_reachable(
 ) -> None:
     with _models_server({"error": "forbidden"}, status=403) as endpoint:
         _install_fake_llm(monkeypatch, _fake_model(api_base=endpoint))
-        results = run_doctor("alias", configured=None, probe=True)
+        results = run_doctor("alias", model_source="--model", probe=True)
     assert _by_name(results)["endpoint"].status == "pass"
 
 
@@ -366,7 +383,7 @@ def test_probe_does_not_follow_redirects(
     try:
         endpoint = f"http://127.0.0.1:{server.server_port}/v1"
         _install_fake_llm(monkeypatch, _fake_model(api_base=endpoint))
-        results = run_doctor("alias", configured=None, probe=True)
+        results = run_doctor("alias", model_source="--model", probe=True)
     finally:
         server.shutdown()
         server.server_close()
@@ -384,7 +401,7 @@ def test_probe_rejects_oversized_model_list(
     huge = {"data": [], "pad": "x" * (PROBE_MAX_BODY_BYTES + 4096)}
     with _models_server(huge) as endpoint:
         _install_fake_llm(monkeypatch, _fake_model(api_base=endpoint))
-        results = run_doctor("alias", configured=None, probe=True)
+        results = run_doctor("alias", model_source="--model", probe=True)
     check = _by_name(results)["endpoint"]
     assert check.status == "fail"
     assert "bounded" in check.detail
@@ -397,7 +414,7 @@ def test_probe_malformed_api_base_fails_without_traceback(
     # must surface as an endpoint failure, never an uncaught traceback that
     # would drop the [SC-14] check report.
     _install_fake_llm(monkeypatch, _fake_model(api_base="http://[unclosed"))
-    results = run_doctor("alias", configured=None, probe=True)
+    results = run_doctor("alias", model_source="--model", probe=True)
     check = _by_name(results)["endpoint"]
     assert check.status == "fail"
     assert [r.name for r in results] == list(CHECK_ORDER)
@@ -428,7 +445,7 @@ def test_probe_truncated_body_fails_without_traceback(
     try:
         endpoint = f"http://127.0.0.1:{server.server_port}/v1"
         _install_fake_llm(monkeypatch, _fake_model(api_base=endpoint))
-        results = run_doctor("alias", configured=None, probe=True)
+        results = run_doctor("alias", model_source="--model", probe=True)
     finally:
         server.shutdown()
         server.server_close()
@@ -480,7 +497,7 @@ def test_probe_never_sends_or_echoes_api_base_credentials(
         _install_fake_llm(
             monkeypatch, _fake_model(api_base=creds, model_name="served-name")
         )
-        results = run_doctor("alias", configured=None, probe=True)
+        results = run_doctor("alias", model_source="--model", probe=True)
     assert _by_name(results)["endpoint"].status == "pass", _by_name(results)["endpoint"]
     blob = json.dumps([asdict(r) for r in results])
     assert "s3cr3t-token" not in blob, blob
@@ -545,7 +562,7 @@ def test_probe_slow_server_is_bounded_by_the_budget(
         endpoint = f"http://127.0.0.1:{server.server_port}/v1"
         _install_fake_llm(monkeypatch, _fake_model(api_base=endpoint))
         start = _time.monotonic()
-        results = run_doctor("alias", configured=None, probe=True)
+        results = run_doctor("alias", model_source="--model", probe=True)
         elapsed = _time.monotonic() - start
     finally:
         server.shutdown()
@@ -576,7 +593,7 @@ def test_probe_bad_port_fails_without_traceback(
     # A non-integer port makes urlsplit().port raise ValueError; it must be
     # an endpoint failure, not an uncaught traceback dropping the report.
     _install_fake_llm(monkeypatch, _fake_model(api_base="http://127.0.0.1:notaport/v1"))
-    results = run_doctor("alias", configured=None, probe=True)
+    results = run_doctor("alias", model_source="--model", probe=True)
     assert _by_name(results)["endpoint"].status == "fail"
     assert [r.name for r in results] == list(CHECK_ORDER)
 
@@ -587,7 +604,7 @@ def test_llm_import_failure_fails_and_dependents_skip(
     # A None entry in sys.modules makes `import llm` raise ImportError —
     # the hermetic stand-in for a broken install.
     monkeypatch.setitem(sys.modules, "llm", None)
-    results = run_doctor("m", configured=None, probe=False)
+    results = run_doctor("m", model_source="--model", probe=False)
     by_name = _by_name(results)
     assert by_name["llm-import"].status == "fail"
     assert by_name["llm-import"].remedy
@@ -600,7 +617,7 @@ def test_details_are_single_line_even_with_hostile_model_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_fake_llm(monkeypatch, None)
-    results = run_doctor("bad\nname\twith spaces", configured=None, probe=False)
+    results = run_doctor("bad\nname\twith spaces", model_source="--model", probe=False)
     for result in results:
         assert "\n" not in result.detail and "\n" not in result.remedy
     assert "bad name" in _by_name(results)["model"].detail
@@ -719,6 +736,34 @@ def test_cli_doctor_exits_two_without_traceback_on_unknown_model(
     assert "Traceback" not in result.stderr
     assert result.returncode == 2, result.stdout
     assert "fail" in result.stdout
+    assert "(from --model)" in result.stdout
+
+
+def test_cli_doctor_reports_generic_option_source_after_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLM_USER_PATH", str(tmp_path / "empty-llm-home"))
+    monkeypatch.setenv("LLM_MODEL", "ambient-model")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "backstitch",
+            "doctor",
+            "--no-config",
+            "--option",
+            "analyze.model",
+            "definitely-not-a-registered-model",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
+    )
+
+    assert result.returncode == 2
+    assert "(from --option analyze.model)" in result.stdout
 
 
 def test_cli_doctor_rejects_config_and_no_config_together() -> None:

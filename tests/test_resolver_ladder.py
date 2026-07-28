@@ -10,8 +10,9 @@ from pathlib import Path
 import pytest
 
 from backstitch.models import Report
+from backstitch.obligation_runtime import build_obligation_runtime
 from backstitch.profiles import get_profile
-from backstitch.resolver import scan_repository
+from backstitch.settings import BackstitchSettings
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures/path_ladder_project"
 
@@ -24,7 +25,9 @@ PROFILE = get_profile("backstitch-style-v1").with_overrides(
 
 @pytest.fixture(scope="module")
 def ladder() -> Report:
-    return scan_repository(FIXTURE, PROFILE)
+    return build_obligation_runtime(
+        FIXTURE, PROFILE, BackstitchSettings()
+    ).pipeline.raw_report
 
 
 def _mapping_edges(report: Report, section_id: str) -> list[str]:

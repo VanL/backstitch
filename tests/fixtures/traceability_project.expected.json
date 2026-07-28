@@ -462,7 +462,7 @@
       "line": 33,
       "target": "src/",
       "kind": "path",
-      "target_path": "src/",
+      "target_path": "src",
       "target_symbol": null
     },
     {
@@ -665,7 +665,7 @@
       "kind": "mapping",
       "spec_path": "docs/specifications/02-Weft_Style.md",
       "section_id": "DIRMAP-1",
-      "code_path": "src/",
+      "code_path": "src",
       "code_symbol": null,
       "line": 33
     },

@@ -55,8 +55,12 @@ def _implemented_spec_rows() -> dict[str, tuple[str, str | None]]:
 def test_issue_codes_match_spec_tables() -> None:
     rows = _implemented_spec_rows()
     assert rows, "could not parse implemented diagnostic tables from the spec"
-    assert ISSUE_CODES == frozenset(rows)
     registry = default_registry()
+    assert ISSUE_CODES == frozenset(
+        code for code in rows if registry.require(code).family == "deterministic"
+    )
+    assert "SEMANTIC_CONFIRMED_MISMATCH" not in ISSUE_CODES
+    assert registry.require("SEMANTIC_CONFIRMED_MISMATCH").status == "implemented"
     for code, (short_code, _level) in rows.items():
         assert registry.require(code).short_code == short_code
 

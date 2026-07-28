@@ -928,7 +928,13 @@ def test_local_live_packet_selector_rejects_non_invariant_kind() -> None:
         )
 
 
-def test_local_live_packet_selector_matches_real_self_corpus(tmp_path: Path) -> None:
+def test_local_live_packet_selector_matches_real_contract_corpus(
+    tmp_path: Path,
+) -> None:
+    contract_root = live_llm._write_live_contract_repo(
+        tmp_path / "contract",
+        kind="local",
+    )
     packets_path = tmp_path / "invariant-packets.jsonl"
     result = subprocess.run(
         [
@@ -937,7 +943,13 @@ def test_local_live_packet_selector_matches_real_self_corpus(tmp_path: Path) -> 
             "backstitch",
             "packets",
             "--repo-root",
-            ".",
+            str(contract_root),
+            "--code-root",
+            "pkg",
+            "--code-root",
+            "tests",
+            "--test-root",
+            "tests",
             "--kind",
             "invariant",
             "--output",
@@ -973,7 +985,8 @@ def test_invalid_local_corpus_fails_before_provider_activity(
     }
 
     def fake_run_cli(*args: str, **kwargs: object) -> subprocess.CompletedProcess[str]:
-        assert args[:5] == ("packets", "--repo-root", ".", "--kind", "invariant")
+        assert args[0] == "packets"
+        assert args[args.index("--kind") + 1] == "all"
         output = Path(args[args.index("--output") + 1])
         output.write_text(json.dumps(packet) + "\n", encoding="utf-8")
         return subprocess.CompletedProcess(args, 0, "", "")

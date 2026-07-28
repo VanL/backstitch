@@ -14,6 +14,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from backstitch.semantic_reports import load_analysis_report
+from tests.acceptance.conftest import SemanticAnalysisHarness
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -27,7 +30,10 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_probe_13_self_acceptance_round_trip(tmp_path: Path) -> None:
+def test_probe_13_self_acceptance_round_trip(
+    tmp_path: Path,
+    semantic_analysis_harness: SemanticAnalysisHarness,
+) -> None:
     # A real check report passes summarize-analysis validation unchanged.
     report_path = tmp_path / "report.json"
     result = _run(
@@ -51,15 +57,22 @@ def test_probe_13_self_acceptance_round_trip(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
 
-    # Real packets pass analyze's packet loading (proven by reaching model
-    # selection with a hermetic model name, which fails AFTER validation).
+    # A real aligned fixture passes packet/report loading. The repository's
+    # broader source corpus intentionally retains active alignment debt, so it
+    # is not a valid complete-current packet corpus yet.
+    aligned_root = REPO_ROOT / "tests/product_eval/phase_c/fixtures/aligned-base"
     packets_path = tmp_path / "packets.jsonl"
+    packet_report_path = tmp_path / "packet-report.json"
     result = _run(
         "packets",
         "--repo-root",
-        str(REPO_ROOT),
+        str(aligned_root),
+        "--kind",
+        "all",
         "--output",
         str(packets_path),
+        "--report",
+        str(packet_report_path),
     )
     assert result.returncode == 0, result.stderr
     assert packets_path.read_text(encoding="utf-8").strip(), "no packets emitted"
@@ -67,21 +80,42 @@ def test_probe_13_self_acceptance_round_trip(tmp_path: Path) -> None:
         "analyze",
         "--packets",
         str(packets_path),
+        "--packet-report",
+        str(packet_report_path),
         "--no-config",
         "--model",
         "backstitch-hermetic-model-that-must-not-exist",
+        "--output",
+        str(tmp_path / "analysis.jsonl"),
     )
     assert result.returncode == 2
     assert "Unknown model" in result.stderr, result.stderr
     assert "malformed packet" not in result.stderr
 
-    # analyze's own error records pass validate_analysis_row.
-    from backstitch.analysis_llm import analyze_packets, render_results_jsonl
-    from backstitch.analysis_results import load_analysis_results
-
+    # The production runner publishes and accepts its closed failed report.
     packet = json.loads(packets_path.read_text(encoding="utf-8").splitlines()[0])
-    rows, errors = analyze_packets([packet], lambda prompt: "not json")
-    assert errors, "garbage response must be recorded as an error"
-    load = load_analysis_results(render_results_jsonl(rows), None)
-    assert load.errors == ()
-    assert load.results[0].classification == "ambiguous"
+    run, request = semantic_analysis_harness(
+        packets=[packet],
+        adapter=lambda prompt: "not json",
+        name="self-acceptance-malformed",
+    )
+    assert run.exit_code == 2
+    assert run.results == ()
+    assert [(problem.stage, problem.code) for problem in run.problems] == [
+        ("normalization", "malformed_result")
+    ]
+    assert request.report_path is not None
+    assert request.result_path is not None
+    loaded = load_analysis_report(
+        request.report_path,
+        result_jsonl=request.result_path.read_bytes(),
+        packet_report=request.packet_report,
+        packets=request.packets,
+        expected_scope=request.scope,
+        expected_semantic_status=request.semantic_status,
+        expected_artifact_currentness=request.artifact_currentness,
+        expected_source_provenance=request.source_provenance,
+    )
+    loaded_row = loaded.to_dict()
+    assert loaded_row["status"] == "failed"
+    assert loaded_row["analysis_exit_code"] == 2

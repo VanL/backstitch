@@ -7,12 +7,27 @@ from pathlib import Path
 
 import pytest
 
-from backstitch.python_refs import parse_python_file
+from backstitch.python_refs import parse_python_bytes, parse_python_file
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "traceability_project"
 RUNTIME = FIXTURE_ROOT / "src" / "runtime.py"
 RANGES = FIXTURE_ROOT / "src" / "ranges.py"
 FIXTURE_TEST = FIXTURE_ROOT / "tests" / "test_runtime.py"
+
+
+def test_byte_parser_matches_filesystem_wrapper() -> None:
+    assert parse_python_bytes(RUNTIME.read_bytes(), "src/runtime.py") == (
+        parse_python_file(RUNTIME, FIXTURE_ROOT)
+    )
+
+
+def test_backlink_comment_nested_in_expression_is_not_pruned() -> None:
+    parsed = parse_python_bytes(
+        b"value = (\n    1\n    # Spec: docs/specs/a.md [A-1]\n)\n",
+        "src/expression.py",
+    )
+
+    assert [(ref.line, ref.section_ids) for ref in parsed.refs] == [(3, ("A-1",))]
 
 
 def _refs_by_owner(path: Path) -> dict[str, list]:

@@ -1,0 +1,6 @@
+[profile]
+name = "backstitch-style-v1"
+spec_roots = ["docs/specs"]
+plan_roots = []
+code_roots = ["src", "tests"]
+test_roots = ["tests"]

@@ -5,12 +5,21 @@ Spec: docs/specs/02-backstitch-core.md [SC-4]
 
 from pathlib import Path
 
-from backstitch.markdown_specs import parse_markdown_spec  # noqa: F401
+from backstitch.markdown_specs import (
+    parse_markdown_spec,
+    parse_markdown_spec_bytes,
+)
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "traceability_project"
 CORE = FIXTURE_ROOT / "docs" / "specifications" / "01-Core.md"
 PLANNED = FIXTURE_ROOT / "docs" / "specifications" / "01A-Core_Planned.md"
 WEFT_STYLE = FIXTURE_ROOT / "docs" / "specifications" / "02-Weft_Style.md"
+
+
+def test_byte_parser_matches_filesystem_wrapper() -> None:
+    assert parse_markdown_spec_bytes(
+        CORE.read_bytes(), "docs/specifications/01-Core.md"
+    ) == parse_markdown_spec(CORE, FIXTURE_ROOT)
 
 
 def test_heading_sections_are_parsed_with_title_line_and_anchor() -> None:
@@ -22,6 +31,81 @@ def test_heading_sections_are_parsed_with_title_line_and_anchor() -> None:
     assert core1.path == "docs/specifications/01-Core.md"
     assert core1.line == 6
     assert core1.anchor == "runtime-behaviour-core-1"
+
+
+def test_invalid_id_bearing_heading_is_reported_without_inventing_a_section() -> None:
+    source = (
+        b"# Ordinary document title\n\n"
+        b"## Broken contract [not-an-id]\n\n"
+        b"## Broken contract[also-not-an-id]\n\n"
+        b"## Ordinary ID-less prose\n"
+    )
+
+    parsed = parse_markdown_spec_bytes(source, "docs/specifications/01-Broken.md")
+
+    assert parsed.sections == ()
+    assert [
+        (
+            issue.code,
+            issue.severity,
+            issue.path,
+            issue.line,
+            issue.section_id,
+            issue.message,
+        )
+        for issue in parsed.issues
+    ] == [
+        (
+            "SPEC_SECTION_HEADING_INVALID",
+            "error",
+            "docs/specifications/01-Broken.md",
+            3,
+            None,
+            "ID-bearing Markdown heading has an invalid or missing section ID",
+        ),
+        (
+            "SPEC_SECTION_HEADING_INVALID",
+            "error",
+            "docs/specifications/01-Broken.md",
+            5,
+            None,
+            "ID-bearing Markdown heading has an invalid or missing section ID",
+        ),
+    ]
+
+
+def test_missing_id_or_title_is_unaddressable_but_idless_headings_remain_prose() -> (
+    None
+):
+    source = (
+        b"## Missing identifier []\n\n"
+        b"## [VALID-1]\n\n"
+        b"## Compare [old] and new\n\n"
+        b"## Ordinary prose\n"
+    )
+
+    parsed = parse_markdown_spec_bytes(source, "docs/specifications/01-Broken.md")
+
+    assert parsed.sections == ()
+    assert [
+        (issue.code, issue.line, issue.path, issue.section_id, issue.message)
+        for issue in parsed.issues
+    ] == [
+        (
+            "SPEC_SECTION_HEADING_INVALID",
+            1,
+            "docs/specifications/01-Broken.md",
+            None,
+            "ID-bearing Markdown heading has an invalid or missing section ID",
+        ),
+        (
+            "SPEC_SECTION_HEADING_INVALID",
+            3,
+            "docs/specifications/01-Broken.md",
+            None,
+            "ID-bearing Markdown heading is missing a section title",
+        ),
+    ]
 
 
 def test_invariant_bullets_define_sections() -> None:
@@ -546,3 +630,267 @@ def test_malformed_markdown_marker_under_section_keeps_parseable_id(
     assert [
         (issue.code, issue.line, issue.invariant_id) for issue in parsed.issues
     ] == [("INVARIANT_MARKER_INVALID", 5, "INV.BAD.1")]
+
+
+def test_inline_heading_skip_is_a_typed_source_fact(tmp_path: Path) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "# T\n\n"
+        "## Contract [T-1] <!-- backstitch: skip-obligation [T-1] "
+        '"Generated code is checked downstream." -->\n',
+        encoding="utf-8",
+    )
+
+    parsed = parse_markdown_spec(doc, tmp_path)
+
+    assert [
+        (item.obligation_id, item.target_id, item.reason)
+        for item in parsed.obligation_skips
+    ] == [
+        (
+            "01-T.md#T-1",
+            "T-1",
+            "Generated code is checked downstream.",
+        )
+    ]
+    assert parsed.obligation_skips[0].form == "heading_html"
+    assert parsed.obligation_skips[0].line == 3
+    assert parsed.marker_diagnostics == ()
+    assert parsed.sections[0].title == "Contract"
+    assert parsed.sections[0].anchor == "contract-t-1"
+
+
+def test_standalone_skip_forms_and_invariant_owner(tmp_path: Path) -> None:
+    html = tmp_path / "01-html.md"
+    html.write_text(
+        "## Contract [T-1]\n"
+        '<!-- backstitch: skip-obligation [T-1] "External owner." -->\n',
+        encoding="utf-8",
+    )
+    traceability = tmp_path / "02-trace.md"
+    traceability.write_text(
+        "## Contract [T-2]\n"
+        '_Traceability: skip-obligation [INV.T.2] "External owner."_\n\n'
+        "Invariant: [INV.T.2] Stable output.\n",
+        encoding="utf-8",
+    )
+
+    html_parsed = parse_markdown_spec(html, tmp_path)
+    trace_parsed = parse_markdown_spec(traceability, tmp_path)
+
+    assert [
+        (item.obligation_id, item.form) for item in html_parsed.obligation_skips
+    ] == [("01-html.md#T-1", "html")]
+    assert [
+        (item.obligation_id, item.target_id, item.form, item.owner_section_id)
+        for item in trace_parsed.obligation_skips
+    ] == [("invariant::INV.T.2", "INV.T.2", "traceability", "T-2")]
+
+
+def test_skip_coexists_with_one_ordinary_marker_in_canonical_orders(
+    tmp_path: Path,
+) -> None:
+    before = tmp_path / "01-before.md"
+    before.write_text(
+        "## Contract [T-1]\n"
+        "<!-- backstitch: meta -->\n"
+        '<!-- backstitch: skip-obligation [T-1] "External owner." -->\n',
+        encoding="utf-8",
+    )
+    inline = tmp_path / "02-inline.md"
+    inline.write_text(
+        "## Contract [T-2] <!-- backstitch: skip-obligation [T-2] "
+        '"External owner." -->\n'
+        "_Traceability: meta_\n",
+        encoding="utf-8",
+    )
+
+    before_parsed = parse_markdown_spec(before, tmp_path)
+    inline_parsed = parse_markdown_spec(inline, tmp_path)
+
+    assert [item.obligation_id for item in before_parsed.obligation_skips] == [
+        "01-before.md#T-1"
+    ]
+    assert before_parsed.section_markers == (("T-1", True, frozenset()),)
+    assert before_parsed.marker_diagnostics == ()
+    assert [item.obligation_id for item in inline_parsed.obligation_skips] == [
+        "02-inline.md#T-2"
+    ]
+    assert inline_parsed.section_markers == (("T-2", True, frozenset()),)
+    assert inline_parsed.marker_diagnostics == ()
+
+
+def test_standalone_skip_before_ordinary_marker_invalidates_only_skip(
+    tmp_path: Path,
+) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        "## Contract [T-1]\n"
+        '<!-- backstitch: skip-obligation [T-1] "External owner." -->\n'
+        "_Traceability: meta_\n",
+        encoding="utf-8",
+    )
+
+    parsed = parse_markdown_spec(doc, tmp_path)
+
+    assert parsed.obligation_skips == ()
+    assert parsed.section_markers == (("T-1", True, frozenset()),)
+    assert [item.code for item in parsed.marker_diagnostics] == [
+        "SUPPRESSION_INVALID_SYNTAX"
+    ]
+
+
+def test_duplicate_skip_and_two_ordinary_markers_leave_evaluate(
+    tmp_path: Path,
+) -> None:
+    duplicate = tmp_path / "01-duplicate.md"
+    duplicate.write_text(
+        "## Contract [T-1]\n"
+        '<!-- backstitch: skip-obligation [T-1] "One." -->\n'
+        '<!-- backstitch: skip-obligation [T-1] "Two." -->\n',
+        encoding="utf-8",
+    )
+    ordinary = tmp_path / "02-ordinary.md"
+    ordinary.write_text(
+        "## Contract [T-2]\n"
+        "_Traceability: meta_\n"
+        "<!-- backstitch: ignore SPEC_SECTION_UNMAPPED -->\n"
+        '<!-- backstitch: skip-obligation [T-2] "External owner." -->\n',
+        encoding="utf-8",
+    )
+
+    duplicate_parsed = parse_markdown_spec(duplicate, tmp_path)
+    ordinary_parsed = parse_markdown_spec(ordinary, tmp_path)
+
+    assert duplicate_parsed.obligation_skips == ()
+    assert [item.code for item in duplicate_parsed.marker_diagnostics] == [
+        "SUPPRESSION_INVALID_SYNTAX"
+    ]
+    assert ordinary_parsed.obligation_skips == ()
+    assert ordinary_parsed.section_markers == (
+        ("T-2", True, frozenset({"SPEC_SECTION_UNMAPPED"})),
+    )
+    assert [item.code for item in ordinary_parsed.marker_diagnostics] == [
+        "SUPPRESSION_INVALID_SYNTAX"
+    ]
+
+
+def test_skip_after_body_and_nonowning_target_are_invalid(tmp_path: Path) -> None:
+    after_body = tmp_path / "01-body.md"
+    after_body.write_text(
+        "## Contract [T-1]\n\nBody.\n\n"
+        '<!-- backstitch: skip-obligation [T-1] "Late." -->\n',
+        encoding="utf-8",
+    )
+    nonowner = tmp_path / "02-owner.md"
+    nonowner.write_text(
+        "## First [T-1]\n\n## Second [T-2]\n"
+        '<!-- backstitch: skip-obligation [T-1] "Wrong owner." -->\n',
+        encoding="utf-8",
+    )
+
+    for doc in (after_body, nonowner):
+        parsed = parse_markdown_spec(doc, tmp_path)
+        assert parsed.obligation_skips == ()
+        assert [item.code for item in parsed.marker_diagnostics] == [
+            "SUPPRESSION_INVALID_SYNTAX"
+        ]
+
+
+def test_unknown_skip_target_is_unused_not_a_synthetic_obligation(
+    tmp_path: Path,
+) -> None:
+    doc = tmp_path / "01-T.md"
+    doc.write_text(
+        '## Contract [T-1]\n<!-- backstitch: skip-obligation [T-9] "No owner." -->\n',
+        encoding="utf-8",
+    )
+
+    parsed = parse_markdown_spec(doc, tmp_path)
+
+    assert parsed.obligation_skips == ()
+    assert [item.code for item in parsed.marker_diagnostics] == ["SUPPRESSION_UNUSED"]
+
+
+def test_missing_and_blank_skip_reasons_have_the_dedicated_diagnostic(
+    tmp_path: Path,
+) -> None:
+    for index, marker in enumerate(
+        (
+            "<!-- backstitch: skip-obligation [T-1] -->",
+            '<!-- backstitch: skip-obligation [T-1] "   " -->',
+            "_Traceability: skip-obligation [T-1]_",
+        ),
+        start=1,
+    ):
+        doc = tmp_path / f"0{index}-T.md"
+        doc.write_text(f"## Contract [T-1]\n{marker}\n", encoding="utf-8")
+        parsed = parse_markdown_spec(doc, tmp_path)
+        assert parsed.obligation_skips == ()
+        assert [item.code for item in parsed.marker_diagnostics] == [
+            "SUPPRESSION_REASON_MISSING"
+        ]
+
+
+def test_malformed_skip_is_warning_even_without_allow_unknown(tmp_path: Path) -> None:
+    markers = (
+        '<!-- backstitch: skip-obligation [bad] "Reason." -->',
+        "<!-- backstitch: skip-obligation [T-1] not-json -->",
+        '<!-- backstitch: skip-obligation [T-1] "raw -- token" -->',
+        '<!-- backstitch: skip-obligation [T-1] "raw < token" -->',
+        '_Traceability: skip-obligation [T-1] "line\\nfeed"_',
+    )
+    for index, marker in enumerate(markers, start=1):
+        doc = tmp_path / f"{index:02d}-T.md"
+        doc.write_text(f"## Contract [T-1]\n{marker}\n", encoding="utf-8")
+        parsed = parse_markdown_spec(doc, tmp_path, allow_unknown_codes=False)
+        assert parsed.obligation_skips == ()
+        assert [item.code for item in parsed.marker_diagnostics] == [
+            "SUPPRESSION_INVALID_SYNTAX"
+        ]
+
+
+def test_skip_reason_bounds_and_html_unicode_escapes(tmp_path: Path) -> None:
+    accepted = tmp_path / "01-accepted.md"
+    accepted.write_text(
+        "## Contract [T-1]\n"
+        '<!-- backstitch: skip-obligation [T-1] "Uses \\u003cowner\\u003e." -->\n',
+        encoding="utf-8",
+    )
+    too_long = tmp_path / "02-long.md"
+    too_long.write_text(
+        "## Contract [T-2]\n"
+        '<!-- backstitch: skip-obligation [T-2] "' + ("x" * 4097) + '" -->\n',
+        encoding="utf-8",
+    )
+
+    accepted_parsed = parse_markdown_spec(accepted, tmp_path)
+    too_long_parsed = parse_markdown_spec(too_long, tmp_path)
+
+    assert accepted_parsed.obligation_skips[0].reason == "Uses <owner>."
+    assert too_long_parsed.obligation_skips == ()
+    assert [item.code for item in too_long_parsed.marker_diagnostics] == [
+        "SUPPRESSION_INVALID_SYNTAX"
+    ]
+
+
+def test_parser_owns_exact_heading_and_bullet_section_spans(tmp_path: Path) -> None:
+    doc = tmp_path / "01-spans.md"
+    doc.write_text(
+        "# Root\n\n"
+        "## Contract [S-1]\n\n"
+        "Body.\n\n"
+        "### Detail\n\n"
+        "More.\n\n"
+        "- **S-2**: Bullet contract\n\n"
+        "## Unowned boundary\n\n"
+        "After.\n",
+        encoding="utf-8",
+    )
+
+    parsed = parse_markdown_spec(doc, tmp_path)
+
+    assert parsed.section_spans == (
+        ("S-1", 3, 12),
+        ("S-2", 11, 11),
+    )

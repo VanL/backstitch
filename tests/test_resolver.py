@@ -7,12 +7,15 @@ from pathlib import Path
 
 import pytest
 
+from backstitch.check_pipeline import CheckPipelineResult
 from backstitch.config import ProfileConfig
 from backstitch.models import InvariantBind, InvariantDeclaration, Report
+from backstitch.obligation_runtime import build_obligation_runtime
 from backstitch.profiles import get_profile
 from backstitch.python_refs import ParsedPython
 from backstitch.reporting import render_json
-from backstitch.resolver import ScanError, resolve, scan_repository
+from backstitch.resolver import resolve
+from backstitch.settings import BackstitchSettings
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -28,14 +31,22 @@ CLEAN_PROFILE = get_profile("backstitch-style-v1").with_overrides(
 )
 
 
+def _snapshot_pipeline(root: Path, profile: ProfileConfig) -> CheckPipelineResult:
+    return build_obligation_runtime(root, profile, BackstitchSettings()).pipeline
+
+
+def _snapshot_report(root: Path, profile: ProfileConfig) -> Report:
+    return _snapshot_pipeline(root, profile).raw_report
+
+
 @pytest.fixture(scope="module")
 def broken() -> Report:
-    return scan_repository(FIXTURES / "traceability_project", BROKEN_PROFILE)
+    return _snapshot_report(FIXTURES / "traceability_project", BROKEN_PROFILE)
 
 
 @pytest.fixture(scope="module")
 def clean() -> Report:
-    return scan_repository(FIXTURES / "clean_project", CLEAN_PROFILE)
+    return _snapshot_report(FIXTURES / "clean_project", CLEAN_PROFILE)
 
 
 def _codes(report: Report, severity: str | None = None) -> list[str]:
@@ -52,6 +63,44 @@ def test_clean_graph_builds_mapping_and_backlink_edges(clean: Report) -> None:
     assert ("mapping", "pkg/mod.py", "do_thing") in kinds
     assert ("backlink", "pkg/mod.py", "module") in kinds
     assert ("backlink", "pkg/mod.py", "do_thing") in kinds
+
+
+def test_scan_artifacts_carry_valid_obligation_skips(tmp_path: Path) -> None:
+    (tmp_path / "docs/specs").mkdir(parents=True)
+    (tmp_path / "docs/specs/01-a.md").write_text(
+        "## Contract [SKIP-1]\n"
+        '<!-- backstitch: skip-obligation [SKIP-1] "rareReasonToken" -->\n'
+        "\nThe worker must run queued work.\n\n"
+        "_Implementation mapping_:\n\n"
+        "- `pkg/rareMappingToken.py`\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pkg").mkdir()
+
+    pipeline = _snapshot_pipeline(
+        tmp_path,
+        CLEAN_PROFILE.with_overrides(
+            spec_roots=("docs/specs",),
+            plan_roots=(),
+            code_roots=("pkg",),
+        ),
+    )
+    report, artifacts = pipeline.raw_report, pipeline.artifacts
+
+    assert [item.obligation_id for item in artifacts.obligation_skips] == [
+        "docs/specs/01-a.md#SKIP-1"
+    ]
+    assert artifacts.obligation_skips[0].reason == "rareReasonToken"
+    search_text = artifacts.obligation_search_text["docs/specs/01-a.md#SKIP-1"]
+    assert "worker must run queued work" in search_text
+    assert "rareReasonToken" not in search_text
+    assert "rareMappingToken" not in search_text
+    skipped = [item for item in report.issues if item.code == "OBLIGATION_SKIPPED"]
+    assert len(skipped) == 1
+    assert skipped[0].short_code == "BSE001"
+    assert skipped[0].severity == "info"
+    assert skipped[0].context == "source_skip"
+    assert skipped[0].section_id == "SKIP-1"
 
 
 def test_missing_mapping_path_is_error(broken: Report) -> None:
@@ -98,7 +147,7 @@ def _dup_corpus(tmp_path: Path, code: str) -> Report:
     )
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg/mod.py").write_text(code, encoding="utf-8")
-    return scan_repository(
+    return _snapshot_report(
         tmp_path,
         get_profile("backstitch-style-v1").with_overrides(
             spec_roots=("docs/specs",), plan_roots=(), code_roots=("pkg",)
@@ -146,7 +195,7 @@ def test_backlink_to_unmapped_section_fires_reciprocal_warning(
     (tmp_path / "pkg/mod.py").write_text(
         '"""Spec: docs/specs/01-a.md [RM-1]"""\n', encoding="utf-8"
     )
-    report = scan_repository(
+    report = _snapshot_report(
         tmp_path,
         get_profile("backstitch-style-v1").with_overrides(
             spec_roots=("docs/specs",), plan_roots=(), code_roots=("pkg",)
@@ -172,7 +221,7 @@ def test_exploratory_glob_classification() -> None:
         planned_spec_globs=(),
         exploratory_spec_globs=("docs/specifications/*A-*.md",),
     )
-    report = scan_repository(FIXTURES / "traceability_project", profile)
+    report = _snapshot_report(FIXTURES / "traceability_project", profile)
     codes = [i.code for i in report.issues]
     assert "CODE_REF_EXPLORATORY_SPEC" in codes
     assert "CODE_REF_PLANNED_SPEC" not in codes
@@ -206,7 +255,7 @@ def test_path_symbol_missing_symbol_error(tmp_path: Path) -> None:
     (pkg / "mod.py").write_text(
         '"""Spec: docs/specs/01-X.md [X-1]"""\n', encoding="utf-8"
     )
-    report = scan_repository(tmp_path, CLEAN_PROFILE)
+    report = _snapshot_report(tmp_path, CLEAN_PROFILE)
     issues = [i for i in report.issues if i.code == "MAPPING_SYMBOL_MISSING"]
     assert len(issues) == 1
     assert issues[0].severity == "error"
@@ -275,7 +324,7 @@ def test_missing_anchor_is_error(tmp_path: Path) -> None:
     (pkg / "mod.py").write_text(
         '"""Spec: docs/specs/01-X.md#no-such-anchor"""\n', encoding="utf-8"
     )
-    report = scan_repository(tmp_path, CLEAN_PROFILE)
+    report = _snapshot_report(tmp_path, CLEAN_PROFILE)
     codes = {i.code: i.severity for i in report.issues}
     assert codes.get("SPEC_ANCHOR_MISSING") == "error"
 
@@ -292,7 +341,7 @@ def test_missing_spec_file_and_section_are_errors(tmp_path: Path) -> None:
         '"""\n',
         encoding="utf-8",
     )
-    report = scan_repository(tmp_path, CLEAN_PROFILE)
+    report = _snapshot_report(tmp_path, CLEAN_PROFILE)
     codes = {i.code: i.severity for i in report.issues}
     assert codes.get("SPEC_FILE_MISSING") == "error"
     assert codes.get("SPEC_SECTION_MISSING") == "error"
@@ -308,7 +357,7 @@ def test_refs_to_md_outside_spec_roots_are_ignored(tmp_path: Path) -> None:
         '"""Spec: README.md and docs/plans/2026-01-01-x.md are not specs."""\n',
         encoding="utf-8",
     )
-    report = scan_repository(tmp_path, CLEAN_PROFILE)
+    report = _snapshot_report(tmp_path, CLEAN_PROFILE)
     assert "SPEC_FILE_MISSING" not in {i.code for i in report.issues}
 
 
@@ -355,7 +404,7 @@ def test_backwards_range_is_unsupported(tmp_path: Path) -> None:
     (pkg / "mod.py").write_text(
         '"""Spec: docs/specs/01-X.md [X-2]-[X-1]"""\n', encoding="utf-8"
     )
-    report = scan_repository(tmp_path, CLEAN_PROFILE)
+    report = _snapshot_report(tmp_path, CLEAN_PROFILE)
     issues = [i for i in report.issues if i.code == "REF_RANGE_UNSUPPORTED"]
     assert len(issues) == 1
     assert "backwards" in issues[0].message
@@ -368,7 +417,7 @@ def test_unreadable_file_is_error_finding_not_crash(tmp_path: Path) -> None:
     pkg = tmp_path / "pkg"
     pkg.mkdir()
     (pkg / "mod.py").write_bytes(b"\xff\xfe invalid utf-8 \xff")
-    report = scan_repository(tmp_path, CLEAN_PROFILE)
+    report = _snapshot_report(tmp_path, CLEAN_PROFILE)
     issues = [i for i in report.issues if i.code == "FILE_UNREADABLE"]
     assert len(issues) == 1
     assert issues[0].severity == "error"
@@ -388,7 +437,7 @@ def test_non_utf8_path_symbol_inside_code_roots_is_unreadable_and_unresolved(
     pkg = tmp_path / "pkg"
     pkg.mkdir()
     (pkg / "binary.py").write_bytes(b"\xff\xfe invalid utf-8 \xff")
-    report = scan_repository(tmp_path, CLEAN_PROFILE)
+    report = _snapshot_report(tmp_path, CLEAN_PROFILE)
     codes = {i.code for i in report.issues}
     assert "FILE_UNREADABLE" in codes
     assert "MAPPING_SYMBOL_UNRESOLVED" in codes
@@ -409,7 +458,7 @@ def test_non_utf8_path_symbol_outside_code_roots_is_unresolved_not_crash(
     external.mkdir()
     (external / "binary.py").write_bytes(b"\xff\xfe invalid utf-8 \xff")
     (tmp_path / "pkg").mkdir()
-    report = scan_repository(tmp_path, CLEAN_PROFILE)
+    report = _snapshot_report(tmp_path, CLEAN_PROFILE)
     codes = {i.code for i in report.issues}
     assert "FILE_UNREADABLE" not in codes
     assert "MAPPING_SYMBOL_UNRESOLVED" in codes
@@ -428,7 +477,7 @@ def test_directory_mapping_covers_contained_files(tmp_path: Path) -> None:
     (pkg / "mod.py").write_text(
         '"""Spec: docs/specs/01-X.md [X-1]"""\n', encoding="utf-8"
     )
-    report = scan_repository(tmp_path, CLEAN_PROFILE)
+    report = _snapshot_report(tmp_path, CLEAN_PROFILE)
     assert "CODE_REF_UNMAPPED_FROM_SPEC" not in {i.code for i in report.issues}
 
 
@@ -444,7 +493,7 @@ def test_ownerless_mapping_block_warns(tmp_path: Path) -> None:
     (tmp_path / "pkg" / "mod.py").write_text(
         '"""Spec: docs/specs/01-X.md [X-1]"""\n', encoding="utf-8"
     )
-    report = scan_repository(tmp_path, CLEAN_PROFILE)
+    report = _snapshot_report(tmp_path, CLEAN_PROFILE)
     codes = {i.code for i in report.issues}
     assert "MAPPING_BLOCK_OWNERLESS" in codes
     # The block under the ID-less heading must NOT attach to X-1.
@@ -455,16 +504,11 @@ def test_ownerless_mapping_block_warns(tmp_path: Path) -> None:
 
 def test_missing_scan_root_is_error(tmp_path: Path) -> None:
     (tmp_path / "pkg").mkdir()
-    report = scan_repository(tmp_path, CLEAN_PROFILE)
+    report = _snapshot_report(tmp_path, CLEAN_PROFILE)
     issues = [i for i in report.issues if i.code == "SCAN_ROOT_MISSING"]
     assert len(issues) == 1
     assert issues[0].severity == "error"
     assert "docs/specs" in issues[0].message
-
-
-def test_unreadable_repo_root_raises_scan_error(tmp_path: Path) -> None:
-    with pytest.raises(ScanError):
-        scan_repository(tmp_path / "does-not-exist", CLEAN_PROFILE)
 
 
 def test_python_syntax_error_surfaces_in_report(tmp_path: Path) -> None:
@@ -474,7 +518,7 @@ def test_python_syntax_error_surfaces_in_report(tmp_path: Path) -> None:
     pkg = tmp_path / "pkg"
     pkg.mkdir()
     (pkg / "mod.py").write_text("def broken(:\n", encoding="utf-8")
-    report = scan_repository(tmp_path, CLEAN_PROFILE)
+    report = _snapshot_report(tmp_path, CLEAN_PROFILE)
     codes = {i.code: i.severity for i in report.issues}
     assert codes.get("PYTHON_SYNTAX_ERROR") == "warning"
 
@@ -482,7 +526,7 @@ def test_python_syntax_error_surfaces_in_report(tmp_path: Path) -> None:
 def test_report_is_stable_across_runs(broken: Report) -> None:
     """Tests-invariant: [INV.RES.1]"""
 
-    again = scan_repository(FIXTURES / "traceability_project", BROKEN_PROFILE)
+    again = _snapshot_report(FIXTURES / "traceability_project", BROKEN_PROFILE)
     assert render_json(again).encode("utf-8") == render_json(broken).encode("utf-8")
 
 
@@ -519,7 +563,7 @@ def test_invariant_resolver_builds_unique_binds_and_reports_unknown(
         encoding="utf-8",
     )
 
-    report = scan_repository(tmp_path, _invariant_profile())
+    report = _snapshot_report(tmp_path, _invariant_profile())
 
     assert [item.invariant_id for item in report.invariants] == ["INV.CODE.1"]
     assert [
@@ -556,7 +600,7 @@ def test_invariant_resolver_reports_tiers_duplicates_and_collisions(
         encoding="utf-8",
     )
 
-    report = scan_repository(tmp_path, _invariant_profile())
+    report = _snapshot_report(tmp_path, _invariant_profile())
     findings = [
         (issue.code, issue.invariant_id, issue.context, issue.severity, issue.line)
         for issue in report.issues
@@ -594,7 +638,7 @@ def test_test_named_definition_outside_test_roots_does_not_bind(tmp_path: Path) 
     )
     (tmp_path / "tests").mkdir()
 
-    report = scan_repository(tmp_path, _invariant_profile())
+    report = _snapshot_report(tmp_path, _invariant_profile())
 
     assert report.binds == ()
     assert {(issue.code, issue.invariant_id) for issue in report.issues} >= {

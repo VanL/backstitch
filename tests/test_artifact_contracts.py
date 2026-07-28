@@ -6,7 +6,9 @@ Spec: docs/specs/02-backstitch-core.md [SC-6], [SC-13]
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -15,9 +17,14 @@ from backstitch.artifact_contracts import (
     load_deterministic_report,
     load_packets,
 )
+from backstitch.semantic_packets import semantic_packet_hash
 
 
-def _packet() -> dict[str, object]:
+def _semantic_hash(packet: dict[str, Any]) -> str:
+    return semantic_packet_hash(packet)
+
+
+def _packet() -> dict[str, Any]:
     return {
         "packet_id": "docs/specs/01-x.md#X-1",
         "kind": "section",
@@ -36,7 +43,32 @@ def _packet() -> dict[str, object]:
     }
 
 
-def _invariant_packet() -> dict[str, object]:
+def _v2_packet() -> dict[str, Any]:
+    packet = _packet()
+    packet.pop("instructions")
+    packet["schema_version"] = 2
+    packet["packet_hash"] = _semantic_hash(packet)
+    return packet
+
+
+def _v2_invariant_packet() -> dict[str, Any]:
+    packet = _invariant_packet()
+    packet.pop("instructions")
+    declaration = packet["declaration"]
+    assert isinstance(declaration, dict)
+    declaration.update(
+        {
+            "start_line": declaration["line"],
+            "end_line": declaration["line"],
+            "excerpt": packet["statement"],
+        }
+    )
+    packet["schema_version"] = 2
+    packet["packet_hash"] = semantic_packet_hash(packet)
+    return packet
+
+
+def _invariant_packet() -> dict[str, Any]:
     targets = [
         {
             "path": "pkg/x.py",
@@ -74,6 +106,26 @@ def _invariant_packet() -> dict[str, object]:
         "instructions": "Return JSON.",
         "content_hash": invariant_content_hash(statement, targets, binding_tests),
     }
+
+
+def test_load_packets_normalizes_multiline_legacy_invariant_span(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "packets.jsonl"
+    packet = _invariant_packet()
+    packet["statement"] = "The result is one.\nIt remains stable."
+    packet["content_hash"] = invariant_content_hash(
+        packet["statement"], packet["targets"], packet["binding_tests"]
+    )
+    path.write_text(json.dumps(packet) + "\n", encoding="utf-8")
+
+    loaded = load_packets(path)
+    declaration = loaded[0].to_dict()["declaration"]
+
+    assert loaded[0].cache_eligible is False
+    assert declaration["start_line"] == 3
+    assert declaration["end_line"] == 4
+    assert declaration["excerpt"] == packet["statement"]
 
 
 def _empty_report(tmp_path: Path) -> dict[str, object]:
@@ -121,11 +173,187 @@ def _issue(
     }
 
 
-def test_load_packets_accepts_full_packet_contract(tmp_path: Path) -> None:
+def test_load_packets_accepts_v2_packet_for_migration_but_not_semantic_use(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "packets.jsonl"
-    packet = _packet()
+    packet = _v2_packet()
     path.write_text(json.dumps(packet) + "\n", encoding="utf-8")
-    assert load_packets(path) == [packet]
+
+    loaded = load_packets(path)
+
+    assert len(loaded) == 1
+    assert loaded[0].cache_eligible is False
+    assert loaded[0].semantic_eligible is False
+    assert loaded[0].to_dict() == packet
+
+
+@pytest.mark.parametrize(
+    ("mutation", "fragment"),
+    [
+        ("too-many-owners", "owners"),
+        ("duplicate-owner", "owners"),
+        ("overlong-owner", "snippet"),
+        ("overlong-section", "section_text"),
+        ("duplicate-test", "tests"),
+        ("no-resolved-edge", "owners.*tests"),
+    ],
+)
+def test_load_packets_rejects_v2_section_content_outside_producer_bounds(
+    tmp_path: Path, mutation: str, fragment: str
+) -> None:
+    packet = _v2_packet()
+    if mutation == "too-many-owners":
+        owner = deepcopy(packet["owners"][0])
+        packet["owners"] = [{**owner, "path": f"pkg/x{index}.py"} for index in range(9)]
+    elif mutation == "duplicate-owner":
+        packet["owners"] = [packet["owners"][0], deepcopy(packet["owners"][0])]
+    elif mutation == "overlong-owner":
+        packet["owners"][0]["snippet"] = "\n".join("x" for _ in range(121))
+    elif mutation == "overlong-section":
+        packet["section_text"] = "\n".join("x" for _ in range(101))
+    elif mutation == "no-resolved-edge":
+        packet["owners"] = []
+        packet["tests"] = []
+    else:
+        packet["tests"] = ["tests/test_x.py", "tests/test_x.py"]
+    packet["packet_hash"] = semantic_packet_hash(packet)
+    path = tmp_path / "packets.jsonl"
+    path.write_text(json.dumps(packet) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=fragment):
+        load_packets(path)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "fragment"),
+    [
+        ("too-many-targets", "targets"),
+        ("no-binding-tests", "binding_tests"),
+        ("duplicate-binding-test", "binding_tests"),
+        ("overlong-target", "snippet"),
+        ("unrelated-code-target", "targets"),
+        ("unsorted-issues", "issues"),
+    ],
+)
+def test_load_packets_rejects_v2_invariant_content_outside_producer_bounds(
+    tmp_path: Path, mutation: str, fragment: str
+) -> None:
+    packet = _v2_invariant_packet()
+    if mutation == "too-many-targets":
+        target = deepcopy(packet["targets"][0])
+        packet["targets"] = [
+            {**target, "path": f"pkg/x{index}.py"} for index in range(9)
+        ]
+    elif mutation == "no-binding-tests":
+        packet["binding_tests"] = []
+    elif mutation == "duplicate-binding-test":
+        packet["binding_tests"] = [
+            packet["binding_tests"][0],
+            deepcopy(packet["binding_tests"][0]),
+        ]
+    elif mutation == "overlong-target":
+        packet["targets"][0]["snippet"] = "\n".join("x" for _ in range(121))
+    elif mutation == "unsorted-issues":
+        packet["issues"] = [
+            {
+                "code": "INVARIANT_UNKNOWN",
+                "path": "z.py",
+                "line": 2,
+                "message": "z",
+                "section_id": None,
+                "symbol": None,
+                "short_code": "BSI002",
+                "context": None,
+                "default_severity": "error",
+                "invariant_id": "INV.X.1",
+            },
+            {
+                "code": "INVARIANT_UNKNOWN",
+                "path": "a.py",
+                "line": 1,
+                "message": "a",
+                "section_id": None,
+                "symbol": None,
+                "short_code": "BSI002",
+                "context": None,
+                "default_severity": "error",
+                "invariant_id": "INV.X.1",
+            },
+        ]
+    else:
+        packet["targets"][0]["path"] = "pkg/unrelated.py"
+    packet["content_hash"] = invariant_content_hash(
+        packet["statement"], packet["targets"], packet["binding_tests"]
+    )
+    packet["packet_hash"] = semantic_packet_hash(packet)
+    path = tmp_path / "packets.jsonl"
+    path.write_text(json.dumps(packet) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=fragment):
+        load_packets(path)
+
+
+@pytest.mark.parametrize("declaration_kind", ["spec", "code"])
+def test_load_packets_rejects_v2_invariant_declaration_before_its_marker(
+    tmp_path: Path, declaration_kind: str
+) -> None:
+    packet = _v2_invariant_packet()
+    declaration = packet["declaration"]
+    assert isinstance(declaration, dict)
+    declaration.update(
+        {
+            "kind": declaration_kind,
+            "path": "docs/specs/01-x.md" if declaration_kind == "spec" else "pkg/x.py",
+            "line": 3,
+            "symbol": None if declaration_kind == "spec" else "run",
+            "section_id": "X-1" if declaration_kind == "spec" else None,
+            "start_line": 2,
+            "end_line": 3,
+            "excerpt": "context\nInvariant: [INV.X.1] The result is one.",
+        }
+    )
+    if declaration_kind == "spec":
+        packet["targets"] = []
+    packet["content_hash"] = invariant_content_hash(
+        packet["statement"], packet["targets"], packet["binding_tests"]
+    )
+    packet["packet_hash"] = semantic_packet_hash(packet)
+    path = tmp_path / "packets.jsonl"
+    path.write_text(json.dumps(packet) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="declaration"):
+        load_packets(path)
+
+
+def test_load_packets_rejects_multiline_v2_spec_declaration(
+    tmp_path: Path,
+) -> None:
+    packet = _v2_invariant_packet()
+    declaration = packet["declaration"]
+    assert isinstance(declaration, dict)
+    declaration.update(
+        {
+            "kind": "spec",
+            "path": "docs/specs/01-x.md",
+            "line": 2,
+            "symbol": None,
+            "section_id": "X-1",
+            "start_line": 2,
+            "end_line": 3,
+            "excerpt": "Invariant: [INV.X.1] The result is one.\nextra",
+        }
+    )
+    packet["targets"] = []
+    packet["content_hash"] = invariant_content_hash(
+        packet["statement"], packet["targets"], packet["binding_tests"]
+    )
+    packet["packet_hash"] = semantic_packet_hash(packet)
+    path = tmp_path / "packets.jsonl"
+    path.write_text(json.dumps(packet) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="declaration"):
+        load_packets(path)
 
 
 def test_load_packets_normalizes_exact_legacy_section_packet(
@@ -138,10 +366,15 @@ def test_load_packets_normalizes_exact_legacy_section_packet(
 
     loaded = load_packets(path)
 
-    assert loaded[0]["kind"] == "section"
+    normalized = loaded[0].to_dict()
+    assert loaded[0].cache_eligible is False
+    assert normalized["kind"] == "section"
+    assert normalized["schema_version"] == 2
+    assert normalized["packet_hash"] == _semantic_hash(normalized)
+    assert "instructions" not in normalized
 
 
-def test_load_packets_preserves_legacy_nested_issue_shape(tmp_path: Path) -> None:
+def test_load_packets_normalizes_legacy_nested_issue_shape(tmp_path: Path) -> None:
     path = tmp_path / "packets.jsonl"
     packet = _packet()
     del packet["kind"]
@@ -152,7 +385,7 @@ def test_load_packets_preserves_legacy_nested_issue_shape(tmp_path: Path) -> Non
 
     loaded = load_packets(path)
 
-    assert "invariant_id" not in loaded[0]["issues"][0]
+    assert loaded[0].to_dict()["issues"][0]["invariant_id"] is None
 
 
 def test_load_packets_accepts_invariant_packet_and_unknown_fields(
@@ -163,7 +396,11 @@ def test_load_packets_accepts_invariant_packet_and_unknown_fields(
     packet["future_field"] = {"preserved": True}
     path.write_text(json.dumps(packet) + "\n", encoding="utf-8")
 
-    assert load_packets(path) == [packet]
+    loaded = load_packets(path)
+
+    assert loaded[0].cache_eligible is False
+    assert loaded[0].to_dict()["future_field"] == {"preserved": True}
+    assert "instructions" not in loaded[0].to_dict()
 
 
 @pytest.mark.parametrize(
@@ -244,7 +481,9 @@ def test_load_packets_accepts_registry_context_and_packaged_default(
     ]
     path.write_text(json.dumps(packet) + "\n", encoding="utf-8")
 
-    assert load_packets(path) == [packet]
+    loaded = load_packets(path)
+
+    assert loaded[0].to_dict()["issues"][0]["context"] == "asserted"
 
 
 @pytest.mark.parametrize(

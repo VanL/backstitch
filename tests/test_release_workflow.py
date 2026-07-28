@@ -1,7 +1,8 @@
 """Release and trusted-workflow contract tests.
 
 Spec: docs/specs/02-backstitch-core.md [SC-10]
-Spec: docs/specs/06-semantic-gates.md [SEM-9], [SEM-10]
+Spec: docs/specs/06-semantic-gates.md [SEM-9], [SEM-9.1], [SEM-10]
+Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-12.2]
 """
 
 from __future__ import annotations
@@ -67,23 +68,9 @@ def test_backstitch_runtime_directory_is_ignored_and_untracked() -> None:
         capture_output=True,
         text=True,
     )
-    refresh_ignored = subprocess.run(
-        ["git", "check-ignore", "-q", ".backstitch-refresh.toml"],
-        cwd=ROOT,
-        check=False,
-    )
-    refresh_tracked = subprocess.run(
-        ["git", "ls-files", "--error-unmatch", ".backstitch-refresh.toml"],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
 
     assert all(result.returncode == 0 for result in ignored)
     assert tracked.stdout == ""
-    assert refresh_ignored.returncode == 1
-    assert refresh_tracked.returncode == 0
 
 
 def test_ci_checks_release_helper_format_and_types() -> None:
@@ -241,7 +228,24 @@ def test_trusted_semantic_refresh_separates_reports_from_disposable_cache() -> N
         in active
     )
     assert "env -u LLM_MODEL uv run backstitch eval" in active
-    assert active.count("--config .backstitch-refresh.toml") == 2
+    assert active.count("--config pyproject.toml") == 2
+    expected_options = {
+        "--option analyze.cache_mode read-write",
+        "--option verify.enabled true",
+        "--option verify.cache_mode read-write",
+    }
+    for step_name in (
+        "Refresh current-source dogfood cache",
+        "Measure semantic eval baseline",
+    ):
+        option_lines = {
+            line.strip()
+            for line in steps[step_name].splitlines()
+            if "--option " in line
+        }
+        assert option_lines == expected_options
+        assert all("${{" not in line for line in option_lines)
+        assert "client_payload" not in steps[step_name]
     assert "tests/semantic_eval/v3/manifest.json" in active
     assert "tests/semantic_eval/v3/qualification-candidate/manifest.json" not in active
     assert active.count("continue-on-error: true") == 4
@@ -320,7 +324,8 @@ def test_trusted_semantic_pr_report_has_closed_hostile_target_boundary() -> None
     assert "pull_request:" not in active
     assert "pull_request_target:" not in active
     assert "permissions:\n  contents: read\n  pull-requests: read" in workflow
-    assert "write" not in active
+    assert "contents: write" not in active
+    assert "pull-requests: write" not in active
     assert "group: semantic-pr-report-${{ github.run_id }}" in active
     assert "TOOL_ROOT: ${{ github.workspace }}/tool" in active
     assert "TARGET_ROOT: ${{ github.workspace }}/target" in active
@@ -383,7 +388,19 @@ def test_trusted_semantic_pr_report_has_closed_hostile_target_boundary() -> None
     analyze = steps["Analyze hostile target with trusted Backstitch"]
     assert 'uv run --project "${TOOL_ROOT}" backstitch analyze' in analyze
     assert '--repo-root "${TARGET_ROOT}"' in analyze
-    assert '--config "${TOOL_ROOT}/.backstitch-refresh.toml"' in analyze
+    assert '--config "${TOOL_ROOT}/pyproject.toml"' in analyze
+    assert "--option analyze.cache_mode read-write" in analyze
+    assert "--option verify.enabled true" in analyze
+    assert "--option verify.cache_mode read-write" in analyze
+    option_lines = {
+        line.strip() for line in analyze.splitlines() if "--option " in line
+    }
+    assert option_lines == {
+        "--option analyze.cache_mode read-write",
+        "--option verify.enabled true",
+        "--option verify.cache_mode read-write",
+    }
+    assert all("${{" not in line for line in option_lines)
     assert '--output "${BACKSTITCH_REPORT_ROOT}/results.jsonl"' in analyze
     assert "working-directory: target" not in active
     assert 'working-directory: "${TARGET_ROOT}"' not in active

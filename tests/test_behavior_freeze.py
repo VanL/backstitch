@@ -24,8 +24,9 @@ from pathlib import Path
 import pytest
 
 from backstitch.models import Report
+from backstitch.obligation_runtime import build_obligation_runtime
 from backstitch.profiles import get_profile
-from backstitch.resolver import scan_repository
+from backstitch.settings import BackstitchSettings
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 GOLDEN = FIXTURES / "traceability_project.expected.json"
@@ -39,7 +40,9 @@ BROKEN_PROFILE = get_profile("backstitch-style-v1").with_overrides(
 
 @pytest.fixture(scope="module")
 def broken() -> Report:
-    return scan_repository(FIXTURES / "traceability_project", BROKEN_PROFILE)
+    return build_obligation_runtime(
+        FIXTURES / "traceability_project", BROKEN_PROFILE, BackstitchSettings()
+    ).pipeline.raw_report
 
 
 def test_broken_fixture_summary_and_histogram_are_frozen(

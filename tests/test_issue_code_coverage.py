@@ -20,8 +20,9 @@ from typing import Any, cast
 import pytest
 
 from backstitch.models import ERROR_SEVERITY_CODES, ISSUE_CODES, Report
+from backstitch.obligation_runtime import build_obligation_runtime
 from backstitch.profiles import get_profile
-from backstitch.resolver import scan_repository
+from backstitch.settings import BackstitchSettings
 
 _FILES: dict[str, str | bytes] = {
     # Sections, duplicates, unmapped, planned/exploratory docs.
@@ -29,7 +30,8 @@ _FILES: dict[str, str | bytes] = {
         "# A\n\n"
         "_Implementation mapping_:\n\n- `pkg/orphan_block.py`\n\n"  # ownerless
         "## One [AA-1]\n\n_Implementation mapping_:\n\n- `pkg/impl.py`\n\n"
-        "## Two [AA-2]\n\n"  # unmapped section
+        "## Two [AA-2] <!-- backstitch: skip-obligation [AA-2] "
+        '"Covered by a downstream contract." -->\n\n'  # unmapped, skipped section
         "## Dup [DD-1]\n\n"
         "## Dup Again [DD-1]\n\n"  # duplicate id
         "## Inexact [AA-3]\n\n_Implementation mapping_:\n\n- `unique_leaf.py`\n\n"
@@ -52,6 +54,9 @@ _FILES: dict[str, str | bytes] = {
         "Invariant: [INV.DUPLICATE.1] first declaration\n\n"
         "Invariant: [INV.DUPLICATE.1] second declaration\n\n"
         "Invariant: [INV.INVALID.1]\n"
+    ),
+    "docs/specs/05-broken-heading.md": (
+        "# Broken heading\n\n## Broken contract [not-an-id]\n"
     ),
     "pkg/impl.py": (
         '"""Spec: docs/specs/01-a.md [AA-1]"""\n'
@@ -127,7 +132,9 @@ def everything(tmp_path_factory: pytest.TempPathFactory) -> Report:
             target.write_bytes(content)
         else:
             target.write_text(content, encoding="utf-8")
-    return scan_repository(root, PROFILE)
+    return build_obligation_runtime(
+        root, PROFILE, BackstitchSettings()
+    ).pipeline.raw_report
 
 
 @pytest.fixture(scope="module")
@@ -136,7 +143,9 @@ def missing_root_report(
 ) -> Report:
     root = tmp_path_factory.mktemp("missing_root_corpus")
     (root / "pkg").mkdir()
-    return scan_repository(root, PROFILE)
+    return build_obligation_runtime(
+        root, PROFILE, BackstitchSettings()
+    ).pipeline.raw_report
 
 
 @pytest.mark.parametrize("code", sorted(TRACE_DIAGNOSTIC_CODES))
@@ -247,6 +256,13 @@ def _suppression_fixture(tmp_path_factory: pytest.TempPathFactory, code: str) ->
             top_config_extra="allow_unknown_keys = true",
             spec_text="# X\n\n## One [SX-1]\n\nBody.\n\n_Traceability: meta_\n",
         )
+    elif code == "SUPPRESSION_REASON_MISSING":
+        _write_base_repo(
+            root,
+            spec_text=(
+                "# X\n\n## One [SX-1] <!-- backstitch: skip-obligation [SX-1] -->\n"
+            ),
+        )
     elif code == "SUPPRESSION_UNSUPPRESSIBLE_CODE":
         _write_base_repo(
             root,
@@ -265,6 +281,7 @@ def test_suppression_firing_fixtures_cover_registry() -> None:
         "SUPPRESSION_UNUSED",
         "SUPPRESSION_UNKNOWN_CODE",
         "SUPPRESSION_INVALID_SYNTAX",
+        "SUPPRESSION_REASON_MISSING",
         "SUPPRESSION_UNSUPPRESSIBLE_CODE",
     }
 

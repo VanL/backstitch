@@ -11,9 +11,27 @@ from typing import Any
 
 import pytest
 
+from backstitch.semantic_identity import (
+    ProviderIdentity,
+    RequestIdentity,
+    build_inference_identity,
+)
+from backstitch.semantic_packets import semantic_packet_hash
 from tests.acceptance.conftest import REPO_ROOT, run_cli
 
 HERMETIC_MODEL = "backstitch-hermetic-model-that-must-not-exist"
+_REPORT_PROVIDER = ProviderIdentity(
+    "controlled",
+    "backstitch-tests",
+    "controlled-adapter",
+    "1",
+    "backstitch.controlled",
+    1,
+    "controlled",
+    "controlled",
+    "controlled",
+)
+_REPORT_REQUEST = RequestIdentity("require", 0.0, 0, 512)
 
 
 def _write(root: Path, relative: str, text: str) -> None:
@@ -148,19 +166,20 @@ def invariant_packet_repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _expected_hash(packet: dict[str, Any]) -> str:
-    fields = ("path", "symbol", "start_line", "snippet")
-    projection = {
-        "statement": packet["statement"],
-        "targets": [{key: item[key] for key in fields} for item in packet["targets"]],
-        "binding_tests": [
-            {key: item[key] for key in fields} for item in packet["binding_tests"]
-        ],
-    }
-    encoded = json.dumps(
-        projection, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+def _repair_targetless_invariant(root: Path) -> None:
+    spec = root / "docs/specs/01-packets.md"
+    spec.write_text(
+        spec.read_text(encoding="utf-8") + "\n_Implementation mapping_:\n\n"
+        "- `pkg/targetless.py::targetless`\n",
+        encoding="utf-8",
+    )
+    _write(
+        root,
+        "pkg/targetless.py",
+        "def targetless() -> int:\n"
+        '    """Spec: docs/specs/01-packets.md [PK-2]"""\n'
+        "    return 2\n",
+    )
 
 
 def test_probe_invariant_dogfood_and_root_override_contract(tmp_path: Path) -> None:
@@ -174,20 +193,80 @@ def test_probe_invariant_dogfood_and_root_override_contract(tmp_path: Path) -> N
     )
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
-    assert report["summary"]["invariants"] == 3
+    assert report["summary"]["invariants"] == 8
     assert {item["invariant_id"] for item in report["invariants"]} == {
+        "INV.CANON.1",
+        "INV.CFG.2",
         "INV.CLI.1",
+        "INV.LINE.1",
+        "INV.PERF.1",
         "INV.RES.1",
         "INV.RES.2",
+        "INV.SCAN.1",
     }
     assert {
         (item["invariant_id"], item["test_path"], item["test_symbol"])
         for item in report["binds"]
     } == {
         (
+            "INV.CANON.1",
+            "tests/test_canonical_owners.py",
+            "test_canonical_json_has_one_production_owner",
+        ),
+        (
+            "INV.CANON.1",
+            "tests/test_canonical_owners.py",
+            "test_sha256_and_candidate_grammars_have_one_production_owner",
+        ),
+        (
+            "INV.CANON.1",
+            "tests/test_canonical_owners.py",
+            "test_issue_sort_key_has_one_production_owner",
+        ),
+        (
+            "INV.CANON.1",
+            "tests/test_canonical_owners.py",
+            "test_no_follow_read_and_stat_identity_have_one_owner_module",
+        ),
+        (
+            "INV.CFG.2",
+            "tests/test_evidence_spike_boundary_pins.py",
+            "test_concrete_obligation_dataclass_defaults_equal_packaged_defaults",
+        ),
+        (
             "INV.CLI.1",
             "tests/test_cli.py",
             "test_deterministic_commands_do_not_import_llm",
+        ),
+        (
+            "INV.LINE.1",
+            "tests/test_canonical_owners.py",
+            "test_line_arithmetic_uses_the_lf_only_owner",
+        ),
+        (
+            "INV.LINE.1",
+            "tests/test_semantic_packets.py",
+            "test_non_lf_characters_preserve_receipts_and_citable_regions",
+        ),
+        (
+            "INV.PERF.1",
+            "tests/test_evidence_spike_cache_perf_pins.py",
+            "test_default_check_performs_zero_static_syntax_fact_derivations",
+        ),
+        (
+            "INV.PERF.1",
+            "tests/test_evidence_spike_cache_perf_pins.py",
+            "test_default_check_captures_an_already_covered_mapping_target_once",
+        ),
+        (
+            "INV.PERF.1",
+            "tests/test_evidence_spike_cache_perf_pins.py",
+            "test_self_corpus_default_check_uses_one_external_snapshot_capture",
+        ),
+        (
+            "INV.PERF.1",
+            "tests/test_evidence_spike_cache_perf_pins.py",
+            "test_obligation_list_parses_each_unique_python_file_at_most_once",
         ),
         (
             "INV.RES.1",
@@ -198,6 +277,11 @@ def test_probe_invariant_dogfood_and_root_override_contract(tmp_path: Path) -> N
             "INV.RES.2",
             "tests/test_resolver_ladder.py",
             "test_ladder_multiple_candidates_ambiguous_error_no_edge",
+        ),
+        (
+            "INV.SCAN.1",
+            "tests/test_evidence_spike_cache_perf_pins.py",
+            "test_live_scan_and_legacy_packet_twins_have_no_production_owner",
         ),
     }
     assert not [
@@ -210,6 +294,7 @@ def test_probe_invariant_dogfood_and_root_override_contract(tmp_path: Path) -> N
     ]
 
     partial_exits: set[int] = set()
+    partial_outputs: list[Path] = []
     for kind in ("section", "invariant", "all"):
         output = tmp_path / f"partial-{kind}.jsonl"
         partial = run_cli(
@@ -224,7 +309,10 @@ def test_probe_invariant_dogfood_and_root_override_contract(tmp_path: Path) -> N
             str(output),
         )
         partial_exits.add(partial.returncode)
+        assert partial.stderr == ""
+        partial_outputs.append(output)
     assert partial_exits == {1}
+    assert all(not output.exists() for output in partial_outputs)
 
     partial = run_cli(
         "check",
@@ -244,9 +332,14 @@ def test_probe_invariant_dogfood_and_root_override_contract(tmp_path: Path) -> N
     ]
     assert {issue["short_code"] for issue in partial_invariant_issues} == {"BSI001"}
     assert {issue["invariant_id"] for issue in partial_invariant_issues} == {
+        "INV.CANON.1",
+        "INV.CFG.2",
         "INV.CLI.1",
+        "INV.LINE.1",
+        "INV.PERF.1",
         "INV.RES.1",
         "INV.RES.2",
+        "INV.SCAN.1",
     }
 
     restored = run_cli(
@@ -261,9 +354,14 @@ def test_probe_invariant_dogfood_and_root_override_contract(tmp_path: Path) -> N
     assert restored.returncode == 0, restored.stderr
     restored_report = json.loads(restored.stdout)
     assert {item["invariant_id"] for item in restored_report["binds"]} == {
+        "INV.CANON.1",
+        "INV.CFG.2",
         "INV.CLI.1",
+        "INV.LINE.1",
+        "INV.PERF.1",
         "INV.RES.1",
         "INV.RES.2",
+        "INV.SCAN.1",
     }
     assert not [
         issue
@@ -337,6 +435,28 @@ def test_probe_invariant_packet_kinds_order_targetless_and_hash(
     invariant_packet_repo: Path,
     tmp_path: Path,
 ) -> None:
+    inspection_rows: dict[str, list[dict[str, Any]]] = {}
+    for kind in ("section", "invariant", "all"):
+        output = tmp_path / f"inspection-{kind}.jsonl"
+        result = run_cli(
+            "packets",
+            *_scan_args(invariant_packet_repo),
+            "--kind",
+            kind,
+            "--output",
+            str(output),
+        )
+        assert result.returncode == 0, result.stderr
+        inspection_rows[kind] = _jsonl(output)
+    for rows in inspection_rows.values():
+        assert not {
+            "docs/specs/01-packets.md#PK-2",
+            "invariant::INV.SPEC.2",
+        }.intersection(row["obligation_id"] for row in rows)
+    assert {row["kind"] for row in inspection_rows["section"]} == {"section"}
+    assert {row["kind"] for row in inspection_rows["invariant"]} == {"invariant"}
+
+    _repair_targetless_invariant(invariant_packet_repo)
     rows_by_kind: dict[str, list[dict[str, Any]]] = {}
     paths_by_kind: dict[str, Path] = {}
     exits: set[int] = set()
@@ -363,42 +483,47 @@ def test_probe_invariant_packet_kinds_order_targetless_and_hash(
     exits.add(default_result.returncode)
     assert exits == {0}
     assert default_output.read_bytes() == paths_by_kind["section"].read_bytes()
-    assert paths_by_kind["all"].read_bytes() == (
-        paths_by_kind["section"].read_bytes() + paths_by_kind["invariant"].read_bytes()
-    )
     assert {row["kind"] for row in rows_by_kind["section"]} == {"section"}
     assert {row["kind"] for row in rows_by_kind["invariant"]} == {"invariant"}
-    assert [row["packet_id"] for row in rows_by_kind["all"]] == [
-        *[row["packet_id"] for row in rows_by_kind["section"]],
-        *[row["packet_id"] for row in rows_by_kind["invariant"]],
-    ]
-    assert [row["kind"] for row in rows_by_kind["all"]] == [
-        *(["section"] * len(rows_by_kind["section"])),
-        *(["invariant"] * len(rows_by_kind["invariant"])),
-    ]
+    assert [
+        row for row in rows_by_kind["all"] if row["kind"] == "section"
+    ] == rows_by_kind["section"]
+    assert [
+        row for row in rows_by_kind["all"] if row["kind"] == "invariant"
+    ] == rows_by_kind["invariant"]
+    assert [
+        (
+            row["requirement"]["path"],
+            row["requirement"]["start_line"],
+            row["obligation_id"],
+        )
+        for row in rows_by_kind["all"]
+    ] == sorted(
+        (
+            row["requirement"]["path"],
+            row["requirement"]["start_line"],
+            row["obligation_id"],
+        )
+        for row in rows_by_kind["all"]
+    )
     empty = next(
-        row for row in rows_by_kind["invariant"] if row["invariant_id"] == "INV.SPEC.2"
-    )
-    assert empty["targets"] == []
-    assert any(
-        "no target code resolved for spec-declared invariant" in warning
-        for warning in empty["packet_warnings"]
-    )
-    assert not [
-        warning
+        row
         for row in rows_by_kind["invariant"]
-        if row["invariant_id"] != "INV.SPEC.2"
-        for warning in row["packet_warnings"]
-        if "no target code resolved for spec-declared invariant" in warning
-    ]
-    for row in rows_by_kind["invariant"]:
-        assert re.fullmatch(r"[0-9a-f]{64}", row["content_hash"])
-        assert row["content_hash"] == _expected_hash(row)
+        if row["obligation_id"] == "invariant::INV.SPEC.2"
+    )
+    assert {item["role"] for item in empty["declared_evidence"]} == {
+        "implementation",
+        "test",
+    }
+    assert empty["packet_warnings"] == []
+    for row in rows_by_kind["all"]:
+        assert re.fullmatch(r"[0-9a-f]{64}", row["packet_hash"])
+        assert row["packet_hash"] == semantic_packet_hash(row)
     invariant_hashes = {
-        row["packet_id"]: row["content_hash"] for row in rows_by_kind["invariant"]
+        row["packet_id"]: row["packet_hash"] for row in rows_by_kind["invariant"]
     }
     assert invariant_hashes == {
-        row["packet_id"]: row["content_hash"]
+        row["packet_id"]: row["packet_hash"]
         for row in rows_by_kind["all"]
         if row["kind"] == "invariant"
     }
@@ -408,6 +533,7 @@ def test_probe_invariant_new_and_legacy_artifacts_self_accept(
     invariant_packet_repo: Path,
     tmp_path: Path,
 ) -> None:
+    _repair_targetless_invariant(invariant_packet_repo)
     report_path = tmp_path / "report.json"
     result = run_cli(
         "check",
@@ -421,6 +547,7 @@ def test_probe_invariant_new_and_legacy_artifacts_self_accept(
     report = json.loads(report_path.read_text(encoding="utf-8"))
 
     all_packets = tmp_path / "all.jsonl"
+    packet_report_path = tmp_path / "packet-report.json"
     result = run_cli(
         "packets",
         *_scan_args(invariant_packet_repo),
@@ -428,6 +555,8 @@ def test_probe_invariant_new_and_legacy_artifacts_self_accept(
         "all",
         "--output",
         str(all_packets),
+        "--report",
+        str(packet_report_path),
     )
     assert result.returncode == 0, result.stderr
     packets = _jsonl(all_packets)
@@ -435,9 +564,13 @@ def test_probe_invariant_new_and_legacy_artifacts_self_accept(
         "analyze",
         "--packets",
         str(all_packets),
+        "--packet-report",
+        str(packet_report_path),
         "--no-config",
         "--model",
         HERMETIC_MODEL,
+        "--output",
+        str(tmp_path / "analysis.jsonl"),
     )
     assert result.returncode == 2
     assert "Unknown model" in result.stderr
@@ -445,28 +578,52 @@ def test_probe_invariant_new_and_legacy_artifacts_self_accept(
 
     section_packet = next(row for row in packets if row["kind"] == "section")
     invariant_packet = next(row for row in packets if row["kind"] == "invariant")
+    binding_test = next(
+        item for item in invariant_packet["declared_evidence"] if item["role"] == "test"
+    )
+    binding_excerpt = binding_test["snippet"]
     results_path = tmp_path / "results.jsonl"
     results_path.write_text(
         json.dumps(
             {
+                "schema_version": 2,
                 "packet_id": section_packet["packet_id"],
                 "kind": "section",
+                "packet_hash": section_packet["packet_hash"],
+                "analysis_key": "a" * 64,
                 "classification": "ok",
                 "confidence": 0.5,
+                "rationale": "The section is supported.",
                 "summary": "section result",
                 "evidence": [],
+                "verification_state": "evidence_bound",
             }
         )
         + "\n"
         + json.dumps(
             {
+                "schema_version": 2,
                 "packet_id": invariant_packet["packet_id"],
                 "kind": "invariant",
-                "content_hash": invariant_packet["content_hash"],
-                "classification": "weak_binding",
+                "packet_hash": invariant_packet["packet_hash"],
+                "analysis_key": "b" * 64,
+                "classification": "ok",
                 "confidence": 0.5,
+                "rationale": "The invariant binding is supported.",
                 "summary": "invariant result",
-                "evidence": [],
+                "evidence": [
+                    {
+                        "role": "test",
+                        "path": binding_test["path"],
+                        "start_line": binding_test["start_line"],
+                        "end_line": binding_test["end_line"],
+                        "excerpt": binding_excerpt,
+                        "excerpt_sha256": hashlib.sha256(
+                            binding_excerpt.encode("utf-8")
+                        ).hexdigest(),
+                    }
+                ],
+                "verification_state": "evidence_bound",
             }
         )
         + "\n",
@@ -507,21 +664,57 @@ def test_probe_invariant_new_and_legacy_artifacts_self_accept(
     )
     assert result.returncode == 0, result.stderr
 
-    legacy_packet = dict(section_packet)
-    del legacy_packet["kind"]
+    legacy_packet = {
+        "packet_id": "docs/specs/01-packets.md#PK-1",
+        "spec_path": "docs/specs/01-packets.md",
+        "section_id": "PK-1",
+        "title": "Mapped",
+        "section_text": "Mapped invariant section.",
+        "section_start_line": 3,
+        "owners": [],
+        "tests": [],
+        "issues": [],
+        "packet_warnings": [],
+        "instructions": "legacy instructions are discarded",
+    }
     legacy_packets_path = tmp_path / "legacy-packet.jsonl"
     legacy_packets_path.write_text(json.dumps(legacy_packet) + "\n", encoding="utf-8")
+    from backstitch.artifact_contracts import load_packets
+    from backstitch.semantic_reports import build_packet_report
+
+    legacy_validated = load_packets(legacy_packets_path)
+    legacy_packet_report_path = tmp_path / "legacy-packet-report.json"
+    legacy_packet_report_path.write_bytes(
+        build_packet_report(
+            packet_jsonl=legacy_packets_path.read_bytes(),
+            packets=legacy_validated,
+            identities=tuple(
+                build_inference_identity(
+                    packet.to_dict(),
+                    _REPORT_PROVIDER,
+                    _REPORT_REQUEST,
+                )
+                for packet in legacy_validated
+            ),
+            kind="section",
+            eligible_counts={"section": 1, "invariant": 0},
+        ).to_json_bytes()
+    )
     result = run_cli(
         "analyze",
         "--packets",
         str(legacy_packets_path),
+        "--packet-report",
+        str(legacy_packet_report_path),
         "--no-config",
         "--model",
         HERMETIC_MODEL,
+        "--output",
+        str(tmp_path / "legacy-analysis.jsonl"),
     )
     assert result.returncode == 2
-    assert "Unknown model" in result.stderr
-    assert "malformed packet" not in result.stderr
+    assert "schema 3" in result.stderr
+    assert "Unknown model" not in result.stderr
 
     legacy_result_path = tmp_path / "legacy-result.jsonl"
     legacy_result_path.write_text(

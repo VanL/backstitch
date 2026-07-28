@@ -14,6 +14,10 @@ def _parse(source: str) -> ParsedModule:
     return parse_python_source(source.encode("utf-8"))
 
 
+def _parse_static(source: str) -> ParsedModule:
+    return parse_python_source(source.encode("utf-8"), include_static_facts=True)
+
+
 def test_owner_spans_include_nested_async_and_decorated_definitions() -> None:
     parsed = _parse(
         "\n".join(
@@ -209,6 +213,164 @@ def test_runtime_version_independent_syntax_parses() -> None:
     assert parsed.owner_spans == (("Box", 1, 2), ("pep701", 6, 7))
 
 
+def test_static_syntax_facts_are_tree_sitter_owned_and_source_ordered() -> None:
+    parsed = _parse_static(
+        "from pkg.mod import first as chosen, second as chosen; chosen()\n"
+        "\n"
+        "def generic[T](value: T):\n"
+        "    from pkg.mod import first as local; local(); del local; "
+        "local = value; local()\n"
+    )
+
+    generic = parsed.definitions[0]
+    assert generic.scope_start_byte > 0
+    assert generic.parent_scope_start_byte is None
+    assert [
+        (
+            item.owner_qualname,
+            item.node_kind,
+            item.name_parts,
+            tuple(
+                (alias.imported, alias.bound_name, alias.source_order)
+                for alias in item.import_aliases
+            ),
+        )
+        for item in parsed.static_references
+        if item.node_kind in {"import", "call"}
+    ] == [
+        (
+            None,
+            "import",
+            (),
+            (
+                (("first",), "chosen", 20),
+                (("second",), "chosen", 37),
+            ),
+        ),
+        (None, "call", ("chosen",), ()),
+        (
+            "generic",
+            "import",
+            (),
+            ((("first",), "local", 115),),
+        ),
+        ("generic", "call", ("local",), ()),
+        ("generic", "call", ("local",), ()),
+    ]
+    local_facts = [
+        (item.name, item.kind, item.source_order)
+        for item in parsed.static_bindings
+        if item.owner_scope_start_byte == generic.scope_start_byte
+        and item.name in {"value", "local"}
+    ]
+    assert local_facts == [
+        ("value", "parameter", 0),
+        ("local", "import", 115),
+        ("local", "delete", 144),
+        ("local", "assignment", 151),
+    ]
+    assert all(
+        item.owner_scope_start_byte == generic.scope_start_byte
+        for item in parsed.static_references
+        if item.owner_qualname == "generic"
+    )
+
+
+def test_scope_directives_are_not_projected_as_name_loads() -> None:
+    parsed = _parse_static(
+        "from pkg.mod import chosen\n"
+        "\n"
+        "def global_caller():\n"
+        "    global chosen\n"
+        "    return chosen()\n"
+        "\n"
+        "def outer():\n"
+        "    chosen = object()\n"
+        "    def inner():\n"
+        "        nonlocal chosen\n"
+        "        return chosen()\n"
+    )
+
+    assert [
+        (item.owner_qualname, item.name_parts)
+        for item in parsed.static_references
+        if item.node_kind == "name" and item.name_parts == ("chosen",)
+    ] == [
+        ("global_caller", ("chosen",)),
+        ("outer.inner", ("chosen",)),
+    ]
+
+
+def test_static_literal_hints_use_the_portable_conservative_subset() -> None:
+    parsed = _parse_static(
+        "importlib.import_module(r'src.worker')\n"
+        "importlib.import_module('src.' 'worker')\n"
+        "importlib.import_module('src\\\\.worker')\n"
+        "importlib.import_module(b'src.worker')\n"
+        "importlib.import_module(f'src.worker')\n"
+    )
+
+    assert [
+        item.literal_argument
+        for item in parsed.static_references
+        if item.node_kind == "call"
+    ] == ["src.worker", "src.worker", None, None, None]
+
+
+def test_static_binding_facts_mark_branch_dependent_bindings() -> None:
+    parsed = _parse_static(
+        "from pkg import stable\n"
+        "if flag:\n"
+        "    from pkg import conditional\n"
+        "try:\n"
+        "    branch = stable\n"
+        "except Exception:\n"
+        "    def fallback():\n"
+        "        pass\n"
+        "def outer():\n"
+        "    value = stable\n"
+    )
+
+    conditional_by_name = {
+        item.name: item.conditional for item in parsed.static_bindings
+    }
+    assert conditional_by_name["stable"] is False
+    assert conditional_by_name["conditional"] is True
+    assert conditional_by_name["branch"] is True
+    assert conditional_by_name["fallback"] is True
+    assert conditional_by_name["value"] is False
+    definitions = {item.name: item.conditional for item in parsed.definitions}
+    assert definitions == {"fallback": True, "outer": False}
+
+
+def test_pep695_aliases_and_type_parameters_are_scope_bindings() -> None:
+    parsed = _parse_static(
+        "from pkg import chosen\n"
+        "def generic[chosen]():\n"
+        "    chosen()\n"
+        "    type chosen = int\n"
+        "class Generic[chosen]:\n"
+        "    def method(self):\n"
+        "        return chosen()\n"
+    )
+
+    generic = next(item for item in parsed.definitions if item.name == "generic")
+    assert [
+        (item.name, item.kind, item.conditional)
+        for item in parsed.static_bindings
+        if item.owner_scope_start_byte == generic.scope_start_byte
+    ] == [
+        ("chosen", "parameter", False),
+        ("chosen", "assignment", False),
+    ]
+    generic_class = next(item for item in parsed.definitions if item.name == "Generic")
+    assert [
+        (item.name, item.kind, item.conditional)
+        for item in parsed.static_bindings
+        if item.owner_scope_start_byte == generic_class.scope_start_byte
+    ] == [("chosen", "parameter", False), ("method", "definition", False)]
+
+
 def test_parser_exposes_definition_and_physical_docstring_metadata() -> None:
     parsed = _parse(
         '''class Suite:
@@ -230,7 +392,7 @@ def test_parser_exposes_definition_and_physical_docstring_metadata() -> None:
         test_async.kind,
         test_async.parent_qualname,
         test_async.attachment_line,
-    ) == ("Suite.test_async", "function", "Suite", 4)
+    ) == ("Suite.test_async", "async-function", "Suite", 4)
     candidate = parsed.doc_candidates[0]
     assert candidate.owner_qualname == "Suite"
     assert candidate.node_type == "string"

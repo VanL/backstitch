@@ -76,6 +76,8 @@ def test_probe_11_malformed_inputs_exit_two_with_one_line_errors(
         "--no-config",
         "--model",
         "irrelevant",
+        "--output",
+        str(tmp_path / "bad-analysis.jsonl"),
     )
     assert outcome.returncode == 2
     assert "backstitch: error:" in outcome.stderr
