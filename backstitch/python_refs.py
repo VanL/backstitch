@@ -14,11 +14,19 @@ prose references like ``see [MA-1.1]`` still resolve.
 
 from __future__ import annotations
 
+import hashlib
 import re
+from collections.abc import MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from backstitch.code_parser import Definition, DocCandidate, parse_python_source
+from backstitch.canonical import lf_split
+from backstitch.code_parser import (
+    Definition,
+    DocCandidate,
+    ParsedModule,
+    parse_python_source,
+)
 from backstitch.exclusions import SuppressionDiagnostic, parse_noqa_text
 from backstitch.grammar import SECTION_ID
 from backstitch.models import (
@@ -206,10 +214,20 @@ def python_symbol_spans(file_path: Path) -> dict[str, tuple[int, int]] | None:
     """Return ``{qualname: (start_line, end_line)}``, or None on syntax error."""
 
     try:
-        source = file_path.read_text(encoding="utf-8")
+        source = file_path.read_bytes()
     except (OSError, UnicodeDecodeError):
         return None
-    parsed = parse_python_source(source.encode("utf-8"))
+    return python_symbol_spans_bytes(source)
+
+
+def python_symbol_spans_bytes(source: bytes) -> dict[str, tuple[int, int]] | None:
+    """Snapshot-backed symbol spans without a filesystem read."""
+
+    try:
+        source.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    parsed = parse_python_source(source)
     if not parsed.parse_ok:
         return None
     return {qualname: (start, end) for qualname, start, end in parsed.owner_spans}
@@ -220,10 +238,35 @@ def python_symbol_inventory(file_path: Path) -> frozenset[str] | None:
     syntax error."""
 
     try:
-        source = file_path.read_text(encoding="utf-8")
+        source = file_path.read_bytes()
     except (OSError, UnicodeDecodeError):
         return None
-    parsed = parse_python_source(source.encode("utf-8"))
+    return python_symbol_inventory_bytes(source)
+
+
+def python_symbol_inventory_bytes(
+    source: bytes,
+    *,
+    rel_path: str | None = None,
+    parsed_module: ParsedModule | None = None,
+    parse_memo: MutableMapping[tuple[str, str], ParsedModule] | None = None,
+) -> frozenset[str] | None:
+    """Snapshot-backed qualified symbol inventory without a filesystem read."""
+
+    try:
+        source.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    parse_key = (
+        None if rel_path is None else (rel_path, hashlib.sha256(source).hexdigest())
+    )
+    parsed = parsed_module
+    if parsed is None and parse_memo is not None and parse_key is not None:
+        parsed = parse_memo.get(parse_key)
+    if parsed is None:
+        parsed = parse_python_source(source)
+        if parse_memo is not None and parse_key is not None:
+            parse_memo[parse_key] = parsed
     if not parsed.parse_ok:
         return None
     return frozenset(qualname for qualname, _, _ in parsed.owner_spans)
@@ -249,7 +292,7 @@ def _reserved_marker(text: str) -> tuple[str, str] | None:
 
 
 def _physical_doc_lines(candidate: DocCandidate) -> list[_PhysicalDocLine]:
-    raw_lines = candidate.raw_text.splitlines() or [candidate.raw_text]
+    raw_lines = list(lf_split(candidate.raw_text)) or [candidate.raw_text]
     opening = _STRING_OPEN_RE.match(raw_lines[0])
     if opening is None:
         return []
@@ -323,11 +366,37 @@ def parse_python_file(
     allow_unknown_codes: bool = False,
     is_test_file: bool = False,
 ) -> ParsedPython:
-    """Parse one Python file into code refs, or a syntax-error issue."""
+    """Filesystem compatibility wrapper around the immutable byte parser."""
 
     rel_path = file_path.resolve().relative_to(repo_root.resolve()).as_posix()
-    source = file_path.read_text(encoding="utf-8")
-    parsed = parse_python_source(source.encode("utf-8"))
+    return parse_python_bytes(
+        file_path.read_bytes(),
+        rel_path,
+        allow_unknown_codes=allow_unknown_codes,
+        is_test_file=is_test_file,
+    )
+
+
+def parse_python_bytes(
+    source_bytes: bytes,
+    rel_path: str,
+    *,
+    allow_unknown_codes: bool = False,
+    is_test_file: bool = False,
+    parsed_module: ParsedModule | None = None,
+    parse_memo: MutableMapping[tuple[str, str], ParsedModule] | None = None,
+) -> ParsedPython:
+    """Parse one captured Python source without reopening the repository."""
+
+    source_bytes.decode("utf-8")
+    parse_key = (rel_path, hashlib.sha256(source_bytes).hexdigest())
+    parsed = parsed_module
+    if parsed is None and parse_memo is not None:
+        parsed = parse_memo.get(parse_key)
+    if parsed is None:
+        parsed = parse_python_source(source_bytes)
+        if parse_memo is not None:
+            parse_memo[parse_key] = parsed
     if not parsed.parse_ok:
         issue = Issue(
             code="PYTHON_SYNTAX_ERROR",
@@ -388,7 +457,10 @@ def parse_python_file(
         definition = definitions.get(owner)
         if not is_test_file or definition is None:
             return []
-        if definition.kind == "function" and definition.name.startswith("test_"):
+        if definition.kind in {
+            "function",
+            "async-function",
+        } and definition.name.startswith("test_"):
             return [definition]
         if definition.kind == "class":
             return [
@@ -396,7 +468,7 @@ def parse_python_file(
                 for item in parsed.definitions
                 if item.parent_qualname == definition.qualname
                 and item.parent_kind == "class"
-                and item.kind == "function"
+                and item.kind in {"function", "async-function"}
                 and item.name.startswith("test_")
             ]
         return []
@@ -430,7 +502,7 @@ def parse_python_file(
         if candidate.node_type != "string" or candidate.text is None:
             evaluated_has_marker = bool(
                 candidate.text
-                and any(_reserved_marker(line) for line in candidate.text.splitlines())
+                and any(_reserved_marker(line) for line in lf_split(candidate.text))
             )
             physical_has_marker = any(
                 _reserved_marker(line.text) for line in physical_lines
@@ -528,7 +600,7 @@ def parse_python_file(
     for doc_block in parsed.doc_blocks:
         source_lines = (
             (doc_block.start_line + offset, text_line)
-            for offset, text_line in enumerate(doc_block.text.splitlines())
+            for offset, text_line in enumerate(lf_split(doc_block.text))
         )
         for line_no, text_line in source_lines:
             if line_no in consumed_doc_lines or _reserved_marker(text_line):

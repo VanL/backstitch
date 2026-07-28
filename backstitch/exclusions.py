@@ -19,6 +19,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from backstitch.canonical import lf_split
 from backstitch.diagnostics import canonicalize_code, is_ordinary_diagnostic_code
 from backstitch.models import Issue, Severity
 from backstitch.settings import LintSettings
@@ -42,6 +43,10 @@ MALFORMED_HTML_MARKER_RE = re.compile(r"<!--\s*backstitch:", re.IGNORECASE)
 # delete the heading's section).
 HTML_IGNORE_RE = re.compile(
     r"<!--\s*backstitch:\s*ignore\b[ \t]*(.*?)\s*-->",
+    re.IGNORECASE,
+)
+RESERVED_SKIP_MARKER_RE = re.compile(
+    r"(?:^_Traceability:|<!--\s*backstitch:)\s*skip-obligation\b",
     re.IGNORECASE,
 )
 # Anchored on purpose: a directive line IS the directive ([EXC-5] grammar
@@ -220,6 +225,12 @@ def parse_traceability_marker_line(
     line: int | None = None,
 ) -> tuple[bool, frozenset[str], list[SuppressionDiagnostic]]:
     stripped = text.strip()
+    # [EVC-8.3.2] owns this reserved repository-source grammar.  It is
+    # deliberately not an ordinary ignore/meta marker and malformed forms do
+    # not take EXC's strict unknown-code path.  The Markdown parser emits its
+    # dedicated warning diagnostics independently.
+    if RESERVED_SKIP_MARKER_RE.search(stripped):
+        return False, frozenset(), []
     if TRACEABILITY_META_RE.match(stripped):
         return True, META_DEFAULT_SUPPRESSED, []
     match = TRACEABILITY_IGNORE_RE.match(stripped)
@@ -281,7 +292,7 @@ def parse_noqa_text(
 
     codes: set[str] = set()
     diagnostics: list[SuppressionDiagnostic] = []
-    for offset, raw_line in enumerate(text.splitlines()):
+    for offset, raw_line in enumerate(lf_split(text)):
         diagnostic_line = line + offset if line is not None else None
         match = NOQA_LINE_RE.match(raw_line.strip())
         if match is None:

@@ -2,6 +2,7 @@
 
 Spec: docs/specs/02-backstitch-core.md [SC-5], [SC-6]
 Spec: docs/specs/05-backstitch-invariants.md [INV-4]
+Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-8.3.2]
 
 Rendering only: suppression is `backstitch.exclusions`' job ([EXC-*]) and
 happens before reports reach this module. There is deliberately no
@@ -14,8 +15,12 @@ from __future__ import annotations
 import dataclasses
 import json
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from backstitch.models import Issue, Report
+
+if TYPE_CHECKING:
+    from backstitch.check_pipeline import ObligationSkipAudit
 
 SuppressedRecord = tuple[Issue, str]
 """One suppressed finding plus its reason ([EXC-7])."""
@@ -37,7 +42,9 @@ def _issue_line(issue: Issue) -> str:
 
 
 def render_text(
-    report: Report, suppressed: Sequence[SuppressedRecord] | None = None
+    report: Report,
+    suppressed: Sequence[SuppressedRecord] | None = None,
+    obligation_skips: Sequence[ObligationSkipAudit] | None = None,
 ) -> str:
     """Render a stable, grouped text report.
 
@@ -78,11 +85,21 @@ def render_text(
             f"{_issue_line(issue)} [suppressed: {reason}]"
             for issue, reason in suppressed
         )
+    if obligation_skips is not None and obligation_skips:
+        lines.append("")
+        lines.append(f"obligation skips ({len(obligation_skips)}):")
+        lines.extend(
+            f"  {item.path}:{item.line} {item.obligation_id} "
+            f"[{item.effective_policy}] {item.reason}"
+            for item in obligation_skips
+        )
     return "\n".join(lines) + "\n"
 
 
 def render_json(
-    report: Report, suppressed: Sequence[SuppressedRecord] | None = None
+    report: Report,
+    suppressed: Sequence[SuppressedRecord] | None = None,
+    obligation_skips: Sequence[ObligationSkipAudit] | None = None,
 ) -> str:
     """Render the exact [SC-6] JSON report contract.
 
@@ -95,5 +112,9 @@ def render_json(
         payload["suppressed_issues"] = [
             {**dataclasses.asdict(issue), "reason": reason}
             for issue, reason in suppressed
+        ]
+    if obligation_skips is not None:
+        payload["obligation_skips"] = [
+            dataclasses.asdict(item) for item in obligation_skips
         ]
     return json.dumps(payload, indent=2) + "\n"

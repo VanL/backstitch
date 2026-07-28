@@ -11,381 +11,567 @@ deterministic and never calls ``llm``.
 from __future__ import annotations
 
 import dataclasses
-import json
-from importlib import resources
-from pathlib import Path
-from typing import Any, Literal
+import hashlib
+from typing import Any, Literal, cast
 
-from backstitch.artifact_contracts import invariant_content_hash
-from backstitch.config import ProfileConfig, resolve_profile_root
-from backstitch.models import InvariantBind, Report, SpecSection
-from backstitch.python_refs import python_symbol_spans
-from backstitch.resolver import scan_repository
+from backstitch.canonical import canonical_json_bytes, lf_line_count
+from backstitch.evidence_discovery import (
+    PreparedEvidenceCatalog,
+    get_candidate_source,
+)
+from backstitch.markdown_specs import project_section_packet_requirement
+from backstitch.obligation_runtime import ALGORITHMS, ObligationRuntime
+from backstitch.obligations import ObligationRecord
+from backstitch.semantic_packets import (
+    ISSUE_FIELDS,
+    semantic_packet_hash,
+)
 
-MAX_SNIPPET_LINES = 120
-MAX_OWNERS_PER_PACKET = 8
-MAX_SECTION_LINES = 100
-MAX_INVARIANT_TARGETS_PER_PACKET = 8
-MAX_BINDING_TESTS_PER_PACKET = 8
 PacketKind = Literal["section", "invariant", "all"]
 
 
-def _section_instructions() -> str:
-    return (
-        resources.files("backstitch") / "prompts" / "backstitch_style_analysis.md"
-    ).read_text(encoding="utf-8")
+_SOURCE_ROLE_ORDER = {"implementation": 0, "test": 1, "binding_test": 2}
+_MODEL_ROLE_ORDER = {
+    "requirement": 0,
+    "implementation": 1,
+    "test": 2,
+    "counterevidence": 3,
+}
+_CANDIDATE_KIND_ORDER = (
+    "implementation_definition",
+    "test_definition",
+    "static_reference",
+    "unresolved_reference",
+    "report_issue",
+)
+_TRACE_STATE_ORDER = (
+    "declared",
+    "partially_declared",
+    "untraced",
+    "conflicted",
+)
+_RELATION_ORDER = (
+    "spec_mapping",
+    "code_backlink",
+    "invariant_declaration",
+    "invariant_bind",
+    "binding_test",
+    "static_import",
+    "static_call",
+    "static_reference",
+    "enclosing_definition",
+    "issue_target",
+)
+_RELATION_INDEX = {value: index for index, value in enumerate(_RELATION_ORDER)}
 
 
-def _invariant_instructions() -> str:
-    return (
-        resources.files("backstitch") / "prompts" / "invariant_binding_analysis.md"
-    ).read_text(encoding="utf-8")
+class SourceAlignedPacketError(ValueError):
+    """Current source cannot produce one complete packet artifact."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
-def _is_test_path(repo_root: Path, path: str, test_roots: tuple[str, ...]) -> bool:
-    candidate = (repo_root / path).resolve()
-    for value in test_roots:
-        root = resolve_profile_root(repo_root, value)
-        if candidate == root or candidate.is_relative_to(root):
-            return True
-    return False
+def _receipt_hash(receipt: object) -> str:
+    return hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
 
 
-def _section_text(
-    section: SpecSection,
-    file_lines: list[str],
-    siblings: list[SpecSection],
-    warnings: list[str],
-) -> str:
-    if section.kind != "heading":
-        line = file_lines[section.line - 1] if section.line <= len(file_lines) else ""
-        return line.strip()
-    next_headings = [
-        s.line for s in siblings if s.kind == "heading" and s.line > section.line
-    ]
-    end = min(next_headings) - 1 if next_headings else len(file_lines)
-    block = file_lines[section.line - 1 : end]
-    if len(block) > MAX_SECTION_LINES:
-        block = block[:MAX_SECTION_LINES]
-        warnings.append(f"section text truncated to {MAX_SECTION_LINES} lines")
-    return "\n".join(block).rstrip()
+def _canonical_span_text(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return normalized[:-1] if normalized.endswith("\n") else normalized
 
 
-def _owner_snippet(
-    repo_root: Path,
-    path: str,
-    symbol: str | None,
-    warnings: list[str],
-    *,
-    fallback_to_file_head: bool = True,
-) -> tuple[str, int]:
-    target = repo_root / path
-    if not target.is_file():
-        warnings.append(f"owner `{path}` is not a file; no snippet included")
-        return "", 1
-    try:
-        lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError as exc:
-        warnings.append(f"owner `{path}` could not be read ({exc})")
-        return "", 1
-    start = 1
-    if symbol == "<module>":
-        pass
-    elif symbol is not None and path.endswith(".py"):
-        spans = python_symbol_spans(target)
-        span = spans.get(symbol) if spans else None
-        if span is not None:
-            start, end = span
-            lines = lines[start - 1 : end]
-        else:
-            suffix = "; using file head" if fallback_to_file_head else ""
-            warnings.append(f"symbol `{symbol}` not found in `{path}`{suffix}")
-            if not fallback_to_file_head:
-                lines = []
-    if not lines:
-        if not any(f"`{path}`" in warning for warning in warnings):
-            warnings.append(f"owner `{path}` has no readable snippet content")
-        return "", start
-    if len(lines) > MAX_SNIPPET_LINES:
-        lines = lines[:MAX_SNIPPET_LINES]
-        warnings.append(f"snippet for `{path}` truncated to {MAX_SNIPPET_LINES} lines")
-    return "\n".join(lines), start
-
-
-def _snippet_record(
-    repo_root: Path,
-    path: str,
-    symbol: str | None,
-    warnings: list[str],
-) -> dict[str, Any]:
-    snippet, start_line = _owner_snippet(
-        repo_root,
-        path,
-        symbol,
-        warnings,
-        fallback_to_file_head=False,
-    )
+def _source_row(item: dict[str, object]) -> dict[str, object]:
+    relation_kinds = item["relation_kinds"]
+    assert isinstance(relation_kinds, list)
     return {
-        "path": path,
-        "symbol": symbol,
-        "start_line": start_line,
-        "snippet": snippet,
+        "source_role": item["role"],
+        "receipt_hash": _receipt_hash(item["receipt"]),
+        "relation_kinds": list(relation_kinds),
+        "reciprocity_state": item["reciprocity_state"],
     }
 
 
-def _bounded_snippet_records(
-    repo_root: Path,
-    keys: set[tuple[str, str | None]],
-    cap: int,
-    label: str,
-    warnings: list[str],
-) -> list[dict[str, Any]]:
-    ordered = sorted(keys, key=lambda item: (item[0], item[1] or ""))
-    if len(ordered) > cap:
-        warnings.append(f"{len(ordered) - cap} additional {label} omitted")
-        ordered = ordered[:cap]
-    records = [
-        _snippet_record(repo_root, path, symbol, warnings) for path, symbol in ordered
-    ]
-    records.sort(
+def _source_order(item: dict[str, object]) -> tuple[object, ...]:
+    relations = item["relation_kinds"]
+    assert isinstance(relations, list)
+    return (
+        _SOURCE_ROLE_ORDER[str(item["source_role"])],
+        item["receipt_hash"],
+        tuple(_RELATION_INDEX[str(value)] for value in relations),
+    )
+
+
+def _unique_rows(
+    rows: list[dict[str, object]],
+    *,
+    order: Any,
+) -> list[dict[str, object]]:
+    unique: dict[bytes, dict[str, object]] = {}
+    for row in rows:
+        unique.setdefault(canonical_json_bytes(row), row)
+    return sorted(unique.values(), key=order)
+
+
+def _merge_declared_regions(
+    atoms: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    atoms.sort(
+        key=lambda item: (
+            _MODEL_ROLE_ORDER[str(item["role"])],
+            item["path"],
+            item["start_line"],
+            -cast(int, item["end_line"]),
+            item["symbol"] or "",
+        )
+    )
+    merged: list[dict[str, object]] = []
+    symbol_sets: list[set[str | None]] = []
+    for atom in atoms:
+        container_index = next(
+            (
+                index
+                for index, region in enumerate(merged)
+                if region["role"] == atom["role"]
+                and region["path"] == atom["path"]
+                and cast(int, region["start_line"]) <= cast(int, atom["start_line"])
+                and cast(int, atom["end_line"]) <= cast(int, region["end_line"])
+            ),
+            None,
+        )
+        atom_sources = atom["sources"]
+        assert isinstance(atom_sources, list)
+        if container_index is None:
+            merged.append(dict(atom))
+            symbol_sets.append({atom["symbol"]})  # type: ignore[arg-type]
+            continue
+        current_sources = merged[container_index]["sources"]
+        assert isinstance(current_sources, list)
+        merged[container_index]["sources"] = _unique_rows(
+            [*current_sources, *atom_sources], order=_source_order
+        )
+        symbol_sets[container_index].add(atom["symbol"])  # type: ignore[arg-type]
+    for region, symbols in zip(merged, symbol_sets, strict=True):
+        region["symbol"] = next(iter(symbols)) if len(symbols) == 1 else None
+        sources = region["sources"]
+        assert isinstance(sources, list)
+        region["sources"] = _unique_rows(sources, order=_source_order)
+    merged.sort(
+        key=lambda item: (
+            _MODEL_ROLE_ORDER[str(item["role"])],
+            item["path"],
+            item["start_line"],
+            item["end_line"],
+            item["symbol"] or "",
+        )
+    )
+    return merged
+
+
+def _candidate_source_order(item: dict[str, object]) -> str:
+    return str(item["candidate_id"])
+
+
+def _merge_counterevidence_regions(
+    atoms: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    atoms.sort(
         key=lambda item: (
             item["path"],
-            item["symbol"] or "",
             item["start_line"],
+            -cast(int, item["end_line"]),
+            cast(list[dict[str, object]], item["candidates"])[0]["candidate_id"],
         )
     )
-    return records
-
-
-def _generate_section_packets(
-    repo_root: Path,
-    profile: ProfileConfig,
-    report: Report,
-) -> list[dict[str, Any]]:
-    """Generate one section packet for each spec section with resolved edges."""
-
-    instructions = _section_instructions()
-
-    sections_by_file: dict[str, list[SpecSection]] = {}
-    for section in report.spec_sections:
-        sections_by_file.setdefault(section.path, []).append(section)
-
-    spec_lines: dict[str, list[str]] = {}
-    for path in sections_by_file:
-        spec_lines[path] = (
-            (repo_root / path)
-            .read_text(encoding="utf-8", errors="replace")
-            .splitlines()
+    merged: list[dict[str, object]] = []
+    for atom in atoms:
+        container = next(
+            (
+                region
+                for region in merged
+                if region["path"] == atom["path"]
+                and cast(int, region["start_line"]) <= cast(int, atom["start_line"])
+                and cast(int, atom["end_line"]) <= cast(int, region["end_line"])
+            ),
+            None,
         )
-
-    edges_by_key: dict[tuple[str, str], list] = {}
-    for edge in report.edges:
-        edges_by_key.setdefault((edge.spec_path, edge.section_id), []).append(edge)
-
-    packets: list[dict[str, Any]] = []
-    seen_keys: set[tuple[str, str]] = set()
-    for section in report.spec_sections:
-        key = (section.path, section.section_id)
-        if key in seen_keys:
+        if container is None:
+            merged.append(dict(atom))
             continue
-        seen_keys.add(key)
-        edges = edges_by_key.get(key, [])
-        if not edges:
-            continue
+        current = container["candidates"]
+        incoming = atom["candidates"]
+        assert isinstance(current, list) and isinstance(incoming, list)
+        container["candidates"] = _unique_rows(
+            [*current, *incoming], order=_candidate_source_order
+        )
+    for region in merged:
+        candidates = region["candidates"]
+        assert isinstance(candidates, list)
+        region["candidates"] = _unique_rows(candidates, order=_candidate_source_order)
+    merged.sort(
+        key=lambda item: (
+            item["path"],
+            item["start_line"],
+            item["end_line"],
+            cast(list[dict[str, object]], item["candidates"])[0]["candidate_id"],
+        )
+    )
+    return merged
 
-        warnings: list[str] = []
-        owner_keys: list[tuple[str, str | None]] = []
-        tests: list[str] = []
-        for edge in edges:
-            if _is_test_path(repo_root, edge.code_path, profile.test_roots):
-                if edge.code_path not in tests:
-                    tests.append(edge.code_path)
-                continue
-            symbol = edge.code_symbol
-            if edge.kind == "backlink" and symbol == "module":
-                symbol = None
-            owner_key = (edge.code_path, symbol)
-            if owner_key not in owner_keys:
-                owner_keys.append(owner_key)
 
-        if len(owner_keys) > MAX_OWNERS_PER_PACKET:
-            omitted = len(owner_keys) - MAX_OWNERS_PER_PACKET
-            owner_keys = owner_keys[:MAX_OWNERS_PER_PACKET]
-            warnings.append(f"{omitted} additional owners omitted")
-
-        owners = []
-        for path, symbol in owner_keys:
-            snippet, start_line = _owner_snippet(repo_root, path, symbol, warnings)
-            owners.append(
-                {
-                    "path": path,
-                    "symbol": symbol,
-                    "start_line": start_line,
-                    "snippet": snippet,
-                }
-            )
-
-        owner_paths = {path for path, _ in owner_keys}
-        issues = [
-            dataclasses.asdict(issue)
-            for issue in report.issues
-            if issue.section_id == section.section_id
-            and (
-                issue.path == section.path
-                or issue.path in owner_paths
-                or issue.path in tests
-            )
+def _requirement(
+    runtime: ObligationRuntime, obligation: ObligationRecord
+) -> dict[str, object]:
+    if obligation.kind == "section":
+        sections = [
+            item
+            for item in runtime.pipeline.raw_report.spec_sections
+            if f"{item.path}#{item.section_id}" == obligation.obligation_id
         ]
+        if len(sections) != 1:
+            raise SourceAlignedPacketError(
+                "REQUIREMENT_INVALID", "section requirement is not uniquely captured"
+            )
+        projection = project_section_packet_requirement(
+            runtime.snapshot.read_bytes(obligation.path),
+            path=obligation.path,
+            section=sections[0],
+            end_line=obligation.end_line,
+            mappings=runtime.pipeline.raw_report.spec_mappings,
+            skips=runtime.pipeline.artifacts.obligation_skips,
+        )
+        identity = sections[0].section_id
+        title = obligation.title
+        text = projection.text
+        start_line = projection.start_line
+        end_line = projection.end_line
+    else:
+        invariant_id = obligation.obligation_id.removeprefix("invariant::")
+        declarations = [
+            item
+            for item in runtime.pipeline.raw_report.invariants
+            if item.invariant_id == invariant_id
+        ]
+        if len(declarations) != 1:
+            raise SourceAlignedPacketError(
+                "REQUIREMENT_INVALID", "invariant requirement is not uniquely captured"
+            )
+        declaration = declarations[0]
+        identity = invariant_id
+        title = None
+        text = declaration.statement
+        start_line = declaration.line
+        end_line = start_line + max(1, lf_line_count(text)) - 1
+    if not text.strip():
+        raise SourceAlignedPacketError(
+            "REQUIREMENT_INVALID", "packet requirement text is blank"
+        )
+    return {
+        "role": "requirement",
+        "path": obligation.path,
+        "identity": identity,
+        "title": title,
+        "start_line": start_line,
+        "end_line": end_line,
+        "text": text,
+    }
 
-        packets.append(
+
+def _packet_issues(
+    runtime: ObligationRuntime, obligation: ObligationRecord
+) -> list[dict[str, object]]:
+    identity = obligation.obligation_id.rsplit("#", 1)[-1]
+    if obligation.kind == "invariant":
+        identity = obligation.obligation_id.removeprefix("invariant::")
+    rows: list[dict[str, object]] = []
+    for issue in runtime.pipeline.report.issues:
+        attributed = (
+            issue.section_id == identity
+            if obligation.kind == "section"
+            else issue.invariant_id == identity
+        )
+        if not attributed:
+            continue
+        source = dataclasses.asdict(issue)
+        rows.append({field: source[field] for field in ISSUE_FIELDS})
+    return rows
+
+
+def _derivation_config(runtime: ObligationRuntime) -> dict[str, object]:
+    settings = runtime.settings.obligations
+    return {
+        "derivation_config_version": 1,
+        "section_required_roles": list(settings.section_required_roles),
+        "maximum_candidate_items": settings.maximum_candidate_items,
+        "maximum_catalog_items": settings.maximum_catalog_items,
+        "maximum_lexical_seeds": settings.maximum_lexical_seeds,
+        "maximum_work_units": settings.maximum_work_units,
+        "maximum_packet_bytes": settings.maximum_packet_bytes,
+        "maximum_packet_report_bytes": settings.maximum_packet_report_bytes,
+        "static_neighbor_depth": settings.static_neighbor_depth,
+        "obligation_algorithm_version": ALGORITHMS.obligation_algorithm_version,
+        "discovery_algorithm_version": ALGORITHMS.discovery_algorithm_version,
+        "packet_contract_version": ALGORITHMS.packet_contract_version,
+        "normalization_version": ALGORITHMS.normalization_version,
+    }
+
+
+def _compile_source_aligned_packet(
+    runtime: ObligationRuntime,
+    obligation: ObligationRecord,
+    prepared_catalog: PreparedEvidenceCatalog,
+) -> dict[str, Any]:
+    declared_items = [dict(item) for item in runtime.evidence_summary(obligation)]
+    declared_sources = _unique_rows(
+        [_source_row(item) for item in declared_items], order=_source_order
+    )
+    declared_atoms: list[dict[str, object]] = []
+    for item in declared_items:
+        source_role = str(item["role"])
+        declared_atoms.append(
             {
-                "packet_id": f"{section.path}#{section.section_id}",
-                "kind": "section",
-                "spec_path": section.path,
-                "section_id": section.section_id,
-                "title": section.title,
-                "section_text": _section_text(
-                    section,
-                    spec_lines[section.path],
-                    sections_by_file[section.path],
-                    warnings,
-                ),
-                # [SC-6]: the section's starting line anchors evidence
-                # line-locality checks against the shown section text.
-                "section_start_line": section.line,
-                "owners": owners,
-                "tests": tests,
-                "issues": issues,
-                # [SC-6] field name is contractual: consumers look for
-                # `packet_warnings` for truncation/omission context.
-                "packet_warnings": warnings,
-                "instructions": instructions,
+                "role": "implementation" if source_role == "implementation" else "test",
+                "path": item["path"],
+                "symbol": item["symbol"],
+                "start_line": item["start_line"],
+                "end_line": item["end_line"],
+                "snippet": _canonical_span_text(str(item["excerpt"])),
+                "sources": [_source_row(item)],
             }
         )
-    return packets
+    declared_regions = _merge_declared_regions(declared_atoms)
+    declared_receipts = {str(source["receipt_hash"]) for source in declared_sources}
 
+    candidates = runtime.discover_candidates(
+        obligation,
+        prepared_catalog=prepared_catalog,
+    )
+    counter_atoms: list[dict[str, object]] = []
+    candidate_rows: list[dict[str, object]] = []
+    for candidate in candidates:
+        relations = sorted(
+            {
+                item.relation_kind
+                for item in (*candidate.declared_relations, *candidate.static_relations)
+            },
+            key=_RELATION_INDEX.__getitem__,
+        )
+        receipt_hash = _receipt_hash(candidate.receipt.to_row())
+        source_row: dict[str, object] = {
+            "candidate_id": candidate.candidate_id,
+            "candidate_kind": candidate.candidate_kind,
+            "receipt_hash": receipt_hash,
+            "trace_state": candidate.trace_state,
+            "discovery_bases": list(candidate.discovery_bases),
+            "relation_kinds": relations,
+        }
+        candidate_rows.append(source_row)
+        if candidate.trace_state == "declared" and receipt_hash in declared_receipts:
+            continue
+        source = get_candidate_source(candidate)
+        counter_atoms.append(
+            {
+                "role": "counterevidence",
+                "path": candidate.path,
+                "start_line": candidate.start_line,
+                "end_line": candidate.end_line,
+                "snippet": _canonical_span_text(source.text),
+                "candidates": [source_row],
+            }
+        )
+    counter_regions = _merge_counterevidence_regions(counter_atoms)
 
-def _invariant_issue_rows(
-    report: Report,
-    invariant_id: str,
-) -> list[dict[str, Any]]:
-    issues = [issue for issue in report.issues if issue.invariant_id == invariant_id]
-    issues.sort(
-        key=lambda issue: (
-            issue.path,
-            issue.line is not None,
-            issue.line or 0,
-            issue.code,
-            issue.message,
+    declared_count_rows = []
+    for role in ("implementation", "test", "binding_test"):
+        rows = [item for item in declared_sources if item["source_role"] == role]
+        declared_count_rows.append(
+            {
+                "source_role": role,
+                "total": len(rows),
+                "complete": sum(
+                    item["reciprocity_state"] == "complete" for item in rows
+                ),
+                "one_sided": sum(
+                    item["reciprocity_state"] == "one_sided" for item in rows
+                ),
+            }
+        )
+    candidate_count_rows = []
+    for kind in _CANDIDATE_KIND_ORDER:
+        rows = [item for item in candidate_rows if item["candidate_kind"] == kind]
+        candidate_count_rows.append(
+            {
+                "candidate_kind": kind,
+                **{
+                    state: sum(item["trace_state"] == state for item in rows)
+                    for state in _TRACE_STATE_ORDER
+                },
+            }
+        )
+    memberships: set[tuple[str, str, str]] = set()
+    for item in declared_sources:
+        for relation in cast(list[str], item["relation_kinds"]):
+            memberships.add(
+                (
+                    "declared",
+                    f"{item['source_role']}:{item['receipt_hash']}",
+                    relation,
+                )
+            )
+    for item in candidate_rows:
+        for relation in cast(list[str], item["relation_kinds"]):
+            memberships.add(("candidate", str(item["candidate_id"]), relation))
+    relation_count_rows = [
+        {
+            "relation_kind": relation,
+            "count": sum(item[2] == relation for item in memberships),
+        }
+        for relation in _RELATION_ORDER
+    ]
+    trace_summary = {
+        "declared_counts": declared_count_rows,
+        "candidate_counts": candidate_count_rows,
+        "relation_counts": relation_count_rows,
+    }
+    requirement = _requirement(runtime, obligation)
+    evidence_regions = [
+        {
+            "role": "requirement",
+            "path": requirement["path"],
+            "start_line": requirement["start_line"],
+            "end_line": requirement["end_line"],
+        },
+        *(
+            {
+                "role": item["role"],
+                "path": item["path"],
+                "start_line": item["start_line"],
+                "end_line": item["end_line"],
+            }
+            for item in declared_regions
+            if str(item["snippet"]).strip()
+        ),
+        *(
+            {
+                "role": "counterevidence",
+                "path": item["path"],
+                "start_line": item["start_line"],
+                "end_line": item["end_line"],
+            }
+            for item in counter_regions
+            if str(item["snippet"]).strip()
+        ),
+    ]
+    evidence_regions.sort(
+        key=lambda item: (
+            _MODEL_ROLE_ORDER[str(item["role"])],
+            item["path"],
+            item["start_line"],
+            item["end_line"],
         )
     )
-    return [dataclasses.asdict(issue) for issue in issues]
+    state = {
+        "obligation_state_version": 1,
+        "obligation_id": obligation.obligation_id,
+        "kind": obligation.kind,
+        "obligation_rung": obligation.obligation_rung,
+        "intent_state": obligation.intent_state,
+        "alignment_state": obligation.alignment_state,
+        "disposition": obligation.disposition,
+        "gate_state": obligation.gate_state,
+        "required_roles": list(obligation.required_roles),
+        "declared_sources": declared_sources,
+    }
+    derivation = _derivation_config(runtime)
+    packet: dict[str, Any] = {
+        "schema_version": 3,
+        "packet_id": obligation.obligation_id,
+        "packet_hash": "",
+        "kind": obligation.kind,
+        "obligation_id": obligation.obligation_id,
+        "source_snapshot": {
+            "snapshot_hash": runtime.snapshot.snapshot_hash,
+            "obligation_state_hash": hashlib.sha256(
+                canonical_json_bytes(state)
+            ).hexdigest(),
+            "derivation_config_hash": hashlib.sha256(
+                canonical_json_bytes(derivation)
+            ).hexdigest(),
+        },
+        "readiness": {
+            "intent_state": obligation.intent_state,
+            "alignment_state": obligation.alignment_state,
+            "disposition": obligation.disposition,
+            "obligation_rung": obligation.obligation_rung,
+            "gate_state": obligation.gate_state,
+            "required_roles": list(obligation.required_roles),
+        },
+        "requirement": requirement,
+        "declared_evidence": declared_regions,
+        "counterevidence": counter_regions,
+        "trace_summary": trace_summary,
+        "evidence_regions": evidence_regions,
+        "issues": _packet_issues(runtime, obligation),
+        "packet_warnings": [],
+    }
+    packet["packet_hash"] = semantic_packet_hash(packet)
+    return packet
 
 
-def _generate_invariant_packets(
-    repo_root: Path,
-    report: Report,
-) -> list[dict[str, Any]]:
-    """Generate one bounded packet for each invariant with a valid bind."""
-
-    mappings_by_section: dict[tuple[str, str], set[tuple[str, str | None]]] = {}
-    for edge in report.edges:
-        if edge.kind != "mapping":
-            continue
-        key = (edge.spec_path, edge.section_id)
-        mappings_by_section.setdefault(key, set()).add(
-            (edge.code_path, edge.code_symbol)
-        )
-
-    binds_by_invariant: dict[str, list[InvariantBind]] = {}
-    for bind in report.binds:
-        binds_by_invariant.setdefault(bind.invariant_id, []).append(bind)
-
-    packets: list[dict[str, Any]] = []
-    instructions = _invariant_instructions()
-    for declaration in report.invariants:
-        binds = binds_by_invariant.get(declaration.invariant_id, [])
-        if not binds:
-            continue
-
-        warnings: list[str] = []
-        if declaration.declaration_kind == "code":
-            target_keys = {(declaration.path, declaration.owner_symbol)}
-        else:
-            target_keys = mappings_by_section.get(
-                (declaration.path, declaration.section_id or ""),
-                set(),
-            )
-            if not target_keys:
-                warnings.append("no target code resolved for spec-declared invariant")
-
-        targets = _bounded_snippet_records(
-            repo_root,
-            target_keys,
-            MAX_INVARIANT_TARGETS_PER_PACKET,
-            "targets",
-            warnings,
-        )
-        binding_tests = _bounded_snippet_records(
-            repo_root,
-            {(bind.test_path, bind.test_symbol) for bind in binds},
-            MAX_BINDING_TESTS_PER_PACKET,
-            "binding tests",
-            warnings,
-        )
-        packet: dict[str, Any] = {
-            "packet_id": f"invariant::{declaration.invariant_id}",
-            "kind": "invariant",
-            "invariant_id": declaration.invariant_id,
-            "tier": declaration.tier,
-            "statement": declaration.statement,
-            "declaration": {
-                "kind": declaration.declaration_kind,
-                "path": declaration.path,
-                "line": declaration.line,
-                "symbol": declaration.owner_symbol,
-                "section_id": declaration.section_id,
-            },
-            "targets": targets,
-            "binding_tests": binding_tests,
-            "issues": _invariant_issue_rows(report, declaration.invariant_id),
-            "packet_warnings": warnings,
-            "instructions": instructions,
-        }
-        packet["content_hash"] = invariant_content_hash(
-            declaration.statement,
-            targets,
-            binding_tests,
-        )
-        packets.append(packet)
-    return packets
-
-
-def generate_packets(
-    repo_root: Path,
-    profile: ProfileConfig,
-    report: Report | None = None,
+def generate_source_aligned_packets(
+    runtime: ObligationRuntime,
     *,
-    kind: PacketKind = "section",
+    require_complete_corpus: bool = True,
+    kind: PacketKind = "all",
 ) -> list[dict[str, Any]]:
-    """Generate deterministic section, invariant, or mixed review packets."""
+    """Compile the complete current executable corpus from one runtime."""
 
-    root = repo_root.resolve()
-    if report is None:
-        report = scan_repository(root, profile)
-    if kind == "section":
-        return _generate_section_packets(root, profile, report)
-    if kind == "invariant":
-        return _generate_invariant_packets(root, report)
-    if kind == "all":
-        return [
-            *_generate_section_packets(root, profile, report),
-            *_generate_invariant_packets(root, report),
-        ]
-    raise ValueError(f"unknown packet kind: {kind}")
+    active = [
+        item
+        for item in runtime.inventory.obligations
+        if item.obligation_rung == "active"
+    ]
+    if not active:
+        raise SourceAlignedPacketError(
+            "NO_ACTIVE_INTENT", "current repository has no active obligation"
+        )
+    debt = [
+        item
+        for item in active
+        if item.disposition == "evaluate" and item.gate_state != "executable"
+    ]
+    if debt and require_complete_corpus:
+        raise SourceAlignedPacketError(
+            "ALIGNMENT_DEBT",
+            "current repository has active non-executable alignment debt",
+        )
+    selected = [
+        item
+        for item in active
+        if item.disposition == "evaluate"
+        and item.gate_state == "executable"
+        and (kind == "all" or item.kind == kind)
+    ]
+    if not selected:
+        return []
+    prepared_catalog = runtime.prepare_discovery_catalog()
+    packets = [
+        _compile_source_aligned_packet(runtime, item, prepared_catalog)
+        for item in selected
+    ]
+    rendered = render_packets_jsonl(packets).encode("utf-8")
+    if len(rendered) > runtime.settings.obligations.maximum_packet_bytes:
+        raise SourceAlignedPacketError(
+            "PACKET_BUDGET_EXHAUSTED",
+            "complete packet JSONL exceeds maximum_packet_bytes",
+        )
+    return packets
 
 
 def render_packets_jsonl(packets: list[dict[str, Any]]) -> str:
     """Render packets as JSONL, one packet per line."""
 
-    return "".join(json.dumps(packet) + "\n" for packet in packets)
+    return b"".join(canonical_json_bytes(packet) + b"\n" for packet in packets).decode(
+        "utf-8"
+    )

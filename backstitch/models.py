@@ -1,25 +1,27 @@
 """Core value types for trace graphs, issues, and reports.
 
 Spec: docs/specs/02-backstitch-core.md [SC-2], [SC-4], [SC-6], [SC-11]
-Spec: docs/specs/05-backstitch-invariants.md [INV-1], [INV-2]
+Spec: docs/specs/05-backstitch-invariants.md [INV-1], [INV-2], [INV-11]
 """
 
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from backstitch.diagnostics import (
     always_error_codes,
     default_level_for,
-    implemented_codes,
+    deterministic_issue_codes,
     short_code_for,
 )
 
 Severity = Literal["error", "warning", "info"]
 InvariantTier = Literal["required", "draft"]
 InvariantDeclarationKind = Literal["code", "spec"]
+ObligationSkipForm = Literal["heading_html", "html", "traceability"]
 
 SectionKind = Literal["heading", "invariant", "bullet"]
 
@@ -34,7 +36,7 @@ RefContext = Literal["asserted", "docstring", "comment"]
 
 # Compatibility inventories derived from the packaged diagnostic registry
 # ([SC-11], [SC-15]). The TOML registry is the source of truth.
-ISSUE_CODES = implemented_codes()
+ISSUE_CODES = deterministic_issue_codes()
 ERROR_SEVERITY_CODES = always_error_codes()
 
 
@@ -128,6 +130,19 @@ class InvariantBind:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceObligationSkip:
+    """One valid source-authored semantic disposition ([EVC-8.3.2])."""
+
+    obligation_id: str
+    target_id: str
+    owner_section_id: str
+    reason: str
+    path: str
+    line: int
+    form: ObligationSkipForm
+
+
+@dataclass(frozen=True, slots=True)
 class Issue:
     """A deterministic finding with a stable code and location metadata."""
 
@@ -152,6 +167,27 @@ class Issue:
                 "default_severity",
                 default_level_for(self.code, self.context),
             )
+
+
+def issue_sort_key(issue: Issue | Mapping[str, Any]) -> tuple[int, str, int, str, str]:
+    """Return the one deterministic ordering key for issue-shaped records."""
+
+    severity_rank = {"error": 0, "warning": 1, "info": 2}
+    if isinstance(issue, Issue):
+        return (
+            severity_rank[issue.severity],
+            issue.path,
+            issue.line or 0,
+            issue.code,
+            issue.message,
+        )
+    return (
+        severity_rank[issue["severity"]],
+        issue["path"] or "",
+        issue["line"] or 0,
+        issue["code"],
+        issue["message"],
+    )
 
 
 @dataclass(frozen=True, slots=True)

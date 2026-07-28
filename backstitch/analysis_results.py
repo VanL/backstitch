@@ -9,13 +9,15 @@ errors, and semantic findings never change deterministic issue severity.
 
 from __future__ import annotations
 
+import hashlib
 import json
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from backstitch.grammar import is_valid_section_id
+from backstitch.canonical import lf_line_count, lf_split
+from backstitch.grammar import is_sha256_hex, is_valid_section_id
+from backstitch.semantic_evidence import required_evidence_roles
 
 SECTION_CLASSIFICATIONS = (
     "ok",
@@ -38,7 +40,24 @@ CLASSIFICATIONS_BY_KIND = {
     "section": SECTION_CLASSIFICATIONS,
     "invariant": INVARIANT_CLASSIFICATIONS,
 }
-_CONTENT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_V2_SECTION_FIELDS = frozenset(
+    {
+        "schema_version",
+        "packet_id",
+        "kind",
+        "packet_hash",
+        "analysis_key",
+        "classification",
+        "confidence",
+        "rationale",
+        "summary",
+        "evidence",
+        "verification_state",
+    }
+)
+_V2_EVIDENCE_FIELDS = frozenset(
+    {"role", "path", "start_line", "end_line", "excerpt", "excerpt_sha256"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +82,131 @@ class AnalysisLoad:
     errors: tuple[str, ...]
 
 
+def _validate_v2_analysis_row(
+    row: dict[str, Any],
+    known_packet_ids: set[str] | Mapping[str, str] | None,
+) -> AnalysisResult | str:
+    kind = row.get("kind")
+    expected_fields = _V2_SECTION_FIELDS
+    if set(row) not in (
+        expected_fields,
+        expected_fields | {"content_hash"} if kind == "invariant" else expected_fields,
+    ):
+        return "v2 result does not match the closed result schema"
+    if row.get("schema_version") != 2:
+        return "invalid `schema_version`; expected 2"
+    packet_id = row.get("packet_id")
+    if not isinstance(packet_id, str) or not packet_id.strip():
+        return "missing or invalid `packet_id`"
+    if kind not in CLASSIFICATIONS_BY_KIND:
+        return "invalid `kind`; expected `section` or `invariant`"
+    if kind == "section" and packet_id.startswith("invariant::"):
+        return "section result cannot use an invariant packet identity"
+    content_hash: str | None = None
+    if kind == "invariant":
+        invariant_id = packet_id.removeprefix("invariant::")
+        if not packet_id.startswith("invariant::") or not is_valid_section_id(
+            invariant_id
+        ):
+            return "invariant result requires `invariant::<ID>` packet identity"
+        raw_content_hash = row.get("content_hash")
+        if raw_content_hash is not None and (not is_sha256_hex(raw_content_hash)):
+            return (
+                "invalid `content_hash`; expected 64 lowercase hexadecimal characters"
+            )
+        content_hash = raw_content_hash
+    for field_name in ("packet_hash", "analysis_key"):
+        value = row.get(field_name)
+        if not is_sha256_hex(value):
+            return (
+                f"invalid `{field_name}`; expected 64 lowercase hexadecimal characters"
+            )
+    if row.get("verification_state") != "evidence_bound":
+        return "invalid `verification_state`; inference rows require evidence_bound"
+    if known_packet_ids is not None:
+        if packet_id not in known_packet_ids:
+            return f"unknown packet ID `{packet_id}`"
+        if (
+            isinstance(known_packet_ids, Mapping)
+            and kind != known_packet_ids[packet_id]
+        ):
+            return f"result kind `{kind}` does not match packet kind `{known_packet_ids[packet_id]}`"
+    classification = row.get("classification")
+    if classification not in CLASSIFICATIONS_BY_KIND[kind]:
+        return f"unsupported classification {classification!r} for {kind} result"
+    summary = row.get("summary")
+    rationale = row.get("rationale")
+    confidence = row.get("confidence")
+    if not isinstance(summary, str) or not summary.strip():
+        return "missing or invalid `summary`"
+    if not isinstance(rationale, str):
+        return "invalid `rationale`; expected a string"
+    if confidence is not None and (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, int | float)
+        or not 0 <= confidence <= 1
+    ):
+        return "invalid `confidence`; expected null or a number between 0 and 1"
+    if confidence is None and not rationale.strip():
+        return "missing `confidence` or `rationale`; rows must carry at least one"
+    evidence_raw = row.get("evidence")
+    if not isinstance(evidence_raw, list):
+        return "missing or invalid `evidence`; expected a list"
+    evidence: list[tuple[str, int]] = []
+    sort_keys: list[tuple[object, ...]] = []
+    seen: set[tuple[object, ...]] = set()
+    roles: set[str] = set()
+    for item in evidence_raw:
+        if not isinstance(item, dict) or set(item) != _V2_EVIDENCE_FIELDS:
+            return "invalid v2 `evidence` item; expected the closed canonical shape"
+        role = item.get("role")
+        path = item.get("path")
+        start_line = item.get("start_line")
+        end_line = item.get("end_line")
+        excerpt = item.get("excerpt")
+        excerpt_hash = item.get("excerpt_sha256")
+        if (
+            role not in ("requirement", "implementation", "test", "counterevidence")
+            or not isinstance(path, str)
+            or not path.strip()
+            or isinstance(start_line, bool)
+            or not isinstance(start_line, int)
+            or isinstance(end_line, bool)
+            or not isinstance(end_line, int)
+            or start_line < 1
+            or end_line < start_line
+            or not isinstance(excerpt, str)
+            or max(1, lf_line_count(excerpt) + excerpt.endswith("\n"))
+            != end_line - start_line + 1
+            or not isinstance(excerpt_hash, str)
+            or excerpt_hash != hashlib.sha256(excerpt.encode("utf-8")).hexdigest()
+        ):
+            return "invalid v2 `evidence` role, span, excerpt, or hash"
+        identity = (role, path, start_line, end_line)
+        if identity in seen:
+            return "duplicate v2 `evidence` item"
+        seen.add(identity)
+        roles.add(role)
+        sort_keys.append((*identity, excerpt_hash))
+        evidence.append((path, start_line))
+    if sort_keys != sorted(sort_keys):
+        return "v2 `evidence` is not in canonical order"
+    required_roles = required_evidence_roles(kind, classification)
+    if not required_roles.issubset(roles):
+        missing = ", ".join(sorted(required_roles - roles))
+        return f"missing required evidence roles: {missing}"
+    return AnalysisResult(
+        packet_id=packet_id,
+        kind=kind,
+        content_hash=content_hash,
+        classification=classification,
+        confidence=float(confidence) if confidence is not None else None,
+        rationale=rationale,
+        evidence=tuple(evidence),
+        summary=summary,
+    )
+
+
 def validate_analysis_row(
     row: Any,
     known_packet_ids: set[str] | Mapping[str, str] | None,
@@ -81,6 +225,10 @@ def validate_analysis_row(
 
     if not isinstance(row, dict):
         return "row is not a JSON object"
+    if "schema_version" in row:
+        return _validate_v2_analysis_row(row, known_packet_ids)
+    if "packet_hash" in row or "analysis_key" in row or "verification_state" in row:
+        return "partial v2 result markers require `schema_version = 2`"
     packet_id = row.get("packet_id")
     if not isinstance(packet_id, str) or not packet_id.strip():
         return "missing or invalid `packet_id`"
@@ -112,9 +260,7 @@ def validate_analysis_row(
             ):
                 return "invariant result requires `invariant::<ID>` packet identity"
             raw_hash = row.get("content_hash")
-            if not isinstance(raw_hash, str) or not _CONTENT_HASH_RE.fullmatch(
-                raw_hash
-            ):
+            if not is_sha256_hex(raw_hash):
                 return (
                     "invalid `content_hash`; expected 64 lowercase hexadecimal"
                     " characters"
@@ -231,7 +377,7 @@ def load_analysis_results(
 
     results: list[AnalysisResult] = []
     errors: list[str] = []
-    for line_no, line in enumerate(text.splitlines(), start=1):
+    for line_no, line in enumerate(lf_split(text), start=1):
         if not line.strip():
             continue
         try:

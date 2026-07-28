@@ -13,9 +13,16 @@ Respond with a single JSON object and nothing else:
 {
   "packet_id": "<copy the packet_id verbatim>",
   "classification": "<one of: ok | confirmed_mismatch | probable_mismatch | missing_trace | ambiguous>",
-  "confidence": <0.0-1.0>,
+  "confidence": <0.0-1.0 or null>,
   "rationale": "<one or two sentences>",
-  "evidence": [{"path": "<packet-local file path>", "line": <int>}],
+  "evidence": [
+    {
+      "role": "<requirement or implementation>",
+      "path": "<packet-local file path>",
+      "start_line": <int>,
+      "end_line": <int>
+    }
+  ],
   "summary": "<one concise reviewer-facing sentence>"
 }
 ```
@@ -30,7 +37,16 @@ Classification guide:
   owner in the packet, or code present appears to need a spec owner.
 - `ambiguous`: the spec text is too vague to judge against the code.
 
-Rules: cite evidence only against files and line numbers present in the
-packet. Never invent paths. If snippets were truncated (see packet
-warnings), lower your confidence rather than guessing. Your findings are
-advisory and never change deterministic issue severities.
+Rules: return exactly those six top-level fields and exactly those four fields
+per evidence item. Cite only inclusive spans present in the packet. Use
+`requirement` for the shown spec section and `implementation` for shown owner
+snippets. The packet gives the exact citable `section_start_line` and
+`section_end_line`, plus exact `start_line` and `end_line` for every owner.
+The `evidence_regions` list is the closed evidence vocabulary: copy evidence
+items verbatim from that list. Never invent, widen, combine, or bridge listed
+regions, including disjoint regions with the same path. An owner with
+`end_line: null` has no citable content. Mismatch findings
+require both roles. Missing-trace and ambiguous
+findings require requirement evidence. Never invent paths. If snippets were
+truncated (see packet warnings), lower your confidence rather than guessing.
+Your findings are advisory and never change deterministic issue severities.

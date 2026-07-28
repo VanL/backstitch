@@ -2,6 +2,8 @@
 
 Spec: docs/specs/02-backstitch-core.md [SC-4]
 Spec: docs/specs/05-backstitch-invariants.md [INV-3]
+Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-2.1], [EVC-4.2],
+[EVC-7], [EVC-8.3.2]
 Grammar: docs/implementation/04-backstitch-style-traceability.md
 
 Backstitch interprets traceability constructs over ``markdown-it-py`` CommonMark
@@ -11,25 +13,38 @@ belongs to the parser library.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+from collections.abc import MutableMapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
-from backstitch.exclusions import SuppressionDiagnostic, parse_traceability_marker_line
+from backstitch.canonical import canonical_repository_path, lf_split
+from backstitch.exclusions import (
+    RESERVED_SKIP_MARKER_RE,
+    SuppressionDiagnostic,
+    parse_traceability_marker_line,
+)
 from backstitch.grammar import SECTION_ID
 from backstitch.models import (
     InvariantDeclaration,
     Issue,
     MappingKind,
+    ObligationSkipForm,
+    SourceObligationSkip,
     SpecMapping,
     SpecSection,
 )
 
 _MARKDOWN = MarkdownIt("commonmark")
 _HEADING_ID_RE = re.compile(rf"^(?P<title>.+?)\s*\[(?P<id>{SECTION_ID})\]\s*$")
+_HEADING_ID_CANDIDATE_RE = re.compile(
+    r"^(?:(?P<title>.+?)\s*)?\[(?P<id>[^\[\]\r\n]*)\]\s*$"
+)
 _INVARIANT_TEXT_RE = re.compile(rf"^\*\*(?P<id>{SECTION_ID})\*\*\s*:\s*(?P<title>.*)$")
 _MAPPING_MARKER_TEXT_RE = re.compile(r"^_Implementation mapping[^_]*_\s*:\s*")
 # `- [MA-1.1] Spawn queue consumption — ...` inside a mapping block defines
@@ -46,6 +61,264 @@ _RESERVED_INVARIANT_PREFIXES = (
     "Invariant (draft):",
     "Tests-invariant:",
 )
+_HTML_SKIP_PREFIX_RE = re.compile(
+    r"<!--[ \t]*backstitch:[ \t]*skip-obligation\b", re.IGNORECASE
+)
+_TRACE_SKIP_PREFIX_RE = re.compile(
+    r"^_Traceability:[ \t]*skip-obligation\b", re.IGNORECASE
+)
+_HTML_SKIP_RE = re.compile(
+    r"^<!--[ \t]*backstitch:[ \t]*skip-obligation[ \t]+"
+    r"\[(?P<target>[^\[\]\r\n]*)\][ \t]*(?P<reason>.*?)[ \t]*-->$"
+)
+_TRACE_SKIP_RE = re.compile(
+    r"^_Traceability:[ \t]*skip-obligation[ \t]+"
+    r"\[(?P<target>[^\[\]\r\n]*)\][ \t]*(?P<reason>.*?)[ \t]*_$"
+)
+
+
+@dataclass(slots=True)
+class _SkipCandidate:
+    target_id: str
+    reason: str
+    line: int
+    form: ObligationSkipForm
+    owner_section_id: str | None = None
+    invalid: bool = False
+
+
+def _skip_diagnostic(
+    code: str,
+    *,
+    path: str,
+    line: int,
+    message: str,
+) -> SuppressionDiagnostic:
+    return SuppressionDiagnostic(
+        code=code,
+        path=path,
+        line=line,
+        message=f"{path}:{line}: {message}",
+    )
+
+
+def _is_skip_marker(text: str) -> bool:
+    return bool(
+        _HTML_SKIP_PREFIX_RE.search(text) or _TRACE_SKIP_PREFIX_RE.search(text.strip())
+    )
+
+
+def _parse_skip_marker(
+    marker: str,
+    *,
+    path: str,
+    line: int,
+    form: ObligationSkipForm,
+) -> tuple[_SkipCandidate | None, SuppressionDiagnostic | None]:
+    """Parse one reserved skip line without ordinary suppression strictness."""
+
+    stripped = marker.strip()
+    match = (
+        _TRACE_SKIP_RE.fullmatch(stripped)
+        if form == "traceability"
+        else _HTML_SKIP_RE.fullmatch(stripped)
+    )
+    if match is None:
+        return None, _skip_diagnostic(
+            "SUPPRESSION_INVALID_SYNTAX",
+            path=path,
+            line=line,
+            message="malformed skip-obligation marker",
+        )
+
+    target_id = match.group("target").strip()
+    if re.fullmatch(SECTION_ID, target_id) is None:
+        return None, _skip_diagnostic(
+            "SUPPRESSION_INVALID_SYNTAX",
+            path=path,
+            line=line,
+            message="skip-obligation target is not one valid obligation ID",
+        )
+
+    raw_reason = match.group("reason").strip()
+    if not raw_reason:
+        return None, _skip_diagnostic(
+            "SUPPRESSION_REASON_MISSING",
+            path=path,
+            line=line,
+            message="skip-obligation requires one nonblank JSON-string reason",
+        )
+    if form != "traceability" and any(
+        token in raw_reason for token in ("--", "<", ">")
+    ):
+        return None, _skip_diagnostic(
+            "SUPPRESSION_INVALID_SYNTAX",
+            path=path,
+            line=line,
+            message="HTML skip-obligation reason contains a forbidden raw token",
+        )
+    try:
+        reason = json.loads(raw_reason)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        reason = None
+    if not isinstance(reason, str):
+        return None, _skip_diagnostic(
+            "SUPPRESSION_INVALID_SYNTAX",
+            path=path,
+            line=line,
+            message="skip-obligation reason must be one strict JSON string",
+        )
+    if not reason.strip():
+        return None, _skip_diagnostic(
+            "SUPPRESSION_REASON_MISSING",
+            path=path,
+            line=line,
+            message="skip-obligation reason is blank",
+        )
+    try:
+        reason_size = len(reason.encode("utf-8"))
+    except UnicodeEncodeError:
+        reason_size = 4097
+    if reason_size > 4096 or any(char in reason for char in "\r\n\u2028\u2029"):
+        return None, _skip_diagnostic(
+            "SUPPRESSION_INVALID_SYNTAX",
+            path=path,
+            line=line,
+            message="skip-obligation reason violates its bounded line-safe contract",
+        )
+    return _SkipCandidate(target_id, reason, line, form), None
+
+
+def _extract_heading_skips(
+    text: str,
+    *,
+    path: str,
+    line: int,
+) -> tuple[str, list[_SkipCandidate], list[SuppressionDiagnostic]]:
+    """Remove reserved HTML comments so an invalid skip cannot hide a heading."""
+
+    cleaned = text
+    candidates: list[_SkipCandidate] = []
+    diagnostics: list[SuppressionDiagnostic] = []
+    search_from = 0
+    while (prefix := _HTML_SKIP_PREFIX_RE.search(cleaned, search_from)) is not None:
+        start = cleaned.rfind("<!--", 0, prefix.end())
+        if start < 0:
+            break
+        close = cleaned.find("-->", prefix.end())
+        end = len(cleaned) if close < 0 else close + 3
+        marker = cleaned[start:end]
+        after = cleaned[end:]
+        candidate, diagnostic = _parse_skip_marker(
+            marker,
+            path=path,
+            line=line,
+            form="heading_html",
+        )
+        if diagnostic is not None:
+            diagnostics.append(diagnostic)
+        if candidate is not None:
+            if after.strip():
+                candidate.invalid = True
+                diagnostics.append(
+                    _skip_diagnostic(
+                        "SUPPRESSION_INVALID_SYNTAX",
+                        path=path,
+                        line=line,
+                        message="inline skip-obligation must be the final heading token",
+                    )
+                )
+            candidates.append(candidate)
+        cleaned = (cleaned[:start] + after).strip()
+        search_from = 0
+    return cleaned, candidates, diagnostics
+
+
+def _resolve_skip_candidates(
+    *,
+    path: str,
+    candidates: list[_SkipCandidate],
+    sections: list[SpecSection],
+    invariants: list[InvariantDeclaration],
+    diagnostics: list[SuppressionDiagnostic],
+) -> tuple[SourceObligationSkip, ...]:
+    """Resolve target ownership only after the complete file is parsed."""
+
+    by_target: dict[str, list[_SkipCandidate]] = {}
+    for candidate in candidates:
+        if not candidate.invalid:
+            by_target.setdefault(candidate.target_id, []).append(candidate)
+    for target_id, duplicates in by_target.items():
+        if len(duplicates) < 2:
+            continue
+        for candidate in duplicates:
+            candidate.invalid = True
+        diagnostics.append(
+            _skip_diagnostic(
+                "SUPPRESSION_INVALID_SYNTAX",
+                path=path,
+                line=duplicates[1].line,
+                message=f"duplicate skip-obligation for [{target_id}]",
+            )
+        )
+
+    section_ids = {item.section_id for item in sections}
+    invariants_by_id: dict[str, list[InvariantDeclaration]] = {}
+    for declaration in invariants:
+        invariants_by_id.setdefault(declaration.invariant_id, []).append(declaration)
+
+    resolved: list[SourceObligationSkip] = []
+    for candidate in candidates:
+        if candidate.invalid or candidate.owner_section_id is None:
+            continue
+        obligation_id: str | None = None
+        if candidate.target_id == candidate.owner_section_id:
+            obligation_id = f"{path}#{candidate.target_id}"
+        else:
+            invariant_declarations = invariants_by_id.get(candidate.target_id, [])
+            if any(
+                item.section_id == candidate.owner_section_id
+                for item in invariant_declarations
+            ):
+                obligation_id = f"invariant::{candidate.target_id}"
+            elif candidate.target_id in section_ids or invariant_declarations:
+                diagnostics.append(
+                    _skip_diagnostic(
+                        "SUPPRESSION_INVALID_SYNTAX",
+                        path=path,
+                        line=candidate.line,
+                        message=(
+                            f"skip-obligation target [{candidate.target_id}] is not"
+                            " owned by this section"
+                        ),
+                    )
+                )
+            else:
+                diagnostics.append(
+                    _skip_diagnostic(
+                        "SUPPRESSION_UNUSED",
+                        path=path,
+                        line=candidate.line,
+                        message=(
+                            f"skip-obligation target [{candidate.target_id}] has no"
+                            " parsed obligation owner"
+                        ),
+                    )
+                )
+        if obligation_id is not None:
+            resolved.append(
+                SourceObligationSkip(
+                    obligation_id=obligation_id,
+                    target_id=candidate.target_id,
+                    owner_section_id=candidate.owner_section_id,
+                    reason=candidate.reason,
+                    path=path,
+                    line=candidate.line,
+                    form=candidate.form,
+                )
+            )
+    resolved.sort(key=lambda item: (item.path, item.line, item.obligation_id))
+    return tuple(resolved)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +340,126 @@ class ParsedSpec:
     file_meta: bool = False
     file_ignores: frozenset[str] = frozenset()
     section_markers: tuple[tuple[str, bool, frozenset[str]], ...] = ()
+    obligation_skips: tuple[SourceObligationSkip, ...] = ()
     marker_diagnostics: tuple[SuppressionDiagnostic, ...] = ()
+    section_spans: tuple[tuple[str, int, int], ...] = ()
+    section_search_text: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(slots=True)
+class _MarkdownParseProduct:
+    tokens: tuple[Token, ...]
+    parser_line_to_source_line: tuple[int, ...]
+    parsed_by_path: dict[str, ParsedSpec]
+
+
+MarkdownParseMemo = MutableMapping[tuple[str, bool], _MarkdownParseProduct]
+
+
+@dataclass(frozen=True, slots=True)
+class PacketRequirementText:
+    """Exact line-preserving requirement projection for packet schema 3."""
+
+    start_line: int
+    end_line: int
+    text: str
+
+
+def _packet_source_lines(raw: bytes) -> list[str]:
+    projected: list[str] = []
+    for line in lf_split(raw.decode("utf-8", errors="replace"), keepends=True):
+        if not line.endswith("\n"):
+            projected.append(line)
+            continue
+        content = line[:-1]
+        projected.append(content[:-1] if content.endswith("\r") else content)
+    return projected
+
+
+def _strip_final_html_directive(line: str, prefix: re.Pattern[str]) -> str:
+    match = prefix.search(line)
+    if match is None:
+        return line
+    start = line.rfind("<!--", 0, match.end())
+    close = line.find("-->", match.end())
+    if start < 0 or close < 0 or line[close + 3 :].strip():
+        return line
+    return line[:start].rstrip(" \t") + line[close + 3 :]
+
+
+def project_section_packet_requirement(
+    raw: bytes,
+    *,
+    path: str,
+    section: SpecSection,
+    end_line: int,
+    mappings: Sequence[SpecMapping],
+    skips: Sequence[SourceObligationSkip],
+) -> PacketRequirementText:
+    """Mask parser-owned source directives without collapsing coordinates.
+
+    The function consumes captured bytes and parser-owned records. It performs
+    no filesystem read and preserves exactly one output line per physical
+    section line, as required by [EVC-9.1].
+    """
+
+    lines = _packet_source_lines(raw)
+    if (
+        section.path != path
+        or section.line < 1
+        or end_line < section.line
+        or end_line > len(lines)
+    ):
+        raise ValueError("section packet requirement span is outside captured source")
+    mapping_lines = {
+        item.line
+        for item in mappings
+        if item.spec_path == path and item.section_id == section.section_id
+    }
+    valid_skips = {item.line: item for item in skips if item.path == path}
+    projected: list[str] = []
+    for line_no in range(section.line, end_line + 1):
+        line = lines[line_no - 1]
+        stripped = line.strip()
+        skip = valid_skips.get(line_no)
+        if skip is not None:
+            if line_no == section.line and skip.form == "heading_html":
+                projected.append(
+                    _strip_final_html_directive(line, _HTML_SKIP_PREFIX_RE)
+                )
+            else:
+                projected.append("")
+            continue
+        if RESERVED_SKIP_MARKER_RE.search(stripped):
+            if line_no == section.line and _HTML_SKIP_PREFIX_RE.search(line):
+                projected.append(
+                    _strip_final_html_directive(line, _HTML_SKIP_PREFIX_RE)
+                )
+            else:
+                projected.append("")
+            continue
+        if line_no in mapping_lines or _MAPPING_MARKER_TEXT_RE.match(stripped):
+            projected.append("")
+            continue
+        is_meta, marker_codes, _warnings = parse_traceability_marker_line(
+            line,
+            allow_unknown=True,
+            location="packet requirement",
+            path=path,
+            line=line_no,
+        )
+        if is_meta or marker_codes:
+            if line_no == section.line:
+                projected.append(
+                    _TRAILING_HTML_COMMENT_RE.sub("", line).rstrip()
+                    if "<!--" in line
+                    else line
+                )
+            else:
+                projected.append("")
+            continue
+        projected.append(line)
+    return PacketRequirementText(section.line, end_line, "\n".join(projected))
 
 
 def github_anchor(heading_text: str, seen: dict[str, int]) -> str:
@@ -109,16 +501,79 @@ def _heading_level(token: Token) -> int:
     return 0
 
 
-def _next_inline(tokens: list[Token], index: int) -> Token | None:
+def _next_inline(tokens: Sequence[Token], index: int) -> Token | None:
     if index + 1 < len(tokens) and tokens[index + 1].type == "inline":
         return tokens[index + 1]
     return None
 
 
-def _token_start_line(token: Token, default: int = 1) -> int:
+def _parser_line_source_map(text: str) -> tuple[int, ...]:
+    """Map markdown-it parser lines to 1-based LF-physical source lines."""
+
+    source_line = 1
+    mapped = [source_line]
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character == "\r":
+            if index + 1 < len(text) and text[index + 1] == "\n":
+                source_line += 1
+                mapped.append(source_line)
+                index += 2
+                continue
+            mapped.append(source_line)
+        elif character == "\n":
+            source_line += 1
+            mapped.append(source_line)
+        index += 1
+    return tuple(mapped)
+
+
+def _token_start_line(
+    token: Token,
+    parser_line_to_source_line: tuple[int, ...],
+    default: int = 1,
+) -> int:
     if token.map:
-        return token.map[0] + 1
+        return parser_line_to_source_line[token.map[0]]
     return default
+
+
+def _token_end_line(
+    token: Token,
+    parser_line_to_source_line: tuple[int, ...],
+    default: int = 1,
+) -> int:
+    """Return Markdown-it's zero-based-exclusive end as one-based inclusive."""
+
+    if token.map is None:
+        return default
+    return max(default, parser_line_to_source_line[token.map[1] - 1])
+
+
+def _token_physical_content_lines(
+    token: Token,
+    parser_line_to_source_line: tuple[int, ...],
+) -> tuple[tuple[int, str], ...]:
+    """Project normalized token content back onto LF-physical source lines."""
+
+    content_lines = lf_split(token.content)
+    if not content_lines:
+        return ()
+    if token.map is None:
+        return tuple((1, line) for line in content_lines)
+    parser_start, parser_end = token.map
+    if parser_start + len(content_lines) > parser_end:
+        raise ValueError("markdown token content exceeds its parser line span")
+    physical: list[tuple[int, str]] = []
+    for offset, content in enumerate(content_lines):
+        source_line = parser_line_to_source_line[parser_start + offset]
+        if physical and physical[-1][0] == source_line:
+            previous_line, previous_content = physical[-1]
+            physical[-1] = (previous_line, previous_content + "\r" + content)
+        else:
+            physical.append((source_line, content))
+    return tuple(physical)
 
 
 def _inline_code_values(token: Token) -> tuple[str, ...]:
@@ -127,10 +582,43 @@ def _inline_code_values(token: Token) -> tuple[str, ...]:
     )
 
 
+def _source_inline_code_values(
+    token: Token,
+    lines: list[str],
+    parser_line_to_source_line: tuple[int, ...],
+) -> tuple[str, ...]:
+    """Restore exact authored scalars that markdown-it replaces before parsing."""
+
+    parser_values = _inline_code_values(token)
+    if not parser_values or token.map is None:
+        return parser_values
+    parser_start, parser_end = token.map
+    source_start = parser_line_to_source_line[parser_start] - 1
+    source_end = parser_line_to_source_line[parser_end - 1]
+    source_spans = tuple(
+        span
+        for line in lines[source_start:source_end]
+        for span in _iter_code_spans_on_line(line)
+    )
+    restored: list[str] = []
+    span_cursor = 0
+    for parser_value in parser_values:
+        authored_value: str | None = None
+        for index in range(span_cursor, len(source_spans)):
+            source_value = source_spans[index]
+            if source_value.replace("\x00", "\ufffd") != parser_value:
+                continue
+            authored_value = source_value
+            span_cursor = index + 1
+            break
+        restored.append(parser_value if authored_value is None else authored_value)
+    return tuple(restored)
+
+
 def _normalize_code_span_source(raw: str) -> str:
     """Mirror CommonMark code-span whitespace normalization for line lookup."""
 
-    normalized = raw.replace("\n", " ")
+    normalized = raw.replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
     if (
         len(normalized) >= 2
         and normalized[0] == " "
@@ -162,7 +650,10 @@ def _iter_code_spans_on_line(line: str) -> tuple[str, ...]:
 
 
 def _line_numbers_for_code_values(
-    token: Token, values: tuple[str, ...], lines: list[str]
+    token: Token,
+    values: tuple[str, ...],
+    lines: list[str],
+    parser_line_to_source_line: tuple[int, ...],
 ) -> tuple[int, ...]:
     """Best-effort source lines for child code_inline tokens within token.map."""
 
@@ -171,7 +662,9 @@ def _line_numbers_for_code_values(
     if not token.map:
         return tuple(1 for _ in values)
 
-    start, end = token.map
+    parser_start, parser_end = token.map
+    start = parser_line_to_source_line[parser_start] - 1
+    end = parser_line_to_source_line[parser_end - 1]
     source_lines = lines[start:end]
     line_numbers: list[int] = []
     line_cursor = 0
@@ -194,14 +687,14 @@ def _line_numbers_for_code_values(
     return tuple(line_numbers)
 
 
-def _list_close_index(tokens: list[Token], start: int) -> int:
+def _list_close_index(tokens: Sequence[Token], start: int) -> int:
     return _container_close_index(
         tokens, start, "bullet_list_open", "bullet_list_close"
     )
 
 
 def _container_close_index(
-    tokens: list[Token], start: int, open_type: str, close_type: str
+    tokens: Sequence[Token], start: int, open_type: str, close_type: str
 ) -> int:
     depth = 0
     for index in range(start, len(tokens)):
@@ -216,7 +709,7 @@ def _container_close_index(
 
 
 def _iter_list_item_first_inlines(
-    tokens: list[Token], start: int, end: int
+    tokens: Sequence[Token], start: int, end: int
 ) -> tuple[Token, ...]:
     inlines: list[Token] = []
     for index in range(start + 1, end):
@@ -234,7 +727,8 @@ def _iter_list_item_first_inlines(
 
 
 def _first_inline_line(token: Token) -> str:
-    return token.content.splitlines()[0].strip() if token.content else ""
+    lines = lf_split(token.content)
+    return lines[0].strip() if lines else ""
 
 
 def _mapping_bullet_title(text: str) -> str:
@@ -248,7 +742,7 @@ def _invariant_from_inline(token: Token) -> tuple[str, str] | None:
     return invariant.group("id"), invariant.group("title").strip()
 
 
-def _list_can_continue_mapping(tokens: list[Token], start: int, end: int) -> bool:
+def _list_can_continue_mapping(tokens: Sequence[Token], start: int, end: int) -> bool:
     for inline in _iter_list_item_first_inlines(tokens, start, end):
         if not inline.content.strip():
             continue
@@ -294,12 +788,43 @@ def parse_markdown_spec(
     *,
     allow_unknown_codes: bool = False,
 ) -> ParsedSpec:
-    """Parse one spec file into sections, mappings, and anchor targets."""
+    """Filesystem compatibility wrapper around the immutable byte parser."""
 
     rel_path = file_path.resolve().relative_to(repo_root.resolve()).as_posix()
-    text = file_path.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    tokens = _MARKDOWN.parse(text)
+    return parse_markdown_spec_bytes(
+        file_path.read_bytes(),
+        rel_path,
+        allow_unknown_codes=allow_unknown_codes,
+    )
+
+
+def parse_markdown_spec_bytes(
+    source: bytes,
+    rel_path: str,
+    *,
+    allow_unknown_codes: bool = False,
+    parse_memo: MarkdownParseMemo | None = None,
+) -> ParsedSpec:
+    """Parse one captured Markdown source without reopening the repository."""
+
+    text = source.decode("utf-8")
+    lines = list(lf_split(text))
+    memo_key = (hashlib.sha256(source).hexdigest(), allow_unknown_codes)
+    cached_product = None if parse_memo is None else parse_memo.get(memo_key)
+    if cached_product is not None:
+        cached_result = cached_product.parsed_by_path.get(rel_path)
+        if cached_result is not None:
+            return cached_result
+    else:
+        cached_product = _MarkdownParseProduct(
+            tuple(_MARKDOWN.parse(text)),
+            _parser_line_source_map(text),
+            {},
+        )
+        if parse_memo is not None:
+            parse_memo[memo_key] = cached_product
+    tokens = cached_product.tokens
+    parser_line_to_source_line = cached_product.parser_line_to_source_line
 
     sections: list[SpecSection] = []
     mappings: list[SpecMapping] = []
@@ -310,7 +835,9 @@ def parse_markdown_spec(
     file_meta = False
     file_ignores: set[str] = set()
     section_markers: dict[str, tuple[bool, set[str]]] = {}
+    skip_candidates: list[_SkipCandidate] = []
     marker_diagnostics: list[SuppressionDiagnostic] = []
+    nonsemantic_lines: set[int] = set()
 
     # Mapping blocks attach to the nearest preceding heading section.
     # Invariant bullets define sections but never own mapping blocks: a
@@ -325,12 +852,73 @@ def parse_markdown_spec(
     # or invariant bullet until the first body block; only markers inside
     # the window attach to the section.
     marker_window_open = False
+    current_directive_owner: SpecSection | None = None
+    ordinary_marker_count = 0
+    block_skip_candidates: list[_SkipCandidate] = []
+
+    def begin_directive_block(owner: SpecSection | None) -> None:
+        nonlocal current_directive_owner
+        nonlocal ordinary_marker_count
+        nonlocal block_skip_candidates
+
+        current_directive_owner = owner
+        ordinary_marker_count = 0
+        block_skip_candidates = []
+
+    def invalidate_block_skips(line_no: int, message: str) -> None:
+        active = [item for item in block_skip_candidates if not item.invalid]
+        if not active:
+            return
+        for item in active:
+            item.invalid = True
+        marker_diagnostics.append(
+            _skip_diagnostic(
+                "SUPPRESSION_INVALID_SYNTAX",
+                path=rel_path,
+                line=line_no,
+                message=message,
+            )
+        )
+
+    def record_skip(candidate: _SkipCandidate) -> None:
+        if not marker_window_open or current_directive_owner is None:
+            candidate.invalid = True
+            marker_diagnostics.append(
+                _skip_diagnostic(
+                    "SUPPRESSION_INVALID_SYNTAX",
+                    path=rel_path,
+                    line=candidate.line,
+                    message=(
+                        "skip-obligation is outside the owning section's"
+                        " directive block"
+                    ),
+                )
+            )
+        else:
+            candidate.owner_section_id = current_directive_owner.section_id
+            if ordinary_marker_count > 1:
+                candidate.invalid = True
+                marker_diagnostics.append(
+                    _skip_diagnostic(
+                        "SUPPRESSION_INVALID_SYNTAX",
+                        path=rel_path,
+                        line=candidate.line,
+                        message=(
+                            "skip-obligation cannot coexist with more than one"
+                            " ordinary traceability directive"
+                        ),
+                    )
+                )
+        skip_candidates.append(candidate)
+        block_skip_candidates.append(candidate)
 
     def record_marker(
         is_meta: bool, marker_codes: frozenset[str], line_no: int
     ) -> None:
+        nonlocal file_meta
+        nonlocal ordinary_marker_count
+
         if not sections:
-            nonlocal file_meta
             file_meta = file_meta or is_meta
             file_ignores.update(marker_codes if not is_meta else ())
             return
@@ -350,8 +938,30 @@ def parse_markdown_spec(
                     ),
                 )
             )
+            invalidate_block_skips(
+                line_no,
+                "body text cannot interleave an obligation skip and an ordinary"
+                " traceability directive",
+            )
             return
-        target = sections[-1].section_id
+        ordinary_marker_count += 1
+        if ordinary_marker_count > 1:
+            invalidate_block_skips(
+                line_no,
+                "skip-obligation cannot coexist with more than one ordinary"
+                " traceability directive",
+            )
+        elif any(item.form != "heading_html" for item in block_skip_candidates):
+            invalidate_block_skips(
+                line_no,
+                "a standalone skip-obligation must follow the ordinary"
+                " traceability directive",
+            )
+        target = (
+            current_directive_owner.section_id
+            if current_directive_owner is not None
+            else sections[-1].section_id
+        )
         meta_flag, codes = section_markers.setdefault(target, (False, set()))
         section_markers[target] = (
             meta_flag or is_meta,
@@ -369,16 +979,91 @@ def parse_markdown_spec(
         marker_diagnostics.extend(warnings)
         if is_meta or marker_codes:
             record_marker(is_meta, marker_codes, line_no)
+            nonsemantic_lines.add(line_no)
             return True
         return False
+
+    def process_reserved_skip_lines(
+        source_lines: Sequence[tuple[int, str]],
+    ) -> tuple[bool, bool]:
+        """Process one CommonMark block containing reserved skip syntax.
+
+        Ordinary markers on adjacent physical lines still go through their
+        existing parser and state.  The booleans are ``recognized`` and
+        ``contains_body``.
+        """
+
+        if not any(_is_skip_marker(line) for _line_no, line in source_lines):
+            return False, False
+        contains_body = False
+        local_candidates: list[_SkipCandidate] = []
+        for line_no, raw_line in source_lines:
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            if _is_skip_marker(stripped):
+                form: ObligationSkipForm = (
+                    "traceability" if _TRACE_SKIP_PREFIX_RE.search(stripped) else "html"
+                )
+                candidate, diagnostic = _parse_skip_marker(
+                    stripped,
+                    path=rel_path,
+                    line=line_no,
+                    form=form,
+                )
+                if diagnostic is not None:
+                    marker_diagnostics.append(diagnostic)
+                if candidate is not None:
+                    record_skip(candidate)
+                    local_candidates.append(candidate)
+                continue
+            if stripped.lower().startswith("_traceability:") or (
+                stripped.startswith("<!--") and "backstitch:" in stripped.lower()
+            ):
+                if parse_marker_text(stripped, line_no):
+                    continue
+            contains_body = True
+        active = [item for item in local_candidates if not item.invalid]
+        if contains_body and active:
+            for item in active:
+                item.invalid = True
+            marker_diagnostics.append(
+                _skip_diagnostic(
+                    "SUPPRESSION_INVALID_SYNTAX",
+                    path=rel_path,
+                    line=active[0].line,
+                    message="body text interleaves the skip-obligation directive block",
+                )
+            )
+        return True, contains_body
 
     def emit_mapping_tokens(token: Token, owner: SpecSection | None) -> None:
         if owner is None:
             return
-        values = _inline_code_values(token)
-        line_numbers = _line_numbers_for_code_values(token, values, lines)
+        values = _source_inline_code_values(
+            token,
+            lines,
+            parser_line_to_source_line,
+        )
+        line_numbers = _line_numbers_for_code_values(
+            token,
+            values,
+            lines,
+            parser_line_to_source_line,
+        )
+        start_line = _token_start_line(token, parser_line_to_source_line)
+        end_line = _token_end_line(
+            token,
+            parser_line_to_source_line,
+            start_line,
+        )
+        nonsemantic_lines.update(range(start_line, end_line + 1))
         for value, line_no in zip(values, line_numbers, strict=True):
             kind, target_path, target_symbol = classify_mapping_token(value)
+            if target_path is not None:
+                canonical_target = canonical_repository_path(target_path)
+                if canonical_target is not None:
+                    target_path = canonical_target.canonical
             mappings.append(
                 SpecMapping(
                     spec_path=rel_path,
@@ -405,21 +1090,25 @@ def parse_markdown_spec(
             )
         )
 
-    def process_invariant_paragraph(inline: Token, line_no: int) -> bool:
-        source_lines = inline.content.splitlines()
-        if not source_lines or not source_lines[0].lstrip().startswith(
+    def process_invariant_paragraph(inline: Token) -> bool:
+        source_lines = _token_physical_content_lines(
+            inline,
+            parser_line_to_source_line,
+        )
+        if not source_lines or not source_lines[0][1].lstrip().startswith(
             _RESERVED_INVARIANT_PREFIXES
         ):
             return False
 
         cursor = 0
         while cursor < len(source_lines):
-            marker_text = source_lines[cursor].lstrip()
+            marker_line, source_text = source_lines[cursor]
+            marker_text = source_text.lstrip()
             if not marker_text.startswith(_RESERVED_INVARIANT_PREFIXES):
                 break
             next_marker = cursor + 1
-            while next_marker < len(source_lines) and not source_lines[
-                next_marker
+            while next_marker < len(source_lines) and not source_lines[next_marker][
+                1
             ].lstrip().startswith(_RESERVED_INVARIANT_PREFIXES):
                 next_marker += 1
 
@@ -430,7 +1119,6 @@ def parse_markdown_spec(
                 SECTION_ID, bracket.group(1).strip()
             ):
                 parsed_id = bracket.group(1).strip()
-            marker_line = line_no + cursor
             if declaration is None or current_heading_section is None:
                 issues.append(
                     Issue(
@@ -450,7 +1138,8 @@ def parse_markdown_spec(
 
             statement_lines = [declaration.group("statement").strip()]
             statement_lines.extend(
-                line.strip() for line in source_lines[cursor + 1 : next_marker]
+                line.strip()
+                for _physical_line, line in source_lines[cursor + 1 : next_marker]
             )
             invariants.append(
                 InvariantDeclaration(
@@ -480,11 +1169,12 @@ def parse_markdown_spec(
             path=rel_path,
             section_id=bullet_def.group("id"),
             title=title,
-            line=_token_start_line(token),
+            line=_token_start_line(token, parser_line_to_source_line),
             anchor=None,
             kind="bullet",
         )
         sections.append(section)
+        begin_directive_block(section)
         return section
 
     def process_heading(index: int) -> None:
@@ -498,11 +1188,17 @@ def parse_markdown_spec(
         inline = _next_inline(tokens, index)
         if inline is None:
             return
-        line_no = _token_start_line(heading_open)
+        line_no = _token_start_line(heading_open, parser_line_to_source_line)
         level = _heading_level(heading_open)
+        without_skip, heading_skips, skip_diagnostics = _extract_heading_skips(
+            inline.content,
+            path=rel_path,
+            line=line_no,
+        )
+        marker_diagnostics.extend(skip_diagnostics)
         heading_text, trailing_meta, trailing_codes, warnings = (
             _strip_recognized_trailing_html_marker(
-                inline.content,
+                without_skip,
                 allow_unknown_codes=allow_unknown_codes,
                 location=f"{rel_path}:{line_no}",
                 path=rel_path,
@@ -528,14 +1224,67 @@ def parse_markdown_spec(
             current_heading_section = section
             current_heading_level = level
             marker_window_open = True
+            begin_directive_block(section)
+            for candidate in heading_skips:
+                record_skip(candidate)
             if trailing_meta or trailing_codes:
                 record_marker(trailing_meta, trailing_codes, line_no)
+                if heading_skips:
+                    invalidate_block_skips(
+                        line_no,
+                        "an inline heading skip must be followed by an ordinary"
+                        " directive on the next source line",
+                    )
+        elif invalid_heading := _HEADING_ID_CANDIDATE_RE.match(heading_text):
+            candidate_id = invalid_heading.group("id")
+            candidate_title = invalid_heading.group("title")
+            if candidate_id and re.fullmatch(SECTION_ID, candidate_id):
+                message = "ID-bearing Markdown heading is missing a section title"
+            elif candidate_title and candidate_title.strip():
+                message = (
+                    "ID-bearing Markdown heading has an invalid or missing section ID"
+                )
+            else:
+                message = (
+                    "ID-bearing Markdown heading is missing a title and section ID"
+                )
+            issues.append(
+                Issue(
+                    code="SPEC_SECTION_HEADING_INVALID",
+                    severity="error",
+                    path=rel_path,
+                    line=line_no,
+                    message=message,
+                )
+            )
+            if level <= current_heading_level:
+                current_heading_section = None
+                marker_window_open = False
+                begin_directive_block(None)
+            for candidate in heading_skips:
+                candidate.invalid = True
+                skip_candidates.append(candidate)
         elif level <= current_heading_level:
             # A same-or-shallower ID-less heading starts a region no section
             # owns. Deeper ID-less subheadings stay inside the owner so local
             # prose structure does not detach the next mapping block.
             current_heading_section = None
             marker_window_open = False
+            begin_directive_block(None)
+            for candidate in heading_skips:
+                record_skip(candidate)
+        elif heading_skips:
+            for candidate in heading_skips:
+                candidate.invalid = True
+                skip_candidates.append(candidate)
+            marker_diagnostics.append(
+                _skip_diagnostic(
+                    "SUPPRESSION_INVALID_SYNTAX",
+                    path=rel_path,
+                    line=line_no,
+                    message="inline skip-obligation heading has no obligation owner",
+                )
+            )
 
     def process_paragraph(index: int) -> None:
         nonlocal last_non_marker_block
@@ -546,18 +1295,42 @@ def parse_markdown_spec(
         inline = _next_inline(tokens, index)
         if inline is None:
             return
-        line_no = _token_start_line(inline, _token_start_line(paragraph_open))
+        line_no = _token_start_line(
+            inline,
+            parser_line_to_source_line,
+            _token_start_line(paragraph_open, parser_line_to_source_line),
+        )
+        source_start = _token_start_line(
+            paragraph_open,
+            parser_line_to_source_line,
+            line_no,
+        )
+        source_end = _token_end_line(
+            paragraph_open,
+            parser_line_to_source_line,
+            source_start,
+        )
+        recognized_skip, contains_body = process_reserved_skip_lines(
+            _token_physical_content_lines(inline, parser_line_to_source_line)
+        )
+        if recognized_skip:
+            if contains_body:
+                marker_window_open = False
+                mapping_section = None
+                last_non_marker_block = "other"
+            return
         stripped = inline.content.strip()
         if stripped.lower().startswith("_traceability:") and parse_marker_text(
             stripped, line_no
         ):
             return
-        if process_invariant_paragraph(inline, line_no):
+        if process_invariant_paragraph(inline):
             marker_window_open = False
             mapping_section = None
             last_non_marker_block = "other"
             return
         if _MAPPING_MARKER_TEXT_RE.match(inline.content):
+            nonsemantic_lines.update(range(source_start, source_end + 1))
             marker_window_open = False
             mapping_section = current_heading_section
             if mapping_section is None:
@@ -584,11 +1357,12 @@ def parse_markdown_spec(
                     path=rel_path,
                     section_id=section_id,
                     title=title,
-                    line=_token_start_line(inline),
+                    line=_token_start_line(inline, parser_line_to_source_line),
                     anchor=None,
                     kind="invariant",
                 )
                 sections.append(section)
+                begin_directive_block(section)
                 marker_window_open = True
                 continue
             mapping_bullet = define_mapping_bullet_section(inline)
@@ -612,11 +1386,12 @@ def parse_markdown_spec(
                     path=rel_path,
                     section_id=section_id,
                     title=title,
-                    line=_token_start_line(inline),
+                    line=_token_start_line(inline, parser_line_to_source_line),
                     anchor=None,
                     kind="invariant",
                 )
                 sections.append(section)
+                begin_directive_block(section)
                 marker_window_open = True
             elif inline.content.strip():
                 marker_window_open = False
@@ -626,7 +1401,16 @@ def parse_markdown_spec(
         nonlocal mapping_section
         nonlocal marker_window_open
 
-        line_no = _token_start_line(token)
+        line_no = _token_start_line(token, parser_line_to_source_line)
+        recognized_skip, contains_body = process_reserved_skip_lines(
+            _token_physical_content_lines(token, parser_line_to_source_line)
+        )
+        if recognized_skip:
+            if contains_body:
+                marker_window_open = False
+                mapping_section = None
+                last_non_marker_block = "other"
+            return
         stripped = token.content.strip()
         if stripped.startswith("<!--") and parse_marker_text(stripped, line_no):
             return
@@ -685,7 +1469,67 @@ def parse_markdown_spec(
             last_non_marker_block = "other"
         index += 1
 
-    return ParsedSpec(
+    obligation_skips = _resolve_skip_candidates(
+        path=rel_path,
+        candidates=skip_candidates,
+        sections=sections,
+        invariants=invariants,
+        diagnostics=marker_diagnostics,
+    )
+
+    heading_boundaries = [
+        (
+            _token_start_line(token, parser_line_to_source_line),
+            _heading_level(token),
+        )
+        for token in tokens
+        if token.type == "heading_open"
+    ]
+    inline_ends: dict[int, int] = {}
+    for token in tokens:
+        if token.type != "inline":
+            continue
+        start = _token_start_line(token, parser_line_to_source_line)
+        inline_ends[start] = max(
+            inline_ends.get(start, start),
+            _token_end_line(token, parser_line_to_source_line, start),
+        )
+
+    section_spans: list[tuple[str, int, int]] = []
+    file_end_line = max(1, len(lines))
+    for section in sections:
+        if section.kind == "heading":
+            level = next(
+                (
+                    heading_level
+                    for heading_line, heading_level in heading_boundaries
+                    if heading_line == section.line
+                ),
+                0,
+            )
+            end_line = file_end_line
+            for heading_line, heading_level in heading_boundaries:
+                if heading_line > section.line and heading_level <= level:
+                    end_line = heading_line - 1
+                    break
+        else:
+            end_line = inline_ends.get(section.line, section.line)
+        section_spans.append((section.section_id, section.line, end_line))
+
+    nonsemantic_lines.update(item.line for item in obligation_skips)
+    section_search_text = tuple(
+        (
+            section_id,
+            "\n".join(
+                lines[line_no - 1]
+                for line_no in range(start_line, end_line + 1)
+                if line_no not in nonsemantic_lines
+            ),
+        )
+        for section_id, start_line, end_line in section_spans
+    )
+
+    result = ParsedSpec(
         path=rel_path,
         sections=tuple(sections),
         mappings=tuple(mappings),
@@ -698,5 +1542,11 @@ def parse_markdown_spec(
             (section_id, meta_flag, frozenset(codes))
             for section_id, (meta_flag, codes) in sorted(section_markers.items())
         ),
+        obligation_skips=obligation_skips,
         marker_diagnostics=tuple(marker_diagnostics),
+        section_spans=tuple(section_spans),
+        section_search_text=section_search_text,
     )
+    if parse_memo is not None:
+        cached_product.parsed_by_path[rel_path] = result
+    return result

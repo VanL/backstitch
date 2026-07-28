@@ -2,12 +2,13 @@
 
 Spec: docs/specs/02-backstitch-core.md [SC-4], [SC-9]
 Spec: docs/specs/05-backstitch-invariants.md [INV-1], [INV-4], [INV-7]
+Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-7], [EVC-8.2]
 Grammar and strictness table:
 docs/implementation/04-backstitch-style-traceability.md
 
-``scan_repository`` does the file IO; ``resolve`` is pure so the graph
-policy can be tested from parsed records alone. Neither calls ``llm``,
-the network, or target-project code [SC-4].
+``scan_snapshot_with_artifacts`` consumes one accepted snapshot; ``resolve``
+is pure so the graph policy can be tested from parsed records alone. Neither
+calls ``llm``, the network, or target-project code [SC-4].
 
 ``resolve`` orchestrates five phases over a shared ``_GraphIndex``:
 duplicate detection, mapping resolution, code-ref resolution, reciprocal
@@ -17,15 +18,22 @@ emission site; there is deliberately no code-to-severity table.
 
 from __future__ import annotations
 
+import dataclasses
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatch
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 
+from backstitch.canonical import canonical_repository_path
+from backstitch.code_parser import ParsedModule
 from backstitch.config import ProfileConfig
 from backstitch.exclusions import SuppressionDiagnostic
-from backstitch.markdown_specs import ParsedSpec, parse_markdown_spec
+from backstitch.markdown_specs import (
+    MarkdownParseMemo,
+    ParsedSpec,
+    parse_markdown_spec_bytes,
+)
 from backstitch.models import (
     CodeRef,
     Edge,
@@ -34,15 +42,20 @@ from backstitch.models import (
     Issue,
     Report,
     Severity,
+    SourceObligationSkip,
     SpecMapping,
     SpecSection,
+    issue_sort_key,
 )
 from backstitch.python_refs import (
     ParsedPython,
-    parse_python_file,
-    python_symbol_inventory,
+    parse_python_bytes,
+    python_symbol_inventory_bytes,
 )
-from backstitch.settings import DEFAULT_EXCLUDES, is_excluded
+from backstitch.repository_snapshot import (
+    RepositorySnapshot,
+    is_valid_repository_path,
+)
 
 _FINAL_NUMBER_RE = re.compile(r"^(?P<base>.*?)(?P<num>\d+)$")
 _ALPHA_PREFIX_RE = re.compile(r"^[A-Z][A-Za-z]*")
@@ -228,7 +241,22 @@ def _resolve_mappings(
                 symbol=mapping.target_symbol,
             )
             continue
-        target_path = mapping.target_path or ""
+        authored_target_path = mapping.target_path or ""
+        normalized_target = canonical_repository_path(authored_target_path)
+        if normalized_target is None:
+            _emit(
+                issues,
+                "MAPPING_PATH_MISSING",
+                "error",
+                mapping.spec_path,
+                mapping.line,
+                f"mapping token `{mapping.target}` is not a valid repo-relative path",
+                section_id=mapping.section_id,
+                symbol=mapping.target_symbol,
+                context="required",
+            )
+            continue
+        target_path = normalized_target.canonical
         if not mapping_path_exists.get(target_path, False):
             # [SC-4] ladder rungs 2-4: exact failed; try unique suffix or
             # basename, report ambiguity, or report missing -- never guess.
@@ -773,16 +801,7 @@ def _resolve_invariants(
 
 
 def _sort_report_parts(issues: list[Issue], edges: list[Edge]) -> None:
-    severity_rank = {"error": 0, "warning": 1, "info": 2}
-    issues.sort(
-        key=lambda i: (
-            severity_rank[i.severity],
-            i.path,
-            i.line or 0,
-            i.code,
-            i.message,
-        )
-    )
+    issues.sort(key=issue_sort_key)
     edges.sort(
         key=lambda e: (
             e.spec_path,
@@ -874,183 +893,34 @@ class ScanArtifacts:
     inline_code_ignores: dict[str, frozenset[str]]
     inline_code_span_ignores: dict[str, tuple[tuple[int, int, frozenset[str]], ...]]
     sections_with_markers: frozenset[tuple[str, str]]
+    obligation_skips: tuple[SourceObligationSkip, ...]
     marker_diagnostics: tuple[SuppressionDiagnostic, ...]
+    obligation_source_end_lines: dict[str, int]
+    obligation_search_text: dict[str, str]
 
 
-def scan_repository(
-    repo_root: Path,
-    profile: ProfileConfig,
-    exclude_globs: tuple[str, ...] | None = None,
-    *,
-    allow_unknown_suppression_codes: bool = False,
-) -> Report:
-    """Scan a target repository and resolve its trace graph.
-
-    Raises ``ScanError`` when the repo root itself is unusable; missing
-    configured roots become ``SCAN_ROOT_MISSING`` error findings instead.
-    ``exclude_globs`` are scan-boundary skips (CFG §6.7); ``None`` means
-    the built-in DEFAULT_EXCLUDES, while an explicit empty tuple excludes
-    nothing (`exclude = []` replaces the defaults). The CLI always passes
-    the resolved settings value -- the profile carries no exclude state.
-    """
-
-    report, _artifacts = scan_repository_with_artifacts(
-        repo_root,
-        profile,
-        exclude_globs,
-        allow_unknown_suppression_codes=allow_unknown_suppression_codes,
-    )
-    return report
-
-
-def scan_repository_with_artifacts(
-    repo_root: Path,
-    profile: ProfileConfig,
-    exclude_globs: tuple[str, ...] | None = None,
-    *,
-    allow_unknown_suppression_codes: bool = False,
+def _project_scan_artifacts(
+    report: Report,
+    parsed_specs: Sequence[ParsedSpec],
+    parsed_python: Sequence[ParsedPython],
 ) -> tuple[Report, ScanArtifacts]:
-    """``scan_repository`` plus the suppression inputs the CLI needs."""
-
-    root = repo_root.resolve()
-    if not root.is_dir():
-        raise ScanError(f"repository root is not a directory: {repo_root}")
-
-    # CFG §6.7/§6.9: exclusion is is_excluded's component-aware match (a
-    # bare `venv` excludes the whole subtree at any depth), and the ONLY
-    # skip policy -- an explicit `exclude = []` scans everything, so no
-    # hard-coded dot-directory rule may sit underneath it.
-    active_excludes = DEFAULT_EXCLUDES if exclude_globs is None else exclude_globs
-    scan_issues: list[Issue] = []
-
-    def excluded(path: Path) -> bool:
-        rel = path.relative_to(root).as_posix()
-        return is_excluded(rel, active_excludes)
-
-    def collect(roots: Sequence[str], pattern: str) -> list[Path]:
-        files: list[Path] = []
-        seen: set[Path] = set()
-        for rel_root in roots:
-            base = (root / rel_root).resolve()
-            # CFG §4.3 allows env expansion to produce an absolute root,
-            # but every root must stay INSIDE the target repository: report
-            # paths are repo-relative by contract. Outside -> invocation
-            # error with a one-line diagnostic, never a raw subpath
-            # traceback.
-            if not base.is_relative_to(root):
-                raise ScanError(
-                    f"configured root `{rel_root}` is outside the"
-                    f" repository root {root}"
-                )
-            if not base.is_dir():
-                scan_issues.append(
-                    Issue(
-                        code="SCAN_ROOT_MISSING",
-                        severity="error",
-                        path=rel_root,
-                        line=None,
-                        message=f"configured root `{rel_root}` does not exist",
-                    )
-                )
-                continue
-            for path in sorted(base.rglob(pattern)):
-                if path.is_file() and not excluded(path) and path not in seen:
-                    seen.add(path)
-                    files.append(path)
-        return files
-
-    parsed_specs: list[ParsedSpec] = []
-    parsed_python: list[ParsedPython] = []
-
-    def unreadable(path: Path, exc: Exception) -> None:
-        scan_issues.append(
-            Issue(
-                code="FILE_UNREADABLE",
-                severity="error",
-                path=path.relative_to(root).as_posix(),
-                line=None,
-                message=f"could not read file: {exc}",
-            )
-        )
-
-    for path in collect(profile.spec_roots, "*.md"):
-        try:
-            parsed_specs.append(
-                parse_markdown_spec(
-                    path,
-                    root,
-                    allow_unknown_codes=allow_unknown_suppression_codes,
-                )
-            )
-        except (OSError, UnicodeDecodeError) as exc:
-            unreadable(path, exc)
-    for path in collect(profile.code_roots, "*.py"):
-        try:
-            parsed_python.append(
-                parse_python_file(
-                    path,
-                    root,
-                    allow_unknown_codes=allow_unknown_suppression_codes,
-                    is_test_file=_is_under(
-                        path.relative_to(root).as_posix(), profile.test_roots
-                    ),
-                )
-            )
-        except (OSError, UnicodeDecodeError) as exc:
-            unreadable(path, exc)
-
-    scan_files = sorted(
-        {p.path for p in parsed_specs} | {p.path for p in parsed_python}
-    )
-
-    mapping_path_exists: dict[str, bool] = {}
-    python_symbols: dict[str, frozenset[str] | None] = {}
-    for spec in parsed_specs:
-        for mapping in spec.mappings:
-            if mapping.target_path is None:
-                continue
-            target = mapping.target_path
-            if target not in mapping_path_exists:
-                # Directory ownership (`weft/core/monitor/`) is a valid
-                # mapping target, so existence covers files and directories.
-                mapping_path_exists[target] = (root / target).exists()
-            inventory_target: str | None = None
-            if mapping_path_exists[target]:
-                inventory_target = target
-            else:
-                # [SC-4] ladder rung 2: a unique suffix candidate will be
-                # the effective path, so its symbol inventory is needed too.
-                candidates = ladder_candidates(target, scan_files)
-                if len(candidates) == 1:
-                    inventory_target = candidates[0]
-            if (
-                mapping.kind == "path_symbol"
-                and inventory_target is not None
-                and inventory_target.endswith(".py")
-                and inventory_target not in python_symbols
-            ):
-                python_symbols[inventory_target] = python_symbol_inventory(
-                    root / inventory_target
-                )
-
-    report = resolve(
-        profile=profile,
-        repo_root=str(root),
-        parsed_specs=parsed_specs,
-        parsed_python=parsed_python,
-        scan_issues=scan_issues,
-        mapping_path_exists=mapping_path_exists,
-        python_symbols=python_symbols,
-        scan_files=scan_files,
-    )
+    """Project suppression and skip artifacts from already parsed sources."""
 
     section_meta: dict[tuple[str, str], bool] = {}
     inline_file_ignores: dict[str, frozenset[str]] = {}
     inline_spec_ignores: dict[tuple[str, str], frozenset[str]] = {}
     sections_with_markers: set[tuple[str, str]] = set()
+    obligation_skips: list[SourceObligationSkip] = []
     marker_diagnostics: list[SuppressionDiagnostic] = []
+    obligation_source_end_lines: dict[str, int] = {}
+    obligation_search_text: dict[str, str] = {}
     for spec in parsed_specs:
         marker_diagnostics.extend(spec.marker_diagnostics)
+        obligation_skips.extend(spec.obligation_skips)
+        for section_id, _start_line, end_line in spec.section_spans:
+            obligation_source_end_lines[f"{spec.path}#{section_id}"] = end_line
+        for section_id, search_text in spec.section_search_text:
+            obligation_search_text[f"{spec.path}#{section_id}"] = search_text
         marked = {section_id for section_id, _, _ in spec.section_markers}
         sections_with_markers.update((spec.path, sid) for sid in marked)
         if spec.file_meta:
@@ -1066,6 +936,54 @@ def scan_repository_with_artifacts(
                 section_meta[(spec.path, section_id)] = True
             if codes:
                 inline_spec_ignores[(spec.path, section_id)] = codes
+    skips_by_id: dict[str, list[SourceObligationSkip]] = {}
+    for item in obligation_skips:
+        skips_by_id.setdefault(item.obligation_id, []).append(item)
+    duplicate_skip_ids = {
+        obligation_id for obligation_id, items in skips_by_id.items() if len(items) > 1
+    }
+    for obligation_id in sorted(duplicate_skip_ids):
+        duplicates = sorted(
+            skips_by_id[obligation_id], key=lambda item: (item.path, item.line)
+        )
+        marker_diagnostics.append(
+            SuppressionDiagnostic(
+                code="SUPPRESSION_INVALID_SYNTAX",
+                path=duplicates[1].path,
+                line=duplicates[1].line,
+                message=(
+                    f"{duplicates[1].path}:{duplicates[1].line}: duplicate"
+                    f" skip-obligation for {obligation_id}"
+                ),
+            )
+        )
+    obligation_skips = [
+        item
+        for item in obligation_skips
+        if item.obligation_id not in duplicate_skip_ids
+    ]
+    obligation_skips.sort(key=lambda item: (item.path, item.line, item.obligation_id))
+    if obligation_skips:
+        issues = list(report.issues)
+        for item in obligation_skips:
+            is_section = item.target_id == item.owner_section_id
+            issues.append(
+                Issue(
+                    code="OBLIGATION_SKIPPED",
+                    severity="info",
+                    path=item.path,
+                    line=item.line,
+                    message=(
+                        f"obligation {item.obligation_id} is skipped for semantic "
+                        f"evaluation: {item.reason}"
+                    ),
+                    section_id=item.owner_section_id if is_section else None,
+                    context="source_skip",
+                    invariant_id=None if is_section else item.target_id,
+                )
+            )
+        _sort_report_parts(issues, [])
+        report = dataclasses.replace(report, issues=tuple(issues))
     inline_code_ignores = {
         p.path: p.module_noqa for p in parsed_python if p.module_noqa
     }
@@ -1073,6 +991,10 @@ def scan_repository_with_artifacts(
         p.path: p.span_noqa for p in parsed_python if p.span_noqa
     }
     marker_diagnostics.extend(d for p in parsed_python for d in p.noqa_diagnostics)
+    for declaration in report.invariants:
+        obligation_search_text[f"invariant::{declaration.invariant_id}"] = (
+            declaration.statement
+        )
 
     return report, ScanArtifacts(
         section_meta=section_meta,
@@ -1081,5 +1003,178 @@ def scan_repository_with_artifacts(
         inline_code_ignores=inline_code_ignores,
         inline_code_span_ignores=inline_code_span_ignores,
         sections_with_markers=frozenset(sections_with_markers),
+        obligation_skips=tuple(obligation_skips),
         marker_diagnostics=tuple(marker_diagnostics),
+        obligation_source_end_lines=obligation_source_end_lines,
+        obligation_search_text=obligation_search_text,
     )
+
+
+def _snapshot_roots(snapshot: RepositorySnapshot, key: str) -> tuple[str, ...]:
+    identity = snapshot.identity_document()
+    semantic_config = identity.get("semantic_config")
+    if not isinstance(semantic_config, dict):
+        raise ScanError("repository snapshot has no semantic configuration")
+    values = semantic_config.get(key)
+    if not isinstance(values, list) or any(
+        not isinstance(value, str) for value in values
+    ):
+        raise ScanError(f"repository snapshot has invalid `{key}`")
+    return tuple(value for value in values if isinstance(value, str))
+
+
+def scan_snapshot_with_artifacts(
+    snapshot: RepositorySnapshot,
+    repo_root_display: str,
+    profile: ProfileConfig,
+    *,
+    allow_unknown_suppression_codes: bool = False,
+    python_parse_memo: MutableMapping[tuple[str, str], ParsedModule] | None = None,
+    markdown_parse_memo: MarkdownParseMemo | None = None,
+) -> tuple[Report, ScanArtifacts]:
+    """Resolve a trace graph using only an accepted repository snapshot."""
+
+    spec_roots = _snapshot_roots(snapshot, "spec_roots")
+    code_roots = _snapshot_roots(snapshot, "code_roots")
+    test_roots = _snapshot_roots(snapshot, "test_roots")
+    scanned_roots = frozenset((*spec_roots, *code_roots))
+    scan_issues = [
+        Issue(
+            code="SCAN_ROOT_MISSING",
+            severity="error",
+            path=root,
+            line=None,
+            message=f"configured root `{root}` does not exist",
+        )
+        for root in snapshot.missing_roots
+        if root in scanned_roots
+    ]
+    parsed_specs: list[ParsedSpec] = []
+    parsed_python: list[ParsedPython] = []
+
+    for row in snapshot.files:
+        is_spec = row.path.endswith(".md") and _is_under(row.path, spec_roots)
+        is_python = row.path.endswith(".py") and _is_under(row.path, code_roots)
+        if not is_spec and not is_python:
+            continue
+        if row.raw_bytes is None:
+            scan_issues.append(
+                Issue(
+                    code="FILE_UNREADABLE",
+                    severity="error",
+                    path=row.path,
+                    line=None,
+                    message=f"could not read file: {row.error_class}",
+                )
+            )
+            continue
+        try:
+            if is_spec:
+                parsed_specs.append(
+                    parse_markdown_spec_bytes(
+                        row.raw_bytes,
+                        row.path,
+                        allow_unknown_codes=allow_unknown_suppression_codes,
+                        parse_memo=markdown_parse_memo,
+                    )
+                )
+            else:
+                parsed_python.append(
+                    parse_python_bytes(
+                        row.raw_bytes,
+                        row.path,
+                        allow_unknown_codes=allow_unknown_suppression_codes,
+                        is_test_file=_is_under(row.path, test_roots),
+                        parse_memo=python_parse_memo,
+                    )
+                )
+        except UnicodeDecodeError:
+            scan_issues.append(
+                Issue(
+                    code="FILE_UNREADABLE",
+                    severity="error",
+                    path=row.path,
+                    line=None,
+                    message="could not read file: invalid UTF-8",
+                )
+            )
+
+    scan_files = sorted(
+        {item.path for item in parsed_specs} | {item.path for item in parsed_python}
+    )
+    mapping_path_exists: dict[str, bool] = {}
+    python_symbols: dict[str, frozenset[str] | None] = {}
+    for spec in parsed_specs:
+        for mapping in spec.mappings:
+            if mapping.target_path is None:
+                continue
+            normalized_target = canonical_repository_path(mapping.target_path)
+            target = (
+                mapping.target_path
+                if normalized_target is None
+                else normalized_target.canonical
+            )
+            if target not in mapping_path_exists:
+                raw_target_path = (
+                    mapping.target.partition("::")[0]
+                    if mapping.kind == "path_symbol"
+                    else mapping.target
+                )
+                mapping_path_exists[target] = (
+                    is_valid_repository_path(target)
+                    and snapshot.path_exists(target)
+                    and (
+                        not raw_target_path.endswith("/")
+                        or snapshot.path_kind(target) == "directory"
+                    )
+                )
+            inventory_target: str | None = None
+            if mapping_path_exists[target]:
+                inventory_target = target
+            else:
+                candidates = ladder_candidates(target, scan_files)
+                if len(candidates) == 1:
+                    inventory_target = candidates[0]
+            if (
+                mapping.kind == "path_symbol"
+                and inventory_target is not None
+                and inventory_target.endswith(".py")
+                and inventory_target not in python_symbols
+            ):
+                try:
+                    target_row = snapshot.file(inventory_target)
+                    source = target_row.raw_bytes
+                except KeyError:
+                    target_row = None
+                    source = None
+                parsed_module = (
+                    None
+                    if (
+                        python_parse_memo is None
+                        or target_row is None
+                        or target_row.raw_sha256 is None
+                    )
+                    else python_parse_memo.get((target_row.path, target_row.raw_sha256))
+                )
+                python_symbols[inventory_target] = (
+                    None
+                    if source is None
+                    else python_symbol_inventory_bytes(
+                        source,
+                        rel_path=inventory_target,
+                        parsed_module=parsed_module,
+                        parse_memo=python_parse_memo,
+                    )
+                )
+
+    report = resolve(
+        profile=profile,
+        repo_root=repo_root_display,
+        parsed_specs=parsed_specs,
+        parsed_python=parsed_python,
+        scan_issues=scan_issues,
+        mapping_path_exists=mapping_path_exists,
+        python_symbols=python_symbols,
+        scan_files=scan_files,
+    )
+    return _project_scan_artifacts(report, parsed_specs, parsed_python)

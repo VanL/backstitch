@@ -1,6 +1,7 @@
 """Environment doctor for the semantic-analysis lane.
 
 Spec: docs/specs/02-backstitch-core.md [SC-14]
+Spec: docs/specs/03-backstitch-configuration.md [CFG-5.1]
 Plan: docs/plans/2026-07-06-local-model-catalog-and-doctor-plan.md
 
 Diagnoses the `llm`/model/endpoint environment `analyze` depends on, as an
@@ -56,17 +57,16 @@ class CheckResult:
 
 
 def run_doctor(
-    model_arg: str | None,
+    model: str | None,
     *,
-    configured: str | None,
+    model_source: str,
     probe: bool,
 ) -> list[CheckResult]:
     """Run every [SC-14] check in contract order and return the results.
 
-    ``model_arg`` is the CLI ``--model`` value; ``configured`` is the
-    config-file ``[analyze].model`` value. Precedence between them (and
-    ``LLM_MODEL`` and the ``llm`` default) belongs to
-    ``resolve_model_name`` — never re-implemented here.
+    ``model`` and ``model_source`` come from the invocation's canonical
+    ``BackstitchSettings`` snapshot. Doctor never rereads Backstitch
+    configuration or environment inputs after that boundary ([CFG-5.1]).
     """
 
     results: list[CheckResult] = []
@@ -74,13 +74,13 @@ def run_doctor(
     llm_ok, llm_result = _check_llm_import()
     results.append(llm_result)
 
-    model, model_result = _check_model(llm_ok, model_arg, configured)
+    resolved_model, model_result = _check_model(llm_ok, model, model_source)
     results.append(model_result)
 
-    results.append(_check_credential(model))
-    results.append(_check_json_mode(model))
+    results.append(_check_credential(resolved_model))
+    results.append(_check_json_mode(resolved_model))
     results.append(_check_memory())
-    results.append(_check_endpoint(model, probe))
+    results.append(_check_endpoint(resolved_model, probe))
 
     assert [result.name for result in results] == list(CHECK_ORDER)
     # One-line details are part of the contract; model/config values are
@@ -150,8 +150,8 @@ def _installed_llm_version() -> str:
 
 def _check_model(
     llm_ok: bool,
-    model_arg: str | None,
     configured: str | None,
+    source: str,
 ) -> tuple[Any | None, CheckResult]:
     if not llm_ok:
         return None, CheckResult("model", "skip", "not evaluated: llm failed to import")
@@ -160,8 +160,7 @@ def _check_model(
 
     from backstitch.analysis_llm import resolve_model_name
 
-    resolved = resolve_model_name(model_arg, configured=configured)
-    source = _model_source(model_arg, configured)
+    resolved = resolve_model_name(None, configured=configured)
     try:
         model = llm.get_model(resolved) if resolved else llm.get_model()
     except llm.UnknownModelError as exc:
@@ -176,22 +175,6 @@ def _check_model(
         )
     name = resolved if resolved else getattr(model, "model_id", "default")
     return model, CheckResult("model", "pass", f"resolved {name} (from {source})")
-
-
-def _model_source(model_arg: str | None, configured: str | None) -> str:
-    """Presentation of which [CFG-5] source won.
-
-    Mirrors (never replaces) ``resolve_model_name``: the value always comes
-    from that helper; this only labels the winning source for the report.
-    """
-
-    if model_arg is not None and model_arg.strip():
-        return "--model"
-    if os.environ.get("LLM_MODEL", "").strip():
-        return "LLM_MODEL environment variable"
-    if configured is not None and configured.strip():
-        return "config [analyze].model"
-    return "llm default model"
 
 
 def _check_credential(model: Any | None) -> CheckResult:

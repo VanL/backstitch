@@ -18,12 +18,14 @@ from typing import Any, Literal
 Severity = Literal["error", "warning", "info"]
 DiagnosticLevel = Literal["error", "warning", "info", "off"]
 DiagnosticStatus = Literal["implemented", "reserved", "deprecated", "redirected"]
+DiagnosticFamily = Literal["deterministic", "semantic"]
 
 SEVERITIES: frozenset[str] = frozenset({"error", "warning", "info"})
 DIAGNOSTIC_LEVELS: frozenset[str] = frozenset({"error", "warning", "info", "off"})
 DIAGNOSTIC_STATUSES: frozenset[str] = frozenset(
     {"implemented", "reserved", "deprecated", "redirected"}
 )
+DIAGNOSTIC_FAMILIES: frozenset[str] = frozenset({"deterministic", "semantic"})
 DEFAULTS_RESOURCE = "defaults.toml"
 OFF_AUDIT_REASON = "diagnostic level off"
 
@@ -37,6 +39,7 @@ class DiagnosticDefinition:
     code: str
     short_code: str
     status: DiagnosticStatus
+    family: DiagnosticFamily
     summary: str
     contexts: tuple[str, ...] = ()
     replacement: str | None = None
@@ -155,6 +158,7 @@ def parse_registry(raw: dict[str, Any], *, source: str) -> DiagnosticRegistry:
         table = _expect_table(value, f"diagnostics.registry.{code}")
         short = table.get("short")
         status = table.get("status")
+        family = table.get("family")
         summary = table.get("summary")
         replacement = table.get("replacement")
         contexts = table.get("contexts", [])
@@ -167,6 +171,8 @@ def parse_registry(raw: dict[str, Any], *, source: str) -> DiagnosticRegistry:
             )
         if status not in DIAGNOSTIC_STATUSES:
             raise DiagnosticConfigError(f"{code} has invalid status {status!r}")
+        if family not in DIAGNOSTIC_FAMILIES:
+            raise DiagnosticConfigError(f"{code} has invalid family {family!r}")
         if not isinstance(summary, str) or not summary.strip():
             raise DiagnosticConfigError(f"{code} summary must be a non-empty string")
         if replacement is not None and not isinstance(replacement, str):
@@ -179,6 +185,7 @@ def parse_registry(raw: dict[str, Any], *, source: str) -> DiagnosticRegistry:
             code=code,
             short_code=short,
             status=status,
+            family=family,
             summary=summary,
             contexts=tuple(contexts),
             replacement=replacement,
@@ -317,6 +324,21 @@ def is_ordinary_diagnostic_code(code_or_short: str) -> bool:
 
 def implemented_codes() -> frozenset[str]:
     return default_registry().implemented_codes()
+
+
+def deterministic_issue_codes() -> frozenset[str]:
+    """Implemented registry codes allowed in deterministic report issues.
+
+    Semantic BSA diagnostics share the registry and policy engine but are
+    projected only from canonical semantic results; they must never
+    enter deterministic packet/report issue records ([SC-11]).
+    """
+
+    return frozenset(
+        code
+        for code, definition in default_registry().definitions.items()
+        if definition.status == "implemented" and definition.family == "deterministic"
+    )
 
 
 def always_error_codes() -> frozenset[str]:

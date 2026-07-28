@@ -29,8 +29,55 @@ process_spec_globs = []
 format = "text"
 warnings_as_errors = false
 
+[obligations]
+section_required_roles = ["implementation"]
+page_size = 5
+maximum_page_size = 100
+maximum_response_bytes = 65536
+maximum_candidate_items = 2000
+maximum_catalog_items = 100000
+maximum_lexical_seeds = 10
+maximum_snapshot_files = 20000
+maximum_file_bytes = 5000000
+maximum_snapshot_bytes = 100000000
+maximum_work_units = 2000000
+maximum_packet_bytes = 10000000
+maximum_packet_report_bytes = 10000000
+maximum_call_seconds = 10.0
+snapshot_capture_attempts = 3
+static_neighbor_depth = 1
+
 [analyze]
+backend_id = "llm"
+plugin_id = ""
+plugin_distribution_name = ""
+model = ""
+model_revision = ""
 concurrency = 1
+json_mode = "prefer"
+temperature = 0.0
+seed = 42
+max_tokens = 512
+cache_path = ".backstitch/semantic-cache"
+cache_mode = "off"
+search_epoch = "1"
+require_complete = false
+required_kinds = []
+minimum_packets = 0
+maximum_packets = 1000
+maximum_prompt_bytes = 10000000
+finding_handling = "report"
+maximum_provider_calls = 1000
+lock_wait_timeout_seconds = 300
+maximum_runtime_seconds = 1800
+maximum_estimated_cost_microusd = 0
+input_cost_microusd_per_million_tokens = 0
+output_cost_microusd_per_million_tokens = 0
+input_token_overhead = 256
+cost_rate_source = ""
+
+[verify]
+enabled = false
 
 [diagnostics]
 default_level = "warning"
@@ -43,6 +90,7 @@ select = [
   "FILE_UNREADABLE",
   "SPEC_FILE_MISSING",
   "SPEC_SECTION_MISSING",
+  "SPEC_SECTION_HEADING_INVALID",
   "SPEC_ANCHOR_MISSING",
   "REF_RANGE_UNSUPPORTED",
   "TARGET_PATH_AMBIGUOUS",
@@ -72,330 +120,590 @@ select = [
 ]
 level = "warning"
 
+# [SEM-6]: each semantic code/state pair is an exact selector so semantic
+# failure authority can audit the actual winning rule. Keep these rules and
+# their registry contexts synchronized as one enumerable contract.
+[[diagnostics.levels]]
+select = ["SEMANTIC_CONFIRMED_MISMATCH:evidence_bound"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_CONFIRMED_MISMATCH:verification_indeterminate"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_CONFIRMED_MISMATCH:independently_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_CONFIRMED_MISMATCH:mechanically_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_CONFIRMED_MISMATCH:human_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_CONFIRMED_MISMATCH:disputed_by_verifier"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_CONFIRMED_MISMATCH:human_rejected"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_PROBABLE_MISMATCH:evidence_bound"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_PROBABLE_MISMATCH:verification_indeterminate"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_PROBABLE_MISMATCH:independently_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_PROBABLE_MISMATCH:mechanically_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_PROBABLE_MISMATCH:human_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_PROBABLE_MISMATCH:disputed_by_verifier"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_PROBABLE_MISMATCH:human_rejected"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_MISSING_TRACE:evidence_bound"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_MISSING_TRACE:verification_indeterminate"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_MISSING_TRACE:independently_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_MISSING_TRACE:mechanically_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_MISSING_TRACE:human_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_MISSING_TRACE:disputed_by_verifier"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_MISSING_TRACE:human_rejected"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_WEAK_BINDING:evidence_bound"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_WEAK_BINDING:verification_indeterminate"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_WEAK_BINDING:independently_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_WEAK_BINDING:mechanically_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_WEAK_BINDING:human_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_WEAK_BINDING:disputed_by_verifier"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_WEAK_BINDING:human_rejected"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_AMBIGUOUS:evidence_bound"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_AMBIGUOUS:verification_indeterminate"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_AMBIGUOUS:independently_verified"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_AMBIGUOUS:mechanically_verified"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_AMBIGUOUS:human_verified"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_AMBIGUOUS:disputed_by_verifier"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_AMBIGUOUS:human_rejected"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["OBLIGATION_SKIPPED:source_skip"]
+level = "info"
+
 [diagnostics.registry.SCAN_ROOT_MISSING]
 short = "BST001"
 status = "implemented"
+family = "deterministic"
 summary = "Configured spec, plan, or code root was not found"
 
 [diagnostics.registry.FILE_UNREADABLE]
 short = "BST002"
 status = "implemented"
+family = "deterministic"
 summary = "File could not be read while scanning"
 
 [diagnostics.registry.CONFIG_TOML_INVALID]
 short = "BST003"
 status = "reserved"
+family = "deterministic"
 summary = "Configuration TOML could not be parsed"
 
 [diagnostics.registry.CONFIG_FILE_MISSING]
 short = "BST004"
 status = "reserved"
+family = "deterministic"
 summary = "Requested configuration file was not found"
 
 [diagnostics.registry.CONFIG_EXTEND_MISSING]
 short = "BST005"
 status = "reserved"
+family = "deterministic"
 summary = "Extended configuration file was not found"
 
 [diagnostics.registry.CONFIG_EXTEND_CYCLE]
 short = "BST006"
 status = "reserved"
+family = "deterministic"
 summary = "Configuration extend chain contains a cycle"
 
 [diagnostics.registry.CONFIG_UNKNOWN_KEY]
 short = "BST007"
 status = "reserved"
+family = "deterministic"
 summary = "Configuration contains an unknown key"
 
 [diagnostics.registry.CONFIG_TYPE_INVALID]
 short = "BST008"
 status = "reserved"
+family = "deterministic"
 summary = "Configuration value has the wrong type"
 
 [diagnostics.registry.CONFIG_VALUE_INVALID]
 short = "BST009"
 status = "reserved"
+family = "deterministic"
 summary = "Configuration value is outside the allowed vocabulary"
 
 [diagnostics.registry.CONFIG_PROFILE_UNKNOWN]
 short = "BST010"
 status = "reserved"
+family = "deterministic"
 summary = "Configuration names an unknown built-in profile"
 
 [diagnostics.registry.REPORT_JSON_INVALID]
 short = "BST011"
 status = "reserved"
+family = "deterministic"
 summary = "Deterministic report JSON could not be parsed"
 
 [diagnostics.registry.REPORT_SHAPE_INVALID]
 short = "BST012"
 status = "reserved"
+family = "deterministic"
 summary = "Deterministic report does not match the expected shape"
 
 [diagnostics.registry.REPORT_SUMMARY_MISMATCH]
 short = "BST013"
 status = "reserved"
+family = "deterministic"
 summary = "Deterministic report summary disagrees with report contents"
 
 [diagnostics.registry.OUTPUT_WRITE_FAILED]
 short = "BST014"
 status = "reserved"
+family = "deterministic"
 summary = "Requested output file could not be written"
 
 [diagnostics.registry.REPO_ROOT_INVALID]
 short = "BST015"
 status = "reserved"
+family = "deterministic"
 summary = "Repository root is invalid"
 
 [diagnostics.registry.INTERNAL_ERROR]
 short = "BST016"
 status = "reserved"
+family = "deterministic"
 summary = "Backstitch hit an internal failure"
 
 [diagnostics.registry.SPEC_FILE_MISSING]
 short = "BSS001"
 status = "implemented"
+family = "deterministic"
 summary = "Referenced spec file does not exist"
 
 [diagnostics.registry.SPEC_SECTION_MISSING]
 short = "BSS002"
 status = "implemented"
+family = "deterministic"
 summary = "File-qualified section reference was not found in that file"
 
 [diagnostics.registry.SPEC_SECTION_AMBIGUOUS]
 short = "BSS003"
 status = "implemented"
+family = "deterministic"
 summary = "Bare section ID matches multiple sections"
 contexts = ["asserted", "weak"]
 
 [diagnostics.registry.SPEC_SECTION_DUPLICATE]
 short = "BSS004"
 status = "implemented"
+family = "deterministic"
 summary = "Section ID is defined more than once"
 
 [diagnostics.registry.SPEC_ANCHOR_MISSING]
 short = "BSS005"
 status = "implemented"
+family = "deterministic"
 summary = "File anchor reference was not found"
 
 [diagnostics.registry.REF_RANGE_UNSUPPORTED]
 short = "BSS006"
 status = "implemented"
+family = "deterministic"
 summary = "Section range could not be expanded"
 
 [diagnostics.registry.SPEC_SECTION_UNMAPPED]
 short = "BSS007"
 status = "implemented"
+family = "deterministic"
 summary = "Spec section has no implementation mapping"
+
+[diagnostics.registry.SPEC_SECTION_HEADING_INVALID]
+short = "BSS008"
+status = "implemented"
+family = "deterministic"
+summary = "Reserved ID-bearing Markdown heading is malformed"
 
 [diagnostics.registry.MAPPING_PATH_MISSING]
 short = "BSM001"
 status = "implemented"
+family = "deterministic"
 summary = "Mapping path does not exist"
 contexts = ["required", "plan-artifact"]
 
 [diagnostics.registry.MAPPING_PATH_INEXACT]
 short = "BSM002"
 status = "implemented"
+family = "deterministic"
 summary = "Mapping token resolved through a unique suffix or basename match"
 
 [diagnostics.registry.TARGET_PATH_AMBIGUOUS]
 short = "BSM003"
 status = "implemented"
+family = "deterministic"
 summary = "Mapping token matches multiple paths"
 
 [diagnostics.registry.MAPPING_SYMBOL_MISSING]
 short = "BSM004"
 status = "implemented"
+family = "deterministic"
 summary = "Explicit path-symbol mapping names a missing symbol"
 
 [diagnostics.registry.MAPPING_SYMBOL_UNRESOLVED]
 short = "BSM005"
 status = "implemented"
+family = "deterministic"
 summary = "Advisory mapping symbol could not be resolved"
 
 [diagnostics.registry.MAPPING_BLOCK_OWNERLESS]
 short = "BSM006"
 status = "implemented"
+family = "deterministic"
 summary = "Mapping block has no preceding ID-bearing heading"
 
 [diagnostics.registry.PYTHON_SYNTAX_ERROR]
 short = "BSC001"
 status = "implemented"
+family = "deterministic"
 summary = "Python file could not be parsed"
 
 [diagnostics.registry.CODE_REF_BARE_UNRESOLVED]
 short = "BSC002"
 status = "implemented"
+family = "deterministic"
 summary = "Known-prefix bare reference matches no section"
 
 [diagnostics.registry.SPEC_MAPPING_RECIPROCAL_MISSING]
 short = "BSC003"
 status = "implemented"
+family = "deterministic"
 summary = "Code backlink exists without a reciprocal spec mapping"
 
 [diagnostics.registry.CODE_BACKLINK_RECIPROCAL_MISSING]
 short = "BSC004"
 status = "implemented"
+family = "deterministic"
 summary = "Spec mapping exists without a reciprocal code backlink"
 
 [diagnostics.registry.CODE_REF_BROAD]
 short = "BSC005"
 status = "implemented"
+family = "deterministic"
 summary = "Document-only code reference should cite a specific section"
 
 [diagnostics.registry.CODE_REF_PLANNED_SPEC]
 short = "BSC006"
 status = "implemented"
+family = "deterministic"
 summary = "Shipped code cites a planned spec"
 
 [diagnostics.registry.CODE_REF_EXPLORATORY_SPEC]
 short = "BSC007"
 status = "implemented"
+family = "deterministic"
 summary = "Shipped code cites an exploratory spec"
 
 [diagnostics.registry.CODE_REF_UNMAPPED_FROM_SPEC]
 short = "BSC008"
 status = "implemented"
+family = "deterministic"
 summary = "Code cites a spec section whose mapping does not cover that code"
 
 [diagnostics.registry.INVARIANT_UNTESTED]
 short = "BSI001"
 status = "implemented"
+family = "deterministic"
 summary = "Unique invariant declaration has no valid binding test"
 contexts = ["required", "draft"]
 
 [diagnostics.registry.INVARIANT_UNKNOWN]
 short = "BSI002"
 status = "implemented"
+family = "deterministic"
 summary = "Valid test binding names no invariant declaration"
 
 [diagnostics.registry.INVARIANT_DUPLICATE]
 short = "BSI003"
 status = "implemented"
+family = "deterministic"
 summary = "Invariant ID is duplicate or collides with a section ID"
 
 [diagnostics.registry.INVARIANT_BINDING_NOT_TEST]
 short = "BSI004"
 status = "implemented"
+family = "deterministic"
 summary = "Invariant binding marker is outside valid test scope"
 
 [diagnostics.registry.INVARIANT_MARKER_INVALID]
 short = "BSI005"
 status = "implemented"
+family = "deterministic"
 summary = "Reserved invariant marker syntax or owner is invalid"
 
 [diagnostics.registry.SUPPRESSION_UNUSED]
 short = "BSX001"
 status = "implemented"
+family = "deterministic"
 summary = "Suppression matched no diagnostic"
 
 [diagnostics.registry.SUPPRESSION_WITHOUT_CODE]
 short = "BSX002"
 status = "reserved"
+family = "deterministic"
 summary = "Suppression did not name a diagnostic code"
 
 [diagnostics.registry.SUPPRESSION_UNKNOWN_CODE]
 short = "BSX003"
 status = "implemented"
+family = "deterministic"
 summary = "Suppression names an unknown diagnostic code"
 
 [diagnostics.registry.SUPPRESSION_INVALID_SYNTAX]
 short = "BSX004"
 status = "implemented"
+family = "deterministic"
 summary = "Suppression directive has invalid syntax"
 
 [diagnostics.registry.SUPPRESSION_UNSUPPRESSIBLE_CODE]
 short = "BSX005"
 status = "implemented"
+family = "deterministic"
 summary = "Suppression attempted to hide a non-suppressible diagnostic"
 
 [diagnostics.registry.SUPPRESSION_REDIRECTED_CODE]
 short = "BSX006"
 status = "reserved"
+family = "deterministic"
 summary = "Suppression used a redirected diagnostic code"
 
 [diagnostics.registry.SUPPRESSION_DEPRECATED_CODE]
 short = "BSX007"
 status = "reserved"
+family = "deterministic"
 summary = "Suppression used a deprecated diagnostic code"
 
 [diagnostics.registry.SUPPRESSION_DUPLICATE_CODE]
 short = "BSX008"
 status = "reserved"
+family = "deterministic"
 summary = "Suppression named the same diagnostic code more than once"
 
 [diagnostics.registry.SUPPRESSION_BROAD_CODE]
 short = "BSX009"
 status = "reserved"
+family = "deterministic"
 summary = "Suppression uses a broad selector"
 
 [diagnostics.registry.SUPPRESSION_REASON_MISSING]
 short = "BSX010"
-status = "reserved"
+status = "implemented"
+family = "deterministic"
 summary = "Suppression lacks a required reason"
+
+[diagnostics.registry.OBLIGATION_SKIPPED]
+short = "BSE001"
+status = "implemented"
+family = "deterministic"
+summary = "Source policy skipped semantic evaluation for one obligation"
+contexts = ["source_skip"]
 
 [diagnostics.registry.PACKET_JSON_INVALID]
 short = "BSP001"
 status = "reserved"
+family = "deterministic"
 summary = "Packet JSONL could not be parsed"
 
 [diagnostics.registry.PACKET_SHAPE_INVALID]
 short = "BSP002"
 status = "reserved"
+family = "deterministic"
 summary = "Packet row does not match the expected shape"
 
 [diagnostics.registry.PACKET_SECTION_TRUNCATED]
 short = "BSP003"
 status = "reserved"
+family = "deterministic"
 summary = "Packet section text was truncated"
 
 [diagnostics.registry.PACKET_OWNER_TRUNCATED]
 short = "BSP004"
 status = "reserved"
+family = "deterministic"
 summary = "Packet owner snippet was truncated"
 
 [diagnostics.registry.PACKET_OWNER_OMITTED]
 short = "BSP005"
 status = "reserved"
+family = "deterministic"
 summary = "Packet owner was omitted"
 
 [diagnostics.registry.PACKET_OWNER_NOT_FILE]
 short = "BSP006"
 status = "reserved"
+family = "deterministic"
 summary = "Packet owner path is not a file"
 
 [diagnostics.registry.PACKET_OWNER_UNREADABLE]
 short = "BSP007"
 status = "reserved"
+family = "deterministic"
 summary = "Packet owner file could not be read"
 
 [diagnostics.registry.PACKET_SYMBOL_NOT_FOUND]
 short = "BSP008"
 status = "reserved"
+family = "deterministic"
 summary = "Packet owner symbol could not be found"
 
 [diagnostics.registry.ANALYSIS_ROW_INVALID]
 short = "BSP009"
 status = "reserved"
+family = "deterministic"
 summary = "Analysis result row is invalid"
 
 [diagnostics.registry.ANALYSIS_PACKET_UNKNOWN]
 short = "BSP010"
 status = "reserved"
+family = "deterministic"
 summary = "Analysis result names an unknown packet"
 
 [diagnostics.registry.MODEL_OUTPUT_INVALID]
 short = "BSP011"
 status = "reserved"
+family = "deterministic"
 summary = "Model output could not be parsed"
 
 [diagnostics.registry.MODEL_PACKET_ID_MISMATCH]
 short = "BSP012"
 status = "reserved"
+family = "deterministic"
 summary = "Model output packet ID does not match the requested packet"
 
 [diagnostics.registry.MODEL_CALL_FAILED]
 short = "BSP013"
 status = "reserved"
+family = "deterministic"
 summary = "Model call failed"
+
+[diagnostics.registry.SEMANTIC_CONFIRMED_MISMATCH]
+short = "BSA001"
+status = "implemented"
+family = "semantic"
+summary = "Semantic evidence confirms a mismatch"
+contexts = ["evidence_bound", "verification_indeterminate", "independently_verified", "mechanically_verified", "human_verified", "disputed_by_verifier", "human_rejected"]
+
+[diagnostics.registry.SEMANTIC_PROBABLE_MISMATCH]
+short = "BSA002"
+status = "implemented"
+family = "semantic"
+summary = "Semantic evidence indicates a probable mismatch"
+contexts = ["evidence_bound", "verification_indeterminate", "independently_verified", "mechanically_verified", "human_verified", "disputed_by_verifier", "human_rejected"]
+
+[diagnostics.registry.SEMANTIC_MISSING_TRACE]
+short = "BSA003"
+status = "implemented"
+family = "semantic"
+summary = "Semantic evidence indicates a missing trace"
+contexts = ["evidence_bound", "verification_indeterminate", "independently_verified", "mechanically_verified", "human_verified", "disputed_by_verifier", "human_rejected"]
+
+[diagnostics.registry.SEMANTIC_WEAK_BINDING]
+short = "BSA004"
+status = "implemented"
+family = "semantic"
+summary = "Semantic evidence indicates a weak invariant binding"
+contexts = ["evidence_bound", "verification_indeterminate", "independently_verified", "mechanically_verified", "human_verified", "disputed_by_verifier", "human_rejected"]
+
+[diagnostics.registry.SEMANTIC_AMBIGUOUS]
+short = "BSA005"
+status = "implemented"
+family = "semantic"
+summary = "Semantic evidence is ambiguous"
+contexts = ["evidence_bound", "verification_indeterminate", "independently_verified", "mechanically_verified", "human_verified", "disputed_by_verifier", "human_rejected"]

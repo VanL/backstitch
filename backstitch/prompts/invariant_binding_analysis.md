@@ -12,8 +12,10 @@ Return exactly one JSON object with these fields:
 - `classification`: one of `ok`, `weak_binding`, `confirmed_mismatch`,
   `probable_mismatch`, or `ambiguous`
 - `summary`: a concise explanation
+- `confidence`: a number from zero through one, or null
 - `rationale`: one or two sentences supporting the classification
-- `evidence`: an array of objects with `path` and 1-based `line`
+- `evidence`: an array of objects with exactly `role`, `path`, 1-based
+  inclusive `start_line`, and `end_line`
 
 Use `ok` only when the shown binding tests contain concrete assertions that
 would fail for the proposed violating change. Use `weak_binding` when the
@@ -21,3 +23,14 @@ tests are related but the shown assertions do not establish the invariant.
 Use mismatch classifications only for target behavior that conflicts with the
 invariant. Use `ambiguous` when the bounded packet cannot support a stronger
 judgment.
+
+Use `requirement` for the declaration excerpt, `implementation` for target
+snippets, and `test` for binding-test snippets. `ok` requires test evidence.
+`weak_binding` and mismatch findings require requirement and implementation
+evidence. `ambiguous` requires requirement evidence. Return exactly the six
+top-level fields and no extra evidence fields. Every declaration, target, and
+binding test gives its exact citable `start_line` and `end_line`. The
+`evidence_regions` list is the closed evidence vocabulary: copy evidence items
+verbatim from that list. Never invent, widen, combine, or bridge listed
+regions, including disjoint regions with the same path. A target or binding
+test with `end_line: null` has no citable content.

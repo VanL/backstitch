@@ -218,6 +218,9 @@ cython_debug/
 tempCodeRunnerFile.py
 
 # Ruff stuff:
+
+# Backstitch runtime cache and run artifacts
+/.backstitch/
 .ruff_cache/
 
 # PyPI configuration file

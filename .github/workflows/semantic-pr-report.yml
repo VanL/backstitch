@@ -1,0 +1,186 @@
+name: semantic-pr-report
+
+on:
+  repository_dispatch:
+    types: [semantic-pr-report]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: semantic-pr-report-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: trusted semantic PR report
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TOOL_ROOT: ${{ github.workspace }}/tool
+      TARGET_ROOT: ${{ github.workspace }}/target
+      BACKSTITCH_CACHE_ROOT: ${{ github.workspace }}/tool/.backstitch/semantic-cache
+      BACKSTITCH_REPORT_ROOT: ${{ runner.temp }}/semantic-pr-report/.backstitch/review
+    steps:
+      - name: Check out trusted Backstitch
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: tool
+          persist-credentials: false
+          submodules: false
+          lfs: false
+      - name: Assert trusted tool identity
+        run: test "$(git -C "${TOOL_ROOT}" rev-parse HEAD)" = "${GITHUB_SHA}"
+      - name: Install uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: "3.14"
+          enable-cache: false
+      - name: Install locked trusted dependencies
+        run: uv sync --project "${TOOL_ROOT}" --locked --extra dev
+      - name: Require provider credential
+        id: credential
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -z "${OPENAI_API_KEY}" ]; then
+            echo "::error::OPENAI_API_KEY is required for trusted semantic PR report"
+            exit 1
+          fi
+      - name: Resolve pull request identity
+        id: resolve
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BACKSTITCH_PR_NUMBER: ${{ github.event.client_payload.pull_request_number }}
+          BACKSTITCH_EXPECTED_HEAD_SHA: ${{ github.event.client_payload.head_sha }}
+        run: >
+          uv run --project "${TOOL_ROOT}" python
+          "${TOOL_ROOT}/.github/scripts/resolve_semantic_pr.py" resolve
+      - name: Check out hostile target as data
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: ${{ steps.resolve.outputs.head_repo }}
+          ref: ${{ steps.resolve.outputs.head_sha }}
+          path: target
+          persist-credentials: false
+          submodules: false
+          lfs: false
+      - name: Assert hostile target identity
+        id: target-identity
+        env:
+          BACKSTITCH_CONFIRMED_HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
+        run: >
+          test "$(git -C "${TARGET_ROOT}" rev-parse HEAD)" =
+          "${BACKSTITCH_CONFIRMED_HEAD_SHA}"
+      - name: Prepare fresh PR report root
+        run: |
+          test "${TOOL_ROOT}" = "${GITHUB_WORKSPACE}/tool"
+          test "${TARGET_ROOT}" = "${GITHUB_WORKSPACE}/target"
+          test "${BACKSTITCH_CACHE_ROOT}" = "${TOOL_ROOT}/.backstitch/semantic-cache"
+          test "${BACKSTITCH_REPORT_ROOT}" = "${RUNNER_TEMP}/semantic-pr-report/.backstitch/review"
+          rm -rf "${BACKSTITCH_REPORT_ROOT}"
+          mkdir -p "${BACKSTITCH_REPORT_ROOT}"
+      - name: Restore immutable PR semantic cache
+        id: cache-restore
+        continue-on-error: true
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            ${{ env.BACKSTITCH_CACHE_ROOT }}/packets
+            ${{ env.BACKSTITCH_CACHE_ROOT }}/results
+            ${{ env.BACKSTITCH_CACHE_ROOT }}/verify-results
+          key: semantic-pr-report-v1-cache-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: semantic-pr-report-v1-cache-v1-
+      - name: Prepare restored PR semantic cache
+        id: cache-prep
+        run: |
+          test "${BACKSTITCH_CACHE_ROOT}" = "${TOOL_ROOT}/.backstitch/semantic-cache"
+          if [ "${{ steps.cache-restore.outcome }}" = "failure" ]; then
+            rm -rf "${BACKSTITCH_CACHE_ROOT}"
+          fi
+          mkdir -p \
+            "${BACKSTITCH_CACHE_ROOT}/packets" \
+            "${BACKSTITCH_CACHE_ROOT}/results" \
+            "${BACKSTITCH_CACHE_ROOT}/verify-results"
+      - name: Revalidate pull request identity
+        id: revalidate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BACKSTITCH_PR_NUMBER: ${{ github.event.client_payload.pull_request_number }}
+          BACKSTITCH_EXPECTED_HEAD_SHA: ${{ github.event.client_payload.head_sha }}
+          BACKSTITCH_CONFIRMED_HEAD_REPO: ${{ steps.resolve.outputs.head_repo }}
+          BACKSTITCH_CONFIRMED_HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
+        run: >
+          uv run --project "${TOOL_ROOT}" python
+          "${TOOL_ROOT}/.github/scripts/resolve_semantic_pr.py" revalidate
+      - name: Analyze hostile target with trusted Backstitch
+        id: analyze
+        continue-on-error: true
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: >
+          env -u LLM_MODEL uv run --project "${TOOL_ROOT}" backstitch analyze
+          --repo-root "${TARGET_ROOT}"
+          --config "${TOOL_ROOT}/pyproject.toml"
+          --option analyze.cache_mode read-write
+          --option verify.enabled true
+          --option verify.cache_mode read-write
+          --packets-output "${BACKSTITCH_REPORT_ROOT}/packets.jsonl"
+          --packet-report-output "${BACKSTITCH_REPORT_ROOT}/packet-report.json"
+          --output "${BACKSTITCH_REPORT_ROOT}/results.jsonl"
+          --report "${BACKSTITCH_REPORT_ROOT}/analysis-report.json"
+      - name: Save immutable PR semantic cache
+        id: cache-save
+        if: ${{ !cancelled() && steps.cache-prep.outcome == 'success' && steps.analyze.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            ${{ env.BACKSTITCH_CACHE_ROOT }}/packets
+            ${{ env.BACKSTITCH_CACHE_ROOT }}/results
+            ${{ env.BACKSTITCH_CACHE_ROOT }}/verify-results
+          key: semantic-pr-report-v1-cache-v1-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Upload semantic PR report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: semantic-pr-report-${{ github.run_id }}
+          path: ${{ env.BACKSTITCH_REPORT_ROOT }}
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Enforce semantic PR report result
+        if: always()
+        run: |
+          failed=0
+          if [ "${{ steps.credential.outcome }}" != "success" ]; then
+            echo "::error::provider credential validation failed"
+            failed=1
+          fi
+          if [ "${{ steps.resolve.outcome }}" != "success" ]; then
+            echo "::error::initial pull request identity validation failed"
+            failed=1
+          fi
+          if [ "${{ steps.target-identity.outcome }}" != "success" ]; then
+            echo "::error::target checkout identity validation failed"
+            failed=1
+          fi
+          if [ "${{ steps.cache-prep.outcome }}" != "success" ]; then
+            echo "::error::semantic cache preparation failed"
+            failed=1
+          fi
+          if [ "${{ steps.revalidate.outcome }}" != "success" ]; then
+            echo "::error::final pull request identity validation failed"
+            failed=1
+          fi
+          if [ "${{ steps.analyze.outcome }}" != "success" ]; then
+            echo "::error::semantic PR analysis did not complete"
+            failed=1
+          fi
+          if [ "${{ steps.cache-save.outcome }}" = "failure" ]; then
+            echo "::error::semantic PR cache persistence failed"
+            failed=1
+          fi
+          exit "${failed}"

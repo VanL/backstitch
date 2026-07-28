@@ -293,7 +293,8 @@ Backstitch always starts with packaged defaults, then applies repository
 configuration, supported environment values, and explicit CLI options. It
 searches upward for the nearest `.backstitch.toml` or `pyproject.toml` with a
 `[tool.backstitch]` table. A standalone file uses the same key layout without
-the `tool.backstitch` prefix.
+the `tool.backstitch` prefix. Explicit `--config PATH` and `extend` may name
+any TOML filename; those names never become implicit discovery conventions.
 
 ```toml
 [tool.backstitch.profile]
@@ -306,6 +307,21 @@ test_roots = ["tests"]
 format = "text"
 warnings_as_errors = false
 ```
+
+One invocation-scoped resolver applies the cascade `CLI > defined environment
+> selected config > extended config > packaged defaults`, then passes an
+immutable settings object into command code. Repeat a generic override before
+or after a config-consuming command:
+
+```bash
+backstitch --option analyze.cache_mode read-write analyze ...
+backstitch config show --option check.warnings_as_errors true
+```
+
+`KEY` is a known runtime-consulted dotted leaf. `VALUE` is parsed as one TOML
+value when possible, otherwise as a bare string. Quote ambiguous strings.
+`summarize-analysis`, `guide`, and `cache cleanup-lock` reject configuration
+controls because they do not consume settings.
 
 Test roots classify paths within code roots. Replacing `code_roots` without
 also supplying `test_roots` resets test roots for that configuration layer;
@@ -348,9 +364,9 @@ The repository ignores `.backstitch/`. Treat its semantic cache as disposable
 acceleration state and its reports as fresh run outputs, not as source or
 reviewed evidence to commit. The usual local flows are:
 
-- update findings with bounded provider calls by running `analyze` with
-  `.backstitch-refresh.toml`; valid hits are reused and only misses call the
-  provider;
+- update findings with bounded provider calls by explicitly selecting the
+  trusted `pyproject.toml` and applying the reviewed static `read-write`
+  options; valid hits are reused and only misses call the provider;
 - replay with zero provider calls by using the default `require` profile; a
   missing object fails with exit `2`;
 - diagnose without reading or writing cache objects by using a trusted config
@@ -379,7 +395,10 @@ negative-control corpus with:
 ```bash
 $ backstitch eval \
     --corpus tests/semantic_eval/v3/manifest.json \
-    --config .backstitch-refresh.toml \
+    --config pyproject.toml \
+    --option analyze.cache_mode read-write \
+    --option verify.enabled true \
+    --option verify.cache_mode read-write \
     --output semantic-eval-report.json
 ```
 

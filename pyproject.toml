@@ -130,6 +130,45 @@ cost_rate_source = "OpenAI GPT-4.1 mini model page (https://developers.openai.co
 
 [tool.backstitch.verify]
 enabled = false
+provider_source = "analyze"
+concurrency = 1
+cache_path = ".backstitch/semantic-cache"
+cache_mode = "require"
+search_epochs = ["1"]
+json_mode = "require"
+temperature = 0.0
+seed = 42
+max_tokens = 512
+required_verdicts = 1
+minimum_support_score = 0.90
+indeterminate = "report"
+maximum_provider_calls = 100
+maximum_prompt_bytes = 1000000
+lock_wait_timeout_seconds = 300
+maximum_runtime_seconds = 1800
+maximum_estimated_cost_microusd = 1000000
+
+[tool.backstitch.verify.eval]
+mode = "report"
+qualification_corpus = ""
+qualification_corpus_sha256 = ""
+qualification_report = ""
+qualification_report_sha256 = ""
+trials = 2
+interval_method = "wilson"
+confidence_level = 0.95
+minimum_positive_units = 1
+minimum_negative_units = 1
+minimum_evidence_sufficiency_rate = 0.0
+minimum_conditional_precision = 0.0
+minimum_conditional_recall = 0.0
+minimum_end_to_end_recall = 0.0
+minimum_recall_lower_bound = 0.0
+maximum_false_positive_rate = 1.0
+maximum_false_positive_upper_bound = 1.0
+maximum_indeterminate_rate = 1.0
+maximum_uncached_flip_rate = 1.0
+require_all_critical = false
 
 [tool.backstitch.lint.per-file-ignores]
 # EVC is active but its implementation lands in reviewed slices; COV remains
