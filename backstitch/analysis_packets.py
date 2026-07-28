@@ -20,12 +20,13 @@ from backstitch.evidence_discovery import (
     get_candidate_source,
 )
 from backstitch.markdown_specs import project_section_packet_requirement
-from backstitch.models import SuppressionDecision, issue_sort_key
+from backstitch.models import SuppressionDecision
 from backstitch.obligation_runtime import ALGORITHMS, ObligationRuntime
 from backstitch.obligations import ObligationRecord, suppression_rule_row
 from backstitch.semantic_packets import (
     ISSUE_FIELDS,
     semantic_packet_hash,
+    suppression_issue_key,
 )
 
 PacketKind = Literal["section", "invariant", "suppression", "all"]
@@ -529,12 +530,11 @@ def _suppression_issue_rows(
 ) -> list[dict[str, object]]:
     """Project the complete decision population in ordinary issue order."""
 
-    ordered = sorted(decisions, key=lambda item: issue_sort_key(item.issue))
     rows: list[dict[str, object]] = []
-    for decision in ordered:
+    for decision in decisions:
         source = dataclasses.asdict(decision.issue)
         rows.append({field: source[field] for field in ISSUE_FIELDS})
-    return rows
+    return sorted(rows, key=suppression_issue_key)
 
 
 def _suppression_counterevidence(

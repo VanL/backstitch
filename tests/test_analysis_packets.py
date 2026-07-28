@@ -10,7 +10,7 @@ import sys
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 
@@ -21,6 +21,7 @@ from backstitch.analysis_packets import (
 )
 from backstitch.artifact_contracts import load_packets_bytes
 from backstitch.config import ProfileConfig
+from backstitch.diagnostics import DiagnosticLevelRule, DiagnosticsSettings
 from backstitch.markdown_specs import project_section_packet_requirement
 from backstitch.models import (
     Issue,
@@ -422,6 +423,79 @@ def test_used_declaration_emits_complete_schema4_suppression_packet(
     forged_report["kind_counts"]["emitted"]["suppression"] = 0
     with pytest.raises(PacketReportError, match="emitted kind counts"):
         PacketReport.from_dict(forged_report)
+
+
+def test_suppression_packet_issue_order_ignores_effective_policy_severity(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "docs/specs").mkdir(parents=True)
+    (tmp_path / "pkg").mkdir()
+    spec_path = "docs/specs/01-core.md"
+    reference = f"{spec_path}#SUP-POLICY"
+    (tmp_path / spec_path).write_text(
+        "_Implementation mapping_:\n\n"
+        "- `pkg/ownerless.py`\n\n"
+        "## Contract [POLICY-1]\n\n"
+        '_Traceability: suppression-declaration [SUP-POLICY] "Policy replay."_\n\n'
+        "## Unmapped [POLICY-2]\n",
+        encoding="utf-8",
+    )
+    rule = SuppressionRule(
+        mechanism="ignore",
+        provenance="config_file",
+        path=spec_path,
+        sections=(),
+        codes=("MAPPING_BLOCK_OWNERLESS", "SPEC_SECTION_UNMAPPED"),
+        declaration=reference,
+        origin=SuppressionOrigin(source=".backstitch.toml", position=0),
+    )
+    profile = get_profile("backstitch-style-v1").with_overrides(
+        spec_roots=("docs/specs",),
+        plan_roots=(),
+        code_roots=("pkg",),
+        test_roots=(),
+    )
+
+    def packet_with_levels(
+        first: Literal["error", "info"], second: Literal["error", "info"]
+    ) -> tuple[dict[str, object], bytes]:
+        settings = replace(
+            BackstitchSettings(),
+            lint=replace(BackstitchSettings().lint, suppressions=(rule,)),
+            diagnostics=DiagnosticsSettings(
+                levels=(
+                    DiagnosticLevelRule(
+                        selectors=("MAPPING_BLOCK_OWNERLESS",),
+                        level=first,
+                    ),
+                    DiagnosticLevelRule(
+                        selectors=("SPEC_SECTION_UNMAPPED",),
+                        level=second,
+                    ),
+                ),
+                suppressible_levels=("error", "warning", "info"),
+            ),
+        )
+        runtime = build_obligation_runtime(tmp_path, profile, settings)
+        packet = next(
+            item
+            for item in generate_source_aligned_packets(
+                runtime,
+                require_complete_corpus=False,
+                kind="suppression",
+            )
+            if item["kind"] == "suppression"
+        )
+        rendered = render_packets_jsonl([packet]).encode("utf-8")
+        load_packets_bytes(rendered)
+        return packet, rendered
+
+    first_packet, first_bytes = packet_with_levels("error", "info")
+    second_packet, second_bytes = packet_with_levels("info", "error")
+
+    assert len(first_packet["issues"]) == 3  # type: ignore[arg-type]
+    assert first_packet["packet_hash"] == second_packet["packet_hash"]
+    assert first_bytes == second_bytes
 
 
 def test_source_aligned_packet_filters_and_orders_relevant_issues(

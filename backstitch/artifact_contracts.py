@@ -31,6 +31,7 @@ from backstitch.semantic_packets import (
     MAX_SNIPPET_LINES,
     SNIPPET_FIELDS,
     semantic_packet_hash,
+    suppression_issue_key,
 )
 
 
@@ -1151,18 +1152,6 @@ def _suppression_rule_path(value: object) -> bool:
     )
 
 
-def _packet_v4_issue_key(item: dict[str, Any]) -> tuple[object, ...]:
-    severity_order = {"error": 0, "warning": 1, "info": 2}
-    return (
-        severity_order[str(item["default_severity"])],
-        item["path"],
-        item["line"] or 0,
-        item["code"],
-        item["message"],
-        canonical_json_bytes(item),
-    )
-
-
 def _packet_v4_shape_error(row: dict[str, Any]) -> str | None:
     """Return a schema-4 suppression packet violation, or ``None``."""
 
@@ -1328,7 +1317,7 @@ def _packet_v4_shape_error(row: dict[str, Any]) -> str | None:
         )
     ):
         return "packet schema 4 issues are invalid"
-    issue_keys = [_packet_v4_issue_key(issue) for issue in issues]
+    issue_keys = [suppression_issue_key(issue) for issue in issues]
     if issue_keys != sorted(issue_keys):
         return "packet schema 4 issues are not in canonical order"
 
