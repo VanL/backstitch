@@ -16,7 +16,8 @@
   now select the trusted checkout's `pyproject.toml` explicitly and apply the
   reviewed literal runtime overrides.
 - Expanded acceptance, adversarial, semantic-evaluation, configuration,
-  workflow-boundary, coverage, and scale tests.
+  workflow-boundary, coverage, and scale tests. Wall-clock tests use one
+  `benchmark` marker and run in the dedicated serial lane.
 
 ## 0.3.0 - 2026-07-10
 

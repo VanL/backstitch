@@ -190,7 +190,6 @@ markers = [
     "benchmark: non-portable wall-clock tests run serially outside xdist",
     "integration: tests that exercise an external command or package boundary",
     "live_llm: tests that call a real LLM provider under the configured live policy",
-    "performance: non-normative local wall-clock and resource budget tests",
 ]
 
 [tool.coverage.run]
