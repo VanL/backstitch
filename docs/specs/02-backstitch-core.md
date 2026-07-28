@@ -375,7 +375,12 @@ backstitch summarize-analysis --deterministic-report spec-trace.json --analysis-
 
 `summarize-analysis` is presentation-only. It validates every input row, exits
 `2` for any malformed report or result, never applies semantic policy or
-dispositions, never asserts verification state, and never exits `1`.
+dispositions, never asserts verification state, and never exits `1`. Its
+known packet identities are the deterministic report's edge-bearing sections,
+bound invariants, and valid unique suppression declarations in
+`suppressed_issues`. Summarizing suppression results therefore requires the
+audited deterministic report produced with `--show-suppressions`; a report
+that omits that audit cannot validate a suppression result identity.
 
 Required environment-diagnosis command:
 
@@ -1366,6 +1371,8 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-07-28-documented-suppression-governance-plan.md`
+  (implemented and independently reviewed)
 - `docs/plans/2026-07-11-deterministic-semantic-gate-plan.md`
   (implementing)
 - `docs/plans/2026-07-15-agent-guided-evidence-cases-plan.md`

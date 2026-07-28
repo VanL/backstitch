@@ -425,6 +425,7 @@ def project_section_packet_requirement(
     end_line: int,
     mappings: Sequence[SpecMapping],
     skips: Sequence[SourceObligationSkip],
+    declarations: Sequence[SuppressionDeclaration] = (),
 ) -> PacketRequirementText:
     """Mask parser-owned source directives without collapsing coordinates.
 
@@ -447,10 +448,19 @@ def project_section_packet_requirement(
         if item.spec_path == path and item.section_id == section.section_id
     }
     valid_skips = {item.line: item for item in skips if item.path == path}
+    declaration_lines = {
+        line_no
+        for item in declarations
+        if item.path == path
+        for line_no in range(item.start_line, item.end_line + 1)
+    }
     projected: list[str] = []
     for line_no in range(section.line, end_line + 1):
         line = lines[line_no - 1]
         stripped = line.strip()
+        if line_no in declaration_lines:
+            projected.append("")
+            continue
         skip = valid_skips.get(line_no)
         if skip is not None:
             if line_no == section.line and skip.form == "heading_html":

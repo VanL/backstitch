@@ -121,20 +121,6 @@ PACKET_V4_PROJECTION_FIELDS = (
 )
 
 
-def suppression_issue_key(item: dict[str, Any]) -> tuple[object, ...]:
-    """Canonical schema-4 issue order, independent of effective policy."""
-
-    severity_order = {"error": 0, "warning": 1, "info": 2}
-    return (
-        severity_order[str(item["default_severity"])],
-        item["path"],
-        item["line"] or 0,
-        item["code"],
-        item["message"],
-        canonical_json_bytes(item),
-    )
-
-
 def prompt_instruction_bytes(kind: SemanticPacketKind) -> bytes:
     """Load the exact code-owned instruction bytes for one packet kind."""
 

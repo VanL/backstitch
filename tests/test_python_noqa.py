@@ -27,6 +27,7 @@ def _check_json(*extra: str) -> dict[str, Any]:
             "check",
             "--repo-root",
             str(FIXTURE),
+            "--no-config",
             "--spec-root",
             "docs/specs",
             "--plan-root",

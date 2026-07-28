@@ -108,6 +108,11 @@ Load-bearing boundaries:
   findings. Suppression happens once, in `check_pipeline.py`, after effective
   policy application and before exit-code/render, through `exclusions.py`.
   Every suppressed finding is recoverable with `--show-suppressions` ([EXC-7]).
+  Structured rules and declaration-bearing inline rules resolve through the
+  same canonical decision path. When required-declaration mode is enabled, a
+  missing, malformed, duplicate, unresolved, or unused declaration fails
+  closed and cannot hide the original finding. Audit rows carry the exact
+  declaration and decoded nonblank rationale.
   Findings hidden by `level = "off"` use the same audit view with reason
   `diagnostic level off`. Fable's audit-free `filter_report` was deliberately
   not ported.
@@ -131,8 +136,11 @@ Load-bearing boundaries:
   the packet's shown paths and line ranges ([SC-7]).
   `summarize-analysis` never sees packets: it validates result-row schema
   (classification, confidence in [0, 1], non-blank evidence paths) and
-  rejects packet IDs no report packet could have produced (edge-bearing
-  sections or bound invariants), and trusts that the rows came from `analyze`.
+  rejects packet IDs no audited report packet could have produced
+  (edge-bearing sections, bound invariants, or used suppression declarations),
+  and trusts that the rows came from `analyze`. Suppression-result summaries
+  therefore require a deterministic report produced with
+  `--show-suppressions`.
   Its `--help` says so; verifying a
   hand-edited results file requires rerunning `analyze`.
 
@@ -201,13 +209,16 @@ committed repository overlay. Choices and their reasons:
   `llm` import from deterministic commands. Each binds to the existing test
   that directly enforces it; the default self-scan requires three binds and
   zero invariant findings.
-- `meta_spec_globs` classifies the DOM operating-model spec as process
-  documentation: parsed, citable, mapping not required.
-- The only lint suppressions are on `tests/*` for citation-inventory codes
-  (`CODE_REF_UNMAPPED_FROM_SPEC`, `SPEC_MAPPING_RECIPROCAL_MISSING`): test
-  files cite the sections they exercise without being implementation
-  owners. Both are recoverable via `--show-suppressions` and asserted
-  auditable by `tests/test_backstitch_corpus_traceability.py`.
+- The repository opts into `lint.require_suppression_declarations = true`.
+  Five structured rules replace the legacy meta/per-file tables: DOM process
+  metadata; two exact residual EVC process/deferred sections; the planned COV
+  spec; and test citation-inventory noise. Their five declarations live under
+  [EXC-10]. The EVC rule is section-bounded, and the test rule retains only
+  `CODE_REF_UNMAPPED_FROM_SPEC` and `SPEC_MAPPING_RECIPROCAL_MISSING`.
+- `tests/test_backstitch_corpus_traceability.py` pins each declaration
+  population and allowed path/code/section boundary. The migration reduced
+  the audit from 206 to 192 records with no new suppression identity; every
+  retained record has a valid declaration and nonblank rationale.
 - `diagnostics.levels` appends across config layers. Repository rules can
   override defaults with a later `select = ["*"]` rule, and
   `config show` exposes both the config layer list and the resolved

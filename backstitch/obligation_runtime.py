@@ -549,9 +549,7 @@ def build_obligation_runtime_from_snapshot(
             unreadable_count=snapshot.unreadable_count,
         ),
         section_required_roles=required_roles,
-        section_meta=frozenset(
-            key for key, enabled in pipeline.artifacts.section_meta.items() if enabled
-        ),
+        section_meta=pipeline.effective_section_meta,
         meta_spec_globs=pipeline.effective_meta_spec_globs,
         skipped_obligation_ids=frozenset(
             item.obligation_id for item in pipeline.artifacts.obligation_skips

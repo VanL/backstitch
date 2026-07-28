@@ -4340,7 +4340,7 @@ _Implementation mapping_:
 ## Related Plans
 
 - `docs/plans/2026-07-28-documented-suppression-governance-plan.md`
-  (reviewed; implementation in progress)
+  (implemented and independently reviewed)
 
 - `docs/plans/2026-07-15-agent-guided-evidence-cases-plan.md`
 - `docs/plans/2026-07-27-semantic-analysis-lifecycle-plan.md`

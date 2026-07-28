@@ -11,6 +11,7 @@ Plans:
 - `docs/plans/2026-07-11-deterministic-semantic-gate-plan.md`
 - `docs/plans/2026-07-15-agent-guided-evidence-cases-plan.md`
 - `docs/plans/2026-07-27-semantic-analysis-lifecycle-plan.md`
+- `docs/plans/2026-07-28-documented-suppression-governance-plan.md`
 
 Backstitch turns aligned intent into an executable gate in two stages. The
 deterministic stage identifies executable obligations and builds a closed,
@@ -19,10 +20,12 @@ optional blinded verifier whether that evidence supports the obligation. A
 model performs bounded search. It does not own source truth, evidence spans,
 policy authority, or exit behavior.
 
-The implementation now uses source-aligned packet schema 3, analysis-report
-schema 3, and semantic-evaluation schema 3. Schema-2 packets and earlier
-evaluation artifacts remain historical validation inputs only. They are not
-current producer or promotion contracts.
+The implementation now uses source-aligned schema-3 section/invariant packets,
+schema-4 suppression packets, packet-report schema 3, analysis-report schema 4,
+and semantic-evaluation schema 3. Exact packet-report schema 2 and
+analysis-report schema 3 readers remain for the immediately prior
+section/invariant-only contract. Earlier artifacts remain bounded historical
+validation inputs, not current producer or promotion contracts.
 
 ## Ownership And Boundaries
 
@@ -32,7 +35,7 @@ No component may silently acquire authority owned by another layer:
 |---|---|---|
 | `obligation_runtime.py` | One accepted repository snapshot and the obligation/readiness inventory derived from it | Fail the current operation; never rebuild only part of the inventory |
 | `evidence_discovery.py` | Complete deterministic candidate catalog, graph closure, receipts, budgets, and obligation-local derivation | Fail closed on budget or catalog-authority mismatch; never truncate candidates |
-| `analysis_packets.py` | Current schema-3 packet and schema-2 packet-report construction from the accepted snapshot | Publish neither artifact when required evidence, counterevidence, or an artifact byte ceiling fails |
+| `analysis_packets.py` | Current mixed schema-3/schema-4 packet and schema-3 packet-report construction from the accepted snapshot | Publish neither artifact when required evidence, counterevidence, or an artifact byte ceiling fails |
 | `semantic_packets.py` | Canonical model-visible projection, prompt identity, and historical packet validation | Change packet or prompt identity whenever model-visible input changes |
 | `semantic_identity.py` | Offline provider and request fingerprint before adapter construction | Use a new identity for any inference-affecting change |
 | `analysis_llm.py` | Provider request construction and wire adaptation | Preserve the logical request identity; reject unsupported or malformed provider behavior |
@@ -91,12 +94,20 @@ separate from nearby code suggested by discovery.
 
 ## Identity, Evidence, And Replay
 
-`packet_hash` covers the exact schema-3 model-visible projection. Prompt
+`packet_hash` covers the exact kind-specific model-visible projection. Prompt
 instructions are code-owned, so their ID, version, and byte hash enter the
 analysis key separately. Provider identity, logical request controls,
 contract version, and search epoch also enter that key. The current provider
 adapter identity is version 3. Policy, concurrency, output paths, report
-formatting, and suppressions do not affect inference identity.
+formatting do not affect inference identity. A suppression declaration,
+normalized rule, matched deterministic finding, or model-visible rationale
+change does affect the relevant packet identity; policy and human disposition
+do not.
+
+Parser-owned suppression-declaration lines are masked from the owning section
+requirement projection while preserving line coordinates. This keeps a
+suppression-only declaration or rationale edit from invalidating an otherwise
+unchanged section packet; the corresponding suppression packet still rekeys.
 
 This split permits zero-call policy replay. An inference-affecting change
 misses the cache; a policy-only change reprojects the same immutable result.
@@ -187,6 +198,13 @@ loading, evidence summary, and reload path. GPT-5 and o-family requests keep
 the logical `max_tokens` identity while adapter version 3 translates it to the
 wire-level `max_completion_tokens` field required by the OpenAI adapter.
 
+The 2026-07-28 hosted contract also passed with `gpt-5.4-mini`. Its bounded
+source-aligned fixture emitted one section packet and one documented
+suppression packet, made two real provider calls in `read-write` mode, then
+replayed byte-identical results in `require` mode with zero provider calls and
+zero cache misses. The summary consumer accepted the suppression result only
+when paired with the `--show-suppressions` deterministic audit.
+
 The authorized local `llama3.2:3b` contract accepted the request and schema but
 returned non-JSON text for both small obligations after roughly six minutes.
 Normalization rejected both results and the run exited `2`. This proves
@@ -210,6 +228,12 @@ traces create evidence and counterevidence regions that are too large for a
 practical semantic gate. This is trace-precision debt, not a reason to
 silently truncate the evidence packet. The deterministic self-corpus gate can
 remain green while the semantic self-corpus is not yet practical.
+
+The current repository also retains known active partial/untraced alignment
+debt recorded by the evidence hardening work. Current-source analysis
+therefore exits `2` at `ALIGNMENT_DEBT` before cache or provider work. Resolving
+that debt is outside the suppression-governance plan; the bounded live fixture
+proves the new suppression cache lifecycle without weakening readiness.
 
 ## Operator Flow
 
@@ -260,7 +284,9 @@ env -u LLM_MODEL backstitch analyze --repo-root . \
 This is the normal update flow. It reuses valid immutable hits, calls the
 provider only for changed inference identities, and stores successful misses.
 A policy-only change rebuilds the current report from the same raw results
-without a provider call.
+without a provider call. It is available only after the addressed repository's
+active obligations are executable; alignment debt correctly stops before this
+cache lifecycle.
 
 The default repository profile uses `require` for explicit zero-call replay.
 Historical packet replay is also explicit and always requires its paired

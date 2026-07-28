@@ -284,6 +284,7 @@ def test_resolve_config_precedence_fires_at_every_layer(tmp_path: Path) -> None:
         "defaults.schema_version",
         "verify",
         "lint.per-file-ignores.src.module.py",
+        "lint.suppressions",
         "packets.output",
         "unknown.value",
     ),

@@ -376,10 +376,16 @@ def test_packet_identities_include_only_packet_eligible_invariants() -> None:
             {"invariant_id": "INV.BOUND.1"},
             {"invariant_id": "INV.UNTESTED.1"},
         ],
+        "suppressed_issues": [
+            {"declaration": "docs/specs/04-exclusions.md#SUP-ONE"},
+            {"declaration": "docs/specs/04-exclusions.md#SUP-ONE"},
+            {"declaration": None},
+        ],
     }
     assert packet_identities_from_report(report) == {
         "docs/specs/01-x.md#X-1": "section",
         "invariant::INV.BOUND.1": "invariant",
+        "suppression::docs/specs/04-exclusions.md#SUP-ONE": "suppression",
     }
 
 

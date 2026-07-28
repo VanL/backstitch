@@ -52,6 +52,7 @@ class CheckPipelineResult:
     artifacts: ScanArtifacts
     suppressed: tuple[SuppressionDecision, ...]
     effective_meta_spec_globs: tuple[str, ...]
+    effective_section_meta: frozenset[tuple[str, str]]
     obligation_skip_audit: tuple[ObligationSkipAudit, ...]
     warnings: tuple[str, ...]
 
@@ -195,6 +196,12 @@ def _apply_check_policy(
                     if rule.mechanism == "meta" and not rule.sections
                 }
             )
+        ),
+        effective_section_meta=frozenset(
+            (rule.path, section_id)
+            for rule in index.rules
+            if rule.mechanism == "meta"
+            for section_id in rule.sections
         ),
         obligation_skip_audit=skip_audit,
         warnings=(),

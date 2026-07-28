@@ -36,6 +36,7 @@ from backstitch.obligation_runtime import build_obligation_runtime
 from backstitch.profiles import get_profile
 from backstitch.semantic_evidence import SemanticResultError, normalize_model_result
 from backstitch.semantic_packets import (
+    PACKET_V4_PROJECTION_FIELDS,
     canonical_json_bytes,
     model_request_bytes,
     prompt_descriptor,
@@ -58,6 +59,61 @@ BROKEN_PROFILE = get_profile("backstitch-style-v1").with_overrides(
     test_roots=("tests",),
     planned_spec_globs=("docs/specifications/*A-*.md",),
 )
+
+
+def _mixed_suppression_packets(
+    repo_root: Path,
+    *,
+    declaration_id: str = "SUP-MIXED",
+    rationale: str = "The unresolved reference is retained as bounded test evidence.",
+    rule_codes: tuple[str, ...] = ("CODE_REF_BROAD",),
+    implementation_path: str = "pkg/core.py",
+) -> dict[str, dict[str, object]]:
+    (repo_root / "docs/specs").mkdir(parents=True)
+    (repo_root / "pkg").mkdir()
+    spec_path = "docs/specs/01-mixed.md"
+    reference = f"{spec_path}#{declaration_id}"
+    (repo_root / spec_path).write_text(
+        "## Mixed contract [MIXED-1]\n\n"
+        "The implementation returns one.\n\n"
+        f'_Traceability: suppression-declaration [{declaration_id}] "{rationale}"_\n\n'
+        "_Implementation mapping_:\n\n"
+        f"- `{implementation_path}::run`\n",
+        encoding="utf-8",
+    )
+    (repo_root / implementation_path).write_text(
+        "def run() -> int:\n"
+        '    """Spec: docs/specs/01-mixed.md [MIXED-1]\n'
+        "    Spec: docs/specs/01-mixed.md\n"
+        '    """\n'
+        "    return 1\n",
+        encoding="utf-8",
+    )
+    rule = SuppressionRule(
+        mechanism="ignore",
+        provenance="config_file",
+        path=implementation_path,
+        sections=(),
+        codes=rule_codes,
+        declaration=reference,
+        origin=SuppressionOrigin(source=".backstitch.toml", position=0),
+    )
+    settings = replace(
+        BackstitchSettings(),
+        lint=replace(BackstitchSettings().lint, suppressions=(rule,)),
+    )
+    profile = get_profile("backstitch-style-v1").with_overrides(
+        spec_roots=("docs/specs",),
+        plan_roots=(),
+        code_roots=("pkg",),
+        test_roots=(),
+    )
+
+    runtime = build_obligation_runtime(repo_root, profile, settings)
+    packets = generate_source_aligned_packets(runtime)
+
+    assert [packet["kind"] for packet in packets] == ["section", "suppression"]
+    return {cast(str, packet["kind"]): packet for packet in packets}
 
 
 def test_compile_source_aligned_packet_uses_runtime_authority_and_v3_shape(
@@ -496,6 +552,167 @@ def test_suppression_packet_issue_order_ignores_effective_policy_severity(
     assert len(first_packet["issues"]) == 3  # type: ignore[arg-type]
     assert first_packet["packet_hash"] == second_packet["packet_hash"]
     assert first_bytes == second_bytes
+
+
+def test_mixed_packet_hashes_change_only_for_truthfully_affected_kinds(
+    tmp_path: Path,
+) -> None:
+    baseline = _mixed_suppression_packets(tmp_path / "baseline")
+    rule_changed = _mixed_suppression_packets(
+        tmp_path / "rule-changed",
+        rule_codes=("CODE_REF_BARE_UNRESOLVED", "CODE_REF_BROAD"),
+    )
+    declaration_changed = _mixed_suppression_packets(
+        tmp_path / "declaration-changed",
+        declaration_id="SUP-MIXED-CHANGED",
+    )
+    rationale_changed = _mixed_suppression_packets(
+        tmp_path / "rationale-changed",
+        rationale="The unresolved reference now has a different bounded rationale.",
+    )
+    issue_changed = _mixed_suppression_packets(
+        tmp_path / "issue-changed",
+        implementation_path="pkg/alternate.py",
+    )
+
+    hashes = {
+        name: {
+            kind: cast(str, packet["packet_hash"]) for kind, packet in packets.items()
+        }
+        for name, packets in {
+            "baseline": baseline,
+            "rule": rule_changed,
+            "declaration": declaration_changed,
+            "rationale": rationale_changed,
+            "issue": issue_changed,
+        }.items()
+    }
+    assert set(hashes) == {
+        "baseline",
+        "rule",
+        "declaration",
+        "rationale",
+        "issue",
+    }
+    assert all(set(row) == {"section", "suppression"} for row in hashes.values())
+
+    for suppression_only_change in ("rule", "declaration", "rationale"):
+        assert (
+            hashes[suppression_only_change]["section"] == hashes["baseline"]["section"]
+        )
+        assert (
+            hashes[suppression_only_change]["suppression"]
+            != hashes["baseline"]["suppression"]
+        )
+
+    assert hashes["issue"]["section"] != hashes["baseline"]["section"]
+    assert hashes["issue"]["suppression"] != hashes["baseline"]["suppression"]
+
+
+def test_nested_suppression_declaration_rekeys_no_ancestor_section_packet(
+    tmp_path: Path,
+) -> None:
+    def packet_hashes(repo_root: Path, rationale: str) -> dict[str, str]:
+        (repo_root / "docs/specs").mkdir(parents=True)
+        (repo_root / "pkg").mkdir()
+        spec_path = "docs/specs/01-nested.md"
+        reference = f"{spec_path}#SUP-NESTED"
+        (repo_root / spec_path).write_text(
+            "## Outer contract [OUTER-1]\n\n"
+            "The outer function returns zero.\n\n"
+            "_Implementation mapping_:\n\n"
+            "- `pkg/core.py::outer`\n\n"
+            "### Inner contract [INNER-1]\n\n"
+            "The inner function returns one.\n\n"
+            f'_Traceability: suppression-declaration [SUP-NESTED] "{rationale}"_\n\n'
+            "_Implementation mapping_:\n\n"
+            "- `pkg/core.py::inner`\n",
+            encoding="utf-8",
+        )
+        (repo_root / "pkg/core.py").write_text(
+            "def outer() -> int:\n"
+            '    """Spec: docs/specs/01-nested.md [OUTER-1]"""\n'
+            "    return 0\n\n"
+            "def inner() -> int:\n"
+            '    """Spec: docs/specs/01-nested.md [INNER-1]\n'
+            "    Spec: docs/specs/01-nested.md\n"
+            '    """\n'
+            "    return 1\n",
+            encoding="utf-8",
+        )
+        rule = SuppressionRule(
+            mechanism="ignore",
+            provenance="config_file",
+            path="pkg/core.py",
+            sections=(),
+            codes=("CODE_REF_BROAD",),
+            declaration=reference,
+            origin=SuppressionOrigin(source=".backstitch.toml", position=0),
+        )
+        settings = replace(
+            BackstitchSettings(),
+            lint=replace(BackstitchSettings().lint, suppressions=(rule,)),
+        )
+        profile = get_profile("backstitch-style-v1").with_overrides(
+            spec_roots=("docs/specs",),
+            plan_roots=(),
+            code_roots=("pkg",),
+            test_roots=(),
+        )
+        runtime = build_obligation_runtime(repo_root, profile, settings)
+        return {
+            cast(str, packet["packet_id"]): cast(str, packet["packet_hash"])
+            for packet in generate_source_aligned_packets(runtime)
+        }
+
+    baseline = packet_hashes(
+        tmp_path / "baseline",
+        "The broad backlink is retained as bounded nested evidence.",
+    )
+    changed = packet_hashes(
+        tmp_path / "changed",
+        "The broad backlink has a revised bounded nested rationale.",
+    )
+
+    assert set(baseline) == {
+        "docs/specs/01-nested.md#INNER-1",
+        "docs/specs/01-nested.md#OUTER-1",
+        "suppression::docs/specs/01-nested.md#SUP-NESTED",
+    }
+    assert (
+        changed["docs/specs/01-nested.md#OUTER-1"]
+        == baseline["docs/specs/01-nested.md#OUTER-1"]
+    )
+    assert (
+        changed["docs/specs/01-nested.md#INNER-1"]
+        == baseline["docs/specs/01-nested.md#INNER-1"]
+    )
+    assert (
+        changed["suppression::docs/specs/01-nested.md#SUP-NESTED"]
+        != baseline["suppression::docs/specs/01-nested.md#SUP-NESTED"]
+    )
+
+
+@pytest.mark.parametrize("field", PACKET_V4_PROJECTION_FIELDS)
+def test_schema4_packet_hash_is_sensitive_to_every_projection_field(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    packet = _mixed_suppression_packets(tmp_path)["suppression"]
+    projection = semantic_packet_projection(packet)
+    baseline_hash = hashlib.sha256(canonical_json_bytes(projection)).hexdigest()
+    assert baseline_hash == packet["packet_hash"]
+    changed = deepcopy(projection)
+    value = changed[field]
+    if isinstance(value, str):
+        changed[field] = value + "-changed"
+    elif isinstance(value, dict):
+        changed[field] = {**value, "__changed__": True}
+    else:
+        assert isinstance(value, list)
+        changed[field] = [*value, {"__changed__": True}]
+
+    assert hashlib.sha256(canonical_json_bytes(changed)).hexdigest() != baseline_hash
 
 
 def test_source_aligned_packet_filters_and_orders_relevant_issues(

@@ -60,7 +60,7 @@ DEFAULT_BACKSTITCH_LOCAL_LLM_SERVED_MODEL = DEFAULT_BACKSTITCH_LOCAL_LLM_BASE_MO
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LIVE_SPEC = "docs/specs/02-backstitch-core.md"
-DEFAULT_LIVE_PACKETS = 1
+DEFAULT_LIVE_PACKETS = 2
 MAX_LIVE_PACKETS = 5
 LOCAL_LIVE_PACKET_IDS = (
     "invariant::INV.RES.1",
@@ -505,7 +505,7 @@ def _write_live_contract_repo(root: Path, *, kind: str = "openai") -> Path:
     (root / "tests").mkdir()
     (root / "docs/plans/.keep").write_text("", encoding="utf-8")
     (root / ".backstitch.toml").write_text(
-        '[analyze]\njson_mode = "require"\n',
+        '[analyze]\njson_mode = "require"\ncache_path = ".backstitch/semantic-cache"\n',
         encoding="utf-8",
     )
     if kind == "local":
@@ -532,10 +532,28 @@ def _write_live_contract_repo(root: Path, *, kind: str = "openai") -> Path:
             encoding="utf-8",
         )
     else:
+        (root / ".backstitch.toml").write_text(
+            '[analyze]\njson_mode = "require"\n'
+            'cache_path = ".backstitch/semantic-cache"\n\n'
+            "[lint]\n"
+            "require_suppression_declarations = true\n\n"
+            "[[lint.suppressions]]\n"
+            'mechanism = "ignore"\n'
+            'path = "docs/specs/01-live.md"\n'
+            "sections = []\n"
+            'codes = ["MAPPING_BLOCK_OWNERLESS"]\n'
+            'declaration = "docs/specs/01-live.md#SUP-LIVE"\n',
+            encoding="utf-8",
+        )
         (root / "docs/specs/01-live.md").write_text(
+            "_Implementation mapping_:\n\n"
+            "- `pkg/ownerless.py`\n\n"
             "# Live contract\n\n"
             "## Return one [LIVE-1]\n\n"
             "The live contract returns one.\n\n"
+            '_Traceability: suppression-declaration [SUP-LIVE] "The ownerless '
+            "preamble fixture is retained to exercise the live documented "
+            'suppression lifecycle."_\n\n'
             "_Implementation mapping_:\n\n- `pkg/live.py::return_one`\n",
             encoding="utf-8",
         )
@@ -1077,6 +1095,8 @@ def _exercise_live_llm_analysis_contract(
     live_packet_report = tmp_path / "live-packet-report.json"
     analysis = tmp_path / "analysis.jsonl"
     analysis_report = tmp_path / "analysis-report.json"
+    replay_analysis = tmp_path / "replay-analysis.jsonl"
+    replay_analysis_report = tmp_path / "replay-analysis-report.json"
     report = tmp_path / "report.json"
 
     # 1. Generate a small source-aligned contract corpus through the real CLI.
@@ -1106,6 +1126,7 @@ def _exercise_live_llm_analysis_contract(
             require_semantic_owner=False,
         )
         assert subset, "live contract corpus produced no selectable section packet"
+        assert {packet["kind"] for packet in subset} == {"section", "suppression"}
     assert len(subset) <= MAX_LIVE_PACKETS
     if kind == "local":
         assert len(subset) >= 2, (
@@ -1128,6 +1149,21 @@ def _exercise_live_llm_analysis_contract(
         _assert_model_listed(local_config)
         _assert_local_transport(local_config)
 
+    cache_identity_options = [
+        "--option",
+        "analyze.backend_id",
+        "llm",
+        "--option",
+        "analyze.plugin_id",
+        "live-contract",
+        "--option",
+        "analyze.plugin_distribution_name",
+        "llm",
+        "--option",
+        "analyze.model_revision",
+        "live-contract-v1",
+    ]
+
     # 3. Real provider call through the public analyze command.
     if proxy is not None:
         proxy.start_analyze_phase()
@@ -1143,6 +1179,10 @@ def _exercise_live_llm_analysis_contract(
         "1",
         "--config",
         str(live_root / ".backstitch.toml"),
+        *cache_identity_options,
+        "--option",
+        "analyze.cache_mode",
+        "read-write",
         "--output",
         str(analysis),
         "--report",
@@ -1165,12 +1205,51 @@ def _exercise_live_llm_analysis_contract(
             served_model=local_config.served_model,
         )
 
-    # 4. Deterministic report over the same source-aligned contract corpus.
-    chk = _run_cli("check", *scan_args, "--format", "json", "--output", str(report))
+    # 4. The same immutable cache objects replay with zero provider calls.
+    replay = _run_cli(
+        "analyze",
+        "--packets",
+        str(live_packets),
+        "--packet-report",
+        str(live_packet_report),
+        "--model",
+        live_model,
+        "--concurrency",
+        "1",
+        "--config",
+        str(live_root / ".backstitch.toml"),
+        *cache_identity_options,
+        "--option",
+        "analyze.cache_mode",
+        "require",
+        "--output",
+        str(replay_analysis),
+        "--report",
+        str(replay_analysis_report),
+        label="analyze require replay",
+        timeout=LOCAL_ANALYZE_TIMEOUT_SECONDS if kind == "local" else None,
+    )
+    _assert_no_traceback(replay, "analyze require replay")
+    assert replay.returncode == 0, replay.stderr
+    replay_report_data = json.loads(replay_analysis_report.read_text(encoding="utf-8"))
+    assert replay_report_data["provider_calls"] == 0
+    assert replay_report_data["cache_misses"] == 0
+    assert replay_analysis.read_bytes() == analysis.read_bytes()
+
+    # 5. Deterministic report over the same source-aligned contract corpus.
+    chk = _run_cli(
+        "check",
+        *scan_args,
+        "--show-suppressions",
+        "--format",
+        "json",
+        "--output",
+        str(report),
+    )
     _assert_no_traceback(chk, "check")
     assert chk.returncode == 0, chk.stderr
 
-    # 5. Summary consumer accepts the model output.
+    # 6. Summary consumer accepts the model output.
     summ = _run_cli(
         "summarize-analysis",
         "--deterministic-report",

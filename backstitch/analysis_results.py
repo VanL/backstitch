@@ -447,6 +447,15 @@ def packet_identities_from_report(report_data: dict[str, Any]) -> dict[str, str]
             for bind in report_data.get("binds", [])
         }
     )
+    identities.update(
+        {
+            f"suppression::{reference}": "suppression"
+            for row in report_data.get("suppressed_issues", [])
+            if isinstance(row, dict)
+            and isinstance((reference := row.get("declaration")), str)
+            and is_valid_suppression_reference(reference)
+        }
+    )
     return identities
 
 
@@ -502,7 +511,7 @@ def render_analysis_summary(summary: Mapping[str, int], load: AnalysisLoad) -> s
         "",
         "semantic findings (advisory):",
     ]
-    for kind in ("section", "invariant"):
+    for kind in ("section", "invariant", "suppression"):
         kind_results = [result for result in load.results if result.kind == kind]
         lines.append(f"  {kind} packets:")
         if not kind_results:

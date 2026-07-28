@@ -202,11 +202,13 @@ def test_required_mode_leaves_legacy_suppression_finding_active(
         ("", "docs/other/01-outside.md#SUP-OUTSIDE", None),
     ),
 )
+@pytest.mark.parametrize("require_declarations", (False, True))
 def test_invalid_or_unresolved_declaration_leaves_original_finding_active(
     tmp_path: Path,
     declaration_source: str,
     reference: str,
     source_hygiene: str | None,
+    require_declarations: bool,
 ) -> None:
     (tmp_path / "docs/specs").mkdir(parents=True)
     (tmp_path / "pkg").mkdir()
@@ -231,7 +233,11 @@ def test_invalid_or_unresolved_declaration_leaves_original_finding_active(
     result = build_obligation_runtime(
         tmp_path,
         profile,
-        BackstitchSettings(lint=LintSettings(require_suppression_declarations=True)),
+        BackstitchSettings(
+            lint=LintSettings(
+                require_suppression_declarations=require_declarations,
+            )
+        ),
     ).pipeline
 
     assert result.suppressed == ()

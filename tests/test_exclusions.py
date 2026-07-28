@@ -19,7 +19,12 @@ from backstitch.exclusions import (
     parse_traceability_marker_line,
     should_suppress,
 )
-from backstitch.models import Issue
+from backstitch.models import (
+    Issue,
+    SuppressionDeclaration,
+    SuppressionOrigin,
+    SuppressionRule,
+)
 from backstitch.settings import LintSettings
 
 
@@ -263,6 +268,29 @@ def test_allow_unknown_downgrades_unknown_suppression_code() -> None:
     assert "SPEC_SECTON_UNMAPPED" in index.suppression_diagnostics[0].message
 
 
+def test_unknown_code_in_structured_suppression_raises() -> None:
+    with pytest.raises(UnknownSuppressionCodeError, match="SPEC_SECTON_UNMAPPED"):
+        build_suppression_index(
+            meta_spec_globs=(),
+            lint=LintSettings(
+                suppressions=(
+                    SuppressionRule(
+                        mechanism="ignore",
+                        provenance="config_file",
+                        path="docs/specs/*.md",
+                        sections=(),
+                        codes=("SPEC_SECTON_UNMAPPED",),
+                        declaration=None,
+                        origin=SuppressionOrigin(
+                            source=".backstitch.toml",
+                            position=0,
+                        ),
+                    ),
+                )
+            ),
+        )
+
+
 def test_non_suppressible_code_in_config_warns_when_matching_issue() -> None:
     index = build_suppression_index(
         meta_spec_globs=(),
@@ -297,6 +325,54 @@ def test_unused_ignores_warn_when_enabled() -> None:
         ),
     )
     assert collect_unused_ignore_diagnostics(quiet) == []
+
+
+def test_unused_documented_rule_and_unreferenced_declaration_both_warn() -> None:
+    reference = "docs/specs/01-x.md#SUP-X"
+    declaration = SuppressionDeclaration(
+        declaration_id="SUP-X",
+        reference=reference,
+        rationale="The generated section has no implementation.",
+        path="docs/specs/01-x.md",
+        owner_section_id="X-1",
+        owner_title="X",
+        start_line=4,
+        end_line=4,
+    )
+    unreferenced = build_suppression_index(
+        meta_spec_globs=(),
+        lint=LintSettings(),
+        declarations=(declaration,),
+    )
+    assert [
+        diagnostic.message
+        for diagnostic in collect_unused_ignore_diagnostics(unreferenced)
+    ] == [f"unreferenced suppression declaration: {reference}"]
+
+    unused_rule = build_suppression_index(
+        meta_spec_globs=(),
+        lint=LintSettings(
+            suppressions=(
+                SuppressionRule(
+                    mechanism="ignore",
+                    provenance="config_file",
+                    path="docs/specs/99-*.md",
+                    sections=(),
+                    codes=("SPEC_SECTION_UNMAPPED",),
+                    declaration=reference,
+                    origin=SuppressionOrigin(
+                        source=".backstitch.toml",
+                        position=0,
+                    ),
+                ),
+            )
+        ),
+        declarations=(declaration,),
+    )
+    assert [
+        diagnostic.message
+        for diagnostic in collect_unused_ignore_diagnostics(unused_rule)
+    ] == ["unused suppression rule: docs/specs/99-*.md"]
 
 
 def test_noqa_parsing_accepts_alias_and_comma_lists() -> None:

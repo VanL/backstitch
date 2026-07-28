@@ -97,8 +97,11 @@ Do not consider work complete until:
 - for implementation work on `backstitch` itself: every enumerable contract
   element the change touches (issue codes, exit codes, config keys) has a
   firing test, and the self-corpus gate passes — advertised default
-  invocation, exit 0, zero errors and warnings, suppressions auditable via
-  `--show-suppressions`. When the [SC-10] acceptance probe suite exists
+  invocation, exit 0, zero errors and warnings, every governed suppression has
+  a valid spec declaration and nonblank rationale in `--show-suppressions`,
+  and every eligible suppression packet has a current semantic result or
+  reviewed disposition under the applied configuration. When the [SC-10]
+  acceptance probe suite exists
   (`tests/acceptance/`), it must pass; until it exists, run the [SC-10]
   probes manually and record the results in the plan (creating the suite is
   slice 0 of implementation work, and a missing suite is named residual

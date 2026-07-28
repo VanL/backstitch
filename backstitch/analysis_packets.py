@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+from functools import partial
 from typing import Any, Literal, cast
 
 from backstitch.canonical import canonical_json_bytes, lf_line_count, lf_split
@@ -20,13 +21,12 @@ from backstitch.evidence_discovery import (
     get_candidate_source,
 )
 from backstitch.markdown_specs import project_section_packet_requirement
-from backstitch.models import SuppressionDecision
+from backstitch.models import SuppressionDecision, issue_sort_key
 from backstitch.obligation_runtime import ALGORITHMS, ObligationRuntime
 from backstitch.obligations import ObligationRecord, suppression_rule_row
 from backstitch.semantic_packets import (
     ISSUE_FIELDS,
     semantic_packet_hash,
-    suppression_issue_key,
 )
 
 PacketKind = Literal["section", "invariant", "suppression", "all"]
@@ -242,6 +242,7 @@ def _requirement(
             end_line=obligation.end_line,
             mappings=runtime.pipeline.raw_report.spec_mappings,
             skips=runtime.pipeline.artifacts.obligation_skips,
+            declarations=runtime.pipeline.artifacts.suppression_declarations,
         )
         identity = sections[0].section_id
         title = obligation.title
@@ -534,7 +535,14 @@ def _suppression_issue_rows(
     for decision in decisions:
         source = dataclasses.asdict(decision.issue)
         rows.append({field: source[field] for field in ISSUE_FIELDS})
-    return sorted(rows, key=suppression_issue_key)
+    return sorted(
+        rows,
+        key=partial(
+            issue_sort_key,
+            severity_field="default_severity",
+            canonical_tiebreak=True,
+        ),
+    )
 
 
 def _suppression_counterevidence(

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import fnmatch
 import re
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -524,26 +523,6 @@ def _path_matches_glob(path: str, pattern: str) -> bool:
     return fnmatch.fnmatch(path, pattern) or fnmatch.fnmatch(path, f"**/{pattern}")
 
 
-def _file_is_meta(path: str | None, index: SuppressionIndex) -> bool:
-    if path is None:
-        return False
-    return any(_path_matches_glob(path, glob) for glob in index.meta_spec_globs)
-
-
-def _section_is_meta(
-    spec_file: str | None,
-    section_id: str | None,
-    index: SuppressionIndex,
-) -> bool:
-    if spec_file is None:
-        return False
-    if section_id is not None and index.section_meta.get(
-        (spec_file, section_id), False
-    ):
-        return True
-    return _file_is_meta(spec_file, index)
-
-
 def _meta_suppresses(issue: Issue, *, code_file: str | None) -> bool:
     if issue.code in META_DEFAULT_SUPPRESSED:
         return True
@@ -552,75 +531,6 @@ def _meta_suppresses(issue: Issue, *, code_file: str | None) -> bool:
         if target is not None and not target.endswith(".py"):
             return True
     return False
-
-
-def _match_per_file_ignore(
-    path: str | None,
-    issue_code: str,
-    ignores: dict[str, tuple[str, ...]],
-) -> str | None:
-    if path is None:
-        return None
-    for pattern, codes in ignores.items():
-        if issue_code not in codes:
-            continue
-        if _path_matches_glob(path, pattern) or path == pattern:
-            return pattern
-    return None
-
-
-def _match_per_section_ignore(
-    spec_file: str | None,
-    section_id: str | None,
-    issue_code: str,
-    ignores: dict[str, tuple[str, ...]],
-) -> str | None:
-    if spec_file is None:
-        return None
-    candidates: list[str] = []
-    if section_id is not None:
-        candidates.append(f"{spec_file}::{section_id}")
-    candidates.append(f"{spec_file}::*")
-    for key in candidates:
-        codes = ignores.get(key)
-        if codes is not None and issue_code in codes:
-            return key
-    for pattern, codes in ignores.items():
-        if issue_code not in codes:
-            continue
-        if "::" not in pattern:
-            continue
-        file_pattern, section_pattern = pattern.split("::", 1)
-        if (
-            not _path_matches_glob(spec_file, file_pattern)
-            and spec_file != file_pattern
-        ):
-            continue
-        if section_pattern == "*" or section_pattern == section_id:
-            return pattern
-    return None
-
-
-def _match_config_ignore_attempts(
-    issue: Issue,
-    index: SuppressionIndex,
-    *,
-    spec_file: str | None,
-    section_id: str | None,
-    code_file: str | None,
-) -> tuple[str | None, str | None]:
-    file_rule = _match_per_file_ignore(
-        spec_file or code_file or issue.path,
-        issue.code,
-        index.lint.per_file_ignores,
-    )
-    section_rule = _match_per_section_ignore(
-        spec_file,
-        section_id,
-        issue.code,
-        index.lint.per_section_ignores,
-    )
-    return file_rule, section_rule
 
 
 def should_suppress(
@@ -938,10 +848,16 @@ def collect_unused_ignore_diagnostics(
             "lint.per-section-ignores",
         }
         if audits_unused and rule not in index.used_rules:
+            if rule.origin.source == "lint.per-file-ignores":
+                message = f"unused per-file-ignore rule: {rule.path}"
+            elif rule.origin.source == "lint.per-section-ignores":
+                message = f"unused per-section-ignore rule: {rule.path}"
+            else:
+                message = f"unused suppression rule: {rule.path}"
             diagnostics.append(
                 _suppression_diagnostic(
                     "SUPPRESSION_UNUSED",
-                    f"unused suppression rule: {rule.path}",
+                    message,
                     path=(
                         f"{rule.path}::{rule.sections[0]}"
                         if rule.origin.source == "lint.per-section-ignores"
@@ -1058,71 +974,3 @@ def _validate_config_codes(index: SuppressionIndex, *, allow_unknown: bool) -> N
     index.suppression_diagnostics.extend(
         validate_lint_codes(index.lint, allow_unknown=allow_unknown)
     )
-
-
-def _iter_inline_ignore_code_sets(
-    index: SuppressionIndex,
-) -> Iterator[tuple[str, int | None, frozenset[str]]]:
-    for path, codes in index.inline_file_ignores.items():
-        yield path, None, codes
-    for (spec_path, section_id), codes in index.inline_spec_ignores.items():
-        yield f"{spec_path}::{section_id}", None, codes
-    for path, codes in index.inline_code_ignores.items():
-        yield path, None, codes
-    # [EXC-5]/[EXC-8]: statement-scoped Python noqa spans are suppression
-    # attempts too -- an error-severity code in a span must warn, not be
-    # silently ignored.
-    for path, spans in index.inline_code_span_ignores.items():
-        for start, _end, codes in spans:
-            yield path, start, codes
-
-
-def _warn_unsuppressible_code_attempt(
-    issue: Issue,
-    index: SuppressionIndex,
-    *,
-    file_rule: str | None = None,
-    section_rule: str | None = None,
-) -> None:
-    if file_rule is not None:
-        message = (
-            f"suppression ignored for non-suppressible code {issue.code}"
-            f" in lint.per-file-ignores rule {file_rule}"
-        )
-        index.suppression_diagnostics.append(
-            _suppression_diagnostic(
-                "SUPPRESSION_UNSUPPRESSIBLE_CODE",
-                message,
-                path=file_rule,
-                line=None,
-            )
-        )
-    if section_rule is not None:
-        message = (
-            f"suppression ignored for non-suppressible code {issue.code}"
-            f" in lint.per-section-ignores rule {section_rule}"
-        )
-        index.suppression_diagnostics.append(
-            _suppression_diagnostic(
-                "SUPPRESSION_UNSUPPRESSIBLE_CODE",
-                message,
-                path=section_rule,
-                line=None,
-            )
-        )
-    for path, line, codes in _iter_inline_ignore_code_sets(index):
-        if issue.code in codes:
-            location = f"{path}:{line}" if line is not None else path
-            message = (
-                f"suppression ignored for non-suppressible code {issue.code}"
-                f" in inline marker at {location}"
-            )
-            index.suppression_diagnostics.append(
-                _suppression_diagnostic(
-                    "SUPPRESSION_UNSUPPRESSIBLE_CODE",
-                    message,
-                    path=path,
-                    line=line,
-                )
-            )
-            return

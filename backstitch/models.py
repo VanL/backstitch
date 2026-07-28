@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from backstitch.canonical import canonical_json_bytes
 from backstitch.diagnostics import (
     always_error_codes,
     default_level_for,
@@ -233,25 +234,39 @@ class SuppressionDecision:
     rule: SuppressionRule | None
 
 
-def issue_sort_key(issue: Issue | Mapping[str, Any]) -> tuple[int, str, int, str, str]:
+def issue_sort_key(
+    issue: Issue | Mapping[str, Any],
+    *,
+    severity_field: Literal["severity", "default_severity"] = "severity",
+    canonical_tiebreak: bool = False,
+) -> tuple[object, ...]:
     """Return the one deterministic ordering key for issue-shaped records."""
 
     severity_rank = {"error": 0, "warning": 1, "info": 2}
     if isinstance(issue, Issue):
-        return (
-            severity_rank[issue.severity],
+        severity = (
+            issue.severity
+            if severity_field == "severity"
+            else (issue.default_severity or issue.severity)
+        )
+        base: tuple[object, ...] = (
+            severity_rank[severity],
             issue.path,
             issue.line or 0,
             issue.code,
             issue.message,
         )
-    return (
-        severity_rank[issue["severity"]],
+        return base
+    base = (
+        severity_rank[issue[severity_field]],
         issue["path"] or "",
         issue["line"] or 0,
         issue["code"],
         issue["message"],
     )
+    if canonical_tiebreak:
+        return (*base, canonical_json_bytes(dict(issue)))
+    return base
 
 
 @dataclass(frozen=True, slots=True)

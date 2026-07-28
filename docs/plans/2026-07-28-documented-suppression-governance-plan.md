@@ -2,7 +2,7 @@
 
 Plan type: implementation with spec revision.
 
-Status: implementation in progress.
+Status: implemented and independently reviewed.
 
 Class: 5+P. The work changes the public suppression configuration, source
 directive grammar, semantic packet/result/report contracts, and this
@@ -116,6 +116,20 @@ unchanged.
   CFG/EXC key tables and reason vocabulary, BSA006-BSA008 registry wording,
   schema-2/schema-3 packet-kind wording, and required reciprocal mapping
   references. They did not change the reviewed product boundary.
+- Final implementation reconciliation on 2026-07-28:
+  - `docs/specs/02-backstitch-core.md`:
+    `7550eb139c55bac5a6887391f5592d1967b1251b884e5f3304366a972f3e6520`
+  - `docs/specs/03-backstitch-configuration.md`:
+    `696750d22a5d32c3c2afb01c79a61622cc8205c98e014a807473893ccd2570f5`
+  - `docs/specs/04-backstitch-traceability-exclusions.md`:
+    `78ec51e46b7586629970e386b1a3f3ee61d8612364ca8ffeac3f7a52835e6c4a`
+  - `docs/specs/06-semantic-gates.md`:
+    `aed1ce5ed1a2c1d3ae8836afdace2ee90c86cbdc4356a5676d1a7ce07ca1011c`
+  - `docs/specs/07-verification-and-evidence-cases.md`:
+    `623fd1f31b3a4b98c0fbc6f21ef56fe60120e5173ad325541139ec7fd57da32f`
+  Spec 02 gained the bounded summary-consumer rule exposed by the live
+  suppression packet; the other hash changes are the reviewed completeness
+  correction, declarations, and truthful migration mappings.
 
 ## Current Structure And Required Reading
 
@@ -925,6 +939,7 @@ Add to [EVC-12]:
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |----------|------------------|-----------------|-----------|---------------|
 | [SEM-7], [EVC-8.7], [EVC-12] | Analyze separately rejects a nonzero eligible suppression population with fewer emitted packets. | Current packet-report schema 3 rejects that artifact first: eligible and emitted both recompute from the selected executable/evaluate audit rows and selected rows must exactly match packets. Analyze treats a validated report as complete; zero eligible remains vacuously complete. | The planned post-validation state is unrepresentable without weakening the closed report contract or adding another population field. The existing validator is the correct failure owner and exits `2` before adapter construction. | Revise [SEM-7], [EVC-8.7], and [EVC-12] to name intrinsic schema-3 completeness and require an invalid-artifact boundary probe instead of a dead analyzer branch. |
+| Slice 5 live refresh | Refresh Backstitch's current self-repository packets in `read-write`, then replay its committed `require` posture. | Current-source analysis exits `2` at the pre-provider `ALIGNMENT_DEBT` gate because the repository retains known active partial/untraced obligations from the evidence-hardening inventory. A bounded source-aligned live fixture instead made real section and suppression calls, then replayed byte-identical results in `require` with zero calls/misses. | Repairing unrelated active trace debt would violate this plan's explicit scope. Readiness must not be bypassed to populate cache. | Record the self-repository availability limit in the implementation note; retain the live suppression and zero-call replay as a real public-CLI gate. |
 
 ## Dependency-Ordered Implementation Slices
 
@@ -1313,6 +1328,63 @@ text, and every corrected owner against the promotion edit list.
   runtime owner and then removing its overly broad [EVC-8] module citation.
   Re-review confirmed zero added `(path, section_id, code)` suppression
   identities against the 206-record baseline.
+- Slice 5 live evidence: `gpt-5.4-mini` analyzed one section and one
+  documented-suppression packet through the public historical replay command.
+  The first `read-write` run made two provider calls; the immediate `require`
+  run reported zero provider calls, zero misses, and byte-identical result
+  JSONL. The live summary path exposed and then closed the missing suppression
+  identity consumer by requiring the deterministic suppression audit.
+- Final direct Claude review Round 1: `VERDICT: BLOCKED`. All findings were
+  accepted within the reviewed boundary:
+  - P1: strict governance retained raw invalid inline meta in the obligation
+    rung. The pipeline now publishes effective section meta from eligible
+    rules, and the obligation runtime consumes only that set.
+  - P2: the packet metamorphic matrix and schema-4 projection-field
+    sensitivity needed direct real-runtime coverage.
+  - P2: firing coverage was missing for both unused declaration forms,
+    compatibility-mode unresolved references, structured unknown codes, and
+    the non-runtime-overridable `lint.suppressions` CLI path.
+  - P2: spec 02 omitted this plan from `## Related Plans`.
+  - P2: seven superseded private legacy matcher helpers remained after the
+    canonical rule path took ownership; they were deleted.
+- Final direct Claude review Round 2: `VERDICT: BLOCKED`. Every Round 1
+  finding was verified fixed. The real-path metamorphic test exposed one
+  correction-caused identity defect: an exact declaration mask filtered by
+  owning section, so a nested declaration remained visible in ancestor
+  section packet ranges. The mask now applies exact parser-owned declaration
+  lines by path across every containing section while preserving line
+  coordinates; a nested outer/inner/suppression regression proves only the
+  suppression packet rekeys on a rationale edit.
+- Final focused Claude review Round 3: `VERDICT: PASS`. The review verified the
+  nested mask, coordinate preservation, production call path, and load-bearing
+  real-runtime regression.
+- Two Round 2 P3 observations were explicitly non-blocking and not expanded
+  into this plan: the semantic-eval fixture harness still passes raw section
+  meta in fixtures that do not enable strict governance, and the generalized
+  issue ordering helper has unused branch asymmetries outside its current
+  mapping-shaped callers. Neither changes production behavior covered by this
+  plan; any general cleanup requires separate scope.
+
+### Final verification evidence
+
+All final gates passed on 2026-07-28:
+
+- `uv run pytest tests/acceptance -q`
+- `uv run pytest -q -m "not live_llm and not benchmark"`
+- `uv run pytest -q -m live_llm`
+- `uv run pytest tests -q -n 0 -m benchmark`; default-check median `0.776s`
+  and obligation-list median `0.802s`. Performance qualification remains
+  unavailable because the benchmark runner contract is absent.
+- `uv run ruff check .`, `uv run ruff format --check .`, and
+  `uv run mypy backstitch`
+- `uv run backstitch check --repo-root . --show-suppressions`; exit `0`,
+  zero active issues, and 192 suppressed records with declarations and
+  nonblank rationales
+- `git diff --check`
+
+The direct final review concluded `VERDICT: PASS` after the nested declaration
+identity correction. The self-repository semantic refresh limitation remains
+the explicit Slice 5 deviation above; no readiness gate was bypassed.
 
 ## Out Of Scope
 
@@ -1333,15 +1405,15 @@ text, and every corrected owner against the promotion edit list.
 
 ## Fresh-Eyes Completion Checklist
 
-- [ ] A zero-context implementer can identify every owner and reuse path.
-- [ ] The opt-in compatibility and strict fail-closed behavior do not conflict.
-- [ ] Every suppressed audit record has one provenance and, when governed, one
+- [x] A zero-context implementer can identify every owner and reuse path.
+- [x] The opt-in compatibility and strict fail-closed behavior do not conflict.
+- [x] Every suppressed audit record has one provenance and, when governed, one
   declaration/rationale.
-- [ ] The LLM reviews evidence but cannot decide deterministic truth.
-- [ ] Installing support leaves section/invariant fixture bytes and identities
+- [x] The LLM reviews evidence but cannot decide deterministic truth.
+- [x] Installing support leaves section/invariant fixture bytes and identities
   unchanged; later source/rule changes re-key only truthfully affected packets.
-- [ ] The EVC migration cannot preserve future file-wide suppression.
-- [ ] Empty suppression inventory is a valid end state.
-- [ ] Rollout and rollback do not depend on committed cache state.
-- [ ] Each enumerable contract element has a firing test.
-- [ ] No task authorizes adjacent cleanup or a second implementation path.
+- [x] The EVC migration cannot preserve future file-wide suppression.
+- [x] Empty suppression inventory is a valid end state.
+- [x] Rollout and rollback do not depend on committed cache state.
+- [x] Each enumerable contract element has a firing test.
+- [x] No task authorizes adjacent cleanup or a second implementation path.

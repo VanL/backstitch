@@ -309,7 +309,7 @@ def test_repository_dogfood_semantic_configuration_is_explicit() -> None:
         "seed": 42,
         "max_tokens": 512,
         "require_complete": True,
-        "required_kinds": ["section", "invariant"],
+        "required_kinds": ["section", "invariant", "suppression"],
         "minimum_packets": 1,
         "maximum_packets": 100,
         "maximum_prompt_bytes": 1_500_000,

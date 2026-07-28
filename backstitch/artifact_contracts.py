@@ -21,7 +21,7 @@ from backstitch.grammar import (
     is_valid_section_id,
     is_valid_suppression_reference,
 )
-from backstitch.models import ISSUE_CODES
+from backstitch.models import ISSUE_CODES, issue_sort_key
 from backstitch.semantic_packets import (
     DECLARATION_FIELDS,
     ISSUE_FIELDS,
@@ -32,7 +32,6 @@ from backstitch.semantic_packets import (
     MAX_SNIPPET_LINES,
     SNIPPET_FIELDS,
     semantic_packet_hash,
-    suppression_issue_key,
 )
 
 
@@ -1318,7 +1317,14 @@ def _packet_v4_shape_error(row: dict[str, Any]) -> str | None:
         )
     ):
         return "packet schema 4 issues are invalid"
-    issue_keys = [suppression_issue_key(issue) for issue in issues]
+    issue_keys = [
+        issue_sort_key(
+            issue,
+            severity_field="default_severity",
+            canonical_tiebreak=True,
+        )
+        for issue in issues
+    ]
     if issue_keys != sorted(issue_keys):
         return "packet schema 4 issues are not in canonical order"
 

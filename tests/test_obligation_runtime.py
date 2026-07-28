@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 import backstitch.obligation_runtime as obligation_runtime
+from backstitch.analysis_packets import generate_source_aligned_packets
 from backstitch.config import ProfileConfig
 from backstitch.models import Issue, SuppressionOrigin, SuppressionRule
 from backstitch.obligation_runtime import (
@@ -117,6 +118,81 @@ def test_validated_structured_meta_rule_sets_the_shared_obligation_rung(
     assert runtime.pipeline.effective_meta_spec_globs == (spec_path,)
     assert obligation.obligation_rung == "meta"
     assert obligation.gate_state == "not_executable"
+
+
+@pytest.mark.parametrize(
+    (
+        "require_declarations",
+        "expected_rung",
+        "expected_section_meta",
+        "expected_packet_ids",
+    ),
+    [
+        (
+            False,
+            "meta",
+            frozenset({("docs/specs/01-core.md", "CAND-1")}),
+            ["docs/specs/01-core.md#CAND-2"],
+        ),
+        (
+            True,
+            "active",
+            frozenset(),
+            [
+                "docs/specs/01-core.md#CAND-1",
+                "docs/specs/01-core.md#CAND-2",
+            ],
+        ),
+    ],
+)
+def test_clause_free_inline_meta_only_changes_obligation_rung_when_eligible(
+    tmp_path: Path,
+    require_declarations: bool,
+    expected_rung: str,
+    expected_section_meta: frozenset[tuple[str, str]],
+    expected_packet_ids: list[str],
+) -> None:
+    (tmp_path / "docs/specs").mkdir(parents=True)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "tests").mkdir()
+    spec_path = "docs/specs/01-core.md"
+    (tmp_path / spec_path).write_text(
+        "## Candidate behavior [CAND-1]\n"
+        "_Traceability: meta_\n\n"
+        "The candidate returns one.\n\n"
+        "_Implementation mapping_:\n\n"
+        "- `pkg/candidate.py::candidate`\n\n"
+        "## Other behavior [CAND-2]\n\n"
+        "The other candidate returns two.\n\n"
+        "_Implementation mapping_:\n\n"
+        "- `pkg/candidate.py::candidate_two`\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pkg/candidate.py").write_text(
+        "def candidate() -> int:\n"
+        '    """Spec: docs/specs/01-core.md [CAND-1]"""\n'
+        "    return 1\n\n"
+        "def candidate_two() -> int:\n"
+        '    """Spec: docs/specs/01-core.md [CAND-2]"""\n'
+        "    return 2\n",
+        encoding="utf-8",
+    )
+    settings = BackstitchSettings(
+        lint=LintSettings(
+            require_suppression_declarations=require_declarations,
+        )
+    )
+
+    runtime = build_obligation_runtime(tmp_path, _profile(), settings)
+
+    obligation = runtime.inventory.get(f"{spec_path}#CAND-1")
+    assert obligation is not None
+    assert runtime.pipeline.artifacts.section_meta == {(spec_path, "CAND-1"): True}
+    assert runtime.pipeline.effective_section_meta == expected_section_meta
+    assert obligation.obligation_rung == expected_rung
+    assert [
+        packet["packet_id"] for packet in generate_source_aligned_packets(runtime)
+    ] == (expected_packet_ids)
 
 
 def test_capture_converges_declared_target_outside_code_roots(tmp_path: Path) -> None:

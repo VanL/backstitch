@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added opt-in documented suppression governance with spec-owned rationales,
+  structured ignore/meta rules, deterministic audit provenance, first-class
+  suppression obligations and semantic packets/results, cache replay, policy
+  and disposition integration, and live suppression lifecycle coverage.
+- Migrated Backstitch's own suppressions from legacy meta/per-file settings to
+  five declared structured rules. The self-corpus audit is narrower (192
+  records from 206), contains no undocumented rationale, and is mechanically
+  pinned against scope broadening.
 - Added deterministic semantic evidence discovery, immutable analysis and
   verification caches, qualification-gated model use, bounded trusted refresh
   workflows, and report-only hostile pull-request analysis.

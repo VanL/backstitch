@@ -81,7 +81,8 @@ consumer, not a package dependency.
 - **Invariant checking** - Connects required or draft guarantees to real tests
 - **Stable diagnostics** - Canonical names, short aliases, contexts, and levels
 - **Configurable policy** - Ordered selectors, `fail_on`, and suppressibility
-- **Auditable suppression** - Hidden findings remain available with reasons
+- **Documented suppression** - Governed exceptions require spec declarations
+  and remain auditable with their rationales
 - **Deterministic reports** - Stable JSON, ordering, locators, and content hashes
 - **Bounded semantic review** - Section and invariant packets with evidence limits
 - **Runtime-independent parsing** - CommonMark and modern Python syntax support
@@ -287,6 +288,26 @@ Selectors accept canonical codes, short codes, `*`, family prefixes, and
 supported contexts. A diagnostic set to `off` is omitted from normal findings
 but remains available in `suppressed_issues` under `--show-suppressions`.
 
+Repositories may opt into documented suppression governance:
+
+```toml
+[tool.backstitch.lint]
+require_suppression_declarations = true
+
+[[tool.backstitch.lint.suppressions]]
+mechanism = "ignore"
+path = "tests/*"
+sections = []
+codes = ["CODE_REF_UNMAPPED_FROM_SPEC"]
+declaration = "docs/specs/04-exclusions.md#SUP-TEST-CITATIONS"
+```
+
+The referenced spec contains a CommonMark declaration such as
+`_Traceability: suppression-declaration [SUP-TEST-CITATIONS] "Tests cite the
+contract but are not implementation owners."_`. Strict mode leaves the
+original finding active when the declaration is invalid and reports every
+applied declaration and decoded rationale through `--show-suppressions`.
+
 ### Configuration Discovery
 
 Backstitch always starts with packaged defaults, then applies repository
@@ -333,7 +354,7 @@ Deterministic checks never call a model. Generate packets explicitly, then
 analyze and summarize them:
 
 ```bash
-$ backstitch check --format json --output spec-trace.json
+$ backstitch check --show-suppressions --format json --output spec-trace.json
 $ backstitch packets --kind all \
     --output packets.jsonl \
     --report packet-report.json
@@ -347,8 +368,9 @@ $ backstitch summarize-analysis \
     --analysis-results analysis.jsonl
 ```
 
-Packets bound the spec text, code snippets, tests, deterministic findings, and
-exact evidence regions shown to the model. The provider receives a
+Packets bind section, invariant, or documented-suppression intent; code
+snippets, tests, deterministic findings; and exact evidence regions shown to
+the model. The provider receives a
 packet-derived response schema, but model output remains untrusted: Backstitch
 owns packet identity, validates structured rows and evidence locality, and
 contains malformed output per packet.
@@ -468,7 +490,9 @@ $ uv run backstitch check --repo-root . --show-suppressions
 
 `tests/live/test_live_llm.py` drives the real `packets` to `analyze` to `check`
 to `summarize-analysis` path. It asserts structured contracts, transport, and
-model success for cloud runs, not exact wording or classification.
+model success for cloud runs, not exact wording or classification. The cloud
+fixture includes a documented suppression packet and immediately proves a
+zero-call `require` replay after the live `read-write` miss.
 
 ```bash
 # Store a provider key once, then run the local-default live test
