@@ -12,8 +12,10 @@ hiding is a failure, not a pass.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -49,11 +51,75 @@ def test_self_corpus_zero_errors_and_warnings() -> None:
 
 def test_self_corpus_suppressions_are_auditable() -> None:
     result = _check("--show-suppressions")
+    assert result.returncode == 0, result.stdout + result.stderr
     data = json.loads(result.stdout)
-    # Suppressions exist (the dogfood config suppresses test-file citation
-    # noise) and every one carries a reason.
     suppressed = data["suppressed_issues"]
-    assert all("reason" in record for record in suppressed)
+    expected_counts = {
+        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-DOM-META": 15,
+        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-PROCESS": 2,
+        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-DEFERRED-MCP": 1,
+        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-COV-PLANNED": 9,
+        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-TEST-CITATIONS": 165,
+    }
+    assert Counter(record["declaration"] for record in suppressed) == expected_counts
+    assert all(record["reason"] for record in suppressed)
+    assert all(record["rationale"].strip() for record in suppressed)
+
+    for record in suppressed:
+        declaration = record["declaration"]
+        if declaration.endswith("#SUP-DOM-META"):
+            assert record["path"] == (
+                "docs/specs/01-development-documentation-operating-model.md"
+            )
+        elif declaration.endswith("#SUP-EVC-PROCESS"):
+            assert record["path"] == (
+                "docs/specs/07-verification-and-evidence-cases.md"
+            )
+            assert record["section_id"] in {"EVC-1", "EVC-12.1"}
+        elif declaration.endswith("#SUP-EVC-DEFERRED-MCP"):
+            assert record["path"] == (
+                "docs/specs/07-verification-and-evidence-cases.md"
+            )
+            assert record["section_id"] == "EVC-8.6"
+        elif declaration.endswith("#SUP-COV-PLANNED"):
+            assert record["path"] == "docs/specs/08-intent-coverage.md"
+        else:
+            assert declaration.endswith("#SUP-TEST-CITATIONS")
+            assert record["path"].startswith("tests/")
+            assert record["code"] in {
+                "CODE_REF_UNMAPPED_FROM_SPEC",
+                "SPEC_MAPPING_RECIPROCAL_MISSING",
+            }
+
+
+def test_dogfood_enables_documented_suppression_governance() -> None:
+    environment = os.environ.copy()
+    environment.pop("LLM_MODEL", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "backstitch",
+            "config",
+            "show",
+            "--repo-root",
+            str(REPO_ROOT),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    config = json.loads(result.stdout)
+    assert config["lint"]["require_suppression_declarations"] is True
+    assert len(config["lint"]["suppressions"]) == 5
+    assert config["analyze"]["required_kinds"] == [
+        "section",
+        "invariant",
+        "suppression",
+    ]
 
 
 def test_dogfood_config_delta_is_live() -> None:

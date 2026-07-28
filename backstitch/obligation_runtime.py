@@ -1,6 +1,7 @@
 """One-view capture orchestration for obligation reads.
 
-Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-2.1], [EVC-8.2]
+Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-2.1], [EVC-2.3],
+[EVC-8.2]
 Spec: docs/specs/05-backstitch-invariants.md [INV-11]
 """
 

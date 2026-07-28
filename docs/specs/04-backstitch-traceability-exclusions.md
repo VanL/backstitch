@@ -597,6 +597,16 @@ sections or split it by rationale, and add no new suppressed scope. Every
 retained rule appears in `--show-suppressions` with its declaration and
 decoded rationale.
 
+_Traceability: suppression-declaration [SUP-DOM-META] "The development-documentation operating model defines repository process rather than runtime behavior, so its sections remain addressable but do not require implementation mappings."_
+
+_Traceability: suppression-declaration [SUP-EVC-PROCESS] "The EVC purpose and coordinated promotion record define scope and documentation process; neither claims a direct runtime implementation owner."_
+
+_Traceability: suppression-declaration [SUP-EVC-DEFERRED-MCP] "The optional local MCP adapter is explicitly deferred and has no implementation mapping until that product phase is promoted."_
+
+_Traceability: suppression-declaration [SUP-COV-PLANNED] "Intent coverage remains a planned specification; its sections stay visible without claiming implemented owners until its implementation plan is activated."_
+
+_Traceability: suppression-declaration [SUP-TEST-CITATIONS] "Tests cite contracts as verification evidence but are not general implementation owners; test-only unmapped backlinks and reciprocal-mapping findings are retained as audited noise."_
+
 _Implementation mapping_:
 
 - `docs/implementation/04-backstitch-style-traceability.md`

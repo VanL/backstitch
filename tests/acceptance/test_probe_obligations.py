@@ -1,4 +1,4 @@
-"""Public obligation bootstrap probes ([EVC-8], [EVC-12])."""
+"""Public obligation bootstrap probes ([EVC-12])."""
 
 from __future__ import annotations
 

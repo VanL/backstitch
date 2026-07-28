@@ -6,6 +6,8 @@ budget decisions, semantic policy projection, reports, publication, and the
 
 Spec: docs/specs/02-backstitch-core.md [SC-7]
 Spec: docs/specs/06-semantic-gates.md [SEM-1], [SEM-2], [SEM-7]
+Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-5.1], [EVC-8.7],
+[EVC-9], [EVC-11]
 """
 
 from __future__ import annotations

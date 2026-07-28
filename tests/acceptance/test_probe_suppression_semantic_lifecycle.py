@@ -1,4 +1,7 @@
-"""Black-box packet creation through controlled semantic miss and replay."""
+"""Black-box packet creation through controlled semantic miss and replay.
+
+Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-12]
+"""
 
 from __future__ import annotations
 

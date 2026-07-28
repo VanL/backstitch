@@ -1301,6 +1301,18 @@ text, and every corrected owner against the promotion edit list.
   packet-report validation owns intrinsic suppression completeness; and an
   ownership-loss race may truthfully report a provider call followed by a
   cache hit at aggregate and per-kind levels.
+- Slice 4 migration evidence: the fresh pre-migration audit contained 206
+  records in the four planned families (DOM 15, EVC 14, COV 9, tests 168).
+  Truthful reciprocal mappings removed 11 EVC section exceptions and two
+  related test reciprocal findings. The governed post-migration audit contains
+  192 records (DOM 15, exact residual EVC 3, COV 9, tests 165), zero active
+  errors/warnings/infos, and zero null declarations or rationales. The
+  self-corpus test pins each declaration population and the exact allowed
+  path/code/section boundaries.
+- Slice 4 independent review: `PASS` after removing a test path that was not a
+  runtime owner and then removing its overly broad [EVC-8] module citation.
+  Re-review confirmed zero added `(path, section_id, code)` suppression
+  identities against the 206-record baseline.
 
 ## Out Of Scope
 

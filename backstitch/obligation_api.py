@@ -1,6 +1,7 @@
 """Transport-neutral Backstitch obligation read envelopes.
 
-Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-8.4]
+Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-8], [EVC-8.4],
+[EVC-8.5]
 """
 
 from __future__ import annotations

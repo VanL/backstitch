@@ -4,6 +4,7 @@ This module owns the untrusted filesystem protocol. Callers provide validated
 packets, offline inference identity inputs, and a lazy provider adapter.
 
 Spec: docs/specs/06-semantic-gates.md [SEM-4]
+Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-4], [EVC-11]
 """
 
 from __future__ import annotations

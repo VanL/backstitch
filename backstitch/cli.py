@@ -18,6 +18,8 @@ prints a one-line ``backstitch: error: ...`` diagnostic.
 Invariant: [INV.CLI.1] Deterministic commands never import ``llm``.
 
 Spec: docs/specs/06-semantic-gates.md [SEM-7], [SEM-8], [SEM-9]
+Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-5.1], [EVC-8],
+[EVC-8.7]
 """
 
 from __future__ import annotations

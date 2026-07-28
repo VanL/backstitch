@@ -2,6 +2,7 @@
 
 Spec: docs/specs/02-backstitch-core.md [SC-5], [SC-7]
 Spec: docs/specs/06-semantic-gates.md [SEM-7]
+Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-4]
 """
 
 from __future__ import annotations

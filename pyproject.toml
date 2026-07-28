@@ -79,7 +79,6 @@ test_roots = ["tests"]
 planned_spec_globs = [
     "docs/specs/08-intent-coverage.md",
 ]
-meta_spec_globs = ["docs/specs/01-development-documentation-operating-model.md"]
 
 [tool.backstitch.diagnostics]
 # This project dogfoods strict mode: every reported Backstitch diagnostic is a
@@ -114,7 +113,7 @@ temperature = 0.0
 seed = 42
 max_tokens = 512
 require_complete = true
-required_kinds = ["section", "invariant"]
+required_kinds = ["section", "invariant", "suppression"]
 minimum_packets = 1
 maximum_packets = 100
 maximum_prompt_bytes = 1500000
@@ -170,15 +169,43 @@ maximum_indeterminate_rate = 1.0
 maximum_uncached_flip_rate = 1.0
 require_all_critical = false
 
-[tool.backstitch.lint.per-file-ignores]
-# EVC is active but its implementation lands in reviewed slices; COV remains
-# proposed. Remove each suppression as its implementation adds reciprocal
-# mappings.
-"docs/specs/07-verification-and-evidence-cases.md" = ["SPEC_SECTION_UNMAPPED"]
-"docs/specs/08-intent-coverage.md" = ["SPEC_SECTION_UNMAPPED"]
-# Test files legitimately cite spec sections without being implementation
-# owners; the unmapped-citation inventory is noise for them.
-"tests/*" = ["CODE_REF_UNMAPPED_FROM_SPEC", "SPEC_MAPPING_RECIPROCAL_MISSING"]
+[tool.backstitch.lint]
+require_suppression_declarations = true
+
+[[tool.backstitch.lint.suppressions]]
+mechanism = "meta"
+path = "docs/specs/01-development-documentation-operating-model.md"
+sections = []
+codes = []
+declaration = "docs/specs/04-backstitch-traceability-exclusions.md#SUP-DOM-META"
+
+[[tool.backstitch.lint.suppressions]]
+mechanism = "ignore"
+path = "docs/specs/07-verification-and-evidence-cases.md"
+sections = ["EVC-1", "EVC-12.1"]
+codes = ["SPEC_SECTION_UNMAPPED"]
+declaration = "docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-PROCESS"
+
+[[tool.backstitch.lint.suppressions]]
+mechanism = "ignore"
+path = "docs/specs/07-verification-and-evidence-cases.md"
+sections = ["EVC-8.6"]
+codes = ["SPEC_SECTION_UNMAPPED"]
+declaration = "docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-DEFERRED-MCP"
+
+[[tool.backstitch.lint.suppressions]]
+mechanism = "ignore"
+path = "docs/specs/08-intent-coverage.md"
+sections = []
+codes = ["SPEC_SECTION_UNMAPPED"]
+declaration = "docs/specs/04-backstitch-traceability-exclusions.md#SUP-COV-PLANNED"
+
+[[tool.backstitch.lint.suppressions]]
+mechanism = "ignore"
+path = "tests/*"
+sections = []
+codes = ["CODE_REF_UNMAPPED_FROM_SPEC", "SPEC_MAPPING_RECIPROCAL_MISSING"]
+declaration = "docs/specs/04-backstitch-traceability-exclusions.md#SUP-TEST-CITATIONS"
 
 [tool.pytest.ini_options]
 minversion = "7.0"

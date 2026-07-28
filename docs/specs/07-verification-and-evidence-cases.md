@@ -278,6 +278,10 @@ alone is visible in evidence summary but does not satisfy the role. Invariant
 roles use [INV-5]'s declaration, bind, and test rules without inventing a
 parallel relation language.
 
+_Implementation mapping_:
+
+- `backstitch/obligations.py`
+
 ### 2.3 Bootstrap-To-Gate Lifecycle [EVC-2.3]
 
 Bootstrap and gate are separate operations joined only by human-reviewed
@@ -303,6 +307,10 @@ the human decisions expressed in current source, rejects incomplete alignment
 before provider calls, and applies [EVC-5.1]'s currentness boundary before it
 publishes a current result. Better discovery ranking, explanations, and trace
 advice reduce the cost of the human bridge; they never confer authority.
+
+_Implementation mapping_:
+
+- `backstitch/obligation_runtime.py`
 
 ## 3. Blinded Adversarial Verify Stage [EVC-3]
 
@@ -547,6 +555,12 @@ There is no proposal schema, proposal validation, activation, deactivation,
 active manifest, case root, case ID, case hash, evidence-case conflict token,
 or source mutation receipt in v1. No compatibility reader may convert one of
 those superseded objects into current alignment authority.
+
+_Implementation mapping_:
+
+- `backstitch/artifact_contracts.py`
+- `backstitch/semantic_cache.py`
+- `backstitch/semantic_reports.py`
 
 ### 4.1 Identity, Canonical JSON, And Receipts [EVC-4.1]
 
@@ -940,6 +954,11 @@ packet-schema-2 and unversioned artifacts remain accepted only by bounded
 validation and presentation paths; they are never analyzable, rewritten, or
 accepted by current, historical schema-3, completeness, or qualification runs.
 
+_Implementation mapping_:
+
+- `backstitch/cli.py`
+- `backstitch/semantic_analysis.py`
+
 ## 6. Policy And Diagnostic Integration [EVC-6]
 
 Alignment readiness, analyzer judgment, verifier judgment, and policy are
@@ -1241,6 +1260,11 @@ deterministically derived from the declaration, normalized rules, matched
 issues, and accepted snapshot. Unsupported summarize/find/get-candidate
 selectors return the existing closed invalid-operation envelope; no parallel
 suppression API is added.
+
+_Implementation mapping_:
+
+- `backstitch/cli.py`
+- `backstitch/obligation_api.py`
 
 ### 8.1 Teaching And Progressive Disclosure [EVC-8.1]
 
@@ -1931,6 +1955,10 @@ return its canonical identity with a guidance note. Backstitch never
 normalizes an ambiguous ID, arbitrary path, guessed symbol, candidate digest,
 or source edit.
 
+_Implementation mapping_:
+
+- `backstitch/obligation_api.py`
+
 ### 8.6 Optional Local MCP Adapter [EVC-8.6]
 
 This adapter is an optional product phase, not setup required by another phase.
@@ -2097,6 +2125,11 @@ readiness fact.
 All exits are traceback-free. MCP returns the same problem code and core result
 but has no process-exit contract per call.
 
+_Implementation mapping_:
+
+- `backstitch/cli.py`
+- `backstitch/semantic_analysis.py`
+
 ## 9. Current CI Gate [EVC-9]
 
 The current CI lane is:
@@ -2123,6 +2156,10 @@ Packet and result caches are performance layers. Every read revalidates the
 complete object and keyed preimage. Cache corruption, stale identity, or
 missing required cached data in require mode fails closed without provider
 traffic.
+
+_Implementation mapping_:
+
+- `backstitch/semantic_analysis.py`
 
 ### 9.1 Source-Aligned Evidence Packets [EVC-9.1]
 
@@ -2649,6 +2686,10 @@ reviewed contract update and baseline rerun. The first implementation slice
 that claims performance qualification must add this file and the named job.
 Their absence makes qualification unavailable; it does not block promotion of
 an otherwise reviewed pre-implementation contract.
+
+_Implementation mapping_:
+
+- `tests/performance/semantic_scale.py`
 
 ### 10.1 Evaluation Artifact [EVC-10.1]
 
@@ -4007,6 +4048,11 @@ therefore include broad, vacuous, and misleading declared-evidence mutations.
 The semantic lane may report weak or mismatched evidence, but cannot silently
 rewrite the trace graph.
 
+_Implementation mapping_:
+
+- `backstitch/semantic_analysis.py`
+- `backstitch/semantic_cache.py`
+
 ## 12. Verification Expectations [EVC-12]
 
 Implementation is not complete until real-boundary tests prove:
@@ -4159,6 +4205,11 @@ suppression obligation/API behavior, analyzer and optional verifier
 evidence binding, empty and nonempty required-kind completeness, and the
 invariant that schema-3 section/invariant bytes and identities do not change
 merely because suppression support is installed.
+
+_Implementation mapping_:
+
+- `tests/acceptance/test_probe_obligations.py`
+- `tests/acceptance/test_probe_suppression_semantic_lifecycle.py`
 
 ### 12.1 Required Cross-Spec Promotion [EVC-12.1]
 

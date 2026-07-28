@@ -5,7 +5,7 @@ the obligation vocabulary.  It performs no filesystem reads, source parsing,
 suppression, diagnostic policy, provider work, or artifact publication.
 
 Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-2], [EVC-2.1],
-[EVC-8.3]
+[EVC-2.2], [EVC-8.3]
 """
 
 from __future__ import annotations
