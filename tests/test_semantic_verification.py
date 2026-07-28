@@ -170,6 +170,63 @@ def _packet() -> dict[str, Any]:
     return row
 
 
+def _suppression_packet() -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "schema_version": 4,
+        "packet_id": "suppression::docs/specs/core.md#SUP-GEN",
+        "packet_hash": "",
+        "kind": "suppression",
+        "obligation_id": "suppression::docs/specs/core.md#SUP-GEN",
+        "requirement": {
+            "role": "requirement",
+            "path": "docs/specs/core.md",
+            "identity": "SUP-GEN",
+            "title": "Generated code",
+            "start_line": 40,
+            "end_line": 40,
+            "text": "Generated output has no stable reciprocal source location.",
+        },
+        "suppression_rules": [
+            {
+                "mechanism": "config",
+                "path": "generated/**",
+                "sections": [],
+                "codes": ["CODE_X"],
+                "declaration": "docs/specs/core.md#SUP-GEN",
+                "origin": {"source": ".backstitch.toml", "position": 0},
+            }
+        ],
+        "counterevidence": [
+            {
+                "role": "counterevidence",
+                "path": "generated/x.py",
+                "start_line": 2,
+                "end_line": 2,
+                "snippet": "dangerous_call()",
+                "issue_indexes": [0],
+            }
+        ],
+        "evidence_regions": [
+            {
+                "role": "requirement",
+                "path": "docs/specs/core.md",
+                "start_line": 40,
+                "end_line": 40,
+            },
+            {
+                "role": "counterevidence",
+                "path": "generated/x.py",
+                "start_line": 2,
+                "end_line": 2,
+            },
+        ],
+        "issues": [],
+        "packet_warnings": [],
+    }
+    row["packet_hash"] = semantic_packet_hash(row)
+    return row
+
+
 def _finding(packet: dict[str, Any]) -> CanonicalSemanticResult:
     return normalize_model_result(
         packet,
@@ -183,6 +240,58 @@ def _finding(packet: dict[str, Any]) -> CanonicalSemanticResult:
         },
         analysis_key="7" * 64,
     )
+
+
+@pytest.mark.parametrize(
+    ("classification", "code"),
+    [
+        (
+            "rationale_insufficient",
+            "SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT",
+        ),
+        ("scope_overbroad", "SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD"),
+        ("risk_unaddressed", "SEMANTIC_SUPPRESSION_RISK_UNADDRESSED"),
+    ],
+)
+def test_verifier_claim_admits_each_suppression_finding(
+    classification: str,
+    code: str,
+) -> None:
+    packet = _suppression_packet()
+    evidence = [
+        {
+            "role": "requirement",
+            "path": "docs/specs/core.md",
+            "start_line": 40,
+            "end_line": 40,
+        }
+    ]
+    if classification != "rationale_insufficient":
+        evidence.append(
+            {
+                "role": "counterevidence",
+                "path": "generated/x.py",
+                "start_line": 2,
+                "end_line": 2,
+            }
+        )
+    result = normalize_model_result(
+        packet,
+        {
+            "packet_id": packet["packet_id"],
+            "classification": classification,
+            "confidence": 0.8,
+            "rationale": "The shown issue is not justified by the declaration.",
+            "summary": "Suppression needs review.",
+            "evidence": evidence,
+        },
+        analysis_key="a" * 64,
+    )
+
+    claim = derive_verification_claim(packet, result)
+
+    assert claim.value["kind"] == "suppression"
+    assert claim.value["code"] == code
 
 
 def _contracts() -> tuple[

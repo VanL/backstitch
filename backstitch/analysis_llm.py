@@ -232,7 +232,11 @@ def _semantic_response_schema(prompt: str) -> dict[str, object]:
     packet_id = projection.get("packet_id")
     kind = projection.get("kind")
     regions = projection.get("evidence_regions")
-    if not isinstance(packet_id, str) or kind not in ("section", "invariant"):
+    if not isinstance(packet_id, str) or kind not in (
+        "section",
+        "invariant",
+        "suppression",
+    ):
         raise ValueError("semantic prompt packet identity is invalid")
     if not isinstance(regions, list) or not regions:
         raise ValueError("semantic prompt has no citable evidence regions")
@@ -251,23 +255,29 @@ def _semantic_response_schema(prompt: str) -> dict[str, object]:
             }
         )
 
-    classifications = (
-        [
+    classifications = {
+        "section": [
             "ok",
             "confirmed_mismatch",
             "probable_mismatch",
             "missing_trace",
             "ambiguous",
-        ]
-        if kind == "section"
-        else [
+        ],
+        "invariant": [
             "ok",
             "weak_binding",
             "confirmed_mismatch",
             "probable_mismatch",
             "ambiguous",
-        ]
-    )
+        ],
+        "suppression": [
+            "ok",
+            "rationale_insufficient",
+            "scope_overbroad",
+            "risk_unaddressed",
+            "ambiguous",
+        ],
+    }[kind]
     required = [
         "packet_id",
         "classification",

@@ -16,7 +16,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from backstitch.canonical import lf_line_count, lf_split
-from backstitch.grammar import is_sha256_hex, is_valid_section_id
+from backstitch.grammar import (
+    is_sha256_hex,
+    is_valid_section_id,
+    is_valid_suppression_reference,
+)
 from backstitch.semantic_evidence import required_evidence_roles
 
 SECTION_CLASSIFICATIONS = (
@@ -33,12 +37,26 @@ INVARIANT_CLASSIFICATIONS = (
     "probable_mismatch",
     "ambiguous",
 )
+SUPPRESSION_CLASSIFICATIONS = (
+    "ok",
+    "rationale_insufficient",
+    "scope_overbroad",
+    "risk_unaddressed",
+    "ambiguous",
+)
 CLASSIFICATIONS = tuple(
-    dict.fromkeys((*SECTION_CLASSIFICATIONS, *INVARIANT_CLASSIFICATIONS))
+    dict.fromkeys(
+        (
+            *SECTION_CLASSIFICATIONS,
+            *INVARIANT_CLASSIFICATIONS,
+            *SUPPRESSION_CLASSIFICATIONS,
+        )
+    )
 )
 CLASSIFICATIONS_BY_KIND = {
     "section": SECTION_CLASSIFICATIONS,
     "invariant": INVARIANT_CLASSIFICATIONS,
+    "suppression": SUPPRESSION_CLASSIFICATIONS,
 }
 _V2_SECTION_FIELDS = frozenset(
     {
@@ -82,7 +100,7 @@ class AnalysisLoad:
     errors: tuple[str, ...]
 
 
-def _validate_v2_analysis_row(
+def _validate_current_analysis_row(
     row: dict[str, Any],
     known_packet_ids: set[str] | Mapping[str, str] | None,
 ) -> AnalysisResult | str:
@@ -92,16 +110,18 @@ def _validate_v2_analysis_row(
         expected_fields,
         expected_fields | {"content_hash"} if kind == "invariant" else expected_fields,
     ):
-        return "v2 result does not match the closed result schema"
-    if row.get("schema_version") != 2:
-        return "invalid `schema_version`; expected 2"
+        return "current result does not match the closed result schema"
+    schema_version = row.get("schema_version")
+    expected_schema = 3 if kind == "suppression" else 2
+    if schema_version != expected_schema:
+        return f"invalid `schema_version`; expected {expected_schema} for {kind}"
     packet_id = row.get("packet_id")
     if not isinstance(packet_id, str) or not packet_id.strip():
         return "missing or invalid `packet_id`"
     if kind not in CLASSIFICATIONS_BY_KIND:
-        return "invalid `kind`; expected `section` or `invariant`"
-    if kind == "section" and packet_id.startswith("invariant::"):
-        return "section result cannot use an invariant packet identity"
+        return "invalid `kind`; expected `section`, `invariant`, or `suppression`"
+    if kind == "section" and packet_id.startswith(("invariant::", "suppression::")):
+        return "section result cannot use an invariant or suppression packet identity"
     content_hash: str | None = None
     if kind == "invariant":
         invariant_id = packet_id.removeprefix("invariant::")
@@ -115,6 +135,13 @@ def _validate_v2_analysis_row(
                 "invalid `content_hash`; expected 64 lowercase hexadecimal characters"
             )
         content_hash = raw_content_hash
+    elif kind == "suppression":
+        prefix = "suppression::"
+        reference = packet_id.removeprefix(prefix)
+        if not packet_id.startswith(prefix) or not is_valid_suppression_reference(
+            reference
+        ):
+            return "suppression result requires `suppression::PATH#SUP-ID` identity"
     for field_name in ("packet_hash", "analysis_key"):
         value = row.get(field_name)
         if not is_sha256_hex(value):
@@ -158,7 +185,9 @@ def _validate_v2_analysis_row(
     roles: set[str] = set()
     for item in evidence_raw:
         if not isinstance(item, dict) or set(item) != _V2_EVIDENCE_FIELDS:
-            return "invalid v2 `evidence` item; expected the closed canonical shape"
+            return (
+                "invalid current `evidence` item; expected the closed canonical shape"
+            )
         role = item.get("role")
         path = item.get("path")
         start_line = item.get("start_line")
@@ -181,16 +210,16 @@ def _validate_v2_analysis_row(
             or not isinstance(excerpt_hash, str)
             or excerpt_hash != hashlib.sha256(excerpt.encode("utf-8")).hexdigest()
         ):
-            return "invalid v2 `evidence` role, span, excerpt, or hash"
+            return "invalid current `evidence` role, span, excerpt, or hash"
         identity = (role, path, start_line, end_line)
         if identity in seen:
-            return "duplicate v2 `evidence` item"
+            return "duplicate current `evidence` item"
         seen.add(identity)
         roles.add(role)
         sort_keys.append((*identity, excerpt_hash))
         evidence.append((path, start_line))
     if sort_keys != sorted(sort_keys):
-        return "v2 `evidence` is not in canonical order"
+        return "current `evidence` is not in canonical order"
     required_roles = required_evidence_roles(kind, classification)
     if not required_roles.issubset(roles):
         missing = ", ".join(sorted(required_roles - roles))
@@ -226,9 +255,9 @@ def validate_analysis_row(
     if not isinstance(row, dict):
         return "row is not a JSON object"
     if "schema_version" in row:
-        return _validate_v2_analysis_row(row, known_packet_ids)
+        return _validate_current_analysis_row(row, known_packet_ids)
     if "packet_hash" in row or "analysis_key" in row or "verification_state" in row:
-        return "partial v2 result markers require `schema_version = 2`"
+        return "partial current-result markers require `schema_version`"
     packet_id = row.get("packet_id")
     if not isinstance(packet_id, str) or not packet_id.strip():
         return "missing or invalid `packet_id`"

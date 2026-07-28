@@ -230,6 +230,9 @@ _SEMANTIC_CODES = frozenset(
         "SEMANTIC_MISSING_TRACE",
         "SEMANTIC_WEAK_BINDING",
         "SEMANTIC_AMBIGUOUS",
+        "SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT",
+        "SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD",
+        "SEMANTIC_SUPPRESSION_RISK_UNADDRESSED",
     }
 )
 _TARGET_ROOT_KEYS = frozenset({"weft"})
@@ -2001,16 +2004,19 @@ def _parse_obligation_settings(table: dict[str, Any]) -> ObligationSettings:
 def _parse_required_kinds(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ConfigLoadError(
-            "analyze.required_kinds must be an array containing section and/or invariant"
+            "analyze.required_kinds must be an array containing section, invariant, "
+            "and/or suppression"
         )
     if len(value) != len(set(value)):
         raise ConfigLoadError("analyze.required_kinds must not contain duplicates")
-    invalid = sorted(set(value) - {"section", "invariant"})
+    invalid = sorted(set(value) - {"section", "invariant", "suppression"})
     if invalid:
         raise ConfigLoadError(
             "analyze.required_kinds contains unknown kinds: " + ", ".join(invalid)
         )
-    return tuple(kind for kind in ("section", "invariant") if kind in value)
+    return tuple(
+        kind for kind in ("section", "invariant", "suppression") if kind in value
+    )
 
 
 def _parse_dispositions(value: Any) -> tuple[SemanticDisposition, ...]:

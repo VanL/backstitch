@@ -46,6 +46,9 @@ _CLASSIFICATION_CODES = {
     "missing_trace": "SEMANTIC_MISSING_TRACE",
     "weak_binding": "SEMANTIC_WEAK_BINDING",
     "ambiguous": "SEMANTIC_AMBIGUOUS",
+    "rationale_insufficient": "SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT",
+    "scope_overbroad": "SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD",
+    "risk_unaddressed": "SEMANTIC_SUPPRESSION_RISK_UNADDRESSED",
 }
 
 

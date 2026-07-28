@@ -829,6 +829,36 @@ def test_default_provider_adapter_constrains_evidence_to_packet_regions(
     ] == semantic_packet_projection(PACKET_A)["evidence_regions"]
 
 
+def test_provider_schema_admits_exact_suppression_classifications() -> None:
+    from backstitch.analysis_llm import _semantic_response_schema
+
+    projection = {
+        "packet_id": "suppression::docs/specs/01-X.md#SUP-X",
+        "kind": "suppression",
+        "evidence_regions": [
+            {
+                "role": "requirement",
+                "path": "docs/specs/01-X.md",
+                "start_line": 3,
+                "end_line": 3,
+            }
+        ],
+    }
+
+    schema = _semantic_response_schema(
+        "suppression prompt\n\n" + json.dumps(projection)
+    )
+    properties = cast(dict[str, Any], schema["properties"])
+
+    assert properties["classification"]["enum"] == [
+        "ok",
+        "rationale_insufficient",
+        "scope_overbroad",
+        "risk_unaddressed",
+        "ambiguous",
+    ]
+
+
 def test_default_provider_adapter_rejects_model_identity_mismatch_before_resolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

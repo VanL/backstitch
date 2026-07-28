@@ -91,6 +91,55 @@ def _v2_result_row(kind: str, classification: str) -> str:
     return json.dumps(row)
 
 
+def _v3_suppression_result_row(
+    classification: str = "rationale_insufficient",
+) -> dict[str, object]:
+    excerpt = "Generated code cannot carry a stable reciprocal backlink."
+    return {
+        "schema_version": 3,
+        "packet_id": "suppression::docs/specs/01-Clean.md#SUP-GEN",
+        "kind": "suppression",
+        "packet_hash": "a" * 64,
+        "analysis_key": "b" * 64,
+        "classification": classification,
+        "confidence": 0.5,
+        "rationale": "The stated exception is not bounded.",
+        "summary": "Suppression rationale needs review.",
+        "evidence": [
+            {
+                "role": "requirement",
+                "path": "docs/specs/01-Clean.md",
+                "start_line": 8,
+                "end_line": 8,
+                "excerpt": excerpt,
+                "excerpt_sha256": hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
+            }
+        ],
+        "verification_state": "evidence_bound",
+    }
+
+
+def test_current_suppression_result_uses_schema_3_and_closed_identity() -> None:
+    row = _v3_suppression_result_row()
+
+    load = load_analysis_results(json.dumps(row), None)
+
+    assert load.errors == ()
+    assert load.results[0].kind == "suppression"
+    assert load.results[0].content_hash is None
+
+    for field, replacement in (
+        ("schema_version", 2),
+        ("packet_id", "suppression::docs/specs/01-Clean.md#bad"),
+        ("kind", "section"),
+    ):
+        changed = dict(row)
+        changed[field] = replacement
+        assert load_analysis_results(json.dumps(changed), None).errors
+    forged_section = dict(row, schema_version=2, kind="section")
+    assert load_analysis_results(json.dumps(forged_section), None).errors
+
+
 def test_invariant_result_variant_loads() -> None:
     load = load_analysis_results(_invariant_row(), None)
     assert load.errors == ()

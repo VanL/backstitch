@@ -27,6 +27,9 @@ SEMANTIC_CODES = {
     "SEMANTIC_MISSING_TRACE": "BSA003",
     "SEMANTIC_WEAK_BINDING": "BSA004",
     "SEMANTIC_AMBIGUOUS": "BSA005",
+    "SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT": "BSA006",
+    "SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD": "BSA007",
+    "SEMANTIC_SUPPRESSION_RISK_UNADDRESSED": "BSA008",
 }
 VERIFICATION_STATES = (
     "evidence_bound",
@@ -80,6 +83,33 @@ PACKAGED_LEVELS = {
         "info",
         "info",
         "info",
+        "info",
+        "info",
+    ),
+    "SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT": (
+        "warning",
+        "warning",
+        "warning",
+        "warning",
+        "warning",
+        "info",
+        "info",
+    ),
+    "SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD": (
+        "warning",
+        "warning",
+        "warning",
+        "warning",
+        "warning",
+        "info",
+        "info",
+    ),
+    "SEMANTIC_SUPPRESSION_RISK_UNADDRESSED": (
+        "warning",
+        "warning",
+        "warning",
+        "warning",
+        "warning",
         "info",
         "info",
     ),
@@ -1050,10 +1080,14 @@ def test_packaged_semantic_registry_and_full_matrix() -> None:
 def test_required_kinds_normalize_to_canonical_order(tmp_path: Path) -> None:
     config = _write_config(
         tmp_path,
-        '[analyze]\nrequired_kinds = ["invariant", "section"]\n',
+        '[analyze]\nrequired_kinds = ["suppression", "invariant", "section"]\n',
     )
     settings = resolve_config(tmp_path, explicit=config)
-    assert settings.analyze.required_kinds == ("section", "invariant")
+    assert settings.analyze.required_kinds == (
+        "section",
+        "invariant",
+        "suppression",
+    )
 
 
 @pytest.mark.parametrize(
@@ -1225,6 +1259,39 @@ def test_dispositions_replace_parent_array_and_are_closed(tmp_path: Path) -> Non
     settings = resolve_config(tmp_path, explicit=child)
     assert len(settings.analyze.dispositions) == 1
     assert settings.analyze.dispositions[0].packet_id == "new"
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT",
+        "SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD",
+        "SEMANTIC_SUPPRESSION_RISK_UNADDRESSED",
+    ],
+)
+def test_suppression_disposition_codes_are_canonical_inputs(
+    tmp_path: Path,
+    code: str,
+) -> None:
+    config = _write_config(
+        tmp_path,
+        "\n".join(
+            [
+                "[[analyze.dispositions]]",
+                f'code = "{code}"',
+                'packet_id = "suppression::docs/specs/x.md#SUP-X"',
+                f'packet_hash = "{"a" * 64}"',
+                f'finding_hash = "{"b" * 64}"',
+                'status = "accepted"',
+                'reason = "reviewed"',
+            ]
+        )
+        + "\n",
+    )
+
+    settings = resolve_config(tmp_path, explicit=config)
+
+    assert settings.analyze.dispositions[0].code == code
 
 
 @pytest.mark.parametrize(

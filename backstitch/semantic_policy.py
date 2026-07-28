@@ -117,6 +117,21 @@ SEMANTIC_DEFINITIONS: tuple[SemanticDefinition, ...] = (
     SemanticDefinition("missing_trace", "SEMANTIC_MISSING_TRACE", "BSA003"),
     SemanticDefinition("weak_binding", "SEMANTIC_WEAK_BINDING", "BSA004"),
     SemanticDefinition("ambiguous", "SEMANTIC_AMBIGUOUS", "BSA005"),
+    SemanticDefinition(
+        "rationale_insufficient",
+        "SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT",
+        "BSA006",
+    ),
+    SemanticDefinition(
+        "scope_overbroad",
+        "SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD",
+        "BSA007",
+    ),
+    SemanticDefinition(
+        "risk_unaddressed",
+        "SEMANTIC_SUPPRESSION_RISK_UNADDRESSED",
+        "BSA008",
+    ),
 )
 _DEFINITION_BY_CLASSIFICATION = MappingProxyType(
     {item.classification: item for item in SEMANTIC_DEFINITIONS}
@@ -170,6 +185,33 @@ def _default_levels() -> dict[tuple[str, VerificationState], DiagnosticLevel]:
             "info",
             "info",
             "info",
+            "info",
+            "info",
+        ),
+        "SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT": (
+            "warning",
+            "warning",
+            "warning",
+            "warning",
+            "warning",
+            "info",
+            "info",
+        ),
+        "SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD": (
+            "warning",
+            "warning",
+            "warning",
+            "warning",
+            "warning",
+            "info",
+            "info",
+        ),
+        "SEMANTIC_SUPPRESSION_RISK_UNADDRESSED": (
+            "warning",
+            "warning",
+            "warning",
+            "warning",
+            "warning",
             "info",
             "info",
         ),
@@ -359,7 +401,7 @@ def materialize_semantic_policy(
     rule_origins: Sequence[PolicyRuleOriginLike],
     effective_policy_layers: Sequence[str],
 ) -> SemanticPolicy:
-    """Resolve all 35 current semantic code/state cells with exact provenance."""
+    """Resolve all 56 current semantic code/state cells with exact provenance."""
 
     if len(rule_origins) != len(settings.levels):
         raise SemanticPolicyError(
@@ -489,6 +531,11 @@ def _validate_failure_authority(
         entry.verification_state,
     )
     if entry.verification_state == "independently_verified" and exact:
+        if definition.short_code in {"BSA006", "BSA007", "BSA008"}:
+            raise SemanticPolicyError(
+                "suppression semantic findings have no independently_verified "
+                "failure authority without a future measured qualification"
+            )
         # The current analysis owner validates the required qualification
         # artifact before cache/provider construction. Policy materialization
         # preserves the user's explicit request so it can fail closed with the

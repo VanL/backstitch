@@ -22,6 +22,7 @@ from backstitch.semantic_cache import (
     SemanticProvenance,
 )
 from backstitch.semantic_eval import (
+    _MEASURED_SHORT_CODES,
     SemanticEvalError,
     SemanticEvalRequest,
     run_semantic_eval,
@@ -65,6 +66,16 @@ PROVENANCE = SemanticProvenance(
     input_tokens=100,
     output_tokens=20,
 )
+
+
+def test_measured_qualification_remains_explicitly_bsa001_through_bsa005() -> None:
+    assert _MEASURED_SHORT_CODES == (
+        "BSA001",
+        "BSA002",
+        "BSA003",
+        "BSA004",
+        "BSA005",
+    )
 
 
 class ControlledAnalyzer:

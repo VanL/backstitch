@@ -348,7 +348,12 @@ def test_resolve_config_rejects_duplicate_and_dedicated_option_conflicts(
         ("analyze.model", '""', "model", ""),
         ("analyze.concurrency", "3", "concurrency", 3),
         ("analyze.temperature", "0.25", "temperature", 0.25),
-        ("analyze.required_kinds", '["section"]', "required_kinds", ("section",)),
+        (
+            "analyze.required_kinds",
+            '["suppression", "section"]',
+            "required_kinds",
+            ("section", "suppression"),
+        ),
     ),
 )
 def test_resolve_config_parses_generic_option_values(

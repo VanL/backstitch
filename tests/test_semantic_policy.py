@@ -59,6 +59,50 @@ class _Aggregate:
 def _canonical_result(
     classification: str = "confirmed_mismatch",
 ) -> dict[str, object]:
+    if classification in {
+        "rationale_insufficient",
+        "scope_overbroad",
+        "risk_unaddressed",
+    }:
+        evidence: list[dict[str, object]] = [
+            {
+                "role": "requirement",
+                "path": "docs/specs/01-x.md",
+                "start_line": 6,
+                "end_line": 6,
+                "excerpt": "Generated code cannot carry a stable backlink.",
+                "excerpt_sha256": hashlib.sha256(
+                    b"Generated code cannot carry a stable backlink."
+                ).hexdigest(),
+            }
+        ]
+        if classification in {"scope_overbroad", "risk_unaddressed"}:
+            evidence.insert(
+                0,
+                {
+                    "role": "counterevidence",
+                    "path": "generated/x.py",
+                    "start_line": 11,
+                    "end_line": 11,
+                    "excerpt": "dangerous_call()",
+                    "excerpt_sha256": hashlib.sha256(
+                        b"dangerous_call()"
+                    ).hexdigest(),
+                },
+            )
+        return {
+            "schema_version": 3,
+            "packet_id": "suppression::docs/specs/01-x.md#SUP-X",
+            "kind": "suppression",
+            "packet_hash": "a" * 64,
+            "analysis_key": "b" * 64,
+            "classification": classification,
+            "confidence": 0.9,
+            "rationale": "The shown issue is not justified by the declaration.",
+            "summary": "Suppression needs review.",
+            "evidence": evidence,
+            "verification_state": "evidence_bound",
+        }
     return {
         "schema_version": 2,
         "packet_id": "docs/specs/01-x.md#X-1",
@@ -130,6 +174,15 @@ def test_closed_semantic_registry_covers_every_code_and_classification() -> None
         "missing_trace": ("SEMANTIC_MISSING_TRACE", "BSA003"),
         "weak_binding": ("SEMANTIC_WEAK_BINDING", "BSA004"),
         "ambiguous": ("SEMANTIC_AMBIGUOUS", "BSA005"),
+        "rationale_insufficient": (
+            "SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT",
+            "BSA006",
+        ),
+        "scope_overbroad": ("SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD", "BSA007"),
+        "risk_unaddressed": (
+            "SEMANTIC_SUPPRESSION_RISK_UNADDRESSED",
+            "BSA008",
+        ),
     }
     assert SEMANTIC_VERIFICATION_STATES == (
         "evidence_bound",
@@ -178,7 +231,7 @@ def test_packaged_settings_materialize_the_exact_semantic_matrix() -> None:
         (entry.code, entry.verification_state): entry.level for entry in policy.entries
     } == SEMANTIC_DEFAULT_LEVELS
     assert [entry.winning_rule.position for entry in policy.entries] == list(
-        range(3, 38)
+        range(3, 3 + len(SEMANTIC_DEFAULT_LEVELS))
     )
 
 
@@ -291,6 +344,22 @@ def test_exact_independent_authority_request_is_preserved_for_qualification_owne
     assert projection.diagnostic is not None
     assert projection.diagnostic.severity == "error"
     assert projection.diagnostic.is_failure is False
+
+
+@pytest.mark.parametrize("short_code", ["BSA006", "BSA007", "BSA008"])
+def test_unmeasured_suppression_codes_cannot_gain_independent_failure_authority(
+    short_code: str,
+) -> None:
+    rule = DiagnosticLevelRule(
+        selectors=(f"{short_code}:independently_verified",),
+        level="error",
+    )
+
+    with pytest.raises(SemanticPolicyError, match="future measured qualification"):
+        _packaged_policy(
+            extra_rules=(rule,),
+            extra_origins=(_Origin("/repo/policy.toml", 0),),
+        )
 
 
 def test_evidence_bound_level_in_fail_on_is_rejected_even_when_not_error() -> None:
@@ -448,6 +517,12 @@ def test_every_finding_identity_field_changes_hash(
         ("missing_trace", "SEMANTIC_MISSING_TRACE"),
         ("weak_binding", "SEMANTIC_WEAK_BINDING"),
         ("ambiguous", "SEMANTIC_AMBIGUOUS"),
+        (
+            "rationale_insufficient",
+            "SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT",
+        ),
+        ("scope_overbroad", "SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD"),
+        ("risk_unaddressed", "SEMANTIC_SUPPRESSION_RISK_UNADDRESSED"),
     ],
 )
 def test_every_non_ok_classification_projects_one_stable_diagnostic(

@@ -72,11 +72,21 @@ from backstitch.settings import (
     VerifyEvalSettings,
 )
 
+# [EVC-10.1] intentionally remains the measured BSA001-BSA005 corpus. Adding
+# product classifications must not silently widen qualification authority.
+_MEASURED_SHORT_CODES = ("BSA001", "BSA002", "BSA003", "BSA004", "BSA005")
+_MEASURED_SEMANTIC_DEFINITIONS = tuple(
+    definition
+    for definition in SEMANTIC_DEFINITIONS
+    if definition.short_code in _MEASURED_SHORT_CODES
+)
 _CODE_BY_CLASSIFICATION = {
-    definition.classification: definition.code for definition in SEMANTIC_DEFINITIONS
+    definition.classification: definition.code
+    for definition in _MEASURED_SEMANTIC_DEFINITIONS
 }
 _CODE_ORDER = {
-    definition.code: index for index, definition in enumerate(SEMANTIC_DEFINITIONS)
+    definition.code: index
+    for index, definition in enumerate(_MEASURED_SEMANTIC_DEFINITIONS)
 }
 
 

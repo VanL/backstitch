@@ -86,6 +86,62 @@ def _invariant_packet() -> dict[str, Any]:
     return packet
 
 
+def _suppression_packet() -> dict[str, Any]:
+    packet: dict[str, Any] = {
+        "schema_version": 4,
+        "packet_id": "suppression::docs/specs/01-x.md#SUP-X",
+        "kind": "suppression",
+        "obligation_id": "suppression::docs/specs/01-x.md#SUP-X",
+        "requirement": {
+            "role": "requirement",
+            "path": "docs/specs/01-x.md",
+            "identity": "SUP-X",
+            "title": "Suppression",
+            "start_line": 7,
+            "end_line": 7,
+            "text": "The generated file cannot carry a stable source mapping.",
+        },
+        "suppression_rules": [
+            {
+                "mechanism": "config",
+                "path": "generated/**",
+                "sections": [],
+                "codes": ["CODE_X"],
+                "declaration": "docs/specs/01-x.md#SUP-X",
+                "origin": {"source": ".backstitch.toml", "position": 0},
+            }
+        ],
+        "counterevidence": [
+            {
+                "role": "counterevidence",
+                "path": "generated/x.py",
+                "start_line": 2,
+                "end_line": 2,
+                "snippet": "unmapped_generated_call()",
+                "issue_indexes": [0],
+            }
+        ],
+        "evidence_regions": [
+            {
+                "role": "requirement",
+                "path": "docs/specs/01-x.md",
+                "start_line": 7,
+                "end_line": 7,
+            },
+            {
+                "role": "counterevidence",
+                "path": "generated/x.py",
+                "start_line": 2,
+                "end_line": 2,
+            },
+        ],
+        "issues": [],
+        "packet_warnings": [],
+    }
+    packet["packet_hash"] = semantic_packet_hash(packet)
+    return packet
+
+
 def test_mismatch_evidence_is_reconstructed_from_exact_packet_spans() -> None:
     packet = _section_packet()
     result = normalize_model_result(
@@ -242,6 +298,18 @@ _INVARIANT_TEST = {
     "start_line": 20,
     "end_line": 21,
 }
+_SUPPRESSION_REQUIREMENT = {
+    "role": "requirement",
+    "path": "docs/specs/01-x.md",
+    "start_line": 7,
+    "end_line": 7,
+}
+_SUPPRESSION_COUNTEREVIDENCE = {
+    "role": "counterevidence",
+    "path": "generated/x.py",
+    "start_line": 2,
+    "end_line": 2,
+}
 
 
 @pytest.mark.parametrize(
@@ -277,12 +345,33 @@ _INVARIANT_TEST = {
             [_INVARIANT_REQUIREMENT, _INVARIANT_IMPLEMENTATION],
         ),
         ("invariant", "ambiguous", [_INVARIANT_REQUIREMENT]),
+        ("suppression", "ok", [_SUPPRESSION_REQUIREMENT]),
+        (
+            "suppression",
+            "rationale_insufficient",
+            [_SUPPRESSION_REQUIREMENT],
+        ),
+        (
+            "suppression",
+            "scope_overbroad",
+            [_SUPPRESSION_REQUIREMENT, _SUPPRESSION_COUNTEREVIDENCE],
+        ),
+        (
+            "suppression",
+            "risk_unaddressed",
+            [_SUPPRESSION_REQUIREMENT, _SUPPRESSION_COUNTEREVIDENCE],
+        ),
+        ("suppression", "ambiguous", [_SUPPRESSION_REQUIREMENT]),
     ],
 )
 def test_every_kind_classification_minimum_role_set_is_accepted(
     kind: str, classification: str, evidence: list[dict[str, object]]
 ) -> None:
-    packet = _section_packet() if kind == "section" else _invariant_packet()
+    packet = {
+        "section": _section_packet,
+        "invariant": _invariant_packet,
+        "suppression": _suppression_packet,
+    }[kind]()
     result = normalize_model_result(
         packet,
         {
@@ -296,6 +385,47 @@ def test_every_kind_classification_minimum_role_set_is_accepted(
         analysis_key="a" * 64,
     )
     assert result.classification == classification
+    assert result.to_row()["schema_version"] == (3 if kind == "suppression" else 2)
+
+
+@pytest.mark.parametrize("classification", ["scope_overbroad", "risk_unaddressed"])
+def test_suppression_one_sided_risk_finding_is_malformed(
+    classification: str,
+) -> None:
+    packet = _suppression_packet()
+
+    with pytest.raises(SemanticResultError, match="counterevidence"):
+        normalize_model_result(
+            packet,
+            {
+                "packet_id": packet["packet_id"],
+                "classification": classification,
+                "confidence": 0.5,
+                "rationale": "The declaration does not address the shown issue.",
+                "summary": "Suppression needs review.",
+                "evidence": [_SUPPRESSION_REQUIREMENT],
+            },
+            analysis_key="a" * 64,
+        )
+
+
+def test_suppression_kind_requires_packet_contract_4() -> None:
+    packet = _suppression_packet()
+    packet["schema_version"] = 3
+
+    with pytest.raises(SemanticResultError, match="contract version"):
+        normalize_model_result(
+            packet,
+            {
+                "packet_id": packet["packet_id"],
+                "classification": "ok",
+                "confidence": 0.5,
+                "rationale": "bounded evidence",
+                "summary": "Reviewed.",
+                "evidence": [_SUPPRESSION_REQUIREMENT],
+            },
+            analysis_key="a" * 64,
+        )
 
 
 def test_duplicate_evidence_items_are_rejected() -> None:

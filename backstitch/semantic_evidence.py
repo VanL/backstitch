@@ -34,6 +34,15 @@ INVARIANT_CLASSIFICATIONS = frozenset(
         "ambiguous",
     }
 )
+SUPPRESSION_CLASSIFICATIONS = frozenset(
+    {
+        "ok",
+        "rationale_insufficient",
+        "scope_overbroad",
+        "risk_unaddressed",
+        "ambiguous",
+    }
+)
 MODEL_RESULT_FIELDS = frozenset(
     {
         "packet_id",
@@ -74,7 +83,7 @@ class CanonicalEvidence:
 @dataclass(frozen=True, slots=True)
 class CanonicalSemanticResult:
     packet_id: str
-    kind: Literal["section", "invariant"]
+    kind: Literal["section", "invariant", "suppression"]
     packet_hash: str
     analysis_key: str
     classification: str
@@ -87,7 +96,7 @@ class CanonicalSemanticResult:
 
     def to_row(self) -> dict[str, object]:
         row: dict[str, object] = {
-            "schema_version": 2,
+            "schema_version": 3 if self.kind == "suppression" else 2,
             "packet_id": self.packet_id,
             "kind": self.kind,
             "packet_hash": self.packet_hash,
@@ -164,6 +173,25 @@ def _shown_regions(packet: dict[str, Any]) -> tuple[_ShownRegion, ...]:
             )
             if shown is not None:
                 regions.append(shown)
+        for item in projection["counterevidence"]:
+            shown = _region(
+                "counterevidence",
+                item["path"],
+                item["start_line"],
+                item["snippet"],
+            )
+            if shown is not None:
+                regions.append(shown)
+    elif projection.get("packet_contract_version") == 4:
+        requirement_row = projection["requirement"]
+        requirement = _region(
+            "requirement",
+            requirement_row["path"],
+            requirement_row["start_line"],
+            requirement_row["text"],
+        )
+        if requirement is not None:
+            regions.append(requirement)
         for item in projection["counterevidence"]:
             shown = _region(
                 "counterevidence",
@@ -319,6 +347,11 @@ def required_evidence_roles(kind: str, classification: str) -> frozenset[Evidenc
             return frozenset({"requirement", "implementation"})
         if classification == "ambiguous":
             return frozenset({"requirement"})
+    elif kind == "suppression":
+        if classification in ("ok", "rationale_insufficient", "ambiguous"):
+            return frozenset({"requirement"})
+        if classification in ("scope_overbroad", "risk_unaddressed"):
+            return frozenset({"requirement", "counterevidence"})
     raise ValueError(f"invalid semantic result variant: {kind}/{classification}")
 
 
@@ -335,9 +368,17 @@ def normalize_model_result(
     if response["packet_id"] != packet["packet_id"]:
         raise SemanticResultError("model response packet_id does not match the packet")
     kind = packet["kind"]
-    classifications = (
-        SECTION_CLASSIFICATIONS if kind == "section" else INVARIANT_CLASSIFICATIONS
-    )
+    if (kind == "suppression") != (packet.get("schema_version") == 4):
+        raise SemanticResultError(
+            "suppression kind and packet contract version must agree"
+        )
+    classifications = {
+        "section": SECTION_CLASSIFICATIONS,
+        "invariant": INVARIANT_CLASSIFICATIONS,
+        "suppression": SUPPRESSION_CLASSIFICATIONS,
+    }.get(kind)
+    if classifications is None:
+        raise SemanticResultError("packet kind is invalid for semantic analysis")
     classification = response["classification"]
     if classification not in classifications:
         raise SemanticResultError("classification is invalid for the packet kind")

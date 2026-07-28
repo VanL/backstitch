@@ -269,6 +269,90 @@ select = ["SEMANTIC_AMBIGUOUS:human_rejected"]
 level = "info"
 
 [[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT:evidence_bound"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT:verification_indeterminate"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT:independently_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT:mechanically_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT:human_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT:disputed_by_verifier"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT:human_rejected"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD:evidence_bound"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD:verification_indeterminate"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD:independently_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD:mechanically_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD:human_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD:disputed_by_verifier"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD:human_rejected"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_RISK_UNADDRESSED:evidence_bound"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_RISK_UNADDRESSED:verification_indeterminate"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_RISK_UNADDRESSED:independently_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_RISK_UNADDRESSED:mechanically_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_RISK_UNADDRESSED:human_verified"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_RISK_UNADDRESSED:disputed_by_verifier"]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["SEMANTIC_SUPPRESSION_RISK_UNADDRESSED:human_rejected"]
+level = "info"
+
+[[diagnostics.levels]]
 select = ["OBLIGATION_SKIPPED:source_skip"]
 level = "info"
 
@@ -711,4 +795,25 @@ short = "BSA005"
 status = "implemented"
 family = "semantic"
 summary = "Semantic evidence is ambiguous"
+contexts = ["evidence_bound", "verification_indeterminate", "independently_verified", "mechanically_verified", "human_verified", "disputed_by_verifier", "human_rejected"]
+
+[diagnostics.registry.SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT]
+short = "BSA006"
+status = "implemented"
+family = "semantic"
+summary = "Suppression rationale is insufficient"
+contexts = ["evidence_bound", "verification_indeterminate", "independently_verified", "mechanically_verified", "human_verified", "disputed_by_verifier", "human_rejected"]
+
+[diagnostics.registry.SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD]
+short = "BSA007"
+status = "implemented"
+family = "semantic"
+summary = "Suppression scope is broader than its rationale supports"
+contexts = ["evidence_bound", "verification_indeterminate", "independently_verified", "mechanically_verified", "human_verified", "disputed_by_verifier", "human_rejected"]
+
+[diagnostics.registry.SEMANTIC_SUPPRESSION_RISK_UNADDRESSED]
+short = "BSA008"
+status = "implemented"
+family = "semantic"
+summary = "Suppression rationale does not address the observed risk"
 contexts = ["evidence_bound", "verification_indeterminate", "independently_verified", "mechanically_verified", "human_verified", "disputed_by_verifier", "human_rejected"]
