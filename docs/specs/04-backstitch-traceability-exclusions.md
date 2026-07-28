@@ -27,6 +27,11 @@ This spec owns:
 - classification globs for meta/process spec files
 - validation and observability for unused or invalid suppressions
 
+This spec also owns opt-in, spec-declared rationales for governed
+suppressions and the deterministic artifacts supplied to semantic review.
+The semantic inference, cache, result, disposition, and authority lifecycle
+remains owned by [SEM-*].
+
 This spec does not own:
 
 - scan-path `exclude` / `extend_exclude` ([CFG-6.7]) — those skip discovery
@@ -64,13 +69,19 @@ Examples: `SPEC_SECTION_UNMAPPED`, `BSS007`,
 - Python module path
 - Python line (future v2; not required in first implementation)
 
-A valid suppression must name at least one diagnostic code. Blanket “ignore
-everything” is not allowed except through explicit `meta` classification on a
-file or section.
+A valid suppression names at least one diagnostic code, except for the closed
+`meta` mechanism whose code set is [EXC-3]. Blanket ordinary ignores are not
+allowed. Every suppression normalizes to one rule with mechanism, origin,
+scope, codes, and optional declaration reference. Every match produces one
+suppression decision carrying the issue, rule provenance, declaration
+reference, and decoded rationale. These canonical objects are used by
+matching, audit reporting, obligation inventory, and semantic packet
+construction; no consumer reparses source or configuration.
 
 _Implementation mapping_:
 
 - `backstitch/exclusions.py`
+- `backstitch/models.py`
 
 ## 3. Classification Globs [EXC-3]
 
@@ -193,6 +204,19 @@ both.
 - Markers must not suppress diagnostics whose effective level is outside
   `diagnostics.suppressible_levels`.
 
+An inline `meta` or `ignore` may append exactly
+` because PATH#SUP-ID`, where `PATH` is a repo-relative POSIX spec path and
+`SUP-ID` follows the suppression-declaration grammar in [EXC-6]. The
+delimiter is the lowercase token `because` surrounded by ASCII spaces.
+Codes precede the delimiter. HTML-comment forms use the same token order
+before `-->`; underscore forms have one closing `_` after the declaration
+reference:
+`_Traceability: ignore CODE because PATH#SUP-ID_`. When
+`lint.require_suppression_declarations = true`, omission of this clause
+emits `SUPPRESSION_REASON_MISSING` and the directive does not suppress.
+Under the packaged `false` default, the existing clause-free forms retain
+their behavior.
+
 ### 4.5 Obligation skip marker
 
 The only source-authored obligation skip grammar is [EVC-8.3.2], including its
@@ -243,6 +267,11 @@ Rules:
   docstring).
 - `# backstitch: ignore` is an alias for `# backstitch: noqa`.
 
+Python `noqa` and `ignore` directives accept the same terminal
+` because PATH#SUP-ID` clause. It does not change docstring-module or
+next-statement scope. Under required-declaration mode a clause-free
+directive emits `SUPPRESSION_REASON_MISSING` and does not suppress.
+
 _Implementation mapping_:
 
 - `backstitch/python_refs.py`
@@ -275,6 +304,8 @@ warn_unused_ignores = true
 | `meta_spec_globs` | string array | File-level meta classification ([EXC-3]) |
 | `process_spec_globs` | string array | Alias of `meta_spec_globs` in v1 |
 | `lint.warn_unused_ignores` | bool | Warn when a suppression matches nothing (default `true`) |
+| `lint.require_suppression_declarations` | bool | Require governed rules to resolve a spec declaration (default `false`) |
+| `lint.suppressions` | ordered array of closed tables | Structured declared `ignore` and file-scoped `meta` rules |
 | `lint.per-file-ignores` | table path → codes | Suppress issue codes for entire spec or code files |
 | `lint.per-section-ignores` | table `path::ID` → codes | Suppress codes for one section; `path::*` for all sections in file |
 
@@ -319,9 +350,86 @@ effective policy controls suppressibility, and `off` remains auditable.
 For `01-development-documentation-operating-model.md`, prefer `meta_spec_globs`
 or `per-file-ignores`, not `extend_exclude`, so the file stays in the corpus.
 
+### 6.4 Documented suppression rules
+
+```toml
+[tool.backstitch.lint]
+warn_unused_ignores = true
+require_suppression_declarations = false
+
+[[tool.backstitch.lint.suppressions]]
+mechanism = "ignore"
+path = "tests/*"
+sections = []
+codes = ["CODE_REF_UNMAPPED_FROM_SPEC"]
+declaration = "docs/specs/04-backstitch-traceability-exclusions.md#SUP-TEST-CITATIONS"
+
+[[tool.backstitch.lint.suppressions]]
+mechanism = "meta"
+path = "docs/specs/01-development-documentation-operating-model.md"
+sections = []
+codes = []
+declaration = "docs/specs/04-backstitch-traceability-exclusions.md#SUP-DOM-META"
+```
+
+`lint.require_suppression_declarations` is boolean and defaults to `false`.
+It governs legacy meta globs, legacy per-file/per-section ignores, and inline
+meta/ignore directives. When true, a legacy or inline rule without a valid
+declaration reference does not suppress and emits
+`SUPPRESSION_REASON_MISSING`. It does not govern scan exclusion, adoption
+rungs, obligation skips, or diagnostic `off` policy.
+
+`lint.suppressions` is an ordered array of closed tables. Each table contains
+exactly `mechanism`, `path`, `sections`, `codes`, and `declaration`.
+`mechanism` is `ignore` or `meta`. `path` is one nonblank repo-relative glob
+with the existing [EXC-6] anchoring and match semantics. `sections` is an
+array of unique valid section IDs; an empty array means file scope. `ignore`
+requires one or more unique ordinary diagnostic codes. Canonical long and
+short-code aliases follow the existing [EXC-2] rules. Input order is not
+significant; Backstitch canonicalizes section IDs lexically and codes by
+registry identity before matching, display, or hashing. `meta` requires
+`codes = []`, applies the exact [EXC-3] policy, and requires
+`sections = []`, preserving config-meta's existing file scope. Section-level
+meta remains an [EXC-4] inline capability. Every structured rule requires one
+declaration
+regardless of the global bool. Unknown fields, invalid combinations,
+duplicates, and malformed references follow [CFG-8].
+Structured `ignore` rules occupy the existing configured-ignore precedence
+tier. Structured `meta` rules occupy the existing meta-classification tier
+and feed the same effective meta set used by deterministic checks and
+obligation-rung projection.
+
+`lint.suppressions` follows ordinary array replacement across `extend`
+layers; it does not gain the special append behavior of
+`diagnostics.levels`. A child that replaces the array restates every
+structured rule it intends to retain. Rule origin records the exact
+contributing config layer and zero-based array position.
+
+A suppression declaration is a CommonMark paragraph token in a scanned spec:
+
+`_Traceability: suppression-declaration [SUP-ID] "strict JSON string"_`
+
+`SUP-ID` is `SUP-` followed by one or more uppercase ASCII letters, digits,
+dots, or hyphens, with an uppercase letter or digit at each end. It is unique
+across the accepted spec corpus. The marker must be ordinary paragraph
+content under an owning ID-bearing section, not a fence, code block, HTML
+comment, heading suffix, preamble, or Python source. The final value uses the
+exact [EVC-8.3.2] JSON-string decoding, nonblank, line-safety, and 4096-byte
+limits. A reference is exactly `repo/relative/spec.md#SUP-ID`; bare IDs,
+absolute paths, backslashes, globs, fragments naming ordinary section IDs,
+and paths outside effective `spec_roots` are invalid.
+
+Declaration parsing produces source artifacts but does not itself suppress
+any finding. One declaration may authorize more than one operational rule
+only when each rule references it explicitly. Under
+`warn_unused_ignores = true`, an unreferenced declaration or a referenced
+rule that matches no issue emits `SUPPRESSION_UNUSED`.
+
 _Implementation mapping_:
 
 - `backstitch/exclusions.py`
+- `backstitch/grammar.py`
+- `backstitch/models.py`
 - `backstitch/settings.py`
 - `backstitch/check_pipeline.py`
 
@@ -334,8 +442,8 @@ backstitch check --show-suppressions
 ```
 
 When set, text/JSON output includes suppressed findings in a separate
-`suppressed_issues` collection with reason (`meta`, `config`, `inline`) and
-scope.
+`suppressed_issues` collection with the canonical provenance reason (`meta`,
+`config_file`, `config_section`, `inline_spec`, or `inline_code`) and scope.
 
 Default output omits suppressed findings entirely. Findings disabled by
 `level = "off"` use the same audit view with reason `diagnostic level off`.
@@ -345,11 +453,27 @@ ID, decoded reason, source path and line, and effective `BSE001` policy. The
 skip remains visible even when BSE001 is off; it is an audit record, not proof
 that ordinary trace findings were suppressed.
 
+Each governed suppressed issue retains the existing `reason` provenance
+field and adds `declaration` and `rationale`. These fields are always present
+in JSON; each is `null` only for a legacy suppression accepted while
+required-declaration mode is false. Text output shows provenance,
+declaration, and rationale, rendering rationale with canonical JSON-string
+escaping rather than writing source bytes as terminal control text. The
+source rationale is data, not trusted terminal markup. Diagnostic `off`
+audit records retain
+`reason = "diagnostic level off"` and null declaration/rationale.
+Structured meta rules reuse `reason = "meta"`. Structured ignore rules reuse
+`reason = "config_file"` when `sections = []` and
+`reason = "config_section"` otherwise. Inline forms retain
+`inline_spec`/`inline_code`; the additive fields do not mint a second
+provenance vocabulary.
+
 _Implementation mapping_:
 
 - `backstitch/reporting.py`
 - `backstitch/check_pipeline.py`
 - `backstitch/cli.py`
+- `backstitch/models.py`
 
 ## 8. Failure Modes [EXC-8]
 
@@ -368,9 +492,10 @@ diagnostics do not become strict-loader exit `2`, and
 `allow_unknown_keys` does not alter this reserved grammar. Invalid config or
 invocation syntax still exits `2`.
 
-Under `allow_unknown_keys = true`, unknown or malformed suppressions that arise
-from repository files or repository configuration are downgraded into
-structured suppression-hygiene diagnostics.
+Under `allow_unknown_keys = true`, unknown codes and malformed clause-free
+legacy suppressions that arise from repository files or repository
+configuration are downgraded into structured suppression-hygiene diagnostics.
+The strict declaration-integrity exceptions below are never downgraded.
 
 Suppression-hygiene diagnostics use stable codes:
 
@@ -378,6 +503,7 @@ Suppression-hygiene diagnostics use stable codes:
 - `SUPPRESSION_UNKNOWN_CODE`
 - `SUPPRESSION_INVALID_SYNTAX`
 - `SUPPRESSION_UNSUPPRESSIBLE_CODE`
+- `SUPPRESSION_REASON_MISSING`
 - future reserved codes listed in [SC-15]
 
 These diagnostics enter the same report stream as other target diagnostics
@@ -388,6 +514,22 @@ Invariant findings follow the same lifecycle. Required untested cannot be
 suppressed under packaged defaults; draft untested can. A repository policy
 override may change that result only through the ordinary effective-level and
 `suppressible_levels` rules, never through an invariant-specific bypass.
+
+`SUPPRESSION_REASON_MISSING` also fires when required-declaration mode sees
+no reference, an unresolved declaration, or a declaration with no valid
+decoded rationale. `SUPPRESSION_INVALID_SYNTAX` fires for malformed source
+declaration syntax, placement, reference syntax, duplicate markers in one
+owning section, or a duplicate `SUP-*` identity anywhere in the accepted
+corpus. Every duplicate declaration is invalid and no affected rule
+suppresses. Existing duplicate-section diagnostics remain authoritative for
+ordinary spec sections. In every case the affected rule
+is ineligible to suppress. `allow_unknown_keys` does not downgrade these
+source-integrity findings when required-declaration mode is enabled.
+Structured rules and inline directives that voluntarily include a `because`
+clause always use this strict declaration-integrity path regardless of the
+global bool: the named hygiene code fires, the rule does not suppress, and
+`allow_unknown_keys` does not downgrade it. The bool governs only whether a
+clause-free legacy rule remains eligible.
 
 _Implementation mapping_:
 
@@ -424,6 +566,15 @@ Required proof:
 - DOM fixture: zero `SPEC_SECTION_UNMAPPED` with `meta_spec_globs`, sections
   still parsed
 
+Verification covers both strictness modes; every Markdown, HTML, docstring,
+comment, legacy-config, structured-ignore, and structured-meta form; missing,
+blank, malformed, duplicate, misplaced, unresolved, outside-root, unused,
+valid declarations; exact section containment; precedence;
+canonical ordering; additive audit fields; and the invariant that an invalid
+required declaration leaves the original finding active. A firing
+configuration test proves the new bool changes behavior and a no-op test
+fails if its runtime consultation is removed.
+
 _Implementation mapping_:
 
 - `tests/test_exclusions.py`
@@ -439,11 +590,21 @@ Update on implementation:
 - invariant documentation must show draft-tier suppressibility,
   required-tier non-suppressibility, policy override behavior, and audit output
 
+Backstitch enables required-declaration mode. Its suppression declarations
+live in this spec. The dogfood migration must audit each existing policy
+family, remove stale rules, narrow the EVC file-wide rule to exact current
+sections or split it by rationale, and add no new suppressed scope. Every
+retained rule appears in `--show-suppressions` with its declaration and
+decoded rationale.
+
 _Implementation mapping_:
 
 - `docs/implementation/04-backstitch-style-traceability.md`
 
 ## Related Plans
+
+- `docs/plans/2026-07-28-documented-suppression-governance-plan.md`
+  (reviewed; implementation in progress)
 
 - `docs/plans/2026-07-15-agent-guided-evidence-cases-plan.md`
   (implementing)

@@ -616,6 +616,11 @@ Lint-style suppressions (`meta_spec_globs`, `lint.per-file-ignores`,
 in v1. They are intentionally separate from `exclude` / `extend_exclude`,
 which skip scanning.
 
+[EXC-6] also defines `lint.require_suppression_declarations` and the closed
+`[[lint.suppressions]]` array. Both standalone and `pyproject.toml` spellings
+use the normal table prefix. They are parsed only by the canonical [CFG-5.1]
+resolver and are present in the immutable settings snapshot.
+
 ### 6.12 Analogues intentionally omitted in v1
 
 The following mypy/ruff options do **not** have v1 analogues:
@@ -779,9 +784,18 @@ An empty effective test-root set is a valid partial scan, not a switch that
 disables invariant diagnostics. Required declarations found in the selected
 code roots remain untested when their tests were intentionally omitted.
 
+A malformed structured suppression table or declaration-reference value is
+a config error and exits `2` before snapshot capture or provider work.
+Config-time reference validation is syntax-only: nonblank repo-relative
+POSIX path, one valid `#SUP-ID`, no absolute path, backslash, glob, control
+character, or extra fragment. Whether that path is inside an effective
+`spec_root`, exists in the accepted snapshot, and owns a valid declaration is
+snapshot-derived target truth governed by [EXC-8], not a second config read.
+
 _Implementation mapping_:
 - `backstitch/diagnostics.py`
 - `backstitch/exclusions.py`
+- `backstitch/grammar.py`
 - `backstitch/settings.py`
 
 ## 9. Verification Expectations [CFG-9]
@@ -853,6 +867,12 @@ actually consults
   duplicate dispositions, and final semantic failure authority
 - `ruff` and `mypy` over new loader modules
 
+`lint.require_suppression_declarations` and every field of
+`lint.suppressions` have firing, wrong-type, closed-shape, precedence,
+`extend`, `config show`, and generic `--option` coverage where the value is a
+scalar option leaf. `lint.suppressions` itself is not settable through
+`--option`; [CFG-5.1]'s existing unknown/non-leaf rejection applies.
+
 Do not call external LLMs in config tests. Use fake adapters for `analyze`
 configuration integration tests. Optional live LLM tests — whether against a
 cloud provider or a local OpenAI-compatible endpoint — belong to [SC-7]'s
@@ -886,6 +906,9 @@ _Implementation mapping_:
 - `docs/implementation/04-backstitch-style-traceability.md`
 
 ## Related Plans
+
+- `docs/plans/2026-07-28-documented-suppression-governance-plan.md`
+  (reviewed; implementation in progress)
 
 - `docs/plans/2026-07-15-agent-guided-evidence-cases-plan.md`
   (implementing)

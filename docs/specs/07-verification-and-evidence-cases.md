@@ -58,7 +58,8 @@ This spec governs:
 - exact source receipts, candidate identities, static relations, and trace
   guidance;
 - the CLI, optional local stdio MCP adapter, and installed alignment guide;
-- compilation of aligned source into evidence packet schema version 3;
+- compilation of aligned source into section/invariant packet schema 3 and
+  suppression packet schema 4, with exact mixed-artifact rules in [EVC-9.1];
 - current-repository analysis versus historical packet replay;
 - independent blinded verification, aggregation, measurement, and policy
   integration.
@@ -83,7 +84,7 @@ The public nouns are:
 
 | Noun | Meaning | Authority |
 |---|---|---|
-| **obligation** | One addressable spec section or first-class invariant | Its repository source declaration |
+| **obligation** | One addressable spec section, first-class invariant, or valid used suppression declaration | Its repository source declaration |
 | **evidence link** | A mapping, backlink, bind, or binding-test relation associated with an obligation | A valid human-reviewed source declaration and its required reciprocal relation |
 | **candidate** | A bounded deterministic discovery result that may be relevant | Advisory; it has no alignment authority |
 | **skip** | A reasoned source annotation that suppresses semantic evaluation without claiming conformance | Human-reviewed spec source |
@@ -136,6 +137,16 @@ Each addressable obligation has these independent facts:
 `gate_state` is readiness, not a semantic verdict. Analyzer classifications,
 verifier verdicts, policy findings, and process exit status remain separate.
 
+A valid suppression declaration referenced by at least one matched governed
+rule enters the inventory as one active suppression obligation. Its identity
+is `suppression::PATH#SUP-ID`; intent is identified, alignment is complete,
+disposition is evaluate, gate state is executable, and required source roles
+are empty. Invalid, unreferenced, or unmatched declarations do not become
+executable semantic obligations; their deterministic hygiene remains
+[EXC-8]. Suppression obligations cannot carry an [EVC-8.3.2] skip because
+their declaration already exists to explain a suppression. Section and
+invariant readiness rules do not change.
+
 The deterministic state rules are:
 
 - a section requires at least one valid reciprocal `implementation` evidence
@@ -153,15 +164,17 @@ The deterministic state rules are:
   line selects exactly one containing owner (the `module` sentinel selects the
   whole parsed module). Directory, non-Python, unparseable, or ambiguous-owner
   attempts remain visible one-sided declarations and do not satisfy readiness;
-- no required role present gives `untraced`;
-- at least one required role satisfied while another is absent, or a one-sided
+- for section and invariant obligations, no required role present gives
+  `untraced`;
+- for section and invariant obligations, at least one required role satisfied while another is absent, or a one-sided
   declaration that can be attributed to the obligation, gives `partial`;
-- every required role satisfied by valid reciprocal relations gives
+- for section and invariant obligations, every required role satisfied by valid reciprocal relations gives
   `complete`;
 - malformed or ambiguous identity, duplicate declaration, or contradictory
   declarations that prevent one readiness answer give `invalid`;
-- valid sections under `spec_roots` and valid first-class invariants enter the
-  inventory. Planned/exploratory file classification and section/file meta
+- valid sections under `spec_roots`, valid first-class invariants, and valid
+  used suppression declarations enter the inventory.
+  Planned/exploratory file classification and section/file meta
   classification produce their named `obligation_rung`. Invariant-style
   Markdown bullets remain ordinary sections under [INV-2]. ID-less prose does
   not enter. A code-declared invariant is `active` unless its captured source
@@ -396,6 +409,17 @@ scores, out-of-packet citations, or unsupported roles invalidate the event.
 `support` and `refute` each require at least one valid bound citation;
 `indeterminate` may use an empty evidence array. An empty refutation therefore
 cannot create a disputed policy context.
+
+Verifier claim/result contracts admit `kind = "suppression"`, result schema
+3, and the [SEM-6] suppression classifications/codes. The reason-free claim
+still excludes analyzer rationale, confidence, policy, dispositions, and
+source skip reasons. A suppression declaration's rationale is the packet's
+source-authored requirement and remains visible; it is not analyzer
+rationale. The verifier may challenge a suppression finding through the
+same support/refute/indeterminate result and evidence binding, but BSA006
+through BSA008 have no independent failure authority without a future exact
+[EVC-10.1] qualification. This revision does not add them to the measured
+promotion corpus.
 
 The exact verifier provider input is the code-owned adversarial prompt bytes,
 two LF bytes, then canonical JSON for the model-visible verifier request. When
@@ -1209,6 +1233,15 @@ No public v1 command named `proposal`, `validate`, `activate`, `deactivate`,
 repository-wide traceability gate. There is no separate obligation-specific
 check pipeline.
 
+`obligation list` includes executable suppression obligations in canonical
+identity order. `obligation get` returns their declaration, normalized rules,
+matched issue count, and current readiness. Existing evidence discovery and
+mutation guidance do not run for this kind: suppression packet evidence is
+deterministically derived from the declaration, normalized rules, matched
+issues, and accepted snapshot. Unsupported summarize/find/get-candidate
+selectors return the existing closed invalid-operation envelope; no parallel
+suppression API is added.
+
 ### 8.1 Teaching And Progressive Disclosure [EVC-8.1]
 
 `backstitch guide alignment` prints the installed versioned quick start. It
@@ -1978,10 +2011,14 @@ in packet/report context.
 
 Legacy semantic completeness keys apply only when at least one row is
 `selected`: `minimum_packets` compares selected count;
-`required_kinds` requires each named packet kind among selected rows;
+`required_kinds` requires `section` and `invariant` among selected rows
+exactly as before. For `suppression`, a nonzero eligible population requires
+every eligible suppression packet among selected rows; zero eligible
+suppressions is vacuously complete. [EVC-12] fires both the zero-eligible and
+nonzero-incomplete cases. This asymmetry lets removal of the last exception
+remain a passing end state without weakening ordinary intent completeness.
 `maximum_packets` and `maximum_prompt_bytes` are fail-closed ceilings;
-`require_complete` requires one valid result per selected packet. All-skipped
-bypasses these semantic
+`require_complete` requires one valid result per selected packet. All-skipped bypasses these semantic
 packet/result requirements because no packet is eligible. No-active-intent and
 alignment debt were already rejected by row 2. Historical replay skips rows 2 through 4 and
 applies artifact validation, semantic completeness, provider/tool, finding
@@ -2085,9 +2122,14 @@ complete object and keyed preimage. Cache corruption, stale identity, or
 missing required cached data in require mode fails closed without provider
 traffic.
 
-### 9.1 Source-Aligned Evidence Packet V3 [EVC-9.1]
+### 9.1 Source-Aligned Evidence Packets [EVC-9.1]
 
-One executable obligation produces one packet artifact row with exactly:
+One executable section or invariant obligation produces the exact schema-3
+row defined below. One executable suppression obligation produces the exact
+schema-4 row and projection in [SEM-3]. A current JSONL artifact may contain
+both versions. `kind` is `section`, `invariant`, or `suppression` and must
+agree with row schema and canonical identity. Schema-3 semantics and bytes
+do not change.
 
 ```text
 {
@@ -2245,6 +2287,14 @@ projection. Exact visible source bytes therefore own the semantic identity; an
 unrelated captured file may change snapshot identity without changing this
 packet hash.
 
+Schema-4 suppression rows use [SEM-3]'s exact closed top-level, nested-rule,
+requirement, counterevidence, evidence-region, issue, readiness, and
+model-visible projection contracts. Their packet hash uses contract version
+4. Schema-3 and schema-4 rows share source-snapshot currentness, complete
+population, byte-ceiling, canonical JSONL ordering, publication, and
+self-validation rules. There is no compatibility normalization from one row
+version or kind into another.
+
 `obligation_state_hash` is SHA-256 of canonical JSON for:
 
 ```text
@@ -2277,7 +2327,7 @@ regions. `derivation_config_hash` is SHA-256 of canonical JSON for:
 Every field is required and uses the effective captured setting/version. Page,
 response, deadline, retry, output, provider, and policy settings are excluded.
 
-The packet report is exactly:
+The immediately prior packet-report schema 2 is exactly:
 
 ```text
 {
@@ -2319,6 +2369,32 @@ The packet report is exactly:
 }
 ```
 
+Current generation emits packet-report schema 3. It is packet-report schema
+2 with exactly these closed changes:
+
+- `schema_version` is `3`;
+- scalar `packet_schema_version` becomes
+  `packet_schema_versions`, an ascending duplicate-free array containing
+  exactly the row versions present: `[3]` or `[3, 4]`;
+- `derivation_contract.packet_contract_version` becomes
+  `packet_contract_versions` with the same exact array;
+- `alignment_audit.kind` admits `suppression`;
+- `kind_counts` is added with exactly `eligible` and `emitted`; each contains
+  exactly nonnegative `section`, `invariant`, and `suppression` counts that
+  recompute from the inventory/audit and emitted JSONL rows;
+- `readiness_counts` uses the same disjoint buckets across all three kinds;
+- `packet_count` and `readiness_counts.selected` equal section + invariant +
+  suppression emitted rows.
+
+Every other field and semantic rule is unchanged. The
+`packet_report_content_sha256` preimage contains exactly every packet-report
+schema-3 field except itself, `tool_version`, and `created_at`, including
+both plural version fields and `kind_counts`. Canonical JSON owns key order.
+The hash therefore continues to cover every non-provenance report field.
+Readers retain exact packet-report schema 2 support for historical
+section/invariant-only replay and never reinterpret a schema-2 artifact as
+containing suppression.
+
 Packet rows use JSONL order. Counts are nonnegative and satisfy `total =
 out_of_scope + selected + skipped + alignment_debt + blocked` and `active =
 selected + skipped + alignment_debt + blocked`. Buckets are the disjoint
@@ -2330,7 +2406,8 @@ report. `packet_count` equals the length of `packets` and `selected`.
 inventory, including out-of-scope and skipped rows. It sorts by path, start
 line, and obligation ID. `skip` is null for `evaluate`; for `skipped` it is
 exactly `{reason, path, line}` from the valid source marker. The facts use
-[EVC-2.1]'s closed vocabularies. Kind is `section` or `invariant`; paths are
+[EVC-2.1]'s closed vocabularies. In schema 2, kind is `section` or
+`invariant`; schema 3 additionally admits `suppression`. Paths are
 canonical repository-relative POSIX strings; lines are positive integers; and
 the reason uses [EVC-8.3.2]'s validation. The rows deterministically reproduce
 every readiness count. They are audit projection only and cannot alter packet
@@ -2350,8 +2427,8 @@ the existing suppression audit. A successful current report can contain only
 issues whose effective severity is outside `fail_on`, because [EVC-8.7] row 3
 precedes publication.
 
-`packet_report_content_sha256` is lowercase SHA-256 of canonical JSON for
-exactly this object:
+The historical schema-2 `packet_report_content_sha256` is lowercase SHA-256
+of canonical JSON for exactly this object:
 
 ```text
 {
@@ -2362,9 +2439,10 @@ exactly this object:
 }
 ```
 
-It covers every packet-report field except itself and the two provenance fields
-`tool_version` and `created_at`. Current generation recomputes it before
-publication. Historical replay recomputes it before using any audit, count,
+It covers every schema-2 packet-report field except itself and the two provenance fields
+`tool_version` and `created_at`. Current generation uses the schema-3
+preimage defined above. Historical replay recomputes the applicable version
+before using any audit, count,
 snapshot, derivation, or packet identity field; mismatch is corrupt input,
 exit 2, with no analysis report. Successful validation proves internal report
 integrity only. The named source derivation remains `claimed_unverified` until
@@ -2393,15 +2471,15 @@ terminators, not each row independently. Exact-limit output succeeds;
 limit-plus-one fails before any packet or report publication.
 
 The standalone `backstitch packets` inspection command may filter packet JSONL
-with `--kind`, but schema-2 `--report` is valid only with `--kind all`. A
+with `--kind`, but current schema-3 `--report` is valid only with `--kind all`. A
 filtered JSONL file has no complete-corpus packet report and therefore cannot
 be supplied to historical analysis. Current `analyze --repo-root` and its
 optional packet/report output pair always compile the unfiltered selected
 corpus.
 
-The analysis report revision retains [SEM-7]'s closed analysis, finding,
-problem, debt, cost, and cache records and changes its top-level schema to 3.
-It adds exactly these required top-level fields:
+The immediately prior analysis report schema 3 retains [SEM-7]'s closed
+analysis, finding, problem, debt, cost, and cache records and adds exactly
+these required top-level fields:
 
 ```text
 scope
@@ -4073,6 +4151,13 @@ bytes, identities, normalization, cache, and failures remain real. Tests must
 not mock the resolver for readiness, parser for guidance, candidate index for
 CLI or implemented MCP, or cache for packet identity.
 
+Acceptance probes cover mixed schema-3/schema-4 packet JSONL,
+packet-report schema 2 compatibility and schema 3 production,
+suppression obligation/API behavior, analyzer and optional verifier
+evidence binding, empty and nonempty required-kind completeness, and the
+invariant that schema-3 section/invariant bytes and identities do not change
+merely because suppression support is installed.
+
 ### 12.1 Required Cross-Spec Promotion [EVC-12.1]
 
 This revision changed active contracts through one coordinated spec change;
@@ -4200,6 +4285,9 @@ _Implementation mapping_:
 - `tests/test_settings.py`
 
 ## Related Plans
+
+- `docs/plans/2026-07-28-documented-suppression-governance-plan.md`
+  (reviewed; implementation in progress)
 
 - `docs/plans/2026-07-15-agent-guided-evidence-cases-plan.md`
 - `docs/plans/2026-07-27-semantic-analysis-lifecycle-plan.md`

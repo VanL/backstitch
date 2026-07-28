@@ -55,6 +55,19 @@ Policy, rendering, concurrency, output location, and suppressions never alter a
 raw-verdict cache key. Changing policy must re-evaluate cached verdicts with zero
 provider calls.
 
+A valid governed suppression may create a `suppression` obligation and
+packet. The declaration rationale, normalized operational rules, complete
+matched suppression decisions, and bounded issue-source excerpts are
+model-visible evidence and therefore affect that suppression packet's hash.
+Adding the suppression packet kind or replaying an unchanged deterministic
+decision does not by itself alter a section or invariant packet. A rule,
+scope, code, source, mapping, matched-finding, or meta-classification change
+that changes an existing packet's model-visible issues or evidence honestly
+changes that packet's identity. A meta/rung change may add or remove an
+eligible packet without changing an otherwise identical projection. Policy,
+dispositions, rendering,
+and audit display remain outside every raw-verdict cache key.
+
 The raw-result cache is an optimization, not evidence authority. Every current
 invocation derives a fresh source snapshot and packet set and validates every
 reused object against the complete inference identity. Every invocation that
@@ -70,12 +83,120 @@ _Implementation mapping_:
 
 ### 3. Packet And Inference Identity [SEM-3]
 
-Current packet rows carry `schema_version = 3`, `kind`, `obligation_id`,
-source snapshot, readiness, and `packet_hash`. Their closed artifact shape,
-exact model-visible projection, receipt identity, evidence universe, ordering,
-byte ceilings, and packet-hash preimage are [EVC-9.1]. That projection is the
-only current producer, prompt, analyzer-cache, verifier-cache, and
-qualification packet contract.
+Current section and invariant packet rows retain schema 3 exactly.
+Opted-in suppression packet rows use schema 4. A current packet artifact may
+contain both versions; version is determined per row, never inferred from
+position or kind. Their closed artifact shape, exact model-visible projection,
+receipt identity, evidence universe, ordering, byte ceilings, and packet-hash
+preimage are [EVC-9.1].
+
+```text
+{
+  schema_version: 4,
+  packet_id, packet_hash,
+  kind: "suppression",
+  obligation_id,
+  source_snapshot: {
+    snapshot_hash, obligation_state_hash, derivation_config_hash
+  },
+  readiness: {
+    intent_state, alignment_state, disposition, obligation_rung, gate_state,
+    required_roles
+  },
+  requirement,
+  suppression_rules,
+  counterevidence,
+  evidence_regions,
+  issues,
+  packet_warnings
+}
+```
+
+One executable schema-4 packet is emitted per referenced declaration,
+grouping every matched decision that names it in canonical rule/issue order.
+`packet_id` and `obligation_id` are both
+`suppression::PATH#SUP-ID`. Readiness is exactly `identified`, `complete`,
+`evaluate`, `active`, `executable`, with `required_roles = []`.
+`requirement` uses the schema-3 requirement shape: role `requirement`, the
+declaration's spec path, identity `SUP-ID`, owning section title, exact
+marker start/end coordinates, and decoded rationale as text.
+
+`suppression_rules` is a nonempty canonical array with exactly:
+
+```text
+{
+  mechanism: "ignore" | "meta",
+  provenance:
+    "meta" | "config_file" | "config_section" |
+    "inline_spec" | "inline_code",
+  path,
+  sections,
+  codes,
+  declaration,
+  origin: {
+    source, position, line
+  }
+}
+```
+
+`sections` and `codes` are the normalized arrays from [EXC-6].
+`declaration` equals the packet declaration reference. `origin.source` is
+the exact config-layer or repository-relative source path;
+`origin.position` is the zero-based structured-config array position or null;
+`origin.line` is the positive inline source line or null. Exactly one of
+position/line is non-null. Legacy rules cannot produce suppression packets
+because they have no declaration.
+
+`issues` is the complete nonempty canonical [SC-6] projection of matched
+suppressed issues. For each issue with a source path and positive line,
+`counterevidence` contains the exact single LF-delimited logical source line
+from the accepted snapshot in this closed shape:
+
+```text
+{
+  role: "counterevidence",
+  path, start_line, end_line, snippet,
+  issue_indexes
+}
+```
+
+`issue_indexes` is the sorted, unique, nonempty array of zero-based indexes
+into `issues` whose locators share that exact path and line. Equal source
+lines merge; disjoint lines remain separate.
+Issues without such a locator remain in `issues` and produce no invented
+region. `evidence_regions` contains the requirement and those
+counterevidence regions in [SEM-5] order. `packet_warnings` is exactly `[]`.
+Empty, sampled, or truncated rule/issue populations are invalid and overflow
+is fatal under existing packet byte ceilings.
+
+The schema-4 model-visible projection is exactly:
+
+```text
+{
+  packet_contract_version: 4,
+  packet_id, kind, obligation_id,
+  requirement,
+  suppression_rules,
+  counterevidence,
+  evidence_regions,
+  issues,
+  packet_warnings
+}
+```
+
+`packet_hash` is SHA-256 of canonical JSON for that projection. Source
+snapshot, readiness, policy, audit rendering, and provenance outside
+`suppression_rules.origin` are excluded.
+
+Suppression packets use packet schema 4 and a code-owned suppression prompt.
+Section and invariant schema, projection, prompt descriptor, packet hash,
+result schema, and analysis-key construction remain byte-for-byte unchanged.
+New readers accept the exact mixed population and the prior
+section/invariant-only population.
+
+Standalone `packets --kind` accepts `suppression`; `all` includes it.
+`check`, `packets`, and obligation commands remain deterministic and do not
+import `llm`.
 
 Schema-3 `packet_warnings` is a compatibility field and is exactly `[]`.
 Current packet generation and loading reject nonempty schema-3 warnings:
@@ -259,25 +380,29 @@ as local bytes. Cache restoration failure changes only expected call count,
 cost, or `require`-mode availability; it cannot change cache authority.
 
 A packet object contains exactly `schema_version = 1`,
-`object_type = "semantic-packet"`, the current [EVC-9.1] model projection, and `packet_hash`.
-It never contains instructions. A prompt-only change therefore reuses the
-packet object and creates a different result key without colliding at the
-packet path.
+`object_type = "semantic-packet"`, one current [EVC-9.1] model projection,
+and `packet_hash`. The nested projection is contract 3 for section/invariant
+or contract 4 for suppression. It never contains instructions. A prompt-only
+change therefore reuses the packet object and creates a different result key
+without colliding at the packet path.
 
 A result object contains exactly `schema_version = 1`,
 `object_type = "semantic-result"`, `inference_contract`, `analysis_key`,
-`result`, `provenance`, and `raw_response_sha256`. Cache-object versions are a
-separate namespace from artifact-row versions, so this object version remains
-one while its nested canonical analyzer result row is version two.
+`result`, `provenance`, and `raw_response_sha256`. Its nested canonical
+analyzer row is result schema 2 for section and invariant and result schema 3
+for suppression. The kind, packet
+projection contract, prompt response contract, and nested result schema must
+agree exactly; mismatch is corruption, not a cache miss.
 
-A valid canonical result row has exactly `schema_version = 2`, `packet_id`,
+A canonical result row contains exactly `schema_version`, `packet_id`,
 `kind`, `packet_hash`, `analysis_key`, `classification`, `confidence`,
-`rationale`, `summary`, `evidence`, and `verification_state`. Confidence is always
-present and may be null. Verification state on an inference row is always
-`evidence_bound`; dispositions and other trusted verification steps project a
-separate diagnostic and never rewrite the cached row. Classifications are the
-closed kind-specific vocabularies in [SC-6] and [INV-5]. Evidence is the closed
-canonical shape from [SEM-5].
+`rationale`, `summary`, `evidence`, and `verification_state`. Schema 2
+retains the exact section/invariant kinds and classifications. Schema 3
+requires `kind = "suppression"` and the [SEM-6] suppression classification
+vocabulary. Confidence is always present and may be null. Every inference
+row remains `evidence_bound`; trusted verification and dispositions project
+separately. Evidence uses the exact [SEM-5] packet-local contract for its
+kind.
 
 Verifier event/cache identity, closed result object, reason-free projection,
 event key, claim hash, trial-specific effective epoch, normalization, and
@@ -319,12 +444,16 @@ Cache modes are:
   verifier object for every normalized finding/required epoch pair; construct
   no adapter and make zero provider calls; any miss exits `2`
 
-`read-write` is the normal update mode. An inference-relevant source, packet,
-prompt, provider, request, contract, or epoch change creates a miss only for
-affected work identities. A policy-only change is not a miss. `off` is an
-uncached run, not a cache-refresh alias: it neither reads nor publishes cache
-objects. Changing `search_epoch` is the explicit resampling mechanism when new
-immutable cache objects should be retained.
+`read-write` is the normal update mode. An inference-relevant change creates
+a miss for every work identity whose model-visible packet, prompt, provider,
+request, contract, or epoch changed. Adding support for a new packet kind
+does not alter old-kind identities. Changes to suppression scope, mappings,
+or matched issues may legitimately alter existing packet projections and
+therefore their keys. Meta/rung changes may alter packet eligibility. A
+policy-only change remains a zero-call replay. `off` is an uncached run, not a
+cache-refresh alias: it neither reads nor publishes cache objects. Changing
+`search_epoch` is the explicit resampling mechanism when new immutable cache
+objects should be retained.
 
 Every hit recomputes and validates object paths, schemas, hashes, inference
 identity, packet identity, prompt/request/provider provenance, result schema,
@@ -476,6 +605,15 @@ satisfied; otherwise it is malformed. `missing_trace` is section-only, remains
 an evidence-bound absence finding, and can never become mechanically
 verified merely from bounded packet evidence.
 
+Suppression result rows use result schema 3 and the same closed packet-local
+evidence representation. Section and invariant result rows remain schema 2.
+Suppression `ok` and `rationale_insufficient` require `requirement`;
+`scope_overbroad` and `risk_unaddressed` require `requirement` and
+`counterevidence`; `ambiguous` requires `requirement`. Missing or
+out-of-range evidence is malformed. Model normalization produces only
+`evidence_bound`; the existing verification and human-disposition authority
+rules do not change.
+
 Evidence ranges are deterministic. A nonblank requirement covers its stored
 inclusive `start_line` through `end_line`, and its `text` has exactly that many
 logical lines. A nonblank declared or counterevidence region covers its stored
@@ -525,6 +663,21 @@ policy, and dispositions; the short code is a display and selector alias:
 | `weak_binding` | `SEMANTIC_WEAK_BINDING` | `BSA004` |
 | `ambiguous` | `SEMANTIC_AMBIGUOUS` | `BSA005` |
 
+| Suppression classification | Canonical code | Short code |
+|---|---|---|
+| `rationale_insufficient` | `SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT` | `BSA006` |
+| `scope_overbroad` | `SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD` | `BSA007` |
+| `risk_unaddressed` | `SEMANTIC_SUPPRESSION_RISK_UNADDRESSED` | `BSA008` |
+
+Suppression classifications are `ok`, `rationale_insufficient`,
+`scope_overbroad`, `risk_unaddressed`, and `ambiguous`; `ambiguous` retains
+`SEMANTIC_AMBIGUOUS`/`BSA005`. The three new codes use the existing
+`confirmed_mismatch` packaged level row across verification states. Their
+finding hashes use `packet_kind = "suppression"` and otherwise retain the
+exact finding contract. Evidence-bound findings never decide whether the
+deterministic suppression applies. Ordinary `finding_handling` and exact
+dispositions govern their debt and human disposition.
+
 Tool, provider, cache, input, and malformed result failures never project to
 BSA diagnostics. Section classifications are `ok`, `confirmed_mismatch`,
 `probable_mismatch`, `missing_trace`, and `ambiguous`. Invariant
@@ -540,6 +693,9 @@ The exact packaged levels are:
 | `SEMANTIC_MISSING_TRACE` | warning | warning | warning | warning | warning | info | info |
 | `SEMANTIC_WEAK_BINDING` | warning | warning | warning | warning | warning | info | info |
 | `SEMANTIC_AMBIGUOUS` | info | info | info | info | info | info | info |
+| `SEMANTIC_SUPPRESSION_RATIONALE_INSUFFICIENT` | warning | warning | warning | warning | warning | info | info |
+| `SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD` | warning | warning | warning | warning | warning | info | info |
+| `SEMANTIC_SUPPRESSION_RISK_UNADDRESSED` | warning | warning | warning | warning | warning | info | info |
 
 For each diagnostic, `finding_hash` is SHA-256 of canonical JSON containing:
 
@@ -548,7 +704,7 @@ For each diagnostic, `finding_hash` is SHA-256 of canonical JSON containing:
   "finding_contract_version": 1,
   "code": "SEMANTIC_...",
   "classification": "...",
-  "packet_kind": "section|invariant",
+  "packet_kind": "section|invariant|suppression",
   "packet_id": "...",
   "packet_hash": "<sha256>",
   "evidence": [
@@ -633,11 +789,11 @@ backstitch packets ... --output packets.jsonl --report packet-report.json
 The resolved packet output and non-null report paths must be distinct. Equality
 is invalid input and exits `2` before temporary creation or publication.
 
-Current generation emits the closed packet-report schema 2 in [EVC-9.1],
-including source snapshot, derivation contract, readiness counts, alignment
-audit, effective deterministic issues, exact packet/report byte counts and
-digests, and content identity. The following schema-1 object is historical
-validation vocabulary only and cannot satisfy current completeness:
+Current generation emits the packet-report schema 3 in [EVC-9.1], including
+source snapshot, derivation contract, readiness counts, alignment audit,
+effective deterministic issues, exact packet/report byte counts and digests,
+and content identity. The following schema-1 object is historical validation
+vocabulary only and cannot satisfy current completeness:
 
 ```json
 {
@@ -663,9 +819,9 @@ Packet entries preserve JSONL order. The digest covers the exact final JSONL
 bytes including newlines.
 
 These schema-1 eligible/emitted counts and prompt totals apply only to
-historical packet-schema-2 validation. They do not appear in schema 2. A
-current schema-2 report is emitted only for complete `--kind all` packet output
-and follows [EVC-9.1]'s exact full-corpus recomputation rules.
+historical packet-schema-2 validation. They do not appear in current reports.
+A current schema-3 report is emitted only for complete `--kind all` packet
+output and follows [EVC-9.1]'s exact full-corpus recomputation rules.
 
 Historical analysis accepts:
 
@@ -688,8 +844,9 @@ readiness counts, byte counts, and derivation identities must satisfy
 [EVC-9.1] before cache or provider work. Packet-schema-2 input remains bounded
 historical validation/presentation only and cannot produce this report.
 
-The current/historical analysis report is the closed schema 3 contract in
-[EVC-9.1]. It retains the following analyzer fields from the former schema-1
+The current analysis report is the closed schema 4 contract in [EVC-9.1];
+historical analysis retains the closed schema 3 reader. The current contract
+retains the following analyzer fields from schema 3 and the former schema-1
 report while adding scope, semantic status, artifact integrity/currentness,
 source provenance/snapshot, packet-report content hash, alignment summary and
 audit, deterministic issues, and the closed verification object. Retained
@@ -705,6 +862,28 @@ fields include
 decision; an output publication failure can still make the command and returned
 run exit `2`. Canonical result JSONL is policy-neutral and byte-stable; this
 operational report is not.
+
+Current packet and analysis reports include closed suppression eligible,
+emitted, result, cache-hit, provider-call, classification, diagnostic, and
+debt counts. `require_complete` covers every emitted suppression packet. A
+required `suppression` kind is satisfied when all eligible suppression
+packets were emitted; zero eligible suppressions is vacuously complete so
+deleting the last suppression does not break CI. Missing one of a nonzero
+eligible population is incomplete and exits `2`.
+
+Packet-report schema 3 and analysis-report schema 4 are the current producer
+contracts when suppression packets are supported. Readers retain exact
+packet-report schema 2 and analysis-report schema 3 support for the
+immediately prior section/invariant-only historical contract. Compatibility
+readers never reinterpret an old row as a suppression row.
+Analysis-report schema 4 adds `packet_schema_versions` from packet-report
+schema 3 and `kind_counts`. `kind_counts` contains exactly `eligible`,
+`emitted`, `results`, `cache_hits`, `cache_misses`, and `provider_calls`;
+each contains exactly nonnegative `section`, `invariant`, and `suppression`
+integers. Eligible/emitted copy the packet report. Results and work counts
+recompute from canonical rows and operational events; each nested total
+equals the corresponding existing aggregate count. Every other
+analysis-report schema-3 field and semantic rule is unchanged.
 
 Every invocation that reaches artifact publication constructs its result and
 report from that invocation's current or historical input, valid cache hits,
@@ -1152,7 +1331,7 @@ cache_path = ".backstitch/semantic-cache"
 cache_mode = "require"         # off | read-write | require
 search_epoch = "1"
 require_complete = true
-required_kinds = ["section", "invariant"]
+required_kinds = ["section", "invariant", "suppression"]
 minimum_packets = 1
 maximum_packets = 1000
 maximum_prompt_bytes = 10000000
@@ -1195,7 +1374,7 @@ The normative value contract is:
 | `cache_path` | nonblank path string, resolved relative to the file that contributed the winning value; CLI values resolve from cwd |
 | `cache_mode` | `off`, `read-write`, or `require` |
 | `require_complete` | boolean |
-| `required_kinds` | list containing each of `section`, `invariant` at most once; normalize to that canonical order |
+| `required_kinds` | list containing each of `section`, `invariant`, `suppression` at most once; normalize to that canonical order |
 | `minimum_packets` | integer excluding booleans, at least 0 |
 | `maximum_packets`, `maximum_prompt_bytes` | integer excluding booleans, at least 0; zero disables that maximum |
 | `finding_handling` | `allow`, `report`, or `require_disposition`; legacy `candidate_handling` is a one-release alias that cannot coexist |
@@ -1245,6 +1424,23 @@ profile. Trusted bounded updates use the explicit config selection and static
 runtime overlays in [SEM-9.1]. A clean checkout may therefore miss in the
 zero-call profile until a validated external cache has been restored; this is
 an honest availability failure, not a reason to commit cache objects.
+
+For required kinds, `suppression` follows `invariant` in canonical order. A
+nonzero eligible suppression population requires every eligible suppression
+packet; zero eligible suppressions is vacuously complete.
+
+Backstitch sets
+`lint.require_suppression_declarations = true` and includes `suppression` in
+`analyze.required_kinds`. Trusted refresh builds missing suppression cache
+objects in `read-write` mode. The committed `require` mode then proves
+zero-call replay. A rationale or suppression-only projection change misses
+its suppression object. A rule, matched-finding, meta, mapping, or source
+change also misses any section/invariant object whose visible issue or
+evidence changed and may add/remove packets whose eligibility changed. A
+non-`ok`
+evidence-bound review creates ordinary finding debt; Backstitch's existing
+`finding_handling = "require_disposition"` requires a current human
+disposition without granting the model deterministic suppression authority.
 
 Trusted refresh and pull-request report workflows may restore disposable
 immutable object trees, run `read-write`, save successful immutable objects,
@@ -1446,6 +1642,17 @@ Executable gates cover:
   authority
 - the ordinary acceptance probes and self-corpus gate remain green
 
+Tests prove prior section/invariant packet, prompt, result, report-reader, and
+cache fixtures remain valid; each suppression classification and evidence
+role fires; rationale/rule-projection-only changes miss the suppression
+packet; changes to deterministic issues or evidence re-key every truthfully
+affected packet; meta/rung changes alter eligibility without being treated
+as a hidden hash input; policy/disposition/rendering changes make zero calls;
+empty,
+incomplete, oversized, malformed, stale-snapshot, cache-corrupt, and
+undisposed paths fail at their existing owners; and live local analysis
+exercises at least one real suppression packet.
+
 _Implementation mapping_:
 
 - `tests/acceptance/test_probe_analysis.py`
@@ -1454,6 +1661,9 @@ _Implementation mapping_:
 - `tests/test_release_workflow.py`
 
 ## Related Plans
+
+- `docs/plans/2026-07-28-documented-suppression-governance-plan.md`
+  (reviewed; implementation in progress)
 
 - `docs/plans/2026-07-11-deterministic-semantic-gate-plan.md`
 - `docs/plans/2026-07-15-agent-guided-evidence-cases-plan.md`
