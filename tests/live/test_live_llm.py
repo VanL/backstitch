@@ -34,23 +34,27 @@ from typing import Any
 
 import pytest
 
-from backstitch.analysis_llm import _packet_evidence_bounds, build_prompt
+from backstitch.analysis_llm import (
+    _packet_evidence_bounds,
+    _semantic_response_schema,
+    build_prompt,
+)
 from backstitch.analysis_results import (
     INVARIANT_CLASSIFICATIONS,
     load_analysis_results,
     validate_analysis_row,
 )
+from backstitch.semantic_packets import prompt_instruction_bytes
 
 # The root collection hook applies policy skips after collecting this marker,
 # so a disabled direct invocation reports one skip instead of exiting 5.
 # Collection stays hermetic: `import llm` lives inside the test body, not here.
 pytestmark = pytest.mark.live_llm
 
-# Canonical default model. MUST stay byte-identical to
-# DEFAULT_BACKSTITCH_LIVE_LLM_MODEL in .github/workflows/ci.yml -- treat the two
-# copies as one value. Re-check `uv run llm models list` and OpenAI's model docs
-# before changing it; availability changes faster than this repo.
-DEFAULT_BACKSTITCH_LIVE_LLM_MODEL = "gpt-5.4-mini"
+# Keep this reviewed default aligned with the local documentation. The trusted
+# semantic refresh model lives in pyproject.toml and has a stronger revision
+# identity than this transport-contract probe.
+DEFAULT_BACKSTITCH_LIVE_LLM_MODEL = "gpt-4.1-mini"
 DEFAULT_BACKSTITCH_LOCAL_LLM_BASE_MODEL = "llama3.2:3b"
 DEFAULT_BACKSTITCH_LOCAL_LLM_SERVED_MODEL = DEFAULT_BACKSTITCH_LOCAL_LLM_BASE_MODEL
 
@@ -143,12 +147,6 @@ class _CountingProxy:
                                 "streaming path"
                             )
                             return
-                        if payload.get("response_format") != {"type": "json_object"}:
-                            self._send_400(
-                                "local analyze request must arrive with the "
-                                "adapter's json_object response format"
-                            )
-                            return
                         try:
                             packet = _local_analyze_packet(payload)
                             packet_id = str(packet["packet_id"])
@@ -158,9 +156,37 @@ class _CountingProxy:
                                     f"only once: {packet_id}"
                                 )
                                 return
-                            payload["response_format"] = _local_analyze_response_format(
-                                payload
-                            )
+                            if packet.get("packet_contract_version") == 3:
+                                response_format = payload.get("response_format")
+                                json_schema = (
+                                    response_format.get("json_schema")
+                                    if isinstance(response_format, dict)
+                                    else None
+                                )
+                                if (
+                                    not isinstance(response_format, dict)
+                                    or response_format.get("type") != "json_schema"
+                                    or not isinstance(json_schema, dict)
+                                    or not isinstance(json_schema.get("schema"), dict)
+                                ):
+                                    self._send_400(
+                                        "local analyze request must preserve the "
+                                        "adapter's packet-bound JSON schema; got "
+                                        + repr(response_format)[:500]
+                                    )
+                                    return
+                            else:
+                                if payload.get("response_format") != {
+                                    "type": "json_object"
+                                }:
+                                    self._send_400(
+                                        "local analyze request must arrive with the "
+                                        "adapter's json_object response format"
+                                    )
+                                    return
+                                payload["response_format"] = (
+                                    _local_analyze_response_format(payload)
+                                )
                         except ValueError as exc:
                             self._send_400(str(exc))
                             return
@@ -444,11 +470,19 @@ def _select_live_packets(
             continue
         packet = json.loads(raw)
         if require_semantic_owner:
-            if packet.get("spec_path") != LIVE_SPEC:
+            requirement = packet.get("requirement")
+            current_spec_path = (
+                requirement.get("path")
+                if isinstance(requirement, dict)
+                else packet.get("spec_path")
+            )
+            if current_spec_path != LIVE_SPEC:
                 continue
-            owner_paths = [
-                str(owner.get("path", "")) for owner in packet.get("owners", [])
-            ]
+            evidence = packet.get("declared_evidence")
+            owners = (
+                evidence if isinstance(evidence, list) else packet.get("owners", [])
+            )
+            owner_paths = [str(owner.get("path", "")) for owner in owners]
             if not any(
                 path == "backstitch/cli.py"
                 or fnmatch.fnmatch(path, "backstitch/analysis_*.py")
@@ -460,6 +494,58 @@ def _select_live_packets(
         key=lambda item: (len(json.dumps(item[1])), str(item[1]["packet_id"]), item[0])
     )
     return [packet for _, packet in candidates[:count]]
+
+
+def _write_live_contract_repo(root: Path, *, kind: str = "openai") -> Path:
+    """Create a tiny aligned corpus for provider transport and schema probes."""
+
+    (root / "docs/specs").mkdir(parents=True)
+    (root / "docs/plans").mkdir(parents=True)
+    (root / "pkg").mkdir()
+    (root / "tests").mkdir()
+    (root / "docs/plans/.keep").write_text("", encoding="utf-8")
+    (root / ".backstitch.toml").write_text(
+        '[analyze]\njson_mode = "require"\n',
+        encoding="utf-8",
+    )
+    if kind == "local":
+        (root / "docs/specs/README.md").write_text(
+            "# Live local contract\n", encoding="utf-8"
+        )
+        (root / "pkg/invariants.py").write_text(
+            "def stable_one() -> int:\n"
+            '    """Invariant: [INV.RES.1] stable_one keeps returning one."""\n'
+            "    return 1\n\n"
+            "def stable_two() -> int:\n"
+            '    """Invariant: [INV.RES.2] stable_two keeps returning two."""\n'
+            "    return 2\n",
+            encoding="utf-8",
+        )
+        (root / "tests/test_invariants.py").write_text(
+            "from pkg.invariants import stable_one, stable_two\n\n"
+            "def test_stable_one() -> None:\n"
+            '    """Tests-invariant: [INV.RES.1]"""\n'
+            "    assert stable_one() == 1\n\n"
+            "def test_stable_two() -> None:\n"
+            '    """Tests-invariant: [INV.RES.2]"""\n'
+            "    assert stable_two() == 2\n",
+            encoding="utf-8",
+        )
+    else:
+        (root / "docs/specs/01-live.md").write_text(
+            "# Live contract\n\n"
+            "## Return one [LIVE-1]\n\n"
+            "The live contract returns one.\n\n"
+            "_Implementation mapping_:\n\n- `pkg/live.py::return_one`\n",
+            encoding="utf-8",
+        )
+        (root / "pkg/live.py").write_text(
+            "def return_one() -> int:\n"
+            '    """Spec: docs/specs/01-live.md [LIVE-1]"""\n'
+            "    return 1\n",
+            encoding="utf-8",
+        )
+    return root
 
 
 def _select_local_live_packets(
@@ -490,21 +576,33 @@ def _select_local_live_packets(
         assert not packet.get("packet_warnings"), (
             f"local live packet {packet_id!r} must have no packet warnings"
         )
-        assert _has_bounded_packet_evidence(packet.get("targets")), (
+        declared = packet.get("declared_evidence")
+        target_evidence = (
+            _has_bounded_packet_evidence(declared, role="implementation")
+            if isinstance(declared, list)
+            else _has_bounded_packet_evidence(packet.get("targets"))
+        )
+        test_evidence = (
+            _has_bounded_packet_evidence(declared, role="test")
+            if isinstance(declared, list)
+            else _has_bounded_packet_evidence(packet.get("binding_tests"))
+        )
+        assert target_evidence, (
             f"local live packet {packet_id!r} must have bounded target evidence"
         )
-        assert _has_bounded_packet_evidence(packet.get("binding_tests")), (
+        assert test_evidence, (
             f"local live packet {packet_id!r} must have bounded binding-test evidence"
         )
         selected.append(packet)
     return selected
 
 
-def _has_bounded_packet_evidence(items: object) -> bool:
+def _has_bounded_packet_evidence(items: object, *, role: str | None = None) -> bool:
     if not isinstance(items, list):
         return False
     return any(
         isinstance(item, dict)
+        and (role is None or item.get("role") == role)
         and isinstance(item.get("path"), str)
         and bool(item["path"].strip())
         and isinstance(item.get("start_line"), int)
@@ -575,6 +673,28 @@ def _local_analyze_response_format(
     """Build strict test-owned decoding bounds from the request's real packet."""
 
     packet = _local_analyze_packet(payload)
+    if packet.get("packet_contract_version") == 3:
+        messages = payload.get("messages")
+        prompts = (
+            [
+                message.get("content")
+                for message in messages
+                if isinstance(message, dict)
+                and message.get("role") == "user"
+                and isinstance(message.get("content"), str)
+            ]
+            if isinstance(messages, list)
+            else []
+        )
+        if len(prompts) != 1 or not isinstance(prompts[0], str):
+            raise ValueError("local analyze request must contain one user prompt")
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "output",
+                "schema": _semantic_response_schema(prompts[0]),
+            },
+        }
     evidence_variants = _local_evidence_schema(packet)
     if not evidence_variants:
         raise ValueError("local analyze invariant packet has no bounded evidence")
@@ -621,6 +741,25 @@ def _local_analyze_response_format(
             },
         },
     }
+
+
+def _local_response_schema_matches(payload: dict[str, object]) -> bool:
+    """Compare packet authority while ignoring provider-operational schema names."""
+
+    expected = _local_analyze_response_format(payload)
+    packet = _local_analyze_packet(payload)
+    actual = payload.get("response_format")
+    if packet.get("packet_contract_version") != 3:
+        return actual == expected
+    if not isinstance(actual, dict) or actual.get("type") != "json_schema":
+        return False
+    actual_json_schema = actual.get("json_schema")
+    expected_json_schema = expected.get("json_schema")
+    return (
+        isinstance(actual_json_schema, dict)
+        and isinstance(expected_json_schema, dict)
+        and actual_json_schema.get("schema") == expected_json_schema.get("schema")
+    )
 
 
 def _endpoint_origin(endpoint: str) -> str:
@@ -732,6 +871,7 @@ def _configure_local_llm(
         # issues streaming (SSE) requests. The proxy preserves streaming while
         # adding the local gate's request-level temperature and seed controls.
         "can_stream": False,
+        "supports_schema": True,
     }
     (llm_home / "extra-openai-models.yaml").write_text(
         json.dumps([model_record]), encoding="utf-8"
@@ -798,7 +938,14 @@ def _assert_local_prompt_budget(subset: list[dict[str, object]]) -> None:
     ceiling = _local_prompt_byte_ceiling()
     too_large: list[str] = []
     for packet in subset:
-        prompt_bytes = len(build_prompt(packet).encode("utf-8"))
+        kind = packet["kind"]
+        assert kind in {"section", "invariant"}
+        prompt_bytes = len(
+            build_prompt(
+                packet,
+                prompt_bytes=prompt_instruction_bytes(kind),
+            ).encode("utf-8")
+        )
         if prompt_bytes > ceiling:
             too_large.append(f"{packet['packet_id']} ({prompt_bytes} bytes)")
     assert not too_large, (
@@ -839,8 +986,7 @@ def _assert_analyze_hit_local_endpoint(
         except ValueError as exc:
             pytest.fail(f"local analyze request did not contain one packet: {exc}")
         request_packet_ids.append(str(packet["packet_id"]))
-        expected_response_format = _local_analyze_response_format(payload)
-        if payload.get("response_format") != expected_response_format:
+        if not _local_response_schema_matches(payload):
             wrong_response_formats.append(payload.get("response_format"))
         controls = (payload.get("temperature"), payload.get("seed"))
         if controls != (LOCAL_INFERENCE_TEMPERATURE, LOCAL_INFERENCE_SEED):
@@ -912,21 +1058,42 @@ def _exercise_live_llm_analysis_contract(
     if kind == "local":
         assert proxy is not None
         local_config = _configure_local_llm(tmp_path, monkeypatch, proxy)
+    live_root = _write_live_contract_repo(
+        tmp_path / "live-contract-repo",
+        kind=kind,
+    )
+    scan_args = [
+        "--repo-root",
+        str(live_root),
+        "--code-root",
+        "pkg",
+        "--code-root",
+        "tests",
+        "--test-root",
+        "tests",
+    ]
 
-    all_packets = tmp_path / "all-packets.jsonl"
     live_packets = tmp_path / "live-packets.jsonl"
+    live_packet_report = tmp_path / "live-packet-report.json"
     analysis = tmp_path / "analysis.jsonl"
+    analysis_report = tmp_path / "analysis-report.json"
     report = tmp_path / "report.json"
 
-    # 1. Generate the full packet corpus through the real CLI.
-    packet_args = ["packets", "--repo-root", "."]
-    if kind == "local":
-        packet_args.extend(("--kind", "invariant"))
-    packet_args.extend(("--output", str(all_packets)))
+    # 1. Generate a small source-aligned contract corpus through the real CLI.
+    packet_args = [
+        "packets",
+        *scan_args,
+        "--kind",
+        "all",
+        "--output",
+        str(live_packets),
+        "--report",
+        str(live_packet_report),
+    ]
     gen = _run_cli(*packet_args)
     _assert_no_traceback(gen, "packets")
     assert gen.returncode == 0, gen.stderr
-    all_text = all_packets.read_text(encoding="utf-8")
+    all_text = live_packets.read_text(encoding="utf-8")
     assert all_text.strip(), "packets produced empty output"
 
     # 2. Build the bounded live subset in-process and write it out.
@@ -936,12 +1103,9 @@ def _exercise_live_llm_analysis_contract(
         subset = _select_live_packets(
             all_text,
             DEFAULT_LIVE_PACKETS,
-            require_semantic_owner=True,
+            require_semantic_owner=False,
         )
-        assert subset, (
-            f"no packets from {LIVE_SPEC} own a semantic-analysis module; the "
-            "dogfood corpus stopped exercising the live semantic path"
-        )
+        assert subset, "live contract corpus produced no selectable section packet"
     assert len(subset) <= MAX_LIVE_PACKETS
     if kind == "local":
         assert len(subset) >= 2, (
@@ -949,10 +1113,13 @@ def _exercise_live_llm_analysis_contract(
             "a single error row is total failure, making leniency vacuous"
         )
         _assert_local_prompt_budget(subset)
+    generated_packet_ids = {
+        str(json.loads(line)["packet_id"])
+        for line in all_text.splitlines()
+        if line.strip()
+    }
     expected_packet_ids = {str(packet["packet_id"]) for packet in subset}
-    live_packets.write_text(
-        "".join(json.dumps(packet) + "\n" for packet in subset), encoding="utf-8"
-    )
+    assert expected_packet_ids == generated_packet_ids
 
     # Curated corpus validity is a precondition for provider activity. Resolve
     # and probe the model only after packet generation, selection, and bounds.
@@ -968,13 +1135,18 @@ def _exercise_live_llm_analysis_contract(
         "analyze",
         "--packets",
         str(live_packets),
+        "--packet-report",
+        str(live_packet_report),
         "--model",
         live_model,
         "--concurrency",
         "1",
-        "--no-config",
+        "--config",
+        str(live_root / ".backstitch.toml"),
         "--output",
         str(analysis),
+        "--report",
+        str(analysis_report),
         label="analyze",
         timeout=LOCAL_ANALYZE_TIMEOUT_SECONDS if kind == "local" else None,
     )
@@ -982,6 +1154,10 @@ def _exercise_live_llm_analysis_contract(
         proxy.stop_analyze_phase()
     _assert_no_traceback(ana, "analyze")
     assert ana.returncode == 0, ana.stderr
+    analysis_report_data = json.loads(analysis_report.read_text(encoding="utf-8"))
+    assert analysis_report_data["status"] == "complete"
+    assert analysis_report_data["problems"] == []
+    assert analysis_report_data["result_count"] == len(subset)
     if local_config is not None and proxy is not None:
         _assert_analyze_hit_local_endpoint(
             proxy,
@@ -989,12 +1165,8 @@ def _exercise_live_llm_analysis_contract(
             served_model=local_config.served_model,
         )
 
-    # 4. Deterministic report over the full repo (committed config, not
-    #    --no-config) so summarize can resolve subset packet IDs against the
-    #    same report surface a normal user produces.
-    chk = _run_cli(
-        "check", "--repo-root", ".", "--format", "json", "--output", str(report)
-    )
+    # 4. Deterministic report over the same source-aligned contract corpus.
+    chk = _run_cli("check", *scan_args, "--format", "json", "--output", str(report))
     _assert_no_traceback(chk, "check")
     assert chk.returncode == 0, chk.stderr
 

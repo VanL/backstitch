@@ -2,8 +2,8 @@ name: CI
 
 # Hermetic CI runs on every push and PR with no secrets. Repository pytest
 # config enables live LLM tests for local runs, so CI explicitly deselects or
-# disables them. The paid live job remains available behind a repository
-# variable for a future policy change.
+# disables them. Provider-backed semantic refresh is isolated in the manual
+# semantic-refresh workflow and never runs in pull-request-controlled CI.
 on:
   push:
   pull_request:
@@ -32,7 +32,7 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
       - name: Hermetic tests (live LLM deselected)
-        run: uv run pytest tests -q -n auto --dist loadgroup -m "not live_llm"
+        run: uv run pytest tests -q -n auto --dist loadgroup -m "not live_llm and not benchmark"
       - name: Prove live tests skip under CI override
         # Expect exactly one skipped test; provider activity here is a failure.
         run: |
@@ -52,6 +52,49 @@ jobs:
         run: uv run mypy backstitch bin/release.py tests --config-file pyproject.toml
       - name: Self-corpus gate
         run: uv run backstitch check --repo-root .
+
+  benchmark:
+    name: benchmarks py3.12
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: false
+      - name: Install dependencies
+        run: uv sync --extra dev
+      - name: Serial wall-clock benchmarks
+        run: uv run pytest tests -q -n 0 -m benchmark
+
+  coverage:
+    name: coverage py3.12
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: false
+      - name: Install dependencies
+        run: uv sync --extra dev
+      - name: Run tests with coverage
+        run: |
+          uv run coverage erase
+          uv run pytest tests -q -n auto --dist loadgroup -m "not live_llm and not benchmark" --cov=backstitch --cov-report=
+          uv run coverage report --show-missing
+          uv run coverage xml
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f
+        with:
+          files: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: VanL/backstitch
 
   binary-wheels:
     name: binary wheels py${{ matrix.python-version }} ${{ matrix.platform.os }}-${{ matrix.platform.arch }}
@@ -88,49 +131,3 @@ jobs:
           enable-cache: false
       - name: Prove dependencies install from wheels
         run: uv sync --locked --extra dev --no-build --no-install-project
-
-  live-llm:
-    name: live LLM
-    needs: test
-    if: >-
-      ${{ vars.BACKSTITCH_CI_LIVE_LLM == '1' &&
-          github.ref == 'refs/heads/main' &&
-          (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
-    runs-on: ubuntu-latest
-    env:
-      BACKSTITCH_LIVE_LLM: "1"
-      # Pin the cloud kind so a stray BACKSTITCH_LIVE_LLM_KIND=local (e.g. on a
-      # self-hosted runner) cannot flip this job into the local Ollama lane.
-      # bin/release.py pins the same value in the release precheck.
-      BACKSTITCH_LIVE_LLM_KIND: openai
-      # MUST stay byte-identical to DEFAULT_BACKSTITCH_LIVE_LLM_MODEL in
-      # tests/live/test_live_llm.py -- one canonical value in two places. Update
-      # both together after re-checking `uv run llm models list` and OpenAI's
-      # model docs; availability changes faster than this repo.
-      DEFAULT_BACKSTITCH_LIVE_LLM_MODEL: "gpt-5.4-mini"
-      # Optional per-environment override; empty when the repo variable is unset.
-      BACKSTITCH_LIVE_LLM_MODEL: ${{ vars.BACKSTITCH_LIVE_LLM_MODEL }}
-      # Injected as env, never as a command-line argument. Empty string when the
-      # secret is not configured.
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          python-version: "3.14"
-          enable-cache: false
-      - name: Install dependencies
-        run: uv sync --extra dev
-      - name: Run live LLM tests
-        run: |
-          if [ -z "${OPENAI_API_KEY}" ]; then
-            echo "::notice::OPENAI_API_KEY not set; skipping live LLM tests without failure"
-            exit 0
-          fi
-          LLM_MODEL="${BACKSTITCH_LIVE_LLM_MODEL:-$DEFAULT_BACKSTITCH_LIVE_LLM_MODEL}"
-          export LLM_MODEL
-          echo "::notice::running live LLM tests with model ${LLM_MODEL}"
-          # Fail fast (no network) if the model id is not registered in llm.
-          uv run python -c 'import llm, os; llm.get_model(os.environ["LLM_MODEL"])'
-          uv run pytest tests/live/test_live_llm.py -q

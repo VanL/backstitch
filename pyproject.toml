@@ -63,7 +63,12 @@ packages = ["backstitch"]
 # make extend_exclude a profile key and fail strict load. extend_exclude
 # appends to defaults (which already exclude .worktrees); a bare `exclude`
 # would REPLACE the defaults and start scanning four dead implementations.
-extend_exclude = ["tests/fixtures/**", "tests/acceptance/fixtures/**"]
+extend_exclude = [
+    "tests/fixtures/**",
+    "tests/acceptance/fixtures/**",
+    "tests/product_eval/**",
+    "tests/semantic_eval/**",
+]
 
 [tool.backstitch.profile]
 name = "backstitch-style-v1"
@@ -71,6 +76,9 @@ spec_roots = ["docs/specs"]
 plan_roots = ["docs/plans"]
 code_roots = ["backstitch", "tests"]
 test_roots = ["tests"]
+planned_spec_globs = [
+    "docs/specs/08-intent-coverage.md",
+]
 meta_spec_globs = ["docs/specs/01-development-documentation-operating-model.md"]
 
 [tool.backstitch.diagnostics]
@@ -82,7 +90,53 @@ suppressible_levels = ["error", "warning", "info"]
 select = ["*"]
 level = "error"
 
+# Semantic candidates remain report-only until the measured eval promotion.
+# This later rule prevents the deterministic strict-mode wildcard from gaining
+# semantic failure authority by accident.
+[[tool.backstitch.diagnostics.levels]]
+select = ["BSA*"]
+level = "info"
+
+[tool.backstitch.analyze]
+# The request alias is resolved by llm; the immutable cache identity uses the
+# exact provider revision observed during the 2026-07-15 compatibility probe.
+backend_id = "llm"
+plugin_id = "openai"
+plugin_distribution_name = "llm"
+model = "gpt-4.1-mini"
+model_revision = "gpt-4.1-mini-2025-04-14"
+concurrency = 1
+cache_path = ".backstitch/semantic-cache"
+cache_mode = "require"
+search_epoch = "1"
+json_mode = "require"
+temperature = 0.0
+seed = 42
+max_tokens = 512
+require_complete = true
+required_kinds = ["section", "invariant"]
+minimum_packets = 1
+maximum_packets = 100
+maximum_prompt_bytes = 1500000
+finding_handling = "require_disposition"
+maximum_provider_calls = 100
+lock_wait_timeout_seconds = 300
+maximum_runtime_seconds = 1800
+maximum_estimated_cost_microusd = 1000000
+input_cost_microusd_per_million_tokens = 400000
+output_cost_microusd_per_million_tokens = 1600000
+input_token_overhead = 256
+cost_rate_source = "OpenAI GPT-4.1 mini model page (https://developers.openai.com/api/docs/models/gpt-4.1-mini), reviewed 2026-07-15"
+
+[tool.backstitch.verify]
+enabled = false
+
 [tool.backstitch.lint.per-file-ignores]
+# EVC is active but its implementation lands in reviewed slices; COV remains
+# proposed. Remove each suppression as its implementation adds reciprocal
+# mappings.
+"docs/specs/07-verification-and-evidence-cases.md" = ["SPEC_SECTION_UNMAPPED"]
+"docs/specs/08-intent-coverage.md" = ["SPEC_SECTION_UNMAPPED"]
 # Test files legitimately cite spec sections without being implementation
 # owners; the unmapped-citation inventory is noise for them.
 "tests/*" = ["CODE_REF_UNMAPPED_FROM_SPEC", "SPEC_MAPPING_RECIPROCAL_MISSING"]
@@ -90,12 +144,41 @@ level = "error"
 [tool.pytest.ini_options]
 minversion = "7.0"
 testpaths = ["tests"]
+norecursedirs = ["fixtures"]
 addopts = "-ra -q --strict-markers"
 run_live_llm = true
 markers = [
+    "benchmark: non-portable wall-clock tests run serially outside xdist",
     "integration: tests that exercise an external command or package boundary",
     "live_llm: tests that call a real LLM provider under the configured live policy",
+    "performance: non-normative local wall-clock and resource budget tests",
 ]
+
+[tool.coverage.run]
+source = ["backstitch"]
+parallel = true
+concurrency = ["thread", "multiprocessing"]
+omit = [
+    "*/tests/*",
+    "*/examples/*",
+    "*/__pycache__/*",
+    "*/site-packages/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "pass",
+]
+show_missing = true
+skip_empty = true
+
+[tool.coverage.html]
+directory = "htmlcov"
 
 [tool.mypy]
 python_version = "3.11"
@@ -107,11 +190,21 @@ check_untyped_defs = true
 no_implicit_optional = true
 warn_redundant_casts = true
 warn_unused_ignores = true
-exclude = "(^tests/fixtures/)"
+# Frozen product/evaluation trees deliberately reuse module names and may
+# contain invalid or adversarial source. Their bytes are test inputs, not this
+# package's type-checking surface.
+exclude = "(^tests/fixtures/|^tests/.*/fixtures/|^tests/semantic_eval/v1/fixture/)"
 
 [tool.ruff]
 target-version = "py311"
 line-length = 88
+extend-exclude = [
+    # Frozen fixture bytes may intentionally violate lint/format rules and are
+    # protected by manifest hashes and drift tests instead.
+    "tests/fixtures/**",
+    "tests/**/fixtures/**",
+    "tests/semantic_eval/v1/fixture/**",
+]
 
 [tool.ruff.lint]
 select = [

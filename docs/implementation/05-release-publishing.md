@@ -132,7 +132,8 @@ Local release process changes should prove:
 - `uv run ruff check backstitch tests bin`
 - `uv run mypy backstitch bin/release.py tests --config-file pyproject.toml`
 - `python3 -m py_compile .github/scripts/require_green_workflows.py`
-- `uv run pytest tests -q -n auto --dist loadgroup -m "not live_llm"`
+- `uv run pytest tests -q -n auto --dist loadgroup -m "not live_llm and not benchmark"`
+- `uv run pytest tests -q -n 0 -m benchmark`
 - `env -u BACKSTITCH_LIVE_LLM uv run pytest tests/live/test_live_llm.py -q -o run_live_llm=false`
 - `uv run pytest tests/live/test_live_llm.py -q` with the configured live
   provider; the repository pytest policy enables this locally

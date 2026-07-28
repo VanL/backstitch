@@ -1,6 +1,7 @@
 # Backstitch
 
   [![CI](https://github.com/VanL/backstitch/actions/workflows/ci.yml/badge.svg)](https://github.com/VanL/backstitch/actions/workflows/ci.yml)
+  [![codecov](https://codecov.io/gh/VanL/backstitch/branch/main/graph/badge.svg)](https://codecov.io/gh/VanL/backstitch)
   [![PyPI version](https://badge.fury.io/py/backstitch.svg)](https://badge.fury.io/py/backstitch)
   [![Python versions](https://img.shields.io/pypi/pyversions/backstitch.svg)](https://pypi.org/project/backstitch/)
 
@@ -15,9 +16,25 @@ $ backstitch check --spec-root docs/specs --code-root src
 
 Backstitch verifies that spec requirements point to real implementation owners,
 code points back to the requirements it implements, and declared invariants are
-bound to real tests. Deterministic checks run without a model. An optional
-semantic lane reviews bounded packets through the `llm` ecosystem without
-giving a model open-ended repository access.
+bound to real tests. It runs as two lanes under one policy layer:
+
+- **Trace lane** — deterministic facts about declared relationships. No model,
+  byte-stable reports, hard-gate by default.
+- **Semantic lane** — bounded model review of finite, reproducible packets
+  through the `llm` ecosystem, without open-ended repository access. Advisory
+  by default; every verdict is evidence-bound and cached as a frozen,
+  replayable artifact.
+- **Policy layer** — repository configuration decides which findings, at which
+  evidence class, become blocking. The decision to block is always a
+  reviewable config diff, never a model output.
+
+Backstitch does not promise that models prove correctness. It promises that
+semantic review becomes repeatable enough to run in CI, diffable enough to
+audit, and structured enough to improve. The workflow stays deterministic even
+where one lane uses probabilistic judgment, because everything around the
+judgment is contract: what evidence the model sees, which requirement it
+judges, which prompt and model produced the verdict, what shape must come
+back, how uncertainty is represented, and how severities map to exit codes.
 
 Backstitch is a standalone tool. Weft is a reference target and eventual
 consumer, not a package dependency.
@@ -142,10 +159,20 @@ def authenticate(request: Request) -> User:
 Run the deterministic checker from the repository root:
 
 ```bash
+$ backstitch obligation list
+$ backstitch obligation docs/specs/01-example.md#EXAMPLE-1 --summarize-evidence
+$ backstitch obligation docs/specs/01-example.md#EXAMPLE-1 --find-evidence
+$ backstitch guide alignment
 $ backstitch check
 $ backstitch check --format json --output spec-trace.json
 $ backstitch check --show-suppressions
 ```
+
+The obligation reads help bootstrap alignment before it is complete. Declared
+evidence comes only from source mappings, backlinks, invariant binds, and
+binding tests. Discovered candidates are deterministic review advice; a human
+or agent must still author an ordinary source diff, and Backstitch never applies
+that diff itself.
 
 The built-in `backstitch-style-v1` profile defaults to `docs/specs` for specs
 and `backstitch` plus `tests` for code. Override roots in configuration or with
@@ -167,17 +194,23 @@ forms are also available where relevant.
 
 | Command | Description |
 |---------|-------------|
+| `obligation` | List obligations or inspect readiness, declared evidence, and deterministic candidates |
+| `guide alignment` | Print the installed, versioned alignment quick start |
 | `check` | Build the deterministic trace graph and report findings |
 | `packets` | Generate bounded section or invariant review packets; no model calls |
-| `analyze` | Run `llm` semantic review over a packet JSONL file |
+| `analyze` | Resolve immutable semantic results and apply repository policy |
+| `eval` | Measure one semantic identity against a closed mutation/control corpus |
 | `summarize-analysis` | Combine a deterministic report with semantic results |
 | `doctor` | Diagnose model, credential, decoding, and endpoint readiness |
 | `config show` | Print effective settings, layers, and diagnostic policy as JSON |
 | `config path` | Print the discovered repository configuration path |
+| `cache cleanup-lock` | Audit and remove one unchanged abandoned semantic lock |
 
 Common deterministic examples:
 
 ```bash
+$ backstitch obligation list --repo-root .
+$ backstitch obligation docs/specs/01-example.md#EXAMPLE-1 --find-evidence
 $ backstitch check --repo-root . --warnings-as-errors
 $ backstitch check --repo-root . --format json --output spec-trace.json
 $ backstitch packets --repo-root . --kind invariant --output invariants.jsonl
@@ -285,20 +318,83 @@ analyze and summarize them:
 
 ```bash
 $ backstitch check --format json --output spec-trace.json
-$ backstitch packets --kind all --output packets.jsonl
-$ backstitch analyze --packets packets.jsonl --output analysis.jsonl
+$ backstitch packets --kind all \
+    --output packets.jsonl \
+    --report packet-report.json
+$ backstitch analyze \
+    --packets packets.jsonl \
+    --packet-report packet-report.json \
+    --output analysis.jsonl \
+    --report analysis-report.json
 $ backstitch summarize-analysis \
     --deterministic-report spec-trace.json \
     --analysis-results analysis.jsonl
 ```
 
 Packets bound the spec text, code snippets, tests, deterministic findings, and
-evidence ranges shown to the model. Model output is untrusted: Backstitch owns
-packet identity, validates structured rows and evidence locality, and contains
-malformed output per packet.
+exact evidence regions shown to the model. The provider receives a
+packet-derived response schema, but model output remains untrusted: Backstitch
+owns packet identity, validates structured rows and evidence locality, and
+contains malformed output per packet.
+
+Semantic verdicts can be stored in an immutable, content-addressed cache.
+`cache_mode = "read-write"` calls the provider only for misses; `"require"`
+forbids provider calls and fails on a miss. Cache identity includes the packet,
+prompt, provider, request controls, contract version, and explicit search
+epoch. Policy is deliberately excluded, so a policy-only change reprojects the
+same frozen result with zero calls.
+
+The repository ignores `.backstitch/`. Treat its semantic cache as disposable
+acceleration state and its reports as fresh run outputs, not as source or
+reviewed evidence to commit. The usual local flows are:
+
+- update findings with bounded provider calls by running `analyze` with
+  `.backstitch-refresh.toml`; valid hits are reused and only misses call the
+  provider;
+- replay with zero provider calls by using the default `require` profile; a
+  missing object fails with exit `2`;
+- diagnose without reading or writing cache objects by using a trusted config
+  whose `[analyze] cache_mode` is `"off"`; and
+- retain a deliberate new sample by changing the trusted `search_epoch` (and
+  verifier `search_epochs`, when verification is enabled) before a
+  `read-write` run.
+
+When no Backstitch process is using it, the whole `.backstitch/` directory can
+be removed. The next `read-write` run rebuilds needed objects; the next
+`require` run reports misses. Backstitch does not currently provide
+fine-grained pruning or concurrent whole-root deletion. A durable reviewed
+snapshot for indefinite provider-free replay would be a separate future
+feature, not a use of this cache.
+
+The analysis report records completeness, cache hits and misses, provider
+calls, budgets, evidence-bound diagnostics, candidate debt, applied policy,
+problems, and the result digest. Exit `0` means the required review completed
+and policy allowed it. Exit `1` is reserved for policy-failing human or
+mechanically verified target findings. Exit `2` means the invocation, cache,
+provider, normalization, completeness, budget, or publication failed.
+
+Measure one exact semantic identity against the committed mutation and
+negative-control corpus with:
+
+```bash
+$ backstitch eval \
+    --corpus tests/semantic_eval/v3/manifest.json \
+    --config .backstitch-refresh.toml \
+    --output semantic-eval-report.json
+```
+
+The committed schema-3 smoke corpus exercises the current evaluator in report
+mode only. The eval report separates evidence sufficiency from conditional and
+end-to-end recall. It also records precision, false-positive and indeterminate
+rates, uncached flip rate, required-cache replay stability, cost, and latency.
+Report mode is observational. Enforce mode can grant stronger policy authority
+only after a reviewed historical corpus, a passing report for the exact
+analyzer/verifier composition, and an explicit human-pinned report digest.
 
 Use `backstitch doctor --probe` before semantic analysis to check model
 registration, credentials, constrained decoding, and endpoint reachability.
+See [the semantic gate implementation guide](docs/implementation/07-deterministic-semantic-gate.md)
+for cache trust, refresh, replay, evidence-authority, and rollout details.
 
 ## Development and Contributing
 
@@ -322,8 +418,15 @@ $ uv run pytest -q
 For an intentionally hermetic run:
 
 ```bash
-$ uv run pytest -q -m "not live_llm"
+$ uv run pytest -q -m "not live_llm and not benchmark"
+$ uv run pytest tests -q -n 0 -m benchmark
 $ uv run pytest tests/live/test_live_llm.py -q -o run_live_llm=false
+```
+
+To reproduce the CI coverage report locally:
+
+```bash
+$ uv run pytest tests -q -n auto --dist loadgroup -m "not live_llm and not benchmark" --cov=backstitch --cov-report=term-missing
 ```
 
 The completion gate also includes:
@@ -345,10 +448,10 @@ model success for cloud runs, not exact wording or classification.
 ```bash
 # Store a provider key once, then run the local-default live test
 $ uv run llm keys set openai
-$ LLM_MODEL=gpt-5.4-mini uv run pytest tests/live/test_live_llm.py -q
+$ LLM_MODEL=gpt-4.1-mini uv run pytest tests/live/test_live_llm.py -q
 
 # Or use a provider environment variable
-$ OPENAI_API_KEY=... LLM_MODEL=gpt-5.4-mini uv run pytest -m live_llm -q
+$ OPENAI_API_KEY=... LLM_MODEL=gpt-4.1-mini uv run pytest -m live_llm -q
 ```
 
 The same test supports a loopback OpenAI-compatible endpoint such as Ollama:
@@ -371,12 +474,46 @@ startup and output-quality variance. See
 `docs/implementation/06-choosing-a-local-model.md` for measured local-model
 guidance.
 
-The hermetic CI matrix always deselects live tests. The cloud CI job requires
-`BACKSTITCH_CI_LIVE_LLM=1` plus a main-branch push or manual run on main, and
-uses read-only repository permissions. It runs the provider probe only when the
-`OPENAI_API_KEY` repository secret is configured; otherwise that job exits
-successfully with a skip notice. The separate `local-llm` workflow owns the
-Ollama canary.
+The hermetic CI matrix always deselects live tests and receives no provider
+secret. The manual `semantic-refresh` workflow binds its trusted tool checkout
+to the dispatch run's exact default-branch revision, requires the
+`OPENAI_API_KEY` repository secret, restores only validated immutable cache
+object trees, runs the bounded dogfood and eval refresh, and uploads fresh
+review reports. Cache service state is optional and untrusted. Missing
+credentials, incomplete analysis, or corrupt restored objects fail; cache
+eviction causes a bounded cold refresh. The workflow never commits or pushes
+cache or report content. It uses `repository_dispatch`, whose run ref is the
+default branch, instead of branch-selectable `workflow_dispatch`. Trigger it
+with write access:
+
+```bash
+$ gh api --method POST repos/{owner}/{repo}/dispatches \
+    -f event_type=semantic-refresh
+```
+
+Repository collaborators with permission to create a repository dispatch can
+request a report-only analysis of an open pull request. Supply the PR number
+and the exact lowercase 40-hex head SHA shown by the GitHub API:
+
+```bash
+$ gh api --method POST repos/{owner}/{repo}/dispatches \
+    -f event_type=semantic-pr-report \
+    -F 'client_payload[pull_request_number]=123' \
+    -f 'client_payload[head_sha]=0123456789abcdef0123456789abcdef01234567'
+```
+
+That workflow runs trusted Backstitch code, dependencies, prompts, provider
+controls, and configuration from the exact default-branch workflow revision.
+It treats the API-confirmed PR checkout as read-only data and never installs
+or executes its workflows, hooks, plugins, build configuration, or commands.
+The provider receives only the bounded packet projection selected by trusted
+Backstitch: relevant specification text, code and test evidence, deterministic
+findings, and exact evidence regions. Provider credentials exist only during
+the credential check and analysis step. The resulting artifact is
+observational; it does not comment on the PR, create a status, or gain merge
+authority.
+
+The separate `local-llm` workflow owns the Ollama canary.
 
 ### Releases
 

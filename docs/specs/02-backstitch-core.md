@@ -173,6 +173,12 @@ Backstitch still classifies that target as `path`, `path_symbol`, or `symbol`.
 Any heading token produced by `markdown-it-py` may define a section if its
 heading text ends in a valid section ID after CommonMark heading normalization,
 including setext headings and ATX headings with closing hashes.
+If the complete normalized heading text ends in one square-bracket marker (or
+is only that marker) but the marker has a blank or invalid ID or lacks a
+section title, the parser emits `SPEC_SECTION_HEADING_INVALID` and defines no
+section. A heading with no terminal square-bracket marker remains ordinary
+ID-less prose; brackets followed by later heading prose are not reserved
+section syntax.
 
 Markdown block structure is delegated to `markdown-it-py` using its CommonMark
 parser. Backstitch must not maintain an independent Markdown fence,
@@ -277,10 +283,14 @@ Invariant marker prefixes are reserved before generic bracket-reference
 extraction. Their grammar and physical-source-line restriction are [INV-3].
 Marker IDs cannot also emit ordinary code references.
 
-A single unreadable or non-UTF-8 file must never abort the scan: the file gets
-a per-file `FILE_UNREADABLE` error naming the path, and the rest of the report
-is still produced. Whole-run aborts are reserved for an unusable target
-repository, not for one bad file inside it.
+A single unreadable or non-UTF-8 file does not abort deterministic `check` or
+an obligation read: the input is represented by the ordinary per-file issue
+and by [EVC-8.2]'s stable unreadable snapshot-manifest row while other readable
+facts remain available. Discovery, packet construction, and current semantic
+analysis instead fail closed with `SOURCE_UNREADABLE` and exit `2` when an
+included semantic input is unreadable, because they must prove a complete
+catalog and packet universe. Whole-run aborts for deterministic `check` remain
+reserved for an unusable target repository, not for one bad file inside it.
 
 _Implementation mapping_:
 - `backstitch/grammar.py`
@@ -301,32 +311,71 @@ backstitch check --repo-root . --profile backstitch-style-v1 --format text
 backstitch check --repo-root . --profile backstitch-style-v1 --format json --output spec-trace.json
 ```
 
-Required packet/result commands:
+Required obligation, packet, and result commands:
 
 ```bash
 backstitch packets --repo-root . --profile backstitch-style-v1 --output packets.jsonl
 backstitch packets --repo-root . --kind section --output packets.jsonl
 backstitch packets --repo-root . --kind invariant --output invariants.jsonl
 backstitch packets --repo-root . --kind all --output all-packets.jsonl
-backstitch analyze --packets packets.jsonl --output analysis.jsonl
+backstitch packets --repo-root . --kind all --output packets.jsonl --report packet-report.json
+backstitch obligation list --repo-root . --format json
+backstitch obligation OBLIGATION_ID --repo-root . --format json
+backstitch obligation OBLIGATION_ID --summarize-evidence
+backstitch obligation OBLIGATION_ID --find-evidence
+backstitch obligation OBLIGATION_ID --candidate CANDIDATE_ID
+backstitch guide alignment --format text
+backstitch analyze --repo-root . --output analysis.jsonl --report analysis-report.json
+backstitch analyze --packets packets.jsonl --packet-report packet-report.json --output analysis.jsonl --report analysis-report.json
+backstitch eval --corpus tests/semantic_eval/v3/manifest.json --output semantic-eval-report.json
+backstitch cache cleanup-lock --cache-path PATH (--analysis-key HASH | --verify-key HASH) --lock-stale-seconds SECONDS --reason TEXT
 ```
+
+The exact option grammar, selector exclusivity, pagination, source-snapshot
+rules, and current-versus-historical analyze modes are [EVC-5.1] and [EVC-8.3].
+Current analysis derives packet schema 3 from `--repo-root`; packet input is a
+historical replay. `backstitch mcp` is registered only if the optional Phase D
+adapter ships and then follows [EVC-8.6]. CLI is the complete required
+interface. No obligation, guide, packet, or implemented MCP operation writes
+repository source.
+
+`cache cleanup-lock` requires exactly one key flag. `--analysis-key` addresses
+the analyzer lock/guard/audit contract; `--verify-key` addresses the disjoint
+verifier contract in [SEM-4]. Both require the explicit stale interval because
+the cleanup command performs no configuration discovery.
+
+Every requested semantic output is distinct from every other input and output
+as [EVC-5.1] requires. Equality or semantic-root overlap is invalid before
+snapshot capture, temporary creation, cache work, adapter construction,
+provider work, or publication.
 
 `--kind` defaults to `section`. Filtering affects packet output only, not the
 deterministic report, policy, or exit status.
 For one corpus and policy, `section`, `invariant`, and `all` therefore have the
 same exit code: `1` when any rendered issue has a severity in effective
 `diagnostics.fail_on`, otherwise `0` after successful output.
+The schema-2 `--report` sidecar is accepted only with `--kind all`; filtered
+packet output is an inspection artifact and cannot be replayed by `analyze`.
+Current `analyze --repo-root` always uses the complete selected corpus.
 
 Model selection may come from `--model`, config (`[analyze].model`), `LLM_MODEL`,
 or the `llm` default ([CFG-5], [SC-7]).
 
 ```bash
-backstitch analyze --packets packets.jsonl --model MODEL --output analysis.jsonl
+backstitch analyze --packets packets.jsonl --packet-report packet-report.json --model MODEL --output analysis.jsonl
 ```
+
+All analyze output flags are optional. The unified semantic-analysis interface
+owns staged publication and stdout always renders the final text summary or
+complete canonical report selected by `--format` ([EVC-5.1]).
 
 ```bash
 backstitch summarize-analysis --deterministic-report spec-trace.json --analysis-results analysis.jsonl
 ```
+
+`summarize-analysis` is presentation-only. It validates every input row, exits
+`2` for any malformed report or result, never applies semantic policy or
+dispositions, never asserts verification state, and never exits `1`.
 
 Required environment-diagnosis command:
 
@@ -348,8 +397,8 @@ repository.
 Exit codes:
 
 - `0`: command completed without deterministic errors
-- `1`: deterministic trace errors exist, or warnings were promoted by an
-  explicit CLI option
+- `1`: target-repository findings selected by effective policy exist. For
+  `analyze`, the semantic finding must also satisfy [SEM-5] and [SEM-6].
 - `2`: invalid CLI arguments, unreadable target repository, malformed input
   file, or internal failure that prevents a report
 
@@ -382,9 +431,9 @@ No invocation may surface a Python traceback. Every failure path prints a
 one-line `backstitch: error: ...` diagnostic naming the offending input where
 known, and exits `2`. A traceback reaching the user is a bug by definition.
 
-The CLI must keep deterministic checks usable without semantic analysis. The
-presence of `llm` as a dependency does not permit model calls during
-`backstitch check`.
+The CLI must keep deterministic checks and source reads usable without semantic
+analysis. The presence of `llm` as a dependency does not permit importing or
+calling it during `check`, `packets`, `obligation`, or `guide`.
 
 _Implementation mapping_:
 - `backstitch/cli.py`
@@ -396,6 +445,8 @@ _Implementation mapping_:
 - `backstitch/profiles.py`
 - `backstitch/reporting.py`
 - `backstitch/resolver.py`
+- `backstitch/semantic_analysis.py`
+- `backstitch/semantic_reports.py`
 
 ## 6. Report And Data Contracts [SC-6]
 
@@ -457,77 +508,31 @@ The report loader accepts the legacy shape only when all three invariant
 additions are absent and normalizes to zero and empty collections. Partial
 shapes are malformed. Producers always emit the new shape.
 
-Packets and results are closed unions on `kind`. Producers always emit kind.
-The only accepted legacy artifacts are: (1) a deterministic report with all of
-`summary.invariants`, `invariants`, and `binds` absent, normalized to zero and
-empty collections; (2) an exact legacy section packet with no `kind`, no
-invariant-only fields (`invariant_id`, `tier`, `statement`, `declaration`,
-`targets`, `binding_tests`, or `content_hash`), and
-`packet_id = spec_path#section_id`, normalized to `kind = section`; and (3) an
-exact legacy section result with no `kind`, no `content_hash`, and a packet ID
-other than the reserved `invariant::` prefix, normalized to `kind = section`.
-Any partial new shape, missing-kind invariant identity, or mixed legacy and new
-fields is malformed. An invariant result requires `content_hash`; section
-results must omit that key entirely, and presence with any value including
-null is malformed. Invariant result hashes are 64 lowercase hexadecimal
-characters.
+Current packet producers emit only the closed packet schema 3 and packet-report
+schema 2 contracts in [EVC-9.1]. The source-derived model projection excludes
+snapshot, readiness, skip reason, policy, cache, and provenance. Packet and
+report byte ceilings are fatal rather than truncating required evidence or the
+closed counterevidence universe. Canonical analyzer results remain schema 2;
+the current/historical analysis report is schema 3 and contains the exact
+alignment, currentness, verification, finding, debt, cache, and problem
+projections in [EVC-9.1] and [SEM-7].
 
-Invariant `content_hash` is lowercase SHA-256 of the final, bounded packet
-content after ordering and truncation. The exact projection has `statement`
-plus ordered `targets` and `binding_tests` items containing only `path`,
-nullable `symbol`, `start_line`, and `snippet`. Serialize with
-`json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=True)` as
-UTF-8 before hashing. Exclude all other fields.
-
-Invariant packets reuse `MAX_SNIPPET_LINES = 120`, add
-`MAX_INVARIANT_TARGETS_PER_PACKET = 8`, and add
-`MAX_BINDING_TESTS_PER_PACKET = 8`. Target and binding-test order are both
-path, nullable symbol, start line. Keep the first eight of each. Snippets keep
-the first 120 lines with no ellipsis; warnings alone record truncation and
-omission. Code declarations target only their declaring path and symbol;
-module declarations use symbol `<module>`, `start_line = 1`, and the first 120
-lines of the whole file's UTF-8 replacement-decoded text read at packet
-generation. Spec declarations target unique
-enclosing-section mapping edges and never backlinks.
+Packet schema 2 and unversioned legacy artifacts are bounded historical or
+migration input only. They may be validated and rendered by legacy
+presentation paths, but cannot produce a schema-3 current or qualification
+report, satisfy current completeness, enter a current cache identity, or gain
+gate authority. They are never silently rewritten. Partial version markers,
+mixed legacy/new fields, and unversioned cache objects are malformed.
 
 Human-facing text output should render both short and canonical codes, for
 example `[BSS001 SPEC_FILE_MISSING]`. Machine-readable JSON keeps the canonical
 long code as the primary key and includes `short_code` as a display alias.
 
-Packet JSONL records must include:
-
-- packet ID
-- spec file and section ID
-- section title and bounded section text
-- the section's starting line in the spec file, so evidence line-locality
-  can be enforced against the section text a model was shown
-- resolved implementation owners
-- bounded code snippets
-- directly linked tests when available; test files are named by path only,
-  so a semantic result cannot cite line evidence into them
-- deterministic issues relevant to the packet
-- prompt instructions for structured semantic review
-- truncation warnings (`packet_warnings`) whenever a snippet, owner, or
-  section bound trimmed content, so a model never mistakes a partial packet
-  for a complete one; repository-level deterministic problems (missing roots,
-  syntax errors) surface here as advisory context rather than polluting every
-  packet's issue list
-
-Analysis-result JSONL records must include:
-
-- packet ID
-- classification
-- confidence or rationale field
-- evidence references against packet-local file/line data
-- concise summary
-
-Supported semantic classifications are:
-
-- `ok`
-- `confirmed_mismatch`
-- `probable_mismatch`
-- `missing_trace`
-- `ambiguous`
+Section and invariant packet rows share the exact obligation, requirement,
+declared-evidence, counterevidence, trace-summary, evidence-region, issue,
+warning, readiness, and snapshot shapes in [EVC-9.1]. The model-visible issue
+projection excludes repository-effective deterministic severity so policy
+changes cannot alter packet or analysis identity.
 
 _Implementation mapping_:
 - `backstitch/diagnostics.py`
@@ -541,161 +546,85 @@ _Implementation mapping_:
 
 ## 7. Semantic Analysis [SC-7]
 
-Semantic analysis must use the `llm` Python API directly. `llm` is a required
-package dependency for `backstitch`.
+Semantic analysis uses the `llm` Python API directly. Deterministic commands
+never import it or construct a model. Analysis operates only on validated
+source-derived packets. The packet projection is the model boundary; the model
+never roams the repository. Verification is a blinded adversarial procedure;
+it does not require a distinct provider or model ([EVC-3], [EVC-5]).
 
-Semantic analysis must operate on packets produced by deterministic mode. It
-must not let the model roam the repository independently. The packet boundary
-is the semantic review boundary.
+All gate authority, evidence validation, caching, diagnostics, reports, output
+publication, and exit selection are owned by one production interface:
 
-Model output is untrusted input. The `packet_id` in a result record is always
-taken from the packet being analyzed, never from the model response, so a
-hallucinated ID cannot corrupt aggregation. Malformed model output (including
-markdown-fenced JSON) is handled per packet: one bad response yields one
-`ambiguous`/error record, not an aborted run.
+```python
+run_semantic_analysis(request: SemanticAnalysisRequest) -> SemanticAnalysisRun
+```
 
-Evidence in a model result is packet-local in both dimensions: the path
-must have been shown in the packet, and a path carries **line** evidence
-only if line-bounded content was shown for it. Linked tests and owners
-with empty snippets name a path without shown lines; citing any line
-against them is fabricated evidence and invalidates the row.
+The packet-level semantic runner remains the single analyzer/cache/policy
+implementation seam. Current-repository orchestration wraps it with
+[EVC-5.1]'s one-snapshot derivation, readiness gate, verifier, recapture, and
+staged publication. Historical mode validates exact packet/report bytes but
+cannot acquire current authority. Settings own inference identities, request
+controls, caches, completeness, budgets, verification, and dispositions.
+Policy owns effective levels, winning-rule identity, qualification selectors,
+and `fail_on`.
 
-`analyze` may process packets concurrently, but output must remain
-deterministic: results are emitted in packet order regardless of worker
-completion order.
+The production interface owns deterministic packet iteration, lazy adapter
+construction, single flight, blinded verification, policy, serialization, and
+publication. Current mode stages all requested artifacts, captures the same
+repository again, and publishes in [EVC-5.1]'s dependency order only when the
+snapshot identities match. A changed snapshot or publication failure is exit
+2 and emits no current success claim. CLI code invokes this one path and does
+not write or re-evaluate semantic artifacts. `summarize-analysis` never calls
+the gate entry point.
 
-Semantic findings are advisory. They must not change deterministic issue
-severity and must not be treated as CI-failing findings unless a separate
-policy explicitly chooses that later.
+Model output is the closed untrusted shape in [SEM-3]. Packet identity, kind,
+hashes, verification state, code, and provenance come from trusted input and
+normalization, never model fields. Evidence is validated and reconstructed
+exactly once against [SEM-5]. A malformed response or provider failure emits no
+canonical analyzer result row or verifier event, records one
+[SEM-7]/[EVC-8.4] problem, and forces exit 2. Concurrency may change worker
+completion order but never packet, event, result, or report order.
 
-`analyze` therefore never exits `1` — exit `1` is reserved for deterministic
-findings about the target repository. Total semantic failure (every packet
-failed to produce a valid model result) is a statement about the tool or the
-model, not the target: exit `2`. Partial failure exits `0`: the output is
-usable, each failed packet carries its `ambiguous`/error record, and the
-failure messages reach stderr.
+Default tests never call external models. They use controlled adapters at the
+external boundary while exercising real packet, evidence, cache, policy,
+serialization, and CLI assembly.
 
-Default semantic-analysis tests must not call external models. They must use
-fake model adapters or equivalent local fakes to prove prompt construction,
-model selection, output parsing, malformed model-output handling, and result
-aggregation.
+Live analysis remains an explicit pytest-policy lane. Disabled live tests are
+collected and skipped. Once enabled, missing credentials, transport failure,
+invalid rows, report problems, or incomplete output fail. A cloud live test
+requires report status `complete`, no problems, and one valid canonical result
+per packet. A local-endpoint test also proves analyze's own requests reached the
+endpoint and uses at least two curated invariant packets, each unique, warning
+free, and containing qualifying target and binding-test snippets. It applies
+the same complete/no-problem assertion.
 
-Live semantic-analysis tests are governed by an explicit pytest policy gate.
-Repository pytest configuration may enable that gate by default for local
-runs; automation may override it off without editing code. The existing
-`BACKSTITCH_LIVE_LLM=1` environment variable remains an independent explicit
-enablement path for dedicated or manual lanes. Gate resolution must not infer
-policy from the generic `CI` environment variable: each automation workflow
-owns its current choice, so CI can enable the lane later without a Python
-change. A live test must use packets produced by deterministic mode, call the
-real `llm` adapter through the public `analyze` command, keep the packet set
-bounded, and validate structured result JSONL rather than exact model wording.
-When the live gate is disabled, live tests are collected and reported skipped.
-Once enabled, missing credentials, invalid result rows (schema or packet id),
-and analysis-load errors must fail the live test by assertion. The two targets
-have distinct, non-overlapping contracts:
+A test-owned local proxy may observe and record exact requests but may not
+inject controls, replace response format, retry a packet, or repair content.
+Provider-neutral temperature, seed, JSON mode, and token controls are production
+request settings under [SEM-3], not proxy patches. Local-endpoint automation on
+forked pull requests remains disabled until a separate threat-model review.
+This optional live lane is distinct from [SEM-9]'s required cache replay, which
+cannot be disabled by an Actions variable.
 
-- A **cloud-provider** live test asserts model success: no result row carries
-  an `error` field (unchanged from prior wording). This per-row assertion is
-  not relaxed for cloud targets.
-- A **local-endpoint** live test (below) instead asserts a reachability and
-  transport proof plus a total-failure guard, and tolerates *individual*
-  per-packet error records — malformed model output or a transient per-packet
-  call failure, which the adapter records identically — unless a stricter
-  opt-in demands model success.
-
-These assertions are stricter than `analyze`'s exit-code contract: per this
-section, `analyze` still exits `0` on partial failure and records one
-`ambiguous`/error row per failed packet. Automation may explicitly disable the
-live gate and exit successfully without invoking the test. Once the gate is
-enabled, these failure assertions apply; credential absence is not a skip.
-
-An optional live test may target a local, self-hosted, OpenAI-compatible model
-endpoint instead of a paid cloud provider, reached through `llm`'s standard
-OpenAI-compatible model configuration (`api_base`) with no additional package
-dependency and no change to the runtime adapter. It needs no provider credential
-(`llm` sends only a placeholder key the server ignores). It must use packets
-produced by deterministic mode, call the real adapter through the public
-`analyze` command over a bounded set of **at least two** packets (so tolerating
-an individual error record is distinguishable from total failure), and validate
-structured result JSONL. It must prove the endpoint served a generation
-**through the same adapter registration and environment that `analyze`
-inherits** (a subprocess exercising the same adapter and `LLM_USER_PATH`
-registration, using a fixed transport-health-probe prompt that feeds the model
-no repository content and so does not breach the packet boundary), and must fail
-if the analyze run reports total failure (every packet produced an error
-record). It must additionally prove that the `analyze` command's own calls
-reached the local endpoint (e.g. a request-count check), so the proof is that
-`analyze`'s real adapter→HTTP path ran — not merely that a separate preflight
-generation succeeded and some non-error row exists. It does not assert that
-every per-packet call had healthy transport, since an individual transient call
-failure is recorded like malformed output and is tolerated in non-strict mode.
-Because small local models legitimately emit malformed output and per-packet
-calls can blip, a local-endpoint test must not treat individual per-packet error
-records as failures unless a stricter opt-in explicitly demands model success.
-An unreachable endpoint, a model absent from the endpoint, or a failed transport
-proof is a failure once the live gate is enabled, and a skip when it is not.
-Because it needs no repository secret, a local-endpoint test is eligible to run
-in credential-free automation contexts, including forked pull requests, **only
-after an explicit threat-model-gated workflow change**; it is not enabled on
-forked pull requests by default. This does not change `analyze`'s exit-code
-contract or the advisory status of semantic findings.
-
-A repository-owned local-endpoint automation gate must make its model input
-and inference controls explicit. It must generate invariant packets through
-the public `packets --kind invariant` command and select an ordered,
-repository-owned set of at least two real invariant packet IDs. Every selected
-packet must occur exactly once, have no packet warnings, and carry at least one
-qualifying target item and one qualifying binding-test item. A qualifying item
-has a nonblank path, a positive integer `start_line`, and a nonblank snippet.
-Invalid curated input fails before model listing or any completion request,
-with no smallest-packet or best-effort fallback.
-
-When an OpenAI-compatible endpoint supplies request defaults that override
-stored model parameters, the local test harness must put `temperature = 0` and
-a fixed nonzero seed on every completion request that reaches the endpoint. Its
-transport proof must record the forwarded analyze requests and assert the
-selected model, packet IDs, temperature, and seed. This tuning is test-owned:
-it must not add provider-specific behavior to Backstitch's production adapter
-or alter cloud/custom-provider calls.
-
-When the pinned local endpoint does not reliably enforce structured output on
-streaming requests, the test-owned proxy must derive a strict JSON Schema from
-each selected packet's exact identity, result vocabulary, and shown evidence
-bounds. It must forward exactly one nonstreaming analyze request per packet,
-then relay the returned assistant content unchanged in the streaming envelope
-expected by the production adapter. The proxy must not repair or semantically
-validate model output; the ordinary result parser remains authoritative, and
-total invalid output still fails. The schema and request must keep explanation,
-evidence-count, and output-token bounds explicit. Malformed packet prompts or upstream
-completion envelopes fail locally without fallback traffic. Before replacing
-the format, the proxy must prove the production adapter requested
-`json_object`; a missing format or any duplicate packet attempt is rejected
-before upstream forwarding or recording.
-
-Live semantic findings remain advisory and must not create CI failure based on
-classification unless a separate policy explicitly changes this section.
-
-Classification vocabulary is closed by kind. For invariant packets, `analyze`
-interprets the existing result `evidence` array as `{path, line}` objects. A
-shown snippet's inclusive range is `start_line` through
-`start_line + len(snippet.splitlines()) - 1`; an empty snippet has no range.
-It normalizes invariant `ok` to `weak_binding` unless at least one evidence
-item falls in a shown binding-test range, even when target-code evidence is
-present. Zero evidence items are valid and evidence-deficient. Every evidence
-item's path must equal a shown item's path and its line must fall in that
-item's range; if either test fails, the result is malformed. An omitted capped
-test has no shown range. Packet ID, kind, and invariant `content_hash` come
-from packet metadata, not model output. The model's packet ID must match;
-model-supplied kind/hash values are ignored. Summary rendering
-separates kinds and does not re-prove locality. `summarize-analysis` is not a
-trust boundary for evidence locality; only `analyze`, while holding the packet,
-can validate it.
+Classification vocabularies, legacy normalization, evidence spans,
+`ok`-to-`weak_binding` behavior, diagnostic projection, dispositions, and
+exit precedence are [SC-6], [INV-5], and [SEM-3] through [SEM-7].
+`summarize-analysis` validates row identity and shape only; it cannot re-prove
+evidence locality without the packet and has no gate authority.
 
 _Implementation mapping_:
 - `backstitch/analysis_llm.py`
 - `backstitch/analysis_packets.py`
 - `backstitch/analysis_results.py`
+- `backstitch/artifact_contracts.py`
+- `backstitch/cli.py`
+- `backstitch/semantic_analysis.py`
+- `backstitch/semantic_cache.py`
+- `backstitch/semantic_evidence.py`
+- `backstitch/semantic_identity.py`
+- `backstitch/semantic_packets.py`
+- `backstitch/semantic_policy.py`
+- `backstitch/semantic_reports.py`
 - `tests/conftest.py`
 - `tests/live/test_live_llm.py`
 
@@ -713,13 +642,19 @@ The first implementation must not include:
 - support for arbitrary documentation styles
 - support for every programming language
 - LLM calls in deterministic checks
-- CI failures based on semantic findings
+- semantic failure authority outside [SEM-5] through [SEM-9]
+- source-mutating obligation, skip, unskip, proposal, activation, or
+  documentation-rewrite commands
+- a proposal/case manifest as alignment authority
+- model-selected packet membership or evidence-universe membership
+- remote MCP transport; the optional [EVC-8.6] adapter, if implemented, is
+  local stdio and read-only
 
 `llm` must be imported lazily and only inside the `analyze` and `doctor`
 execution paths.
-`check` and `packets` must be structurally incapable of importing it — the
-boundary is enforced by import placement, not by convention, and [SC-10]
-proves it with a subprocess test.
+`check`, `packets`, `obligation`, and `guide` must be structurally incapable of
+importing it. The boundary is enforced by import placement, not convention,
+and [SC-10]/[EVC-12] prove it with subprocess tests.
 
 If durable Weft-backed analysis becomes desirable later, it requires a separate
 spec or spec revision because it changes the dependency and execution boundary.
@@ -827,7 +762,9 @@ Required proof surfaces:
   7. an unknown config key exits `2` naming the key and file (under the
      default `allow_unknown_keys = false`; the escape hatch downgrading to a
      warning is its own [CFG-9] test, not a probe failure)
-  8. malformed model output is contained per packet, never aborting the run
+  8. malformed v2 model output emits no result for that packet, records one
+     `normalization/malformed_result` problem, continues later packets, and
+     exits `2`
   9. concurrent `analyze` output order is byte-identical to serial order
   10. sibling target discovery works from a linked worktree ([SC-12])
   11. key-incomplete report JSON, malformed packet JSONL, and an unwritable
@@ -837,16 +774,26 @@ Required proof surfaces:
       one candidate resolves with `MAPPING_PATH_INEXACT` ([SC-4] ladder)
   13. self-acceptance round-trip: a `check --format json` report of this
       repository passes `summarize-analysis` validation unchanged (paired
-      with an empty analysis-results file); packets generated from this
-      repository pass `analyze`'s packet loading; and the per-packet error
-      records `analyze` emits for malformed model output pass
-      `validate_analysis_row` — every machine-readable artifact the tool
-      writes survives the tool's own reading
+      with an empty analysis-results file); generated packet-schema-3 rows and
+      packet-report-schema-2 pass current and historical loading; valid
+      analyzer result rows and analysis-report-schema-3 pass validation; and a
+      controlled malformed response produces the closed failed analysis report
+      and problem record from probe 8. Every machine-readable artifact the tool
+      writes survives the tool's own reading.
+  14. packaged semantic defaults and Backstitch's applied TOML policy produce
+      different levels for the same cached finding without a provider call
+  15. complete semantic replay exits `0`, an applied verified target finding
+      exits `1`, and cache/provider/completeness failure exits `2`
+  16. a second required-cache replay makes zero provider calls and emits
+      byte-identical canonical result JSONL
 - invariant probes cover marker isolation, paired root overrides, every BSI
   firing case, report, packet, and result self-acceptance and legacy
   normalization, `--kind` filtering and mixed-order byte stability, targetless
-  packets, laundering normalization, hash stability, and three dogfood
-  invariants
+  spec invariants remaining non-executable, laundering normalization, hash
+  stability, and three dogfood invariants
+- [EVC-12]'s obligation bootstrap, source-authority, no-mutation, readiness,
+  skip, evidence-summary, discovery, snapshot, currentness, verify, and
+  qualification probes run through installed public interfaces
 - every implemented diagnostic code in the default registry has at least one
   test that proves it fires. Reserved codes may appear in the registry only
   with `status = "reserved"` and must not be accepted as emitted issue codes or
@@ -862,16 +809,21 @@ Required proof surfaces:
   basename shortcut fires `MAPPING_PATH_INEXACT` and fails the
   zero-warnings gate — fix the token, never suppress the warning
 - target-corpus smoke check against `../weft` when present
-- packet-generation tests that prove snippet bounds and truncation warnings
+- packet-generation tests that prove complete evidence membership, exact byte
+  ceilings, and fail-closed overflow without truncated required evidence
 - analysis-result tests with valid and malformed JSONL
 - semantic-analysis tests using fake model adapters, not external model calls
 - live-policy tests proving the repository pytest config enables the real live
   test for an ordinary local invocation without the legacy environment opt-in,
   while the current hermetic CI command explicitly overrides the policy off
-  and direct collection reports exactly one skip. A CI live lane must require
-  an explicit repository-variable opt-in, run only from main-branch
-  push or manual-main events, and use least-privilege workflow permissions;
-  current CI disablement is policy, not a permanent prohibition
+  and direct collection reports exactly one skip. This is the legacy bounded
+  live-test lane. The semantic gate and refresh lanes use [SEM-9], have no
+  repository-variable activation switch, and use least-privilege permissions
+- wall-clock benchmark tests carry the registered `benchmark` marker. Normal
+  xdist and coverage lanes explicitly select `not benchmark`; a dedicated
+  serial lane runs every `benchmark` test without xdist. The serial lane may
+  not convert failures into skips. An ordinary serial local pytest run may
+  include both normal and benchmark tests
 - `ruff` over the CI-listed source/test files, and `mypy` over `backstitch`,
   `bin/release.py`, and tests (excluding fixture target repositories)
 
@@ -904,6 +856,9 @@ _Implementation mapping_:
 - `tests/conftest.py`
 - `tests/live/test_live_llm.py`
 - `tests/test_pytest_policy.py`
+- `tests/performance/test_evidence_spike_wall_clock.py`
+- `tests/test_release_script.py`
+- `tests/test_release_workflow.py`
 
 ## 11. Diagnostic Codes And Default Policy [SC-11]
 
@@ -925,6 +880,7 @@ row is emittable.
 | `SPEC_ANCHOR_MISSING` | `BSS005` | error | none | File#anchor reference not found |
 | `REF_RANGE_UNSUPPORTED` | `BSS006` | error | none | Section range could not be expanded |
 | `SPEC_SECTION_UNMAPPED` | `BSS007` | info | none | Spec section has no implementation mapping |
+| `SPEC_SECTION_HEADING_INVALID` | `BSS008` | error | none | Reserved ID-bearing Markdown heading is malformed |
 | `MAPPING_PATH_MISSING` | `BSM001` | error/warning | `required`, `plan-artifact` | Mapping path missing |
 | `MAPPING_PATH_INEXACT` | `BSM002` | warning | none | Mapping token resolved via unique suffix/basename match |
 | `TARGET_PATH_AMBIGUOUS` | `BSM003` | error | none | Mapping token matches multiple paths; no edge emitted |
@@ -1021,10 +977,13 @@ satisfy this section.
   required field present, every type exact, every enumerated vocabulary
   closed (issue codes, severities, classifications, edge kinds, section
   kinds, mapping kinds, reference contexts) — not against the projection
-  the consumer happens to read. Unknown extra keys are tolerated: the
-  contract closes vocabularies and types, not the key set. (Passthrough
-  paths preserve extras; validating loaders that build typed records
-  need not.) For configuration, key and value-type strictness is
+  the consumer happens to read. Unknown top-level packet input extensions are
+  tolerated but excluded from the semantic projection only on the bounded
+  historical compatibility path. Current packet-schema-3 rows, canonical
+  analyzer results, verifier events, packet-report-schema-2,
+  analysis-report-schema-3, eval artifacts, and versioned cache objects are
+  closed and reject unknown keys. For
+  configuration, key and value-type strictness is
   [CFG-8]'s rule; suppression-code vocabularies are validated in the CLI
   and exclusions layer ([EXC-8]).
 - **[SC-13.2] Blank means absent.** An empty or whitespace-only string is
@@ -1039,9 +998,11 @@ satisfy this section.
   integer is required. Line numbers are 1-based (`line >= 1`, or `null`
   where the contract allows no line). Counts are non-negative integers.
   Confidence is a number in `[0, 1]`.
-- **[SC-13.4] Composite documents are self-consistent.** A section packet's
-  `packet_id` equals `spec_path#section_id`; an invariant packet's ID equals
-  `invariant::<ID>`. A report's summary counts equal what its own contents
+- **[SC-13.4] Composite documents are self-consistent.** A current packet's
+  `packet_id` equals its canonical `obligation_id`; its snapshot, readiness,
+  packet hash, report content hash, analysis composition, verifier-event, and
+  currentness relations satisfy [EVC-3.1], [EVC-4.1], and [EVC-9.1]. A
+  deterministic report's summary counts equal what its own contents
   tally (issue severities; section, ref, mapping, and invariant list lengths).
   A report's edges reference only sections the report itself contains; binds
   reference only invariants in the same report and concrete test definitions.
@@ -1058,23 +1019,27 @@ satisfy this section.
   warning naming the directive — never a silent no-op, and never silent
   deletion of the section or content it is attached to.
 - **[SC-13.7] Rejection happens at the input boundary.** Malformed input
-  is rejected before downstream side effects: before model selection and
-  before any model call. Output-write failures are discovered when the
-  write happens and are exit `2` ([SC-5]); they are not required to be
-  pre-checked. Per-packet containment of model failures follows [SC-7].
+  is rejected before adapter construction, cache mutation, provider traffic,
+  or output publication where the required facts are available. Output-write
+  failures are discovered when the write happens and are exit `2` ([SC-5]);
+  they are not required to be pre-checked. Per-packet containment follows
+  [SC-7]'s problem-only contract; malformed/provider failures never become
+  result rows or verifier events.
 
-Total validation covers invariant and report relations and both packet and
-result variants. Accept only the three legacy forms enumerated in [SC-6] and
-apply its exact normalization; reject every partial or mixed legacy and new
-shape.
+Total validation covers invariant, packet, report, analyzer-result, verifier,
+and qualification relations. Accept legacy packet/result forms only through
+[SC-6]'s bounded historical validation/presentation path; they cannot produce
+a current or qualification report. Reject every partial or mixed legacy and
+new shape.
 
 Severity of a validation failure is [SC-5] exit `2` for invocation inputs
-(packet files, report files, configuration) and a per-row input problem
-for analysis-result rows, consistent with [SC-7].
+(packet files, report files, configuration) and a structured analysis problem
+for untrusted model rows, consistent with [SC-7].
 
 _Implementation mapping_:
 - `backstitch/artifact_contracts.py`
 - `backstitch/cli.py`
+- `backstitch/semantic_eval_reports.py`
 - `backstitch/analysis_results.py`
 - `backstitch/analysis_llm.py`
 - `backstitch/settings.py`
@@ -1222,7 +1187,7 @@ The initial suppression-hygiene and reserved diagnostic allocation is:
 | `SUPPRESSION_DEPRECATED_CODE` | `BSX007` | reserved | Suppression hygiene |
 | `SUPPRESSION_DUPLICATE_CODE` | `BSX008` | reserved | Suppression hygiene |
 | `SUPPRESSION_BROAD_CODE` | `BSX009` | reserved | Suppression hygiene |
-| `SUPPRESSION_REASON_MISSING` | `BSX010` | reserved | Suppression hygiene |
+| `SUPPRESSION_REASON_MISSING` | `BSX010` | implemented | Suppression hygiene |
 | `INVARIANT_UNTESTED` | `BSI001` | implemented | Invariant resolution (`required`, `draft` contexts) |
 | `INVARIANT_UNKNOWN` | `BSI002` | implemented | Invariant resolution |
 | `INVARIANT_DUPLICATE` | `BSI003` | implemented | Invariant resolution |
@@ -1241,11 +1206,32 @@ The initial suppression-hygiene and reserved diagnostic allocation is:
 | `MODEL_OUTPUT_INVALID` | `BSP011` | reserved | Analysis model boundary |
 | `MODEL_PACKET_ID_MISMATCH` | `BSP012` | reserved | Analysis model boundary |
 | `MODEL_CALL_FAILED` | `BSP013` | reserved | Analysis model boundary |
+| `SEMANTIC_CONFIRMED_MISMATCH` | `BSA001` | implemented | Semantic projection (all [SEM-5]/[EVC-6] contexts) |
+| `SEMANTIC_PROBABLE_MISMATCH` | `BSA002` | implemented | Semantic projection (all [SEM-5]/[EVC-6] contexts) |
+| `SEMANTIC_MISSING_TRACE` | `BSA003` | implemented | Syntactically complete but substantively missing behavioral trace |
+| `SEMANTIC_WEAK_BINDING` | `BSA004` | implemented | Semantic projection (all [SEM-5]/[EVC-6] contexts) |
+| `SEMANTIC_AMBIGUOUS` | `BSA005` | implemented | Semantic projection (all [SEM-5]/[EVC-6] contexts) |
+| `OBLIGATION_SKIPPED` | `BSE001` | implemented | Auditable valid obligation skip ([EVC-6]) |
 
 The BSI allocations remained reserved through contract alignment, then all
 five became `implemented` together with their first emissions and firing
 tests. Packaged default policy sets BSI001 required to error and draft to
 warning, BSI004 to warning, and BSI002, BSI003, and BSI005 to error.
+
+The five BSA allocations became implemented with their production projection
+and firing tests. Their allowed contexts are exactly `evidence_bound`,
+`verification_indeterminate`, `independently_verified`,
+`mechanically_verified`, `human_verified`, `disputed_by_verifier`, and
+`human_rejected`. They never enter deterministic `Issue` inventories or
+ordinary source suppressions; semantic diagnostics reuse the registry's
+selector and level resolver through their separate [SEM-6] record family.
+
+`BSE001` is the only aligned-evidence diagnostic allocation. It remains
+reserved until the skip parser, emitter, and firing test land atomically;
+operation problems use [EVC-8.4]'s non-suppressible problem vocabulary and do
+not allocate case-lifecycle diagnostics. Ordinary trace and invariant
+diagnostics remain authoritative for graph defects. `BSX010` likewise remains
+reserved until its first skip-reason emission and firing test.
 
 _Implementation mapping_:
 - `backstitch/defaults.toml`
@@ -1254,8 +1240,91 @@ _Implementation mapping_:
 - `backstitch/settings.py`
 - `backstitch/check_pipeline.py`
 
+## 16. Product Identity And Lanes [SC-16]
+
+This section states the identity every other section applies. When a proposed
+feature or spec revision is debated, it is tested against this section first.
+
+**Boundary rule.** Backstitch observes, classifies, and gates. It never
+authors content, never repairs the repository, never guesses an edge, and
+never lets a model roam. Backstitch is a reader of repositories; the one
+narrow exception any future write feature must satisfy is that it may
+transcribe what the resolver already deterministically proved, and nothing
+else.
+
+**Evidence-class rule.** No claim ever exceeds its evidence class. Every
+finding carries what kind of knowledge it is — asserted versus weak in the
+deterministic lane ([SC-11] severity rationale); `evidence_bound` through
+`human_verified` in the semantic lane ([SEM-5], [EVC-6]) — and policy may
+promote a finding's consequence, never its evidence class.
+
+**The promise.** Backstitch does not promise that models prove correctness.
+It promises that semantic review becomes repeatable enough to run in CI,
+diffable enough to audit, and structured enough to improve. The workflow is
+deterministic even where one lane uses probabilistic judgment, because the
+judgment is surrounded by deterministic contract — what evidence the model
+may see, which contract it judges, which prompt/model/config produced the
+verdict, what shape must come back, how uncertainty is represented, how
+severities map to exit codes, and how suppressions and dispositions are
+audited — and because the judgment itself happens exactly once per cache
+identity and is then a content-addressed, replayable fact
+([SEM-3], [SEM-4]). Backstitch converts probabilistic judgment into
+deterministic evidence.
+
+**Two lanes and one authority.**
+
+- **Trace lane** — deterministic facts about declared relationships:
+  sections, mappings, backlinks, invariant bindings, coverage, and drift
+  ([SC-4], [INV-*], [COV-*]). Hard-gate by default.
+- **Semantic lane** — bounded model judgment over source-derived packets;
+  `analyze` and blinded adversarial `verify` are stages within this one lane
+  ([SC-7], [SEM-*], [EVC-*]). Independence is procedural, not a requirement
+  for distinct models, providers, or statistically independent errors.
+  Advisory by default.
+- **Policy layer** — not a lane; the projection both lanes' findings flow
+  through ([SC-15], [SEM-6]). It is the repository's authority mapping:
+  which findings, at which evidence class, become blocking. The decision to
+  block is always a reviewable configuration diff, never a model output.
+
+**Metric identity rule.** Trendable signals (coverage counts, ambiguous
+sections, drift suspects, regressions since base, flip rate, promotion
+readiness) are computed only from committed artifacts, such as reports,
+caches, and derived packet receipts, so every trend is replayable. Signal definitions carry the
+same stable-identity discipline as diagnostics: a metric's definition is
+versioned, a changed definition is a new metric version with the old one
+deprecated, and no metric is ever silently redefined. Aggregated semantic
+results are rendered as counts by classification and evidence class, never
+as a blended correctness percentage. Semantic qualification reports exact
+counts, rates, confidence bounds, and pass checks bound to one committed corpus
+and exact composed inference identities; Backstitch emits no blended
+correctness percentage or calibrated model score.
+
+**Contract coverage.** The measurement surface asks five questions, four
+deterministic and one semantic:
+
+| Axis | Question | Lane | Governed by |
+|---|---|---|---|
+| Spec coverage | which promised behaviors have mapped implementation? | trace | [COV-3], [COV-6] |
+| Test evidence coverage | which promised behaviors have binding tests or probes? | trace | [INV-*], [SC-10] |
+| Orphan code | which definitions have no declared purpose? | trace | [COV-3], [COV-7] |
+| Drift coverage | which changed code touches contract-bearing areas without corresponding spec/test movement? | trace | [COV-8] |
+| Semantic agreement | which promises did bounded review judge implemented, contradicted, under-tested, or ambiguous? | semantic | [SEM-6], [EVC-6] |
+
+The lane split, defaults, and policy authority stated here are current
+contract. The semantic-lane internals and the coverage/drift axes are
+governed by their own specs, whose Status lines control what is implemented
+versus proposed; this section states identity, which does not change with
+implementation status.
+
+_Implementation mapping_:
+- `backstitch/cli.py`
+
 ## Related Plans
 
+- `docs/plans/2026-07-11-deterministic-semantic-gate-plan.md`
+  (implementing)
+- `docs/plans/2026-07-15-agent-guided-evidence-cases-plan.md`
+  (implementing)
 - `docs/plans/2026-07-10-local-default-live-llm-tests-plan.md`
   (implemented)
 - `docs/plans/2026-07-09-backstitch-invariant-traceability-plan.md`
@@ -1269,6 +1338,7 @@ _Implementation mapping_:
   (implementing)
 - `docs/plans/2026-07-03-live-llm-tests-plan.md` (implementing)
 - `docs/plans/2026-07-03-input-validation-invariants-plan.md` (implementing)
+- `docs/plans/2026-07-27-serial-benchmark-lane-plan.md` (implementing)
 - `docs/plans/2026-07-02-backstitch-four-way-reconciliation-plan.md` (implementing)
 - `docs/plans/2026-06-18-backstitch-style-spec-code-traceability-tool-plan.md` (superseded)
 - `docs/plans/2026-07-01-backstitch-toml-configuration-plan.md` (archival)

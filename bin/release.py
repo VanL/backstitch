@@ -59,7 +59,18 @@ HERMETIC_TEST_COMMAND: Final[tuple[str, ...]] = (
     "--dist",
     "loadgroup",
     "-m",
-    "not live_llm",
+    "not live_llm and not benchmark",
+)
+BENCHMARK_TEST_COMMAND: Final[tuple[str, ...]] = (
+    "uv",
+    "run",
+    "pytest",
+    "tests",
+    "-q",
+    "-n",
+    "0",
+    "-m",
+    "benchmark",
 )
 LIVE_LLM_TEST_COMMAND: Final[tuple[str, ...]] = (
     "uv",
@@ -343,6 +354,7 @@ def build_precheck_commands() -> tuple[tuple[str, ...], ...]:
 
     return (
         HERMETIC_TEST_COMMAND,
+        BENCHMARK_TEST_COMMAND,
         LIVE_LLM_TEST_COMMAND,
         LOCAL_LLM_TEST_COMMAND,
         RUFF_CHECK_COMMAND,

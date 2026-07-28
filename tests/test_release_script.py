@@ -1,6 +1,12 @@
+"""Release-helper contract tests.
+
+Spec: docs/specs/02-backstitch-core.md [SC-10]
+"""
+
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -94,7 +100,34 @@ def test_precheck_commands_match_release_contract() -> None:
     commands = release.build_precheck_commands()
     command_text = "\n".join(" ".join(command) for command in commands)
 
-    assert "pytest tests -q -n auto --dist loadgroup -m not live_llm" in command_text
+    assert release.HERMETIC_TEST_COMMAND == (
+        "uv",
+        "run",
+        "pytest",
+        "tests",
+        "-q",
+        "-n",
+        "auto",
+        "--dist",
+        "loadgroup",
+        "-m",
+        "not live_llm and not benchmark",
+    )
+    assert release.BENCHMARK_TEST_COMMAND == (
+        "uv",
+        "run",
+        "pytest",
+        "tests",
+        "-q",
+        "-n",
+        "0",
+        "-m",
+        "benchmark",
+    )
+    assert commands[:2] == (
+        release.HERMETIC_TEST_COMMAND,
+        release.BENCHMARK_TEST_COMMAND,
+    )
     assert "pytest tests/live/test_live_llm.py -q" in command_text
     assert "pytest tests/live/test_live_llm.py -q --tb=short" in command_text
     assert "ruff check backstitch tests bin" in command_text
@@ -104,6 +137,38 @@ def test_precheck_commands_match_release_contract() -> None:
         in command_text
     )
     assert "backstitch check --repo-root ." in command_text
+
+
+def test_benchmark_precheck_disables_ambient_xdist(
+    tmp_path: Path,
+) -> None:
+    probe = tmp_path / "test_serial_probe.py"
+    probe.write_text(
+        "import os\n\n"
+        "def test_not_in_xdist_worker() -> None:\n"
+        '    assert "PYTEST_XDIST_WORKER" not in os.environ\n',
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["PYTEST_ADDOPTS"] = "-n auto"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(probe),
+            "-q",
+            "-n",
+            "0",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_live_llm_precheck_opts_in_to_real_provider_path() -> None:
