@@ -14,7 +14,12 @@ from typing import Any
 
 from backstitch.canonical import canonical_json_bytes, lf_line_count, lf_split
 from backstitch.diagnostics import default_level_for, default_registry, short_code_for
-from backstitch.grammar import candidate_ref_digest, is_sha256_hex, is_valid_section_id
+from backstitch.grammar import (
+    candidate_ref_digest,
+    is_sha256_hex,
+    is_valid_section_id,
+    is_valid_suppression_reference,
+)
 from backstitch.models import ISSUE_CODES
 from backstitch.semantic_packets import (
     DECLARATION_FIELDS,
@@ -49,9 +54,9 @@ class ValidatedSemanticPacket:
 
     @property
     def semantic_eligible(self) -> bool:
-        """Only packet schema 3 may enter current or historical inference."""
+        """Current schema-3 and schema-4 packets may enter inference."""
 
-        return self.to_dict().get("schema_version") == 3
+        return self.to_dict().get("schema_version") in {3, 4}
 
 
 # Legacy [SC-6] schema-less packet field inventory. Schema 2 derives its
@@ -624,6 +629,23 @@ _PACKET_V3_FIELDS = frozenset(
         "packet_warnings",
     }
 )
+_PACKET_V4_FIELDS = frozenset(
+    {
+        "schema_version",
+        "packet_id",
+        "packet_hash",
+        "kind",
+        "obligation_id",
+        "source_snapshot",
+        "readiness",
+        "requirement",
+        "suppression_rules",
+        "counterevidence",
+        "evidence_regions",
+        "issues",
+        "packet_warnings",
+    }
+)
 _PACKET_V3_RELATIONS = (
     "spec_mapping",
     "code_backlink",
@@ -1117,6 +1139,303 @@ def _packet_v3_shape_error(row: dict[str, Any]) -> str | None:
     return None
 
 
+def _suppression_rule_path(value: object) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    return (
+        not value.startswith(("/", "./"))
+        and "\\" not in value
+        and "//" not in value
+        and all(part not in {"", ".", ".."} for part in value.split("/"))
+        and all(ord(character) >= 32 and ord(character) != 127 for character in value)
+    )
+
+
+def _packet_v4_issue_key(item: dict[str, Any]) -> tuple[object, ...]:
+    severity_order = {"error": 0, "warning": 1, "info": 2}
+    return (
+        severity_order[str(item["default_severity"])],
+        item["path"],
+        item["line"] or 0,
+        item["code"],
+        item["message"],
+        canonical_json_bytes(item),
+    )
+
+
+def _packet_v4_shape_error(row: dict[str, Any]) -> str | None:
+    """Return a schema-4 suppression packet violation, or ``None``."""
+
+    if set(row) != _PACKET_V4_FIELDS or row.get("schema_version") != 4:
+        return "packet schema 4 does not match its closed top-level shape"
+    packet_id = row.get("packet_id")
+    if (
+        row.get("kind") != "suppression"
+        or not isinstance(packet_id, str)
+        or not packet_id.startswith("suppression::")
+        or row.get("obligation_id") != packet_id
+        or not is_sha256_hex(row.get("packet_hash"))
+    ):
+        return "packet schema 4 has invalid identity fields"
+    reference = packet_id.removeprefix("suppression::")
+    if not is_valid_suppression_reference(reference):
+        return "packet schema 4 has an invalid suppression reference"
+    declaration_path, _, declaration_id = reference.rpartition("#")
+
+    snapshot = row.get("source_snapshot")
+    if (
+        not isinstance(snapshot, dict)
+        or set(snapshot)
+        != {
+            "snapshot_hash",
+            "obligation_state_hash",
+            "derivation_config_hash",
+        }
+        or not all(is_sha256_hex(value) for value in snapshot.values())
+    ):
+        return "packet schema 4 has an invalid source snapshot"
+    readiness = row.get("readiness")
+    if (
+        not isinstance(readiness, dict)
+        or set(readiness)
+        != {
+            "intent_state",
+            "alignment_state",
+            "disposition",
+            "obligation_rung",
+            "gate_state",
+            "required_roles",
+        }
+        or readiness
+        != {
+            "intent_state": "identified",
+            "alignment_state": "complete",
+            "disposition": "evaluate",
+            "obligation_rung": "active",
+            "gate_state": "executable",
+            "required_roles": [],
+        }
+    ):
+        return "packet schema 4 must describe one executable suppression"
+
+    requirement = row.get("requirement")
+    if (
+        not isinstance(requirement, dict)
+        or set(requirement)
+        != {"role", "path", "identity", "title", "start_line", "end_line", "text"}
+        or requirement.get("role") != "requirement"
+        or requirement.get("path") != declaration_path
+        or requirement.get("identity") != declaration_id
+        or not isinstance(requirement.get("title"), str)
+        or not requirement["title"].strip()
+        or not _packet_v3_span(requirement, "text")
+        or not requirement["text"].strip()
+    ):
+        return "packet schema 4 has an invalid requirement"
+
+    rules = row.get("suppression_rules")
+    if not isinstance(rules, list) or not rules:
+        return "packet schema 4 suppression_rules must be nonempty"
+    rule_bytes: list[bytes] = []
+    for rule in rules:
+        if (
+            not isinstance(rule, dict)
+            or set(rule)
+            != {
+                "mechanism",
+                "provenance",
+                "path",
+                "sections",
+                "codes",
+                "declaration",
+                "origin",
+            }
+            or rule.get("mechanism") not in {"ignore", "meta"}
+            or rule.get("provenance")
+            not in {
+                "meta",
+                "config_file",
+                "config_section",
+                "inline_spec",
+                "inline_code",
+            }
+            or not _suppression_rule_path(rule.get("path"))
+            or rule.get("declaration") != reference
+        ):
+            return "packet schema 4 has an invalid suppression rule"
+        sections = rule.get("sections")
+        codes = rule.get("codes")
+        if (
+            not isinstance(sections, list)
+            or any(
+                not isinstance(value, str) or not is_valid_section_id(value)
+                for value in sections
+            )
+            or sections != sorted(set(sections))
+            or not isinstance(codes, list)
+            or any(not isinstance(value, str) or not value.strip() for value in codes)
+            or codes != sorted(set(codes))
+            or (rule["mechanism"] == "meta" and (sections or codes))
+            or (rule["mechanism"] == "ignore" and not codes)
+            or (rule["provenance"] == "meta") != (rule["mechanism"] == "meta")
+        ):
+            return "packet schema 4 has invalid normalized suppression scope"
+        origin = rule.get("origin")
+        if (
+            not isinstance(origin, dict)
+            or set(origin) != {"source", "position", "line"}
+            or not isinstance(origin.get("source"), str)
+            or not origin["source"].strip()
+            or any(
+                ord(character) < 32 or ord(character) == 127
+                for character in origin["source"]
+            )
+            or (origin["position"] is None) == (origin["line"] is None)
+            or (
+                origin["position"] is not None
+                and (
+                    isinstance(origin["position"], bool)
+                    or not isinstance(origin["position"], int)
+                    or origin["position"] < 0
+                )
+            )
+            or (
+                origin["line"] is not None
+                and (
+                    isinstance(origin["line"], bool)
+                    or not isinstance(origin["line"], int)
+                    or origin["line"] < 1
+                )
+            )
+        ):
+            return "packet schema 4 has an invalid suppression origin"
+        rule_bytes.append(canonical_json_bytes(rule))
+    if rule_bytes != sorted(set(rule_bytes)):
+        return "packet schema 4 suppression_rules are not canonical unique"
+
+    issues = row.get("issues")
+    if (
+        not isinstance(issues, list)
+        or not issues
+        or any(
+            not isinstance(issue, dict)
+            or set(issue) != set(ISSUE_FIELDS)
+            or not _is_issue_record(
+                {**issue, "severity": issue.get("default_severity")},
+                require_invariant_locator=True,
+            )
+            for issue in issues
+        )
+    ):
+        return "packet schema 4 issues are invalid"
+    issue_keys = [_packet_v4_issue_key(issue) for issue in issues]
+    if issue_keys != sorted(issue_keys):
+        return "packet schema 4 issues are not in canonical order"
+
+    counter = row.get("counterevidence")
+    if not isinstance(counter, list):
+        return "packet schema 4 counterevidence must be an array"
+    counter_keys: list[tuple[str, int]] = []
+    covered_indexes: list[int] = []
+    for region in counter:
+        if (
+            not isinstance(region, dict)
+            or set(region)
+            != {
+                "role",
+                "path",
+                "start_line",
+                "end_line",
+                "snippet",
+                "issue_indexes",
+            }
+            or region.get("role") != "counterevidence"
+            or not _is_path_locator(region.get("path"))
+            or isinstance(region.get("start_line"), bool)
+            or not isinstance(region.get("start_line"), int)
+            or region["start_line"] < 1
+            or region.get("end_line") != region["start_line"]
+            or not isinstance(region.get("snippet"), str)
+            or "\n" in region["snippet"]
+            or not isinstance(region.get("issue_indexes"), list)
+            or not region["issue_indexes"]
+            or any(
+                isinstance(index, bool)
+                or not isinstance(index, int)
+                or index < 0
+                or index >= len(issues)
+                for index in region["issue_indexes"]
+            )
+            or region["issue_indexes"] != sorted(set(region["issue_indexes"]))
+        ):
+            return "packet schema 4 has an invalid counterevidence region"
+        if any(
+            issues[index]["path"] != region["path"]
+            or issues[index]["line"] != region["start_line"]
+            for index in region["issue_indexes"]
+        ):
+            return "packet schema 4 counterevidence issue indexes do not match"
+        counter_keys.append((region["path"], region["start_line"]))
+        covered_indexes.extend(region["issue_indexes"])
+    if counter_keys != sorted(set(counter_keys)):
+        return "packet schema 4 counterevidence is not canonical unique"
+    expected_covered = [
+        index
+        for index, issue in enumerate(issues)
+        if isinstance(issue["path"], str)
+        and bool(issue["path"])
+        and isinstance(issue["line"], int)
+    ]
+    if sorted(covered_indexes) != expected_covered:
+        return "packet schema 4 counterevidence does not cover issue locators"
+
+    expected_regions = [
+        {
+            "role": "requirement",
+            "path": requirement["path"],
+            "start_line": requirement["start_line"],
+            "end_line": requirement["end_line"],
+        },
+        *(
+            {
+                "role": "counterevidence",
+                "path": region["path"],
+                "start_line": region["start_line"],
+                "end_line": region["end_line"],
+            }
+            for region in counter
+        ),
+    ]
+    if row.get("evidence_regions") != expected_regions:
+        return "packet schema 4 evidence_regions do not recompute"
+    state = {
+        "obligation_state_version": 1,
+        "obligation_id": row["obligation_id"],
+        "kind": "suppression",
+        "obligation_rung": "active",
+        "intent_state": "identified",
+        "alignment_state": "complete",
+        "disposition": "evaluate",
+        "gate_state": "executable",
+        "required_roles": [],
+        "declared_sources": [],
+    }
+    if (
+        snapshot["obligation_state_hash"]
+        != hashlib.sha256(canonical_json_bytes(state)).hexdigest()
+    ):
+        return "packet schema 4 obligation_state_hash does not recompute"
+    if row.get("packet_warnings") != []:
+        return "packet schema 4 packet_warnings must be exactly empty"
+    try:
+        expected_hash = semantic_packet_hash(row)
+    except (KeyError, TypeError, ValueError):
+        return "packet schema 4 projection is invalid"
+    if row["packet_hash"] != expected_hash:
+        return "packet schema 4 packet_hash does not recompute"
+    return None
+
+
 def load_packets_bytes(
     content: bytes,
     *,
@@ -1168,12 +1487,17 @@ def _load_packets_text(
             raise ValueError(msg)
         kind = row.get("kind")
         problem: str | None
-        cache_eligible = row.get("schema_version") == 3
+        cache_eligible = row.get("schema_version") in {3, 4}
         if versioned:
             if row.get("schema_version") == 3:
                 problem = _packet_v3_shape_error(row)
+            elif row.get("schema_version") == 4:
+                problem = _packet_v4_shape_error(row)
             elif row.get("schema_version") != 2:
-                problem = "invalid `schema_version`; expected 3 (or 2 for migration diagnostics)"
+                problem = (
+                    "invalid `schema_version`; expected 3 or 4 "
+                    "(or 2 for migration diagnostics)"
+                )
             elif kind == "section":
                 problem = _v2_section_packet_shape_error(row)
             elif kind == "invariant":

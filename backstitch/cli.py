@@ -221,7 +221,7 @@ def _add_other_parsers(subparsers: argparse._SubParsersAction[Any]) -> None:
     _add_option_argument(packets)
     packets.add_argument(
         "--kind",
-        choices=("section", "invariant", "all"),
+        choices=("section", "invariant", "suppression", "all"),
         default="section",
         help="packet kind to emit (default: section)",
     )
@@ -1474,7 +1474,33 @@ def _run_obligation(
                 "--cursor and --limit require --summarize-evidence or --find-evidence"
             )
         obligation = inventory.get(args.obligation_id)
-        if obligation is not None and not args.summarize_evidence:
+        if obligation is not None and obligation.kind == "suppression":
+            if (
+                args.summarize_evidence
+                or args.find_evidence
+                or args.candidate is not None
+            ):
+                envelope = problem_envelope(
+                    operation=_obligation_operation(args),
+                    snapshot=inventory.snapshot.to_row(),
+                    code="INVALID_INPUT",
+                    message="This operation is not available for suppression obligations.",
+                    action=(
+                        "Inspect the suppression obligation directly; its evidence is "
+                        "derived from the declaration and matched findings."
+                    ),
+                    details={
+                        "field": "operation",
+                        "reason": (
+                            "suppression obligations do not support evidence discovery "
+                            "or candidate selectors"
+                        ),
+                    },
+                )
+                _emit_obligation_problem(args, envelope, resolved_root=root.as_posix())
+                return 2
+            envelope = inventory_get_envelope(inventory, obligation.obligation_id)
+        elif obligation is not None and not args.summarize_evidence:
             unreadable = next(
                 (row for row in snapshot.files if row.state == "unreadable"),
                 None,

@@ -745,6 +745,16 @@ def render_envelope_text(envelope: dict[str, Any], *, resolved_root: str) -> str
         for blocker in blockers:
             assert isinstance(blocker, dict)
             lines.append("blocker: " + canonical_json_bytes(blocker).decode("utf-8"))
+        if result["kind"] == "suppression":
+            lines.extend(
+                (
+                    "declaration: "
+                    + canonical_json_bytes(result["declaration"]).decode("utf-8"),
+                    "suppression_rules: "
+                    + canonical_json_bytes(result["suppression_rules"]).decode("utf-8"),
+                    f"matched_issue_count: {result['matched_issue_count']}",
+                )
+            )
         lines.append("next_actions: " + ",".join(result["next_actions"]))
     elif operation == "obligation.summarize_evidence":
         lines.extend(

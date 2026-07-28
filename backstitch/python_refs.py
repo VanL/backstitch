@@ -27,7 +27,11 @@ from backstitch.code_parser import (
     ParsedModule,
     parse_python_source,
 )
-from backstitch.exclusions import SuppressionDiagnostic, parse_noqa_text
+from backstitch.exclusions import (
+    SuppressionDiagnostic,
+    is_noqa_directive_line,
+    parse_noqa_directives,
+)
 from backstitch.grammar import SECTION_ID
 from backstitch.models import (
     CodeRef,
@@ -35,6 +39,8 @@ from backstitch.models import (
     InvariantDeclaration,
     Issue,
     RefContext,
+    SuppressionOrigin,
+    SuppressionRule,
 )
 
 _ID_RE = re.compile(rf"^{SECTION_ID}$")
@@ -67,6 +73,8 @@ class ParsedPython:
     module_noqa: frozenset[str] = frozenset()
     span_noqa: tuple[tuple[int, int, frozenset[str]], ...] = ()
     noqa_diagnostics: tuple[SuppressionDiagnostic, ...] = ()
+    module_suppression_rules: tuple[SuppressionRule, ...] = ()
+    span_suppression_rules: tuple[tuple[int, int, SuppressionRule], ...] = ()
     invariants: tuple[InvariantDeclaration, ...] = ()
     binding_refs: tuple[InvariantBind, ...] = ()
 
@@ -605,6 +613,11 @@ def parse_python_bytes(
         for line_no, text_line in source_lines:
             if line_no in consumed_doc_lines or _reserved_marker(text_line):
                 continue
+            # A declaration-bearing noqa contains a spec path by design, but
+            # that path is suppression metadata, not an asserted/prose code
+            # reference. The canonical directive parser below owns it.
+            if is_noqa_directive_line(text_line):
+                continue
             # [SC-11] context: a `Spec:` marker line ASSERTS a trace edge;
             # any other docstring line is prose. The distinction is made
             # here, at parse time, never re-inferred downstream.
@@ -620,11 +633,35 @@ def parse_python_bytes(
 
     # [EXC-5] module-docstring noqa: file-scoped suppression codes.
     noqa_diagnostics: list[SuppressionDiagnostic] = []
+    source_markers = [
+        (doc.start_line + offset, source_line)
+        for doc in parsed.doc_blocks
+        for offset, source_line in enumerate(lf_split(doc.text))
+    ]
+    source_markers.extend(
+        (comment.line, comment.text) for comment in parsed.comment_nodes
+    )
+    for line_no, source_line in source_markers:
+        lowered = source_line.strip().lower()
+        if "suppression-declaration" in lowered and lowered.startswith(
+            ("_traceability:", "backstitch:")
+        ):
+            noqa_diagnostics.append(
+                SuppressionDiagnostic(
+                    code="SUPPRESSION_INVALID_SYNTAX",
+                    path=rel_path,
+                    line=line_no,
+                    message=(
+                        f"{rel_path}:{line_no}: suppression-declaration is not "
+                        "valid in Python source"
+                    ),
+                )
+            )
     module_doc = next(
         (doc for doc in parsed.doc_blocks if doc.owner_qualname == "module"), None
     )
     if module_doc is not None:
-        module_noqa, doc_warnings = parse_noqa_text(
+        module_directives, doc_warnings = parse_noqa_directives(
             module_doc.text,
             allow_unknown=allow_unknown_codes,
             location=f"{rel_path} module docstring",
@@ -632,8 +669,27 @@ def parse_python_bytes(
             line=module_doc.start_line,
         )
         noqa_diagnostics.extend(doc_warnings)
+        module_noqa = frozenset(
+            code for directive in module_directives for code in directive.codes
+        )
+        module_suppression_rules = tuple(
+            SuppressionRule(
+                mechanism="ignore",
+                provenance="inline_code",
+                path=rel_path,
+                sections=(),
+                codes=tuple(sorted(directive.codes)),
+                declaration=directive.declaration,
+                origin=SuppressionOrigin(
+                    source=rel_path,
+                    line=directive.line or module_doc.start_line,
+                ),
+            )
+            for directive in module_directives
+        )
     else:
         module_noqa = frozenset()
+        module_suppression_rules = ()
 
     # Comments, with the innermost enclosing owner.
     def owner_for_line(line_no: int) -> str:
@@ -648,10 +704,11 @@ def parse_python_bytes(
 
     statement_spans = list(parsed.statement_spans)
     span_noqa: list[tuple[int, int, frozenset[str]]] = []
+    span_suppression_rules: list[tuple[int, int, SuppressionRule]] = []
     for comment in parsed.comment_nodes:
         line_no = comment.line
         comment_text = comment.text
-        codes, comment_warnings = parse_noqa_text(
+        comment_directives, comment_warnings = parse_noqa_directives(
             comment_text,
             allow_unknown=allow_unknown_codes,
             location=f"{rel_path}:{line_no}",
@@ -659,11 +716,33 @@ def parse_python_bytes(
             line=line_no,
         )
         noqa_diagnostics.extend(comment_warnings)
+        codes = frozenset(
+            code for directive in comment_directives for code in directive.codes
+        )
         if codes:
             # [EXC-5] comment form: next statement only, never file-wide.
             span = _next_statement_span(line_no, statement_spans)
             if span is not None:
                 span_noqa.append((span[0], span[1], codes))
+                span_suppression_rules.extend(
+                    (
+                        span[0],
+                        span[1],
+                        SuppressionRule(
+                            mechanism="ignore",
+                            provenance="inline_code",
+                            path=rel_path,
+                            sections=(),
+                            codes=tuple(sorted(directive.codes)),
+                            declaration=directive.declaration,
+                            origin=SuppressionOrigin(
+                                source=rel_path,
+                                line=directive.line or line_no,
+                            ),
+                        ),
+                    )
+                    for directive in comment_directives
+                )
             continue
         marker = _reserved_marker(comment_text)
         if marker is not None:
@@ -721,6 +800,8 @@ def parse_python_bytes(
         module_noqa=module_noqa,
         span_noqa=tuple(span_noqa),
         noqa_diagnostics=tuple(noqa_diagnostics),
+        module_suppression_rules=module_suppression_rules,
+        span_suppression_rules=tuple(span_suppression_rules),
         invariants=tuple(invariants),
         binding_refs=tuple(binding_refs),
     )

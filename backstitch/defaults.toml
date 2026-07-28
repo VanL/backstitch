@@ -79,6 +79,11 @@ cost_rate_source = ""
 [verify]
 enabled = false
 
+[lint]
+warn_unused_ignores = true
+require_suppression_declarations = false
+suppressions = []
+
 [diagnostics]
 default_level = "warning"
 fail_on = ["error"]

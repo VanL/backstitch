@@ -5,6 +5,8 @@ Spec: docs/specs/02-backstitch-core.md [SC-4]
 
 from pathlib import Path
 
+import pytest
+
 from backstitch.markdown_specs import (
     parse_markdown_spec,
     parse_markdown_spec_bytes,
@@ -894,3 +896,69 @@ def test_parser_owns_exact_heading_and_bullet_section_spans(tmp_path: Path) -> N
         ("S-1", 3, 12),
         ("S-2", 11, 11),
     )
+
+
+def test_suppression_declaration_uses_strict_json_and_section_owner() -> None:
+    parsed = parse_markdown_spec_bytes(
+        (
+            b"## Contract [S-1]\n\n"
+            b"_Traceability: suppression-declaration [SUP-SAFE] "
+            b'"Explains \\\\t safely."_\n'
+        ),
+        "docs/specs/01-x.md",
+    )
+    declaration = parsed.suppression_declarations[0]
+    assert declaration.reference == "docs/specs/01-x.md#SUP-SAFE"
+    assert declaration.owner_section_id == "S-1"
+    assert declaration.rationale == "Explains \\t safely."
+    assert declaration.start_line == 3
+
+
+def test_suppression_declaration_rejects_nonparagraph_boundaries() -> None:
+    for source in (
+        (
+            "## Contract [S-1]\n\n"
+            "```\n"
+            '_Traceability: suppression-declaration [SUP-X] "Reason."_\n'
+            "```\n"
+        ),
+        (
+            "## Contract [S-1]\n\n"
+            '<!-- _Traceability: suppression-declaration [SUP-X] "Reason."_ -->\n'
+        ),
+        '_Traceability: suppression-declaration [SUP-X] "Reason."_\n',
+    ):
+        parsed = parse_markdown_spec_bytes(
+            source.encode(),
+            "docs/specs/01-x.md",
+        )
+        assert parsed.suppression_declarations == ()
+        assert "SUPPRESSION_INVALID_SYNTAX" in {
+            item.code for item in parsed.marker_diagnostics
+        }
+
+
+@pytest.mark.parametrize(
+    "marker",
+    (
+        '_Traceability: suppression-declaration [SUP-X] ""_',
+        '_Traceability: suppression-declaration [SUP-X] "   "_',
+        '_Traceability: suppression-declaration [SUP-X] "unterminated_',
+        '_Traceability: suppression-declaration [sup-x] "Reason."_',
+    ),
+)
+def test_suppression_declaration_rejects_blank_or_malformed_markers(
+    marker: str,
+) -> None:
+    parsed = parse_markdown_spec_bytes(
+        f"## Contract [S-1]\n\n{marker}\n".encode(),
+        "docs/specs/01-x.md",
+    )
+
+    assert parsed.suppression_declarations == ()
+    expected = (
+        "SUPPRESSION_REASON_MISSING"
+        if marker.endswith(('""_', '"   "_'))
+        else "SUPPRESSION_INVALID_SYNTAX"
+    )
+    assert [item.code for item in parsed.marker_diagnostics] == [expected]

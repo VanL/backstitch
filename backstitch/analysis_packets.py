@@ -14,20 +14,21 @@ import dataclasses
 import hashlib
 from typing import Any, Literal, cast
 
-from backstitch.canonical import canonical_json_bytes, lf_line_count
+from backstitch.canonical import canonical_json_bytes, lf_line_count, lf_split
 from backstitch.evidence_discovery import (
     PreparedEvidenceCatalog,
     get_candidate_source,
 )
 from backstitch.markdown_specs import project_section_packet_requirement
+from backstitch.models import SuppressionDecision, issue_sort_key
 from backstitch.obligation_runtime import ALGORITHMS, ObligationRuntime
-from backstitch.obligations import ObligationRecord
+from backstitch.obligations import ObligationRecord, suppression_rule_row
 from backstitch.semantic_packets import (
     ISSUE_FIELDS,
     semantic_packet_hash,
 )
 
-PacketKind = Literal["section", "invariant", "all"]
+PacketKind = Literal["section", "invariant", "suppression", "all"]
 
 
 _SOURCE_ROLE_ORDER = {"implementation": 0, "test": 1, "binding_test": 2}
@@ -298,7 +299,11 @@ def _packet_issues(
     return rows
 
 
-def _derivation_config(runtime: ObligationRuntime) -> dict[str, object]:
+def _derivation_config(
+    runtime: ObligationRuntime,
+    *,
+    packet_contract_version: int = ALGORITHMS.packet_contract_version,
+) -> dict[str, object]:
     settings = runtime.settings.obligations
     return {
         "derivation_config_version": 1,
@@ -312,7 +317,7 @@ def _derivation_config(runtime: ObligationRuntime) -> dict[str, object]:
         "static_neighbor_depth": settings.static_neighbor_depth,
         "obligation_algorithm_version": ALGORITHMS.obligation_algorithm_version,
         "discovery_algorithm_version": ALGORITHMS.discovery_algorithm_version,
-        "packet_contract_version": ALGORITHMS.packet_contract_version,
+        "packet_contract_version": packet_contract_version,
         "normalization_version": ALGORITHMS.normalization_version,
     }
 
@@ -519,6 +524,169 @@ def _compile_source_aligned_packet(
     return packet
 
 
+def _suppression_issue_rows(
+    decisions: list[SuppressionDecision],
+) -> list[dict[str, object]]:
+    """Project the complete decision population in ordinary issue order."""
+
+    ordered = sorted(decisions, key=lambda item: issue_sort_key(item.issue))
+    rows: list[dict[str, object]] = []
+    for decision in ordered:
+        source = dataclasses.asdict(decision.issue)
+        rows.append({field: source[field] for field in ISSUE_FIELDS})
+    return rows
+
+
+def _suppression_counterevidence(
+    runtime: ObligationRuntime,
+    issues: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Read exact issue lines from the already accepted snapshot."""
+
+    grouped: dict[tuple[str, int], list[int]] = {}
+    for index, issue in enumerate(issues):
+        path = issue["path"]
+        line = issue["line"]
+        if not isinstance(path, str) or not path or not isinstance(line, int):
+            continue
+        grouped.setdefault((path, line), []).append(index)
+
+    rows: list[dict[str, object]] = []
+    decoded: dict[str, tuple[str, ...]] = {}
+    for (path, line), issue_indexes in sorted(grouped.items()):
+        if path not in decoded:
+            try:
+                decoded[path] = tuple(
+                    lf_split(
+                        runtime.snapshot.read_bytes(path).decode("utf-8", "replace")
+                    )
+                )
+            except KeyError:
+                raise SourceAlignedPacketError(
+                    "SUPPRESSION_EVIDENCE_INVALID",
+                    f"suppressed issue source is not in the accepted snapshot: {path}",
+                ) from None
+        if line < 1 or line > len(decoded[path]):
+            raise SourceAlignedPacketError(
+                "SUPPRESSION_EVIDENCE_INVALID",
+                f"suppressed issue line is outside the accepted snapshot: {path}:{line}",
+            )
+        rows.append(
+            {
+                "role": "counterevidence",
+                "path": path,
+                "start_line": line,
+                "end_line": line,
+                "snippet": decoded[path][line - 1],
+                "issue_indexes": issue_indexes,
+            }
+        )
+    return rows
+
+
+def _compile_suppression_packet(
+    runtime: ObligationRuntime,
+    obligation: ObligationRecord,
+) -> dict[str, Any]:
+    """Compile one complete schema-4 packet from the shared decision model."""
+
+    detail = obligation.suppression
+    if detail is None:
+        raise SourceAlignedPacketError(
+            "SUPPRESSION_EVIDENCE_INVALID",
+            "suppression obligation has no declaration detail",
+        )
+    declaration = detail.declaration
+    decisions = [
+        decision
+        for decision in runtime.pipeline.suppressed
+        if decision.declaration == declaration.reference and decision.rule is not None
+    ]
+    if len(decisions) != detail.matched_issue_count:
+        raise SourceAlignedPacketError(
+            "SUPPRESSION_EVIDENCE_INVALID",
+            "suppression obligation decision population changed after inventory",
+        )
+    issues = _suppression_issue_rows(decisions)
+    if not issues:
+        raise SourceAlignedPacketError(
+            "SUPPRESSION_EVIDENCE_INVALID",
+            "suppression packet requires at least one matched issue",
+        )
+    counterevidence = _suppression_counterevidence(runtime, issues)
+    requirement = {
+        "role": "requirement",
+        "path": declaration.path,
+        "identity": declaration.declaration_id,
+        "title": declaration.owner_title,
+        "start_line": declaration.start_line,
+        "end_line": declaration.end_line,
+        "text": declaration.rationale,
+    }
+    evidence_regions = [
+        {
+            "role": "requirement",
+            "path": declaration.path,
+            "start_line": declaration.start_line,
+            "end_line": declaration.end_line,
+        },
+        *(
+            {
+                "role": "counterevidence",
+                "path": item["path"],
+                "start_line": item["start_line"],
+                "end_line": item["end_line"],
+            }
+            for item in counterevidence
+        ),
+    ]
+    state = {
+        "obligation_state_version": 1,
+        "obligation_id": obligation.obligation_id,
+        "kind": obligation.kind,
+        "obligation_rung": obligation.obligation_rung,
+        "intent_state": obligation.intent_state,
+        "alignment_state": obligation.alignment_state,
+        "disposition": obligation.disposition,
+        "gate_state": obligation.gate_state,
+        "required_roles": [],
+        "declared_sources": [],
+    }
+    derivation = _derivation_config(runtime, packet_contract_version=4)
+    packet: dict[str, Any] = {
+        "schema_version": 4,
+        "packet_id": obligation.obligation_id,
+        "packet_hash": "",
+        "kind": "suppression",
+        "obligation_id": obligation.obligation_id,
+        "source_snapshot": {
+            "snapshot_hash": runtime.snapshot.snapshot_hash,
+            "obligation_state_hash": hashlib.sha256(
+                canonical_json_bytes(state)
+            ).hexdigest(),
+            "derivation_config_hash": hashlib.sha256(
+                canonical_json_bytes(derivation)
+            ).hexdigest(),
+        },
+        "readiness": {
+            "intent_state": "identified",
+            "alignment_state": "complete",
+            "disposition": "evaluate",
+            "obligation_rung": "active",
+            "gate_state": "executable",
+            "required_roles": [],
+        },
+        "requirement": requirement,
+        "suppression_rules": [suppression_rule_row(rule) for rule in detail.rules],
+        "counterevidence": counterevidence,
+        "evidence_regions": evidence_regions,
+        "issues": issues,
+        "packet_warnings": [],
+    }
+    packet["packet_hash"] = semantic_packet_hash(packet)
+    return packet
+
+
 def generate_source_aligned_packets(
     runtime: ObligationRuntime,
     *,
@@ -555,11 +723,20 @@ def generate_source_aligned_packets(
     ]
     if not selected:
         return []
-    prepared_catalog = runtime.prepare_discovery_catalog()
-    packets = [
-        _compile_source_aligned_packet(runtime, item, prepared_catalog)
-        for item in selected
-    ]
+    prepared_catalog = (
+        runtime.prepare_discovery_catalog()
+        if any(item.kind != "suppression" for item in selected)
+        else None
+    )
+    packets: list[dict[str, Any]] = []
+    for item in selected:
+        if item.kind == "suppression":
+            packets.append(_compile_suppression_packet(runtime, item))
+        else:
+            assert prepared_catalog is not None
+            packets.append(
+                _compile_source_aligned_packet(runtime, item, prepared_catalog)
+            )
     rendered = render_packets_jsonl(packets).encode("utf-8")
     if len(rendered) > runtime.settings.obligations.maximum_packet_bytes:
         raise SourceAlignedPacketError(

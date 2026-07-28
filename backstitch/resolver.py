@@ -45,6 +45,8 @@ from backstitch.models import (
     SourceObligationSkip,
     SpecMapping,
     SpecSection,
+    SuppressionDeclaration,
+    SuppressionRule,
     issue_sort_key,
 )
 from backstitch.python_refs import (
@@ -894,6 +896,10 @@ class ScanArtifacts:
     inline_code_span_ignores: dict[str, tuple[tuple[int, int, frozenset[str]], ...]]
     sections_with_markers: frozenset[tuple[str, str]]
     obligation_skips: tuple[SourceObligationSkip, ...]
+    suppression_declarations: tuple[SuppressionDeclaration, ...]
+    inline_spec_rules: tuple[SuppressionRule, ...]
+    inline_code_rules: tuple[SuppressionRule, ...]
+    inline_code_span_rules: tuple[tuple[int, int, SuppressionRule], ...]
     marker_diagnostics: tuple[SuppressionDiagnostic, ...]
     obligation_source_end_lines: dict[str, int]
     obligation_search_text: dict[str, str]
@@ -911,12 +917,16 @@ def _project_scan_artifacts(
     inline_spec_ignores: dict[tuple[str, str], frozenset[str]] = {}
     sections_with_markers: set[tuple[str, str]] = set()
     obligation_skips: list[SourceObligationSkip] = []
+    suppression_declarations: list[SuppressionDeclaration] = []
+    inline_spec_rules: list[SuppressionRule] = []
     marker_diagnostics: list[SuppressionDiagnostic] = []
     obligation_source_end_lines: dict[str, int] = {}
     obligation_search_text: dict[str, str] = {}
     for spec in parsed_specs:
         marker_diagnostics.extend(spec.marker_diagnostics)
         obligation_skips.extend(spec.obligation_skips)
+        suppression_declarations.extend(spec.suppression_declarations)
+        inline_spec_rules.extend(spec.suppression_rules)
         for section_id, _start_line, end_line in spec.section_spans:
             obligation_source_end_lines[f"{spec.path}#{section_id}"] = end_line
         for section_id, search_text in spec.section_search_text:
@@ -963,6 +973,40 @@ def _project_scan_artifacts(
         if item.obligation_id not in duplicate_skip_ids
     ]
     obligation_skips.sort(key=lambda item: (item.path, item.line, item.obligation_id))
+    declarations_by_id: dict[str, list[SuppressionDeclaration]] = {}
+    for declaration in suppression_declarations:
+        declarations_by_id.setdefault(declaration.declaration_id, []).append(
+            declaration
+        )
+    duplicate_declaration_ids = {
+        declaration_id
+        for declaration_id, items in declarations_by_id.items()
+        if len(items) > 1
+    }
+    for declaration_id in sorted(duplicate_declaration_ids):
+        for declaration in sorted(
+            declarations_by_id[declaration_id],
+            key=lambda item: (item.path, item.start_line),
+        ):
+            marker_diagnostics.append(
+                SuppressionDiagnostic(
+                    code="SUPPRESSION_INVALID_SYNTAX",
+                    path=declaration.path,
+                    line=declaration.start_line,
+                    message=(
+                        f"{declaration.path}:{declaration.start_line}: duplicate"
+                        f" suppression-declaration [{declaration_id}]"
+                    ),
+                )
+            )
+    suppression_declarations = sorted(
+        (
+            declaration
+            for declaration in suppression_declarations
+            if declaration.declaration_id not in duplicate_declaration_ids
+        ),
+        key=lambda item: item.reference,
+    )
     if obligation_skips:
         issues = list(report.issues)
         for item in obligation_skips:
@@ -991,9 +1035,15 @@ def _project_scan_artifacts(
         p.path: p.span_noqa for p in parsed_python if p.span_noqa
     }
     marker_diagnostics.extend(d for p in parsed_python for d in p.noqa_diagnostics)
-    for declaration in report.invariants:
-        obligation_search_text[f"invariant::{declaration.invariant_id}"] = (
-            declaration.statement
+    inline_code_rules = tuple(
+        rule for parsed in parsed_python for rule in parsed.module_suppression_rules
+    )
+    inline_code_span_rules = tuple(
+        item for parsed in parsed_python for item in parsed.span_suppression_rules
+    )
+    for invariant_declaration in report.invariants:
+        obligation_search_text[f"invariant::{invariant_declaration.invariant_id}"] = (
+            invariant_declaration.statement
         )
 
     return report, ScanArtifacts(
@@ -1004,6 +1054,10 @@ def _project_scan_artifacts(
         inline_code_span_ignores=inline_code_span_ignores,
         sections_with_markers=frozenset(sections_with_markers),
         obligation_skips=tuple(obligation_skips),
+        suppression_declarations=tuple(suppression_declarations),
+        inline_spec_rules=tuple(inline_spec_rules),
+        inline_code_rules=inline_code_rules,
+        inline_code_span_rules=inline_code_span_rules,
         marker_diagnostics=tuple(marker_diagnostics),
         obligation_source_end_lines=obligation_source_end_lines,
         obligation_search_text=obligation_search_text,

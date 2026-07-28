@@ -15,7 +15,7 @@ from typing import Any, Literal, cast
 
 from backstitch.canonical import canonical_json_bytes, lf_end_line
 
-SemanticPacketKind = Literal["section", "invariant"]
+SemanticPacketKind = Literal["section", "invariant", "suppression"]
 MAX_SNIPPET_LINES = 120
 MAX_OWNERS_PER_PACKET = 8
 MAX_SECTION_LINES = 100
@@ -40,6 +40,11 @@ _PROMPTS: dict[SemanticPacketKind, tuple[str, int, str]] = {
         "backstitch.invariant-analysis",
         3,
         "invariant_binding_analysis.md",
+    ),
+    "suppression": (
+        "backstitch.suppression-analysis",
+        1,
+        "suppression_analysis.md",
     ),
 }
 
@@ -99,6 +104,17 @@ PACKET_V3_PROJECTION_FIELDS = (
     "declared_evidence",
     "counterevidence",
     "trace_summary",
+    "evidence_regions",
+    "issues",
+    "packet_warnings",
+)
+PACKET_V4_PROJECTION_FIELDS = (
+    "packet_id",
+    "kind",
+    "obligation_id",
+    "requirement",
+    "suppression_rules",
+    "counterevidence",
     "evidence_regions",
     "issues",
     "packet_warnings",
@@ -254,6 +270,13 @@ def semantic_packet_projection(packet: dict[str, Any]) -> dict[str, Any]:
         return {
             "packet_contract_version": 3,
             **_closed_record(packet, PACKET_V3_PROJECTION_FIELDS),
+        }
+    if packet.get("schema_version") == 4:
+        if packet.get("kind") != "suppression":
+            raise ValueError("packet schema 4 requires suppression kind")
+        return {
+            "packet_contract_version": 4,
+            **_closed_record(packet, PACKET_V4_PROJECTION_FIELDS),
         }
 
     kind = packet["kind"]

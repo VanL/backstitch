@@ -13,7 +13,9 @@ from backstitch.exclusions import (
     UnknownSuppressionCodeError,
     build_suppression_index,
     collect_unused_ignore_diagnostics,
+    parse_noqa_directives,
     parse_noqa_text,
+    parse_traceability_directive_line,
     parse_traceability_marker_line,
     should_suppress,
 )
@@ -38,6 +40,43 @@ def _issue(
     )
 
 
+def test_inline_forms_preserve_valid_declaration_references() -> None:
+    reference = "docs/specs/04-backstitch-traceability-exclusions.md#SUP-INLINE"
+    directive, diagnostics = parse_traceability_directive_line(
+        f"_Traceability: ignore BSS007 because {reference}_"
+    )
+    assert diagnostics == []
+    assert directive is not None
+    assert directive.codes == frozenset({"SPEC_SECTION_UNMAPPED"})
+    assert directive.declaration == reference
+
+    noqa, diagnostics = parse_noqa_directives(
+        f"backstitch: noqa BSC003 because {reference}",
+        line=7,
+    )
+    assert diagnostics == []
+    assert noqa[0].codes == frozenset({"SPEC_MAPPING_RECIPROCAL_MISSING"})
+    assert noqa[0].declaration == reference
+    assert noqa[0].line == 7
+
+
+def test_clause_bearing_inline_form_rejects_invalid_reference_under_hatch() -> None:
+    directive, diagnostics = parse_traceability_directive_line(
+        "_Traceability: ignore BSS007 because ../outside.md#SUP-X_",
+        allow_unknown=True,
+    )
+    assert directive is None
+    assert [item.code for item in diagnostics] == ["SUPPRESSION_INVALID_SYNTAX"]
+
+
+def test_clause_free_legacy_underscore_marker_remains_optional() -> None:
+    assert parse_traceability_marker_line("_Traceability: meta") == (
+        True,
+        frozenset({"SPEC_SECTION_UNMAPPED"}),
+        [],
+    )
+
+
 def test_meta_glob_suppresses_unmapped_but_not_missing() -> None:
     index = build_suppression_index(
         meta_spec_globs=("docs/specs/01-*.md",),
@@ -50,6 +89,21 @@ def test_meta_glob_suppresses_unmapped_but_not_missing() -> None:
         _issue("SPEC_SECTION_MISSING", severity="error"), index
     )
     assert not suppressed and reason is None
+
+
+def test_legacy_meta_and_inline_rules_do_not_gain_unused_diagnostics() -> None:
+    index = build_suppression_index(
+        meta_spec_globs=("docs/specs/*.md",),
+        lint=LintSettings(),
+        inline_spec_ignores={
+            ("docs/specs/01-x.md", "X-1"): frozenset({"SPEC_SECTION_UNMAPPED"})
+        },
+        inline_code_ignores={
+            "pkg/x.py": frozenset({"CODE_REF_UNMAPPED_FROM_SPEC"})
+        },
+    )
+
+    assert collect_unused_ignore_diagnostics(index) == []
 
 
 def test_inline_marker_beats_config_in_reported_reason() -> None:

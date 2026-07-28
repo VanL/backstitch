@@ -8,7 +8,12 @@ from __future__ import annotations
 import json
 
 import backstitch.reporting as reporting
-from backstitch.models import InvariantDeclaration, Issue, Report
+from backstitch.models import (
+    InvariantDeclaration,
+    Issue,
+    Report,
+    SuppressionDecision,
+)
 from backstitch.reporting import render_json, render_text
 
 REPORT = Report(
@@ -92,6 +97,37 @@ def test_render_json_matches_sc6_keys() -> None:
         "binds",
         "issues",
     }
+
+
+def test_suppression_audit_adds_declaration_and_escaped_rationale() -> None:
+    decision = SuppressionDecision(
+        issue=REPORT.issues[0],
+        reason="inline_spec",
+        declaration="docs/specs/04-x.md#SUP-X",
+        rationale="reviewed\tterminal-safe",
+        rule=None,
+    )
+
+    data = json.loads(render_json(REPORT, suppressed=(decision,)))
+    assert data["suppressed_issues"][0]["declaration"].endswith("#SUP-X")
+    assert data["suppressed_issues"][0]["rationale"] == "reviewed\tterminal-safe"
+    text = render_text(REPORT, suppressed=(decision,))
+    assert 'rationale: "reviewed\\tterminal-safe"' in text
+
+
+def test_legacy_suppression_audit_keeps_additive_fields_null() -> None:
+    decision = SuppressionDecision(
+        issue=REPORT.issues[0],
+        reason="config_file",
+        declaration=None,
+        rationale=None,
+        rule=None,
+    )
+    row = json.loads(render_json(REPORT, suppressed=(decision,)))["suppressed_issues"][
+        0
+    ]
+    assert row["declaration"] is None
+    assert row["rationale"] is None
 
 
 def test_filter_report_does_not_exist() -> None:

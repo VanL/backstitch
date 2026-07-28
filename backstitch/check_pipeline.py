@@ -17,15 +17,18 @@ from backstitch.diagnostics import apply_policy_to_report, issue_with_policy
 from backstitch.exclusions import (
     build_suppression_index,
     collect_unused_ignore_diagnostics,
-    should_suppress,
+    suppression_decision,
 )
 from backstitch.markdown_specs import MarkdownParseMemo
-from backstitch.models import Issue, Report, issue_sort_key
+from backstitch.models import (
+    Issue,
+    Report,
+    SuppressionDecision,
+    issue_sort_key,
+)
 from backstitch.repository_snapshot import RepositorySnapshot
 from backstitch.resolver import ScanArtifacts, scan_snapshot_with_artifacts
 from backstitch.settings import BackstitchSettings
-
-SuppressedRecord = tuple[Issue, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +50,8 @@ class CheckPipelineResult:
     raw_report: Report
     report: Report
     artifacts: ScanArtifacts
-    suppressed: tuple[SuppressedRecord, ...]
+    suppressed: tuple[SuppressionDecision, ...]
+    effective_meta_spec_globs: tuple[str, ...]
     obligation_skip_audit: tuple[ObligationSkipAudit, ...]
     warnings: tuple[str, ...]
 
@@ -94,18 +98,31 @@ def _apply_check_policy(
         inline_code_span_ignores=artifacts.inline_code_span_ignores,
         sections_with_markers=artifacts.sections_with_markers,
         marker_diagnostics=list(artifacts.marker_diagnostics),
+        declarations=artifacts.suppression_declarations,
+        inline_spec_rules=artifacts.inline_spec_rules,
+        inline_code_rules=artifacts.inline_code_rules,
+        inline_code_span_rules=artifacts.inline_code_span_rules,
         allow_unknown=settings.allow_unknown_keys,
     )
     kept: list[Issue] = []
-    suppressed: list[SuppressedRecord] = list(off_records)
+    suppressed: list[SuppressionDecision] = [
+        SuppressionDecision(
+            issue=issue,
+            reason="diagnostic level off",
+            declaration=None,
+            rationale=None,
+            rule=None,
+        )
+        for issue, _reason in off_records
+    ]
     for issue in report.issues:
-        is_suppressed, reason = should_suppress(
+        decision = suppression_decision(
             issue,
             index,
             suppressible_levels=settings.diagnostics.suppressible_levels,
         )
-        if is_suppressed and reason is not None:
-            suppressed.append((issue, reason.value))
+        if decision is not None:
+            suppressed.append(decision)
         else:
             kept.append(issue)
     diagnostics = tuple(index.suppression_diagnostics) + tuple(
@@ -120,7 +137,15 @@ def _apply_check_policy(
         if patched is not None:
             kept.append(patched)
         elif off_issue is not None:
-            suppressed.append((off_issue, "diagnostic level off"))
+            suppressed.append(
+                SuppressionDecision(
+                    issue=off_issue,
+                    reason="diagnostic level off",
+                    declaration=None,
+                    rationale=None,
+                    rule=None,
+                )
+            )
     kept.sort(key=issue_sort_key)
     filtered_report = dataclasses.replace(report, issues=tuple(kept))
     active_bse = {
@@ -129,11 +154,17 @@ def _apply_check_policy(
         if issue.code == "OBLIGATION_SKIPPED"
     }
     off_bse = {
-        (issue.path, issue.line, issue.invariant_id or issue.section_id): (
-            "off" if reason == "diagnostic level off" else issue.severity
+        (
+            decision.issue.path,
+            decision.issue.line,
+            decision.issue.invariant_id or decision.issue.section_id,
+        ): (
+            "off"
+            if decision.reason == "diagnostic level off"
+            else decision.issue.severity
         )
-        for issue, reason in suppressed
-        if issue.code == "OBLIGATION_SKIPPED"
+        for decision in suppressed
+        if decision.issue.code == "OBLIGATION_SKIPPED"
     }
     skip_audit = tuple(
         ObligationSkipAudit(
@@ -156,6 +187,15 @@ def _apply_check_policy(
         report=filtered_report,
         artifacts=artifacts,
         suppressed=tuple(suppressed),
+        effective_meta_spec_globs=tuple(
+            sorted(
+                {
+                    rule.path
+                    for rule in index.rules
+                    if rule.mechanism == "meta" and not rule.sections
+                }
+            )
+        ),
         obligation_skip_audit=skip_audit,
         warnings=(),
     )

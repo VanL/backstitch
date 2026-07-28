@@ -76,6 +76,10 @@ class ObligationRuntime:
     ) -> tuple[dict[str, object], ...]:
         """Return the complete source-declared evidence inventory."""
 
+        if obligation.kind == "suppression":
+            raise ValueError(
+                "suppression obligations do not support evidence summaries"
+            )
         return build_evidence_summary_items(
             self.pipeline.raw_report,
             obligation,
@@ -91,6 +95,10 @@ class ObligationRuntime:
     ) -> tuple[EvidenceCandidate, ...]:
         """Return the complete deterministic candidate universe."""
 
+        if obligation.kind == "suppression":
+            raise ValueError(
+                "suppression obligations do not support evidence discovery"
+            )
         return discover_evidence_candidates(
             self.snapshot,
             self.pipeline.raw_report,
@@ -543,6 +551,7 @@ def build_obligation_runtime_from_snapshot(
         section_meta=frozenset(
             key for key, enabled in pipeline.artifacts.section_meta.items() if enabled
         ),
+        meta_spec_globs=pipeline.effective_meta_spec_globs,
         skipped_obligation_ids=frozenset(
             item.obligation_id for item in pipeline.artifacts.obligation_skips
         ),
@@ -561,6 +570,8 @@ def build_obligation_runtime_from_snapshot(
             pipeline.raw_report,
             parse_memo=python_parse_memo,
         ),
+        suppression_declarations=pipeline.artifacts.suppression_declarations,
+        suppression_decisions=pipeline.suppressed,
     )
     return ObligationRuntime(
         snapshot=snapshot,

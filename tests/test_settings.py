@@ -27,6 +27,194 @@ from backstitch.settings import (
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+def test_documented_suppression_settings_parse_and_canonicalize(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "suppression.toml"
+    config.write_text(
+        """
+[lint]
+require_suppression_declarations = true
+
+[[lint.suppressions]]
+mechanism = "ignore"
+path = "tests/*"
+sections = ["CFG-9", "CFG-8"]
+codes = ["BSC003", "CODE_REF_UNMAPPED_FROM_SPEC"]
+declaration = "docs/specs/04-backstitch-traceability-exclusions.md#SUP-TEST"
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    resolved = resolve_config(tmp_path, explicit=config, environment={})
+
+    assert resolved.lint.require_suppression_declarations is True
+    assert len(resolved.lint.suppressions) == 1
+    rule = resolved.lint.suppressions[0]
+    assert rule.sections == ("CFG-8", "CFG-9")
+    assert rule.codes == (
+        "CODE_REF_UNMAPPED_FROM_SPEC",
+        "SPEC_MAPPING_RECIPROCAL_MISSING",
+    )
+    assert rule.origin.source == str(config.resolve())
+    assert rule.origin.position == 0
+
+
+def test_documented_suppression_bool_uses_generic_cli_override(
+    tmp_path: Path,
+) -> None:
+    resolved = resolve_config(
+        tmp_path,
+        use_repo_config=False,
+        environment={},
+        cli_options=(("lint.require_suppression_declarations", "true"),),
+    )
+    assert resolved.lint.require_suppression_declarations is True
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "[lint]\nrequire_suppression_declarations = 1\n",
+        "[lint]\nsuppressions = {}\n",
+        (
+            "[[lint.suppressions]]\n"
+            'mechanism = "meta"\npath = "docs/*.md"\nsections = ["CFG-8"]\n'
+            'codes = []\ndeclaration = "docs/specs/04-x.md#SUP-X"\n'
+        ),
+        (
+            "[[lint.suppressions]]\n"
+            'mechanism = "ignore"\npath = "docs/*.md"\nsections = []\n'
+            'codes = []\ndeclaration = "docs/specs/04-x.md#SUP-X"\n'
+        ),
+        (
+            "[[lint.suppressions]]\n"
+            'mechanism = "ignore"\npath = "docs/*.md"\nsections = []\n'
+            'codes = ["BSS007"]\ndeclaration = "../outside.md#SUP-X"\n'
+        ),
+        (
+            "[[lint.suppressions]]\n"
+            'mechanism = "drop"\npath = "docs/*.md"\nsections = []\n'
+            'codes = ["BSS007"]\ndeclaration = "docs/specs/04-x.md#SUP-X"\n'
+        ),
+        (
+            "[[lint.suppressions]]\n"
+            'mechanism = "ignore"\npath = "/docs/*.md"\nsections = []\n'
+            'codes = ["BSS007"]\ndeclaration = "docs/specs/04-x.md#SUP-X"\n'
+        ),
+        (
+            "[[lint.suppressions]]\n"
+            'mechanism = "ignore"\npath = "docs/*.md"\nsections = ["bad"]\n'
+            'codes = ["BSS007"]\ndeclaration = "docs/specs/04-x.md#SUP-X"\n'
+        ),
+        (
+            "[[lint.suppressions]]\n"
+            'mechanism = "ignore"\npath = "docs/*.md"\nsections = ["CFG-8", "CFG-8"]\n'
+            'codes = ["BSS007"]\ndeclaration = "docs/specs/04-x.md#SUP-X"\n'
+        ),
+        (
+            "[[lint.suppressions]]\n"
+            'mechanism = "ignore"\npath = "docs/*.md"\nsections = []\n'
+            'codes = ["BSS007", "SPEC_SECTION_UNMAPPED"]\n'
+            'declaration = "docs/specs/04-x.md#SUP-X"\n'
+        ),
+    ],
+)
+def test_documented_suppression_settings_reject_invalid_shapes(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    config = tmp_path / "bad.toml"
+    config.write_text(body, encoding="utf-8")
+    with pytest.raises(ConfigLoadError):
+        resolve_config(tmp_path, explicit=config, environment={})
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ("mechanism", "path", "sections", "codes", "declaration"),
+)
+def test_documented_suppression_settings_require_every_closed_field(
+    tmp_path: Path,
+    missing: str,
+) -> None:
+    values = {
+        "mechanism": '"ignore"',
+        "path": '"docs/*.md"',
+        "sections": "[]",
+        "codes": '["BSS007"]',
+        "declaration": '"docs/specs/04-x.md#SUP-X"',
+    }
+    config = tmp_path / "missing.toml"
+    config.write_text(
+        "[[lint.suppressions]]\n"
+        + "\n".join(f"{key} = {value}" for key, value in values.items() if key != missing)
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigLoadError, match="missing required keys"):
+        resolve_config(tmp_path, explicit=config, environment={})
+
+
+def test_structured_suppression_unknown_field_uses_existing_hatch(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = tmp_path / "future.toml"
+    config.write_text(
+        """
+allow_unknown_keys = true
+
+[[lint.suppressions]]
+mechanism = "ignore"
+path = "tests/*"
+sections = []
+codes = ["BSC003"]
+declaration = "docs/specs/04-x.md#SUP-X"
+future_field = "ignored"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    resolved = resolve_config(tmp_path, explicit=config, environment={})
+    assert len(resolved.lint.suppressions) == 1
+    assert "lint.suppressions[0].future_field" in capsys.readouterr().err
+
+
+def test_structured_suppression_array_replaces_across_extend(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "parent.toml"
+    parent.write_text(
+        """
+[[lint.suppressions]]
+mechanism = "ignore"
+path = "parent/*"
+sections = []
+codes = ["BSC003"]
+declaration = "docs/specs/04-x.md#SUP-PARENT"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    child = tmp_path / "child.toml"
+    child.write_text(
+        """
+extend = "parent.toml"
+
+[[lint.suppressions]]
+mechanism = "meta"
+path = "docs/meta.md"
+sections = []
+codes = []
+declaration = "docs/specs/04-x.md#SUP-CHILD"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    resolved = resolve_config(tmp_path, explicit=child, environment={})
+    assert [rule.path for rule in resolved.lint.suppressions] == ["docs/meta.md"]
+    assert resolved.lint.suppressions[0].origin.source == str(child.resolve())
+
+
 def test_resolve_config_applies_cli_over_environment_over_explicit_config(
     tmp_path: Path,
 ) -> None:

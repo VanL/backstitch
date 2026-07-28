@@ -20,6 +20,11 @@ from backstitch.evidence_discovery import (
     EvidenceCandidate,
     SourceReceipt,
 )
+from backstitch.models import (
+    SuppressionDeclaration,
+    SuppressionOrigin,
+    SuppressionRule,
+)
 from backstitch.obligation_api import (
     CursorError,
     OperationProblemCode,
@@ -29,6 +34,7 @@ from backstitch.obligation_api import (
     encode_page_cursor,
     evidence_summary_envelope,
     find_evidence_envelope,
+    inventory_get_envelope,
     inventory_list_envelope,
     problem_envelope,
     render_envelope_json,
@@ -40,6 +46,7 @@ from backstitch.obligations import (
     ObligationInventory,
     ObligationRecord,
     SnapshotIdentity,
+    SuppressionObligationDetail,
     UnaddressableIntent,
 )
 from backstitch.settings import BackstitchSettings
@@ -119,6 +126,66 @@ def test_empty_inventory_has_one_closed_bootstrap_guidance_row() -> None:
     assert rendered.endswith("\n")
     assert json.loads(rendered) == envelope
     assert rendered == render_envelope_json(envelope)
+
+
+def test_suppression_get_projects_declaration_rules_and_matched_count() -> None:
+    snapshot = SnapshotIdentity("a" * 64, 1, 20, 0)
+    declaration = SuppressionDeclaration(
+        declaration_id="SUP-1",
+        reference="docs/specs/a.md#SUP-1",
+        rationale="The fixture intentionally retains this warning.",
+        path="docs/specs/a.md",
+        owner_section_id="A-1",
+        owner_title="Suppression policy",
+        start_line=5,
+        end_line=5,
+    )
+    rule = SuppressionRule(
+        mechanism="ignore",
+        provenance="config_file",
+        path="pkg/a.py",
+        sections=(),
+        codes=("CODE_REF_PATH_UNRESOLVED",),
+        declaration=declaration.reference,
+        origin=SuppressionOrigin(source=".backstitch.toml", position=0),
+    )
+    obligation = ObligationRecord(
+        obligation_id="suppression::docs/specs/a.md#SUP-1",
+        kind="suppression",
+        path=declaration.path,
+        start_line=5,
+        end_line=5,
+        title=declaration.owner_title,
+        intent_state="identified",
+        alignment_state="complete",
+        disposition="evaluate",
+        obligation_rung="active",
+        gate_state="executable",
+        required_roles=(),
+        evidence_counts=EvidenceCounts(),
+        candidate_counts=CandidateCounts(),
+        blocking_reasons=(),
+        next_actions=("RUN_DETERMINISTIC_CHECK", "RUN_CURRENT_ANALYSIS"),
+        suppression=SuppressionObligationDetail(declaration, (rule,), 2),
+    )
+    inventory = ObligationInventory(
+        snapshot=snapshot,
+        obligations=(obligation,),
+        unaddressable_intent=(),
+        next_actions=obligation.next_actions,
+    )
+
+    envelope = inventory_get_envelope(inventory, obligation.obligation_id)
+
+    assert envelope is not None
+    assert envelope["result"]["declaration"]["rationale"] == declaration.rationale
+    assert envelope["result"]["suppression_rules"][0]["declaration"] == (
+        declaration.reference
+    )
+    assert envelope["result"]["matched_issue_count"] == 2
+    assert "matched_issue_count: 2" in render_envelope_text(
+        envelope, resolved_root="/repo"
+    )
 
 
 def test_not_found_problem_has_null_result_and_no_success_guidance() -> None:

@@ -33,6 +33,15 @@ EdgeKind = Literal["mapping", "backlink"]
 # edge. "docstring": docstring prose. "comment": code comment. Ambiguity is
 # an error only in asserted context ([SC-11]).
 RefContext = Literal["asserted", "docstring", "comment"]
+SuppressionMechanism = Literal["ignore", "meta"]
+SuppressionProvenance = Literal[
+    "meta",
+    "config_file",
+    "config_section",
+    "inline_spec",
+    "inline_code",
+    "diagnostic level off",
+]
 
 # Compatibility inventories derived from the packaged diagnostic registry
 # ([SC-11], [SC-15]). The TOML registry is the source of truth.
@@ -143,6 +152,50 @@ class SourceObligationSkip:
 
 
 @dataclass(frozen=True, slots=True)
+class SuppressionOrigin:
+    """Exact source location of one normalized suppression rule ([EXC-6])."""
+
+    source: str
+    position: int | None = None
+    line: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.position is None) == (self.line is None):
+            raise ValueError("suppression origin requires exactly one position or line")
+        if self.position is not None and self.position < 0:
+            raise ValueError("suppression origin position must be nonnegative")
+        if self.line is not None and self.line < 1:
+            raise ValueError("suppression origin line must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class SuppressionRule:
+    """One canonical operational suppression rule ([EXC-2], [EXC-6])."""
+
+    mechanism: SuppressionMechanism
+    provenance: SuppressionProvenance
+    path: str
+    sections: tuple[str, ...]
+    codes: tuple[str, ...]
+    declaration: str | None
+    origin: SuppressionOrigin
+
+
+@dataclass(frozen=True, slots=True)
+class SuppressionDeclaration:
+    """One valid source-authored suppression rationale ([EXC-6])."""
+
+    declaration_id: str
+    reference: str
+    rationale: str
+    path: str
+    owner_section_id: str
+    owner_title: str
+    start_line: int
+    end_line: int
+
+
+@dataclass(frozen=True, slots=True)
 class Issue:
     """A deterministic finding with a stable code and location metadata."""
 
@@ -167,6 +220,17 @@ class Issue:
                 "default_severity",
                 default_level_for(self.code, self.context),
             )
+
+
+@dataclass(frozen=True, slots=True)
+class SuppressionDecision:
+    """One auditable suppression decision over a concrete issue ([EXC-7])."""
+
+    issue: Issue
+    reason: SuppressionProvenance
+    declaration: str | None
+    rationale: str | None
+    rule: SuppressionRule | None
 
 
 def issue_sort_key(issue: Issue | Mapping[str, Any]) -> tuple[int, str, int, str, str]:

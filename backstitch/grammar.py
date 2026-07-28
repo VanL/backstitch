@@ -28,6 +28,7 @@ import or invoke `llm`, and never touches the network.
 from __future__ import annotations
 
 import re
+from pathlib import PurePosixPath
 from typing import TypeGuard
 
 SECTION_ID = r"[A-Z][A-Za-z0-9.\-]*[0-9][A-Za-z0-9]*"
@@ -42,6 +43,8 @@ SHA256_HEX = r"[0-9a-f]{64}"
 SHA256_HEX_RE = re.compile(rf"^{SHA256_HEX}$")
 SHA256_PREFIXED_RE = re.compile(rf"^sha256:{SHA256_HEX}$")
 CANDIDATE_REF_RE = re.compile(rf"^candidate:sha256:({SHA256_HEX})$")
+SUPPRESSION_ID = r"SUP-[A-Z0-9](?:[A-Z0-9.\-]*[A-Z0-9])?"
+SUPPRESSION_ID_RE = re.compile(rf"^{SUPPRESSION_ID}$")
 
 
 def is_valid_section_id(candidate: str) -> bool:
@@ -84,6 +87,27 @@ def candidate_ref(digest: str) -> str:
     return f"candidate:sha256:{digest}"
 
 
+def is_valid_suppression_reference(value: object) -> TypeGuard[str]:
+    """Validate the config/source reference syntax owned by [EXC-6]/[CFG-8]."""
+
+    if not isinstance(value, str) or value.count("#") != 1:
+        return False
+    path, declaration_id = value.split("#", 1)
+    if (
+        not path
+        or not path.endswith(".md")
+        or path.startswith("/")
+        or path.startswith("./")
+        or "\\" in path
+        or "//" in path
+        or any(char in value for char in "\x00\r\n\t*?[]")
+        or not SUPPRESSION_ID_RE.fullmatch(declaration_id)
+    ):
+        return False
+    parts = PurePosixPath(path).parts
+    return bool(parts) and all(part not in {"", ".", ".."} for part in parts)
+
+
 __all__ = [
     "CANDIDATE_REF_RE",
     "SECTION_ID",
@@ -91,9 +115,12 @@ __all__ = [
     "SHA256_HEX",
     "SHA256_HEX_RE",
     "SHA256_PREFIXED_RE",
+    "SUPPRESSION_ID",
+    "SUPPRESSION_ID_RE",
     "candidate_ref",
     "candidate_ref_digest",
     "is_prefixed_sha256",
     "is_sha256_hex",
+    "is_valid_suppression_reference",
     "is_valid_section_id",
 ]

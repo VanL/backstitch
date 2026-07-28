@@ -26,7 +26,9 @@ from markdown_it.token import Token
 from backstitch.canonical import canonical_repository_path, lf_split
 from backstitch.exclusions import (
     RESERVED_SKIP_MARKER_RE,
+    ParsedSuppressionDirective,
     SuppressionDiagnostic,
+    parse_traceability_directive_line,
     parse_traceability_marker_line,
 )
 from backstitch.grammar import SECTION_ID
@@ -38,6 +40,9 @@ from backstitch.models import (
     SourceObligationSkip,
     SpecMapping,
     SpecSection,
+    SuppressionDeclaration,
+    SuppressionOrigin,
+    SuppressionRule,
 )
 
 _MARKDOWN = MarkdownIt("commonmark")
@@ -74,6 +79,15 @@ _HTML_SKIP_RE = re.compile(
 _TRACE_SKIP_RE = re.compile(
     r"^_Traceability:[ \t]*skip-obligation[ \t]+"
     r"\[(?P<target>[^\[\]\r\n]*)\][ \t]*(?P<reason>.*?)[ \t]*_$"
+)
+_SUPPRESSION_DECLARATION_PREFIX_RE = re.compile(
+    r"^_Traceability:[ \t]*suppression-declaration\b",
+    re.IGNORECASE,
+)
+_SUPPRESSION_DECLARATION_RE = re.compile(
+    r"^_Traceability:[ \t]*suppression-declaration[ \t]+"
+    r"\[(?P<id>SUP-[A-Z0-9](?:[A-Z0-9.\-]*[A-Z0-9])?)\][ \t]+"
+    r'(?P<reason>".*")[ \t]*_$',
 )
 
 
@@ -157,36 +171,50 @@ def _parse_skip_marker(
             line=line,
             message="HTML skip-obligation reason contains a forbidden raw token",
         )
-    try:
-        reason = json.loads(raw_reason)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        reason = None
-    if not isinstance(reason, str):
+    reason, reason_error = _decode_strict_reason(raw_reason)
+    if reason_error == "syntax":
         return None, _skip_diagnostic(
             "SUPPRESSION_INVALID_SYNTAX",
             path=path,
             line=line,
             message="skip-obligation reason must be one strict JSON string",
         )
-    if not reason.strip():
+    if reason_error == "missing":
         return None, _skip_diagnostic(
             "SUPPRESSION_REASON_MISSING",
             path=path,
             line=line,
             message="skip-obligation reason is blank",
         )
-    try:
-        reason_size = len(reason.encode("utf-8"))
-    except UnicodeEncodeError:
-        reason_size = 4097
-    if reason_size > 4096 or any(char in reason for char in "\r\n\u2028\u2029"):
+    if reason_error == "bounds":
         return None, _skip_diagnostic(
             "SUPPRESSION_INVALID_SYNTAX",
             path=path,
             line=line,
             message="skip-obligation reason violates its bounded line-safe contract",
         )
+    assert reason is not None
     return _SkipCandidate(target_id, reason, line, form), None
+
+
+def _decode_strict_reason(raw_reason: str) -> tuple[str | None, str | None]:
+    """Decode the one shared line-safe JSON reason contract ([EVC-8.3.2])."""
+
+    try:
+        reason = json.loads(raw_reason)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, "syntax"
+    if not isinstance(reason, str):
+        return None, "syntax"
+    if not reason.strip():
+        return None, "missing"
+    try:
+        reason_size = len(reason.encode("utf-8"))
+    except UnicodeEncodeError:
+        return None, "bounds"
+    if reason_size > 4096 or any(char in reason for char in "\r\n\u2028\u2029"):
+        return None, "bounds"
+    return reason, None
 
 
 def _extract_heading_skips(
@@ -341,6 +369,8 @@ class ParsedSpec:
     file_ignores: frozenset[str] = frozenset()
     section_markers: tuple[tuple[str, bool, frozenset[str]], ...] = ()
     obligation_skips: tuple[SourceObligationSkip, ...] = ()
+    suppression_declarations: tuple[SuppressionDeclaration, ...] = ()
+    suppression_rules: tuple[SuppressionRule, ...] = ()
     marker_diagnostics: tuple[SuppressionDiagnostic, ...] = ()
     section_spans: tuple[tuple[str, int, int], ...] = ()
     section_search_text: tuple[tuple[str, str], ...] = ()
@@ -762,24 +792,27 @@ def _strip_recognized_trailing_html_marker(
     location: str,
     path: str,
     line: int,
-) -> tuple[str, bool, frozenset[str], list[SuppressionDiagnostic]]:
+) -> tuple[
+    str,
+    ParsedSuppressionDirective | None,
+    list[SuppressionDiagnostic],
+]:
     if "<!--" not in text:
-        return text, False, frozenset(), []
-    is_meta, marker_codes, warnings = parse_traceability_marker_line(
+        return text, None, []
+    directive, warnings = parse_traceability_directive_line(
         text,
         allow_unknown=allow_unknown_codes,
         location=location,
         path=path,
         line=line,
     )
-    if is_meta or marker_codes or warnings:
+    if directive is not None or warnings:
         return (
             _TRAILING_HTML_COMMENT_RE.sub("", text).strip(),
-            is_meta,
-            marker_codes,
+            directive,
             warnings,
         )
-    return text, False, frozenset(), []
+    return text, None, []
 
 
 def parse_markdown_spec(
@@ -836,8 +869,23 @@ def parse_markdown_spec_bytes(
     file_ignores: set[str] = set()
     section_markers: dict[str, tuple[bool, set[str]]] = {}
     skip_candidates: list[_SkipCandidate] = []
+    suppression_declarations: list[SuppressionDeclaration] = []
+    suppression_rules: list[SuppressionRule] = []
     marker_diagnostics: list[SuppressionDiagnostic] = []
     nonsemantic_lines: set[int] = set()
+    declaration_candidate_lines = {
+        line_no
+        for line_no, source_line in enumerate(lines, start=1)
+        if "suppression-declaration" in source_line.lower()
+        and (
+            source_line.strip().lower().startswith("_traceability:")
+            or (
+                source_line.strip().startswith(("<!--", "#"))
+                and "_traceability:" in source_line.lower()
+            )
+        )
+    }
+    processed_declaration_lines: set[int] = set()
 
     # Mapping blocks attach to the nearest preceding heading section.
     # Invariant bullets define sections but never own mapping blocks: a
@@ -913,7 +961,10 @@ def parse_markdown_spec_bytes(
         block_skip_candidates.append(candidate)
 
     def record_marker(
-        is_meta: bool, marker_codes: frozenset[str], line_no: int
+        is_meta: bool,
+        marker_codes: frozenset[str],
+        line_no: int,
+        declaration: str | None = None,
     ) -> None:
         nonlocal file_meta
         nonlocal ordinary_marker_count
@@ -921,6 +972,17 @@ def parse_markdown_spec_bytes(
         if not sections:
             file_meta = file_meta or is_meta
             file_ignores.update(marker_codes if not is_meta else ())
+            suppression_rules.append(
+                SuppressionRule(
+                    mechanism="meta" if is_meta else "ignore",
+                    provenance="inline_spec",
+                    path=rel_path,
+                    sections=(),
+                    codes=() if is_meta else tuple(sorted(marker_codes)),
+                    declaration=declaration,
+                    origin=SuppressionOrigin(source=rel_path, line=line_no),
+                )
+            )
             return
         # [EXC-4] §4.2: a section marker goes IMMEDIATELY after the heading
         # or invariant bullet, before body text. A misplaced marker never
@@ -967,9 +1029,20 @@ def parse_markdown_spec_bytes(
             meta_flag or is_meta,
             codes | (marker_codes if not is_meta else set()),
         )
+        suppression_rules.append(
+            SuppressionRule(
+                mechanism="meta" if is_meta else "ignore",
+                provenance="inline_spec",
+                path=rel_path,
+                sections=(target,),
+                codes=() if is_meta else tuple(sorted(marker_codes)),
+                declaration=declaration,
+                origin=SuppressionOrigin(source=rel_path, line=line_no),
+            )
+        )
 
     def parse_marker_text(text: str, line_no: int) -> bool:
-        is_meta, marker_codes, warnings = parse_traceability_marker_line(
+        directive, warnings = parse_traceability_directive_line(
             text,
             allow_unknown=allow_unknown_codes,
             location=f"{rel_path}:{line_no}",
@@ -977,11 +1050,93 @@ def parse_markdown_spec_bytes(
             line=line_no,
         )
         marker_diagnostics.extend(warnings)
-        if is_meta or marker_codes:
-            record_marker(is_meta, marker_codes, line_no)
+        if directive is not None:
+            record_marker(
+                directive.mechanism == "meta",
+                directive.codes,
+                line_no,
+                directive.declaration,
+            )
             nonsemantic_lines.add(line_no)
             return True
         return False
+
+    def process_suppression_declaration(inline: Token, line_no: int) -> bool:
+        """Parse one declaration paragraph without treating it as an ignore."""
+
+        stripped = inline.content.strip()
+        if _SUPPRESSION_DECLARATION_PREFIX_RE.match(stripped) is None:
+            return False
+        processed_declaration_lines.add(line_no)
+        physical = _token_physical_content_lines(
+            inline,
+            parser_line_to_source_line,
+        )
+        match = (
+            _SUPPRESSION_DECLARATION_RE.fullmatch(stripped)
+            if len(physical) == 1
+            else None
+        )
+        if match is None:
+            marker_diagnostics.append(
+                _skip_diagnostic(
+                    "SUPPRESSION_INVALID_SYNTAX",
+                    path=rel_path,
+                    line=line_no,
+                    message="malformed suppression-declaration marker",
+                )
+            )
+            return True
+        if current_heading_section is None:
+            marker_diagnostics.append(
+                _skip_diagnostic(
+                    "SUPPRESSION_INVALID_SYNTAX",
+                    path=rel_path,
+                    line=line_no,
+                    message=(
+                        "suppression-declaration must be under an ID-bearing section"
+                    ),
+                )
+            )
+            return True
+        rationale, reason_error = _decode_strict_reason(match.group("reason"))
+        if reason_error is not None:
+            marker_diagnostics.append(
+                _skip_diagnostic(
+                    (
+                        "SUPPRESSION_REASON_MISSING"
+                        if reason_error == "missing"
+                        else "SUPPRESSION_INVALID_SYNTAX"
+                    ),
+                    path=rel_path,
+                    line=line_no,
+                    message=(
+                        "suppression-declaration reason is blank"
+                        if reason_error == "missing"
+                        else (
+                            "suppression-declaration reason violates its strict "
+                            "bounded line-safe JSON-string contract"
+                        )
+                    ),
+                )
+            )
+            return True
+        assert rationale is not None
+        declaration_id = match.group("id")
+        suppression_declarations.append(
+            SuppressionDeclaration(
+                declaration_id=declaration_id,
+                reference=f"{rel_path}#{declaration_id}",
+                rationale=rationale,
+                path=rel_path,
+                owner_section_id=current_heading_section.section_id,
+                owner_title=current_heading_section.title,
+                start_line=line_no,
+                end_line=line_no,
+            )
+        )
+        nonsemantic_lines.add(line_no)
+        return True
 
     def process_reserved_skip_lines(
         source_lines: Sequence[tuple[int, str]],
@@ -1196,7 +1351,7 @@ def parse_markdown_spec_bytes(
             line=line_no,
         )
         marker_diagnostics.extend(skip_diagnostics)
-        heading_text, trailing_meta, trailing_codes, warnings = (
+        heading_text, trailing_directive, warnings = (
             _strip_recognized_trailing_html_marker(
                 without_skip,
                 allow_unknown_codes=allow_unknown_codes,
@@ -1227,8 +1382,13 @@ def parse_markdown_spec_bytes(
             begin_directive_block(section)
             for candidate in heading_skips:
                 record_skip(candidate)
-            if trailing_meta or trailing_codes:
-                record_marker(trailing_meta, trailing_codes, line_no)
+            if trailing_directive is not None:
+                record_marker(
+                    trailing_directive.mechanism == "meta",
+                    trailing_directive.codes,
+                    line_no,
+                    trailing_directive.declaration,
+                )
                 if heading_skips:
                     invalidate_block_skips(
                         line_no,
@@ -1320,6 +1480,8 @@ def parse_markdown_spec_bytes(
                 last_non_marker_block = "other"
             return
         stripped = inline.content.strip()
+        if process_suppression_declaration(inline, line_no):
+            return
         if stripped.lower().startswith("_traceability:") and parse_marker_text(
             stripped, line_no
         ):
@@ -1476,6 +1638,18 @@ def parse_markdown_spec_bytes(
         invariants=invariants,
         diagnostics=marker_diagnostics,
     )
+    for line_no in sorted(declaration_candidate_lines - processed_declaration_lines):
+        marker_diagnostics.append(
+            _skip_diagnostic(
+                "SUPPRESSION_INVALID_SYNTAX",
+                path=rel_path,
+                line=line_no,
+                message=(
+                    "suppression-declaration must be ordinary paragraph content "
+                    "under an ID-bearing section"
+                ),
+            )
+        )
 
     heading_boundaries = [
         (
@@ -1543,6 +1717,8 @@ def parse_markdown_spec_bytes(
             for section_id, (meta_flag, codes) in sorted(section_markers.items())
         ),
         obligation_skips=obligation_skips,
+        suppression_declarations=tuple(suppression_declarations),
+        suppression_rules=tuple(suppression_rules),
         marker_diagnostics=tuple(marker_diagnostics),
         section_spans=tuple(section_spans),
         section_search_text=section_search_text,

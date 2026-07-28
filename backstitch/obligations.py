@@ -26,6 +26,9 @@ from backstitch.models import (
     Report,
     SpecMapping,
     SpecSection,
+    SuppressionDecision,
+    SuppressionDeclaration,
+    SuppressionRule,
 )
 
 IntentState = Literal["identified"]
@@ -33,7 +36,7 @@ AlignmentState = Literal["untraced", "partial", "complete", "invalid"]
 Disposition = Literal["evaluate", "skipped"]
 ObligationRung = Literal["active", "planned", "exploratory", "meta"]
 GateState = Literal["not_executable", "executable"]
-ObligationKind = Literal["section", "invariant"]
+ObligationKind = Literal["section", "invariant", "suppression"]
 EvidenceRole = Literal["implementation", "test", "binding_test"]
 ReciprocityState = Literal["complete", "one_sided"]
 RelationKind = Literal[
@@ -201,6 +204,57 @@ class BlockingReason:
         }
 
 
+def suppression_rule_row(rule: SuppressionRule) -> dict[str, object]:
+    """Project one normalized rule into its shared API/packet shape."""
+
+    return {
+        "mechanism": rule.mechanism,
+        "provenance": rule.provenance,
+        "path": rule.path,
+        "sections": list(rule.sections),
+        "codes": list(rule.codes),
+        "declaration": rule.declaration,
+        "origin": {
+            "source": rule.origin.source,
+            "position": rule.origin.position,
+            "line": rule.origin.line,
+        },
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class SuppressionObligationDetail:
+    """Source declaration and complete normalized decision population."""
+
+    declaration: SuppressionDeclaration
+    rules: tuple[SuppressionRule, ...]
+    matched_issue_count: int
+
+    def __post_init__(self) -> None:
+        if not self.rules:
+            raise ValueError("suppression obligation requires at least one rule")
+        _validate_count(self.matched_issue_count, "matched_issue_count")
+        if self.matched_issue_count < 1:
+            raise ValueError("suppression obligation requires a matched issue")
+
+    def to_row(self) -> dict[str, object]:
+        declaration = self.declaration
+        return {
+            "declaration": {
+                "declaration_id": declaration.declaration_id,
+                "reference": declaration.reference,
+                "rationale": declaration.rationale,
+                "path": declaration.path,
+                "owner_section_id": declaration.owner_section_id,
+                "owner_title": declaration.owner_title,
+                "start_line": declaration.start_line,
+                "end_line": declaration.end_line,
+            },
+            "suppression_rules": [suppression_rule_row(rule) for rule in self.rules],
+            "matched_issue_count": self.matched_issue_count,
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class ObligationRecord:
     obligation_id: str
@@ -219,6 +273,7 @@ class ObligationRecord:
     candidate_counts: CandidateCounts
     blocking_reasons: tuple[BlockingReason, ...]
     next_actions: tuple[GuidanceCode, ...]
+    suppression: SuppressionObligationDetail | None = None
 
     def list_row(self) -> dict[str, object]:
         return {
@@ -238,7 +293,7 @@ class ObligationRecord:
         }
 
     def to_row(self) -> dict[str, object]:
-        return {
+        row: dict[str, object] = {
             "obligation_id": self.obligation_id,
             "kind": self.kind,
             "path": self.path,
@@ -256,6 +311,9 @@ class ObligationRecord:
             "blocking_reasons": [item.to_row() for item in self.blocking_reasons],
             "next_actions": list(self.next_actions),
         }
+        if self.suppression is not None:
+            row.update(self.suppression.to_row())
+        return row
 
 
 @dataclass(frozen=True, slots=True)
@@ -572,10 +630,11 @@ def _rung_for_section(
     section: SpecSection,
     profile: ProfileConfig,
     section_meta: frozenset[tuple[str, str]],
+    meta_spec_globs: tuple[str, ...],
 ) -> ObligationRung:
     key = (section.path, section.section_id)
     if key in section_meta or any(
-        fnmatch(section.path, pattern) for pattern in profile.meta_spec_globs
+        fnmatch(section.path, pattern) for pattern in meta_spec_globs
     ):
         return "meta"
     if any(fnmatch(section.path, pattern) for pattern in profile.planned_spec_globs):
@@ -592,6 +651,7 @@ def _rung_for_invariant(
     sections: Mapping[tuple[str, str], SpecSection],
     profile: ProfileConfig,
     section_meta: frozenset[tuple[str, str]],
+    meta_spec_globs: tuple[str, ...],
 ) -> ObligationRung:
     if declaration.declaration_kind == "code":
         return "active"
@@ -601,7 +661,7 @@ def _rung_for_invariant(
     section = sections.get((declaration.path, section_id))
     if section is None:
         return "active"
-    return _rung_for_section(section, profile, section_meta)
+    return _rung_for_section(section, profile, section_meta, meta_spec_globs)
 
 
 def _related_section_issues(report: Report, section: SpecSection) -> tuple[Issue, ...]:
@@ -674,6 +734,7 @@ def _section_record(
     profile: ProfileConfig,
     required_roles: tuple[Literal["implementation", "test"], ...],
     section_meta: frozenset[tuple[str, str]],
+    meta_spec_globs: tuple[str, ...],
     skipped: bool,
     candidate_counts: CandidateCounts,
     end_line: int,
@@ -728,7 +789,7 @@ def _section_record(
             if not role_facts or "spec_mapping" in relation_kinds:
                 guidance.append("ADD_RECIPROCAL_BACKLINK")
 
-    rung = _rung_for_section(section, profile, section_meta)
+    rung = _rung_for_section(section, profile, section_meta, meta_spec_globs)
     disposition: Disposition = "skipped" if skipped else "evaluate"
     if rung != "active":
         blockers.append(BlockingReason("OUT_OF_GATE_SCOPE"))
@@ -824,6 +885,7 @@ def _invariant_record(
     sections: Mapping[tuple[str, str], SpecSection],
     profile: ProfileConfig,
     section_meta: frozenset[tuple[str, str]],
+    meta_spec_globs: tuple[str, ...],
     skipped: bool,
     atomic_targets: frozenset[tuple[str, str | None]],
     atomic_code_invariant_ids: frozenset[str],
@@ -862,7 +924,9 @@ def _invariant_record(
     else:
         alignment_state = "untraced"
 
-    rung = _rung_for_invariant(declaration, sections, profile, section_meta)
+    rung = _rung_for_invariant(
+        declaration, sections, profile, section_meta, meta_spec_globs
+    )
     disposition: Disposition = "skipped" if skipped else "evaluate"
     if rung != "active":
         blockers.append(BlockingReason("OUT_OF_GATE_SCOPE"))
@@ -953,6 +1017,7 @@ def build_obligation_inventory(
         "implementation",
     ),
     section_meta: frozenset[tuple[str, str]] = frozenset(),
+    meta_spec_globs: tuple[str, ...] | None = None,
     skipped_obligation_ids: frozenset[str] = frozenset(),
     candidate_counts: Mapping[str, CandidateCounts] | None = None,
     source_end_lines: Mapping[str, int] | None = None,
@@ -960,10 +1025,13 @@ def build_obligation_inventory(
     | None = None,
     atomic_invariant_targets: frozenset[tuple[str, str | None]] = frozenset(),
     atomic_code_invariant_ids: frozenset[str] = frozenset(),
+    suppression_declarations: tuple[SuppressionDeclaration, ...] = (),
+    suppression_decisions: tuple[SuppressionDecision, ...] = (),
 ) -> ObligationInventory:
     """Project one raw resolved report into deterministic obligation records.
 
-    ``section_meta`` and ``skipped_obligation_ids`` are parser-owned hooks that
+    ``section_meta``, ``meta_spec_globs``, and ``skipped_obligation_ids`` are
+    parser-owned hooks that
     are intentionally separate from ``Report.issues``.  They must come from the
     same captured scan as ``report``.  ``source_end_lines`` and
     ``unaddressable_excerpts`` likewise let the snapshot owner add presentation
@@ -971,6 +1039,8 @@ def build_obligation_inventory(
     """
 
     _validate_required_roles(section_required_roles)
+    if meta_spec_globs is None:
+        meta_spec_globs = profile.meta_spec_globs
     candidate_counts = candidate_counts or {}
     source_end_lines = source_end_lines or {}
     unaddressable_excerpts = unaddressable_excerpts or {}
@@ -1002,14 +1072,37 @@ def build_obligation_inventory(
         if declaration.invariant_id not in invalid_invariant_ids
     )
 
-    known_ids = {_section_id(section) for section in valid_sections} | {
+    ordinary_ids = {_section_id(section) for section in valid_sections} | {
         _invariant_id(declaration) for declaration in valid_invariants
     }
+    declarations_by_reference = {
+        declaration.reference: declaration for declaration in suppression_declarations
+    }
+    decisions_by_reference: dict[str, list[SuppressionDecision]] = {}
+    for decision in suppression_decisions:
+        if decision.declaration is None or decision.rule is None:
+            continue
+        if decision.rule.declaration != decision.declaration:
+            raise ValueError("suppression decision rule/declaration mismatch")
+        if decision.declaration not in declarations_by_reference:
+            raise ValueError(
+                "suppression decision names an unresolved declaration: "
+                f"{decision.declaration}"
+            )
+        decisions_by_reference.setdefault(decision.declaration, []).append(decision)
+    suppression_ids = {
+        f"suppression::{reference}" for reference in decisions_by_reference
+    }
+    known_ids = ordinary_ids | suppression_ids
     unknown_skips = skipped_obligation_ids - known_ids
     if unknown_skips:
         rendered = ", ".join(sorted(unknown_skips))
         raise ValueError(f"skipped obligation IDs are not addressable: {rendered}")
-    unknown_counts = set(candidate_counts) - known_ids
+    suppression_skips = skipped_obligation_ids & suppression_ids
+    if suppression_skips:
+        rendered = ", ".join(sorted(suppression_skips))
+        raise ValueError(f"suppression obligations cannot be skipped: {rendered}")
+    unknown_counts = set(candidate_counts) - ordinary_ids
     if unknown_counts:
         rendered = ", ".join(sorted(unknown_counts))
         raise ValueError(f"candidate counts name unknown obligations: {rendered}")
@@ -1027,6 +1120,7 @@ def build_obligation_inventory(
                 profile=profile,
                 required_roles=section_required_roles,
                 section_meta=section_meta,
+                meta_spec_globs=meta_spec_globs,
                 skipped=obligation_id in skipped_obligation_ids,
                 candidate_counts=candidate_counts.get(obligation_id, CandidateCounts()),
                 end_line=end_line,
@@ -1050,11 +1144,49 @@ def build_obligation_inventory(
                 sections=section_index,
                 profile=profile,
                 section_meta=section_meta,
+                meta_spec_globs=meta_spec_globs,
                 skipped=skipped,
                 atomic_targets=atomic_invariant_targets,
                 atomic_code_invariant_ids=atomic_code_invariant_ids,
                 candidate_counts=candidate_counts.get(obligation_id, CandidateCounts()),
                 end_line=end_line,
+            )
+        )
+
+    for reference, decisions in decisions_by_reference.items():
+        suppression_declaration = declarations_by_reference[reference]
+        rules_by_bytes = {
+            canonical_json_bytes(suppression_rule_row(decision.rule)): decision.rule
+            for decision in decisions
+            if decision.rule is not None
+        }
+        rules = tuple(rules_by_bytes[key] for key in sorted(rules_by_bytes))
+        records.append(
+            ObligationRecord(
+                obligation_id=f"suppression::{reference}",
+                kind="suppression",
+                path=suppression_declaration.path,
+                start_line=suppression_declaration.start_line,
+                end_line=suppression_declaration.end_line,
+                title=suppression_declaration.owner_title,
+                intent_state="identified",
+                alignment_state="complete",
+                disposition="evaluate",
+                obligation_rung="active",
+                gate_state="executable",
+                required_roles=(),
+                evidence_counts=EvidenceCounts(),
+                candidate_counts=CandidateCounts(),
+                blocking_reasons=(),
+                next_actions=(
+                    "RUN_DETERMINISTIC_CHECK",
+                    "RUN_CURRENT_ANALYSIS",
+                ),
+                suppression=SuppressionObligationDetail(
+                    declaration=suppression_declaration,
+                    rules=rules,
+                    matched_issue_count=len(decisions),
+                ),
             )
         )
 

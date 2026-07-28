@@ -17,13 +17,12 @@ import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from backstitch.models import Issue, Report
+from backstitch.models import Issue, Report, SuppressionDecision
 
 if TYPE_CHECKING:
     from backstitch.check_pipeline import ObligationSkipAudit
 
-SuppressedRecord = tuple[Issue, str]
-"""One suppressed finding plus its reason ([EXC-7])."""
+SuppressedRecord = SuppressionDecision
 
 _SEVERITY_ORDER = ("error", "warning", "info")
 _GROUP_TITLES = {"error": "errors", "warning": "warnings", "info": "infos"}
@@ -81,10 +80,15 @@ def render_text(
     if suppressed is not None and suppressed:
         lines.append("")
         lines.append(f"suppressed ({len(suppressed)}):")
-        lines.extend(
-            f"{_issue_line(issue)} [suppressed: {reason}]"
-            for issue, reason in suppressed
-        )
+        for decision in suppressed:
+            details = f"suppressed: {decision.reason}"
+            if decision.declaration is not None:
+                details += f"; declaration: {decision.declaration}"
+            if decision.rationale is not None:
+                details += "; rationale: " + json.dumps(
+                    decision.rationale, ensure_ascii=True
+                )
+            lines.append(f"{_issue_line(decision.issue)} [{details}]")
     if obligation_skips is not None and obligation_skips:
         lines.append("")
         lines.append(f"obligation skips ({len(obligation_skips)}):")
@@ -110,8 +114,13 @@ def render_json(
     payload = report.to_dict()
     if suppressed is not None:
         payload["suppressed_issues"] = [
-            {**dataclasses.asdict(issue), "reason": reason}
-            for issue, reason in suppressed
+            {
+                **dataclasses.asdict(decision.issue),
+                "reason": decision.reason,
+                "declaration": decision.declaration,
+                "rationale": decision.rationale,
+            }
+            for decision in suppressed
         ]
     if obligation_skips is not None:
         payload["obligation_skips"] = [

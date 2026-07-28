@@ -757,6 +757,7 @@ def _phase_a_initial_state(
         section_meta=frozenset(
             key for key, enabled in pipeline.artifacts.section_meta.items() if enabled
         ),
+        meta_spec_globs=pipeline.effective_meta_spec_globs,
         skipped_obligation_ids=frozenset(
             item.obligation_id for item in pipeline.artifacts.obligation_skips
         ),
@@ -829,6 +830,7 @@ def _production_fixture_view(
         section_meta=frozenset(
             key for key, enabled in pipeline.artifacts.section_meta.items() if enabled
         ),
+        meta_spec_globs=pipeline.effective_meta_spec_globs,
         skipped_obligation_ids=frozenset(
             item.obligation_id for item in pipeline.artifacts.obligation_skips
         ),
@@ -913,6 +915,7 @@ def _source_bound_candidate_catalog(
         section_meta=frozenset(
             key for key, enabled in pipeline.artifacts.section_meta.items() if enabled
         ),
+        meta_spec_globs=pipeline.effective_meta_spec_globs,
         skipped_obligation_ids=frozenset(
             item.obligation_id for item in pipeline.artifacts.obligation_skips
         ),

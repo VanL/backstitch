@@ -87,6 +87,51 @@ def test_config_show_includes_packaged_defaults_and_resolved_policy(
     assert data["profile_overrides"]["test_roots"] == []
 
 
+def test_config_show_projects_documented_suppression_settings(tmp_path: Path) -> None:
+    config = tmp_path / "arbitrary.toml"
+    config.write_text(
+        """
+[lint]
+require_suppression_declarations = true
+
+[[lint.suppressions]]
+mechanism = "meta"
+path = "docs/specs/01-process.md"
+sections = []
+codes = []
+declaration = "docs/specs/04-exclusions.md#SUP-PROCESS"
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "config",
+        "show",
+        "--repo-root",
+        str(tmp_path),
+        "--config",
+        str(config),
+    )
+
+    assert result.returncode == 0, result.stderr
+    lint = json.loads(result.stdout)["lint"]
+    assert lint["require_suppression_declarations"] is True
+    assert lint["suppressions"] == [
+        {
+            "mechanism": "meta",
+            "path": "docs/specs/01-process.md",
+            "sections": [],
+            "codes": [],
+            "declaration": "docs/specs/04-exclusions.md#SUP-PROCESS",
+            "origin": {
+                "source": str(config.resolve()),
+                "position": 0,
+                "line": None,
+            },
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     ("arguments", "expected"),
     (

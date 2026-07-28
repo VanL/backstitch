@@ -13,14 +13,14 @@ import pytest
 
 import backstitch.obligation_runtime as obligation_runtime
 from backstitch.config import ProfileConfig
-from backstitch.models import Issue
+from backstitch.models import Issue, SuppressionOrigin, SuppressionRule
 from backstitch.obligation_runtime import (
     build_obligation_runtime,
     capture_obligation_snapshot,
     unaddressable_issue_excerpts,
 )
 from backstitch.repository_snapshot import SnapshotCaptureError
-from backstitch.settings import BackstitchSettings, resolve_config
+from backstitch.settings import BackstitchSettings, LintSettings, resolve_config
 
 
 def _profile() -> ProfileConfig:
@@ -72,6 +72,53 @@ def test_runtime_owns_snapshot_pipeline_inventory_summary_and_discovery(
     assert runtime.evidence_summary(obligation) == declared
     assert runtime.discover_candidates(obligation) == discovered
     assert any(item.candidate_id for item in discovered)
+
+
+def test_validated_structured_meta_rule_sets_the_shared_obligation_rung(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "docs/specs").mkdir(parents=True)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "tests").mkdir()
+    spec_path = "docs/specs/01-core.md"
+    (tmp_path / spec_path).write_text(
+        "## Candidate behavior [CAND-1]\n\n"
+        '_Traceability: suppression-declaration [SUP-META] "Process contract."_\n\n'
+        "_Implementation mapping_:\n\n"
+        "- `pkg/candidate.py::candidate`\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pkg/candidate.py").write_text(
+        "def candidate() -> int:\n"
+        '    """Spec: docs/specs/01-core.md [CAND-1]"""\n'
+        "    return 1\n",
+        encoding="utf-8",
+    )
+    settings = BackstitchSettings(
+        lint=LintSettings(
+            suppressions=(
+                SuppressionRule(
+                    mechanism="meta",
+                    provenance="meta",
+                    path=spec_path,
+                    sections=(),
+                    codes=(),
+                    declaration=f"{spec_path}#SUP-META",
+                    origin=SuppressionOrigin(
+                        source="/trusted/config.toml", position=0
+                    ),
+                ),
+            )
+        )
+    )
+
+    runtime = build_obligation_runtime(tmp_path, _profile(), settings)
+
+    obligation = runtime.inventory.get(f"{spec_path}#CAND-1")
+    assert obligation is not None
+    assert runtime.pipeline.effective_meta_spec_globs == (spec_path,)
+    assert obligation.obligation_rung == "meta"
+    assert obligation.gate_state == "not_executable"
 
 
 def test_capture_converges_declared_target_outside_code_roots(tmp_path: Path) -> None:

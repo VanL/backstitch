@@ -10,7 +10,6 @@ import sys
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -28,26 +27,22 @@ from backstitch.models import (
     SourceObligationSkip,
     SpecMapping,
     SpecSection,
+    SuppressionOrigin,
+    SuppressionRule,
     issue_sort_key,
 )
 from backstitch.obligation_runtime import build_obligation_runtime
 from backstitch.profiles import get_profile
-from backstitch.semantic_analysis import (
-    SemanticAnalysisRequest,
-    _packet_report_preflight,
-)
 from backstitch.semantic_evidence import SemanticResultError, normalize_model_result
-from backstitch.semantic_identity import (
-    ProviderIdentity,
-    RequestIdentity,
-    build_inference_identity,
-)
 from backstitch.semantic_packets import (
     canonical_json_bytes,
+    model_request_bytes,
+    prompt_descriptor,
     semantic_packet_hash,
     semantic_packet_projection,
 )
 from backstitch.semantic_reports import (
+    PacketReport,
     PacketReportError,
     build_source_packet_report,
     validate_packet_report,
@@ -56,19 +51,6 @@ from backstitch.settings import BackstitchSettings
 
 FIXTURES = Path(__file__).parent / "fixtures"
 BROKEN = FIXTURES / "traceability_project"
-_PREFLIGHT_PROVIDER = ProviderIdentity(
-    "controlled",
-    "backstitch-tests",
-    "controlled-adapter",
-    "1",
-    "backstitch.controlled",
-    1,
-    "controlled",
-    "controlled",
-    "controlled",
-)
-_PREFLIGHT_REQUEST = RequestIdentity("require", 0.0, 0, 512)
-
 BROKEN_PROFILE = get_profile("backstitch-style-v1").with_overrides(
     spec_roots=("docs/specifications",),
     code_roots=("src", "tests"),
@@ -167,42 +149,19 @@ def test_compile_source_aligned_packet_uses_runtime_authority_and_v3_shape(
         created_at="2026-07-16T12:00:00Z",
     )
     report_row = report.to_dict()
-    assert report_row["schema_version"] == 2
-    assert report_row["packet_schema_version"] == 3
+    assert report_row["schema_version"] == 3
+    assert report_row["packet_schema_versions"] == [3]
+    assert report_row["derivation_contract"]["packet_contract_versions"] == [3]
+    assert report_row["kind_counts"] == {
+        "eligible": {"section": 1, "invariant": 0, "suppression": 0},
+        "emitted": {"section": 1, "invariant": 0, "suppression": 0},
+    }
     assert report_row["scope"] == "source_snapshot"
     assert report_row["packet_count"] == 1
     assert report_row["packet_bytes"] == len(packet_jsonl)
     assert report_row["readiness_counts"]["selected"] == 1
     assert report_row["alignment_audit"][0]["obligation_id"] == packet["packet_id"]
     validate_packet_report(report, packet_jsonl=packet_jsonl, packets=loaded)
-    preflight_problems, preflight_report = _packet_report_preflight(
-        cast(
-            SemanticAnalysisRequest,
-            SimpleNamespace(
-                packets=loaded,
-                packet_jsonl_sha256=hashlib.sha256(packet_jsonl).hexdigest(),
-                packet_report=report,
-                settings=SimpleNamespace(
-                    require_complete=True,
-                    required_kinds=("section",),
-                    minimum_packets=1,
-                    maximum_packets=0,
-                    maximum_prompt_bytes=1_000_000,
-                ),
-            ),
-        ),
-        tuple(item.to_dict() for item in loaded),
-        tuple(
-            build_inference_identity(
-                item.to_dict(),
-                _PREFLIGHT_PROVIDER,
-                _PREFLIGHT_REQUEST,
-            )
-            for item in loaded
-        ),
-    )
-    assert preflight_problems == []
-    assert preflight_report == report
 
     forged = deepcopy(packet)
     forged["readiness"]["disposition"] = "skipped"
@@ -335,6 +294,134 @@ def test_compile_source_aligned_packet_uses_runtime_authority_and_v3_shape(
     frozen = render_packets_jsonl(packets)
     source.write_text("raise RuntimeError('after capture')\n", encoding="utf-8")
     assert render_packets_jsonl(generate_source_aligned_packets(runtime)) == frozen
+
+
+def test_used_declaration_emits_complete_schema4_suppression_packet(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "docs/specs").mkdir(parents=True)
+    (tmp_path / "pkg").mkdir()
+    spec = tmp_path / "docs/specs/01-core.md"
+    spec.write_text(
+        "_Implementation mapping_:\n\n"
+        "- `pkg/ownerless.py`\n\n"
+        "## Contract [SUPTEST-1]\n\n"
+        '_Traceability: suppression-declaration [SUP-1] "The ownerless example '
+        'is retained to exercise suppression governance."_ \n\n'
+        "_Implementation mapping_:\n\n"
+        "- `pkg/core.py::run`\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pkg/core.py").write_text(
+        'def run() -> int:\n    """Spec: docs/specs/01-core.md [SUPTEST-1]"""\n'
+        "    return 1\n",
+        encoding="utf-8",
+    )
+    rule = SuppressionRule(
+        mechanism="ignore",
+        provenance="config_file",
+        path="docs/specs/01-core.md",
+        sections=(),
+        codes=("MAPPING_BLOCK_OWNERLESS",),
+        declaration="docs/specs/01-core.md#SUP-1",
+        origin=SuppressionOrigin(source=".backstitch.toml", position=0),
+    )
+    settings = replace(
+        BackstitchSettings(),
+        lint=replace(BackstitchSettings().lint, suppressions=(rule,)),
+    )
+    profile = get_profile("backstitch-style-v1").with_overrides(
+        spec_roots=("docs/specs",),
+        plan_roots=(),
+        code_roots=("pkg",),
+        test_roots=(),
+    )
+
+    runtime = build_obligation_runtime(tmp_path, profile, settings)
+    packets = generate_source_aligned_packets(runtime)
+
+    obligation = runtime.inventory.get("suppression::docs/specs/01-core.md#SUP-1")
+    assert obligation is not None
+    assert obligation.kind == "suppression"
+    assert obligation.gate_state == "executable"
+    assert obligation.required_roles == ()
+    assert obligation.to_row()["matched_issue_count"] == 1
+    assert sorted(packet["schema_version"] for packet in packets) == [3, 4]
+    suppression = next(packet for packet in packets if packet["kind"] == "suppression")
+    assert suppression["packet_id"] == "suppression::docs/specs/01-core.md#SUP-1"
+    assert suppression["requirement"]["text"] == (
+        "The ownerless example is retained to exercise suppression governance."
+    )
+    assert suppression["suppression_rules"] == [
+        {
+            "mechanism": "ignore",
+            "provenance": "config_file",
+            "path": "docs/specs/01-core.md",
+            "sections": [],
+            "codes": ["MAPPING_BLOCK_OWNERLESS"],
+            "declaration": "docs/specs/01-core.md#SUP-1",
+            "origin": {
+                "source": ".backstitch.toml",
+                "position": 0,
+                "line": None,
+            },
+        }
+    ]
+    assert [issue["code"] for issue in suppression["issues"]] == [
+        "MAPPING_BLOCK_OWNERLESS"
+    ]
+    assert suppression["counterevidence"][0]["issue_indexes"] == [0]
+    assert suppression["packet_hash"] == semantic_packet_hash(suppression)
+    assert semantic_packet_projection(suppression)["packet_contract_version"] == 4
+    request = model_request_bytes(suppression)
+    assert b"Do not activate" in request
+    assert prompt_descriptor("suppression").id == "backstitch.suppression-analysis"
+    loaded = load_packets_bytes(render_packets_jsonl(packets).encode("utf-8"))
+    assert [packet.semantic_eligible for packet in loaded] == [True, True]
+
+    forged = deepcopy(suppression)
+    forged["suppression_rules"] = []
+    forged["packet_hash"] = semantic_packet_hash(forged)
+    with pytest.raises(ValueError, match="suppression_rules must be nonempty"):
+        load_packets_bytes(render_packets_jsonl([forged]).encode("utf-8"))
+
+    forged = deepcopy(suppression)
+    forged["counterevidence"][0]["issue_indexes"] = [1]
+    forged["packet_hash"] = semantic_packet_hash(forged)
+    with pytest.raises(ValueError, match="invalid counterevidence"):
+        load_packets_bytes(render_packets_jsonl([forged]).encode("utf-8"))
+
+    forged = deepcopy(suppression)
+    forged["suppression_rules"][0]["origin"]["line"] = 1
+    forged["packet_hash"] = semantic_packet_hash(forged)
+    with pytest.raises(ValueError, match="invalid suppression origin"):
+        load_packets_bytes(render_packets_jsonl([forged]).encode("utf-8"))
+
+    forged = deepcopy(suppression)
+    forged["requirement"]["text"] = "A changed rationale."
+    with pytest.raises(ValueError, match="packet_hash does not recompute"):
+        load_packets_bytes(render_packets_jsonl([forged]).encode("utf-8"))
+
+    report = build_source_packet_report(
+        runtime,
+        packet_jsonl=render_packets_jsonl(packets).encode("utf-8"),
+        created_at="2026-07-28T12:00:00Z",
+    )
+    row = report.to_dict()
+    assert row["schema_version"] == 3
+    assert row["packet_schema_versions"] == [3, 4]
+    assert row["kind_counts"] == {
+        "eligible": {"section": 1, "invariant": 0, "suppression": 1},
+        "emitted": {"section": 1, "invariant": 0, "suppression": 1},
+    }
+    forged_report = deepcopy(row)
+    forged_report["packet_schema_versions"] = [4]
+    with pytest.raises(PacketReportError, match="packet_schema_versions"):
+        PacketReport.from_dict(forged_report)
+    forged_report = deepcopy(row)
+    forged_report["kind_counts"]["emitted"]["suppression"] = 0
+    with pytest.raises(PacketReportError, match="emitted kind counts"):
+        PacketReport.from_dict(forged_report)
 
 
 def test_source_aligned_packet_filters_and_orders_relevant_issues(

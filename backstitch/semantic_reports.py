@@ -23,12 +23,13 @@ from backstitch.artifact_contracts import ValidatedSemanticPacket, load_packets_
 from backstitch.canonical import canonical_json_bytes, lf_line_count, lf_split
 from backstitch.contract_validation import make_validators
 from backstitch.diagnostics import default_level_for, default_registry, short_code_for
+from backstitch.grammar import is_valid_suppression_reference
 from backstitch.models import ISSUE_CODES, issue_sort_key
 from backstitch.obligation_runtime import ALGORITHMS, ObligationRuntime
 from backstitch.semantic_identity import InferenceIdentity
 from backstitch.semantic_packets import model_request_bytes
 
-PacketReportKind = Literal["section", "invariant", "all"]
+PacketReportKind = Literal["section", "invariant", "suppression", "all"]
 
 _PACKET_REPORT_V1_FIELDS = frozenset(
     {
@@ -64,7 +65,30 @@ _PACKET_REPORT_V2_FIELDS = frozenset(
         "created_at",
     }
 )
+_PACKET_REPORT_V3_FIELDS = frozenset(
+    {
+        "schema_version",
+        "artifact",
+        "packet_schema_versions",
+        "scope",
+        "source_snapshot",
+        "derivation_contract",
+        "packet_jsonl_sha256",
+        "packet_count",
+        "packet_bytes",
+        "selection_status",
+        "readiness_counts",
+        "alignment_audit",
+        "deterministic_issues",
+        "kind_counts",
+        "packets",
+        "packet_report_content_sha256",
+        "tool_version",
+        "created_at",
+    }
+)
 _COUNT_FIELDS = frozenset({"section", "invariant"})
+_CURRENT_COUNT_FIELDS = frozenset({"section", "invariant", "suppression"})
 _PACKET_IDENTITY_FIELDS = frozenset({"packet_id", "packet_hash"})
 _ANALYSIS_REPORT_V1_FIELDS = frozenset(
     {
@@ -1208,7 +1232,7 @@ def _validate_analysis_alignment_projection(
         canonical_json_bytes(_packet_report_content_projection(synthetic))
     ).hexdigest()
     try:
-        _packet_report_v2_shape(synthetic)
+        _packet_report_source_shape(synthetic)
     except PacketReportError as exc:
         raise AnalysisReportError(
             f"analysis alignment projection is invalid: {exc}"
@@ -2073,6 +2097,27 @@ def _validate_packet_report_v1_shape(value: Mapping[str, Any]) -> dict[str, Any]
 
 
 def _packet_report_content_projection(value: Mapping[str, Any]) -> dict[str, Any]:
+    if value.get("schema_version") == 3:
+        return {
+            field: value[field]
+            for field in (
+                "schema_version",
+                "artifact",
+                "packet_schema_versions",
+                "scope",
+                "source_snapshot",
+                "derivation_contract",
+                "packet_jsonl_sha256",
+                "packet_count",
+                "packet_bytes",
+                "selection_status",
+                "readiness_counts",
+                "alignment_audit",
+                "deterministic_issues",
+                "kind_counts",
+                "packets",
+            )
+        }
     return {
         field: value[field]
         for field in (
@@ -2165,20 +2210,28 @@ def _packet_report_issue_error(
     return None
 
 
-def _packet_report_v2_shape(value: Mapping[str, Any]) -> dict[str, Any]:
-    if set(value) != _PACKET_REPORT_V2_FIELDS:
+def _packet_report_source_shape(value: Mapping[str, Any]) -> dict[str, Any]:
+    schema_version = value.get("schema_version")
+    current = schema_version == 3
+    expected_fields = _PACKET_REPORT_V3_FIELDS if current else _PACKET_REPORT_V2_FIELDS
+    if set(value) != expected_fields:
         raise PacketReportError(
-            "packet report schema 2 does not match its closed shape"
+            f"packet report schema {schema_version} does not match its closed shape"
         )
     if (
-        value.get("schema_version") != 2
+        schema_version not in {2, 3}
         or value.get("artifact") != "backstitch-packet-report"
     ):
-        raise PacketReportError("packet report schema 2 identity is invalid")
-    if (
-        value.get("packet_schema_version") != 3
-        or value.get("scope") != "source_snapshot"
-    ):
+        raise PacketReportError("packet report source identity is invalid")
+    if value.get("scope") != "source_snapshot":
+        raise PacketReportError("packet report schema/scope is invalid")
+    if current:
+        packet_versions = value.get("packet_schema_versions")
+        if packet_versions not in ([3], [3, 4]):
+            raise PacketReportError(
+                "packet_schema_versions must be exactly [3] or [3, 4]"
+            )
+    elif value.get("packet_schema_version") != 3:
         raise PacketReportError("packet report schema/scope is invalid")
     source = value.get("source_snapshot")
     if not isinstance(source, dict) or set(source) != {
@@ -2192,10 +2245,13 @@ def _packet_report_v2_shape(value: Mapping[str, Any]) -> dict[str, Any]:
     for field in ("file_count", "byte_count", "unreadable_count"):
         _nonnegative_int(source[field], f"source_snapshot.{field}")
     derivation = value.get("derivation_contract")
+    contract_version_field = (
+        "packet_contract_versions" if current else "packet_contract_version"
+    )
     if not isinstance(derivation, dict) or set(derivation) != {
         "obligation_algorithm_version",
         "discovery_algorithm_version",
-        "packet_contract_version",
+        contract_version_field,
         "normalization_version",
         "semantic_config_sha256",
     }:
@@ -2203,7 +2259,6 @@ def _packet_report_v2_shape(value: Mapping[str, Any]) -> dict[str, Any]:
     for field in (
         "obligation_algorithm_version",
         "discovery_algorithm_version",
-        "packet_contract_version",
         "normalization_version",
     ):
         if (
@@ -2212,6 +2267,19 @@ def _packet_report_v2_shape(value: Mapping[str, Any]) -> dict[str, Any]:
             or derivation[field] < 1
         ):
             raise PacketReportError(f"derivation_contract.{field} must be positive")
+    if current:
+        if derivation[contract_version_field] != packet_versions:
+            raise PacketReportError(
+                "derivation packet contract versions do not match row versions"
+            )
+    elif (
+        isinstance(derivation[contract_version_field], bool)
+        or not isinstance(derivation[contract_version_field], int)
+        or derivation[contract_version_field] < 1
+    ):
+        raise PacketReportError(
+            "derivation_contract.packet_contract_version must be positive"
+        )
     _packet_report_digest(
         derivation["semantic_config_sha256"],
         "derivation_contract.semantic_config_sha256",
@@ -2281,7 +2349,12 @@ def _packet_report_v2_shape(value: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(item, dict) or set(item) != audit_fields:
             raise PacketReportError(f"alignment_audit[{index}] is invalid")
         if (
-            item["kind"] not in {"section", "invariant"}
+            item["kind"]
+            not in (
+                {"section", "invariant", "suppression"}
+                if current
+                else {"section", "invariant"}
+            )
             or not _packet_report_nonblank(
                 item["obligation_id"], f"alignment_audit[{index}].obligation_id"
             )
@@ -2343,10 +2416,22 @@ def _packet_report_v2_shape(value: Mapping[str, Any]) -> dict[str, Any]:
                 raise PacketReportError(
                     f"alignment_audit[{index}] section identity is inconsistent"
                 )
-        elif not item["obligation_id"].startswith("invariant::"):
+        elif item["kind"] == "invariant" and not item["obligation_id"].startswith(
+            "invariant::"
+        ):
             raise PacketReportError(
                 f"alignment_audit[{index}] invariant identity is inconsistent"
             )
+        elif item["kind"] == "suppression":
+            reference = item["obligation_id"].removeprefix("suppression::")
+            if (
+                item["obligation_id"] != f"suppression::{reference}"
+                or not is_valid_suppression_reference(reference)
+                or reference.rpartition("#")[0] != item["path"]
+            ):
+                raise PacketReportError(
+                    f"alignment_audit[{index}] suppression identity is inconsistent"
+                )
         audit_order.append((item["path"], item["start_line"], item["obligation_id"]))
     if audit_order != sorted(audit_order) or len(audit_order) != len(set(audit_order)):
         raise PacketReportError("packet report alignment_audit is not ordered unique")
@@ -2427,6 +2512,45 @@ def _packet_report_v2_shape(value: Mapping[str, Any]) -> dict[str, Any]:
         raise PacketReportError(
             "packet report packet IDs do not match selected alignment audit rows"
         )
+    if current:
+        kind_counts = value.get("kind_counts")
+        if not isinstance(kind_counts, dict) or set(kind_counts) != {
+            "eligible",
+            "emitted",
+        }:
+            raise PacketReportError("packet report kind_counts are invalid")
+        normalized_kind_counts: dict[str, dict[str, int]] = {}
+        for population in ("eligible", "emitted"):
+            counts_value = kind_counts[population]
+            if (
+                not isinstance(counts_value, dict)
+                or set(counts_value) != _CURRENT_COUNT_FIELDS
+            ):
+                raise PacketReportError(
+                    f"kind_counts.{population} must contain all packet kinds"
+                )
+            normalized_kind_counts[population] = {
+                packet_kind: _nonnegative_int(
+                    counts_value[packet_kind],
+                    f"kind_counts.{population}.{packet_kind}",
+                )
+                for packet_kind in ("section", "invariant", "suppression")
+            }
+        expected_kind_counts = {
+            packet_kind: sum(
+                item["kind"] == packet_kind and _audit_bucket(item) == "selected"
+                for item in audit
+            )
+            for packet_kind in ("section", "invariant", "suppression")
+        }
+        if normalized_kind_counts["eligible"] != expected_kind_counts:
+            raise PacketReportError(
+                "packet report eligible kind counts do not recompute"
+            )
+        if normalized_kind_counts["emitted"] != expected_kind_counts:
+            raise PacketReportError(
+                "packet report emitted kind counts do not recompute"
+            )
     expected_content_hash = hashlib.sha256(
         canonical_json_bytes(_packet_report_content_projection(value))
     ).hexdigest()
@@ -2446,8 +2570,8 @@ def _packet_report_v2_shape(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _validate_packet_report_shape(value: Mapping[str, Any]) -> dict[str, Any]:
-    if value.get("schema_version") == 2:
-        return _packet_report_v2_shape(value)
+    if value.get("schema_version") in {2, 3}:
+        return _packet_report_source_shape(value)
     return _validate_packet_report_v1_shape(value)
 
 
@@ -2526,7 +2650,7 @@ def build_source_packet_report(
     packet_jsonl: bytes,
     created_at: str | None = None,
 ) -> PacketReport:
-    """Build the complete schema-2 current source packet report."""
+    """Build the complete schema-3 current source packet report."""
 
     if not isinstance(packet_jsonl, bytes):
         raise PacketReportError("packet_jsonl must be exact bytes")
@@ -2553,8 +2677,15 @@ def build_source_packet_report(
         )
     packets = load_packets_bytes(packet_jsonl, source="generated packet JSONL")
     if any(not packet.semantic_eligible for packet in packets):
-        raise PacketReportError("current packet report requires packet schema 3")
+        raise PacketReportError("current packet report requires packet schema 3 or 4")
     packet_rows = tuple(packet.to_dict() for packet in packets)
+    packet_schema_versions = sorted(
+        {cast(int, row["schema_version"]) for row in packet_rows}
+    ) or [3]
+    if packet_schema_versions not in ([3], [3, 4]):
+        raise PacketReportError(
+            "current packet population must contain schema 3, optionally with schema 4"
+        )
     active = [
         item
         for item in runtime.inventory.obligations
@@ -2656,10 +2787,14 @@ def build_source_packet_report(
         "alignment_debt": 0,
         "blocked": 0,
     }
+    kind_counts = {
+        packet_kind: sum(item.kind == packet_kind for item in selected)
+        for packet_kind in ("section", "invariant", "suppression")
+    }
     value: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "artifact": "backstitch-packet-report",
-        "packet_schema_version": 3,
+        "packet_schema_versions": packet_schema_versions,
         "scope": "source_snapshot",
         "source_snapshot": {
             "snapshot_hash": runtime.snapshot.snapshot_hash,
@@ -2670,7 +2805,7 @@ def build_source_packet_report(
         "derivation_contract": {
             "obligation_algorithm_version": ALGORITHMS.obligation_algorithm_version,
             "discovery_algorithm_version": ALGORITHMS.discovery_algorithm_version,
-            "packet_contract_version": ALGORITHMS.packet_contract_version,
+            "packet_contract_versions": packet_schema_versions,
             "normalization_version": ALGORITHMS.normalization_version,
             "semantic_config_sha256": hashlib.sha256(
                 canonical_json_bytes(semantic_config)
@@ -2683,6 +2818,10 @@ def build_source_packet_report(
         "readiness_counts": readiness_counts,
         "alignment_audit": audit,
         "deterministic_issues": issue_rows,
+        "kind_counts": {
+            "eligible": kind_counts,
+            "emitted": dict(kind_counts),
+        },
         "packets": [
             {"packet_id": row["packet_id"], "packet_hash": row["packet_hash"]}
             for row in packet_rows
@@ -2719,7 +2858,7 @@ def validate_packet_report(
         report if isinstance(report, PacketReport) else PacketReport.from_dict(report)
     )
     value = validated.to_dict()
-    if value["schema_version"] == 2:
+    if value["schema_version"] in {2, 3}:
         packet_values = tuple(packets) if packets is not None else None
         if packet_jsonl is not None:
             if value["packet_jsonl_sha256"] != hashlib.sha256(packet_jsonl).hexdigest():
@@ -2742,7 +2881,19 @@ def validate_packet_report(
         if packet_values is not None:
             packet_rows = tuple(packet.to_dict() for packet in packet_values)
             if any(not packet.semantic_eligible for packet in packet_values):
+                raise PacketReportError(
+                    "source packet report requires current semantic packets"
+                )
+            versions = sorted(
+                {cast(int, row["schema_version"]) for row in packet_rows}
+            ) or [3]
+            if value["schema_version"] == 2 and versions != [3]:
                 raise PacketReportError("schema-2 report requires schema-3 packets")
+            if (
+                value["schema_version"] == 3
+                and value["packet_schema_versions"] != versions
+            ):
+                raise PacketReportError("packet schema version population mismatch")
             expected_identities = [
                 {"packet_id": row["packet_id"], "packet_hash": row["packet_hash"]}
                 for row in packet_rows
@@ -2757,13 +2908,22 @@ def validate_packet_report(
                 for row in packet_rows
             ):
                 raise PacketReportError("packet snapshot claim mismatch")
-            derivation_hashes = {
-                row["source_snapshot"]["derivation_config_hash"] for row in packet_rows
-            }
-            if len(derivation_hashes) > 1:
+            derivation_hashes_by_version: dict[int, set[str]] = {}
+            for row in packet_rows:
+                derivation_hashes_by_version.setdefault(
+                    cast(int, row["schema_version"]), set()
+                ).add(row["source_snapshot"]["derivation_config_hash"])
+            if any(len(hashes) > 1 for hashes in derivation_hashes_by_version.values()):
                 raise PacketReportError(
                     "packet derivation configuration claims are inconsistent"
                 )
+            if value["schema_version"] == 3:
+                emitted = {
+                    packet_kind: sum(row["kind"] == packet_kind for row in packet_rows)
+                    for packet_kind in ("section", "invariant", "suppression")
+                }
+                if value["kind_counts"]["emitted"] != emitted:
+                    raise PacketReportError("packet emitted kind counts mismatch")
         return validated
     if packet_jsonl is not None:
         actual_digest = hashlib.sha256(packet_jsonl).hexdigest()

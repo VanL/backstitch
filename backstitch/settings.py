@@ -24,21 +24,29 @@ import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from fnmatch import fnmatch
-from pathlib import Path
-from typing import Any, Literal
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal, cast
 
 from backstitch.config import uncontained_test_root
 from backstitch.diagnostics import (
     DiagnosticConfigError,
     DiagnosticsSettings,
+    canonicalize_code,
     default_policy,
     default_registry,
+    is_ordinary_diagnostic_code,
     load_default_config_raw,
     parse_policy,
     policy_to_dict,
     resolved_policy_to_dict,
 )
-from backstitch.grammar import is_prefixed_sha256, is_sha256_hex
+from backstitch.grammar import (
+    SECTION_ID_RE,
+    is_prefixed_sha256,
+    is_sha256_hex,
+    is_valid_suppression_reference,
+)
+from backstitch.models import SuppressionOrigin, SuppressionRule
 
 DEFAULT_EXCLUDES: tuple[str, ...] = tuple(load_default_config_raw()["exclude"])
 PACKAGED_DEFAULTS_LAYER = "packaged:backstitch/defaults.toml"
@@ -87,8 +95,15 @@ _PROFILE_KEYS = frozenset(
     }
 )
 _LINT_KEYS = frozenset(
-    {"warn_unused_ignores", "per-file-ignores", "per-section-ignores"}
+    {
+        "warn_unused_ignores",
+        "require_suppression_declarations",
+        "per-file-ignores",
+        "per-section-ignores",
+        "suppressions",
+    }
 )
+_SUPPRESSION_KEYS = frozenset({"mechanism", "path", "sections", "codes", "declaration"})
 _CHECK_KEYS = frozenset({"format", "warnings_as_errors", "output"})
 _PACKETS_KEYS = frozenset({"output"})
 _ANALYZE_KEYS = frozenset(
@@ -227,6 +242,7 @@ _GENERIC_OPTION_LEAVES = frozenset(
         "extend_exclude",
         *{f"profile.{key}" for key in _PROFILE_KEYS},
         "lint.warn_unused_ignores",
+        "lint.require_suppression_declarations",
         *{f"check.{key}" for key in _CHECK_KEYS},
         *{f"analyze.{key}" for key in _ANALYZE_KEYS},
         "verify.enabled",
@@ -273,8 +289,10 @@ class ProfileSettings:
 @dataclass(frozen=True, slots=True)
 class LintSettings:
     warn_unused_ignores: bool = True
+    require_suppression_declarations: bool = False
     per_file_ignores: dict[str, tuple[str, ...]] = field(default_factory=dict)
     per_section_ignores: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    suppressions: tuple[SuppressionRule, ...] = ()
 
 
 class ConfigLoadError(ValueError):
@@ -598,6 +616,7 @@ def resolve_config(
         PolicyRuleOrigin(source=PACKAGED_DEFAULTS_LAYER, position=index)
         for index in range(len(packaged_rules))
     ]
+    suppression_rule_source = PACKAGED_DEFAULTS_LAYER
     config_layer_identities: list[ConfigLayerIdentity] = []
     explicit_analyze_keys: set[str] = set()
     analyze_model_source = "llm default model"
@@ -643,6 +662,9 @@ def resolve_config(
                     PolicyRuleOrigin(source=source, position=index)
                     for index in range(len(_raw_policy_rules(layer.body)))
                 )
+                lint_layer = layer.body.get("lint")
+                if isinstance(lint_layer, dict) and "suppressions" in lint_layer:
+                    suppression_rule_source = source
     environment_overlay = _environment_config_overlay(
         os.environ if environment is None else environment
     )
@@ -686,6 +708,7 @@ def resolve_config(
         config_layers=tuple(layers),
         config_layer_identities=tuple(config_layer_identities),
         policy_rule_origins=tuple(policy_origins),
+        suppression_rule_source=suppression_rule_source,
         analyze_model_source=analyze_model_source,
         explicit_analyze_keys=frozenset(explicit_analyze_keys),
         validate_unknown_keys=config_path is None,
@@ -850,6 +873,9 @@ def settings_to_json(settings: BackstitchSettings) -> str:
         "profile_overrides": asdict(settings.profile_overrides),
         "lint": {
             "warn_unused_ignores": settings.lint.warn_unused_ignores,
+            "require_suppression_declarations": (
+                settings.lint.require_suppression_declarations
+            ),
             "per_file_ignores": {
                 key: list(codes)
                 for key, codes in settings.lint.per_file_ignores.items()
@@ -858,6 +884,17 @@ def settings_to_json(settings: BackstitchSettings) -> str:
                 key: list(codes)
                 for key, codes in settings.lint.per_section_ignores.items()
             },
+            "suppressions": [
+                {
+                    "mechanism": rule.mechanism,
+                    "path": rule.path,
+                    "sections": list(rule.sections),
+                    "codes": list(rule.codes),
+                    "declaration": rule.declaration,
+                    "origin": asdict(rule.origin),
+                }
+                for rule in settings.lint.suppressions
+            ],
         },
         "check": asdict(settings.check),
         "packets": asdict(settings.packets),
@@ -1187,6 +1224,7 @@ def _parse_settings(
     config_layers: tuple[str, ...],
     config_layer_identities: tuple[ConfigLayerIdentity, ...],
     policy_rule_origins: tuple[PolicyRuleOrigin, ...],
+    suppression_rule_source: str,
     analyze_model_source: str,
     explicit_analyze_keys: frozenset[str],
     validate_unknown_keys: bool,
@@ -1281,7 +1319,11 @@ def _parse_settings(
         ),
     )
 
-    lint_settings = _parse_lint_settings(lint_table)
+    lint_settings = _parse_lint_settings(
+        lint_table,
+        suppression_rule_source=suppression_rule_source,
+        allow_unknown=allow_unknown,
+    )
 
     check_format = check_table.get("format")
     if check_format is not None and check_format not in {"text", "json"}:
@@ -2196,6 +2238,17 @@ def _unknown_key_messages(raw: dict[str, Any], config_path: Path) -> list[str]:
                                     disposition, _DISPOSITION_KEYS
                                 )
                             )
+                if key == "lint":
+                    suppressions = value.get("suppressions")
+                    if isinstance(suppressions, list):
+                        for index, suppression in enumerate(suppressions):
+                            messages.extend(
+                                "unknown config key "
+                                f"`lint.suppressions[{index}].{sub}` in {config_path}"
+                                for sub in _unused_table_keys(
+                                    suppression, _SUPPRESSION_KEYS
+                                )
+                            )
                 if key == "verify":
                     provider = value.get("provider")
                     if isinstance(provider, dict):
@@ -2257,11 +2310,19 @@ def _table_key_names(table_name: str) -> frozenset[str]:
     return frozenset()
 
 
-def _parse_lint_settings(lint_table: dict[str, Any]) -> LintSettings:
+def _parse_lint_settings(
+    lint_table: dict[str, Any],
+    *,
+    suppression_rule_source: str,
+    allow_unknown: bool,
+) -> LintSettings:
     warn_unused = lint_table.get("warn_unused_ignores", True)
     if not isinstance(warn_unused, bool):
         msg = "lint.warn_unused_ignores must be a boolean"
         raise ConfigLoadError(msg)
+    require_declarations = lint_table.get("require_suppression_declarations", False)
+    if not isinstance(require_declarations, bool):
+        raise ConfigLoadError("lint.require_suppression_declarations must be a boolean")
     per_file = _parse_ignore_table(
         lint_table.get("per-file-ignores"),
         "lint.per-file-ignores",
@@ -2272,9 +2333,108 @@ def _parse_lint_settings(lint_table: dict[str, Any]) -> LintSettings:
     )
     return LintSettings(
         warn_unused_ignores=warn_unused,
+        require_suppression_declarations=require_declarations,
         per_file_ignores=per_file,
         per_section_ignores=per_section,
+        suppressions=_parse_structured_suppressions(
+            lint_table.get("suppressions"),
+            source=suppression_rule_source,
+            allow_unknown=allow_unknown,
+        ),
     )
+
+
+def _parse_structured_suppressions(
+    value: Any,
+    *,
+    source: str,
+    allow_unknown: bool,
+) -> tuple[SuppressionRule, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ConfigLoadError("lint.suppressions must be an array of tables")
+    parsed: list[SuppressionRule] = []
+    for position, raw in enumerate(value):
+        label = f"lint.suppressions[{position}]"
+        if not isinstance(raw, dict):
+            raise ConfigLoadError(f"{label} must be a table")
+        missing = sorted(_SUPPRESSION_KEYS - set(raw))
+        extra = sorted(set(raw) - _SUPPRESSION_KEYS)
+        if missing:
+            raise ConfigLoadError(
+                f"{label} missing required keys: {', '.join(missing)}"
+            )
+        if extra and not allow_unknown:
+            raise ConfigLoadError(f"{label} has unknown keys: {', '.join(extra)}")
+        raw_mechanism = raw["mechanism"]
+        if not isinstance(raw_mechanism, str) or raw_mechanism not in {
+            "ignore",
+            "meta",
+        }:
+            raise ConfigLoadError(f"{label}.mechanism must be 'ignore' or 'meta'")
+        mechanism = cast(Literal["ignore", "meta"], raw_mechanism)
+        path = raw["path"]
+        if (
+            not isinstance(path, str)
+            or not path.strip()
+            or path.startswith("/")
+            or path.startswith("./")
+            or "\\" in path
+            or "//" in path
+            or any(char in path for char in "\x00\r\n\t")
+            or ".." in PurePosixPath(path).parts
+        ):
+            raise ConfigLoadError(
+                f"{label}.path must be one nonblank repo-relative POSIX glob"
+            )
+        sections = _require_str_list(raw["sections"], f"{label}.sections")
+        if len(sections) != len(set(sections)):
+            raise ConfigLoadError(f"{label}.sections must not contain duplicates")
+        invalid_sections = sorted(
+            section for section in sections if SECTION_ID_RE.fullmatch(section) is None
+        )
+        if invalid_sections:
+            raise ConfigLoadError(
+                f"{label}.sections contains invalid section IDs: "
+                + ", ".join(invalid_sections)
+            )
+        codes = _require_str_list(raw["codes"], f"{label}.codes")
+        canonical_codes = tuple(
+            canonicalize_code(code) if is_ordinary_diagnostic_code(code) else code
+            for code in codes
+        )
+        if len(canonical_codes) != len(set(canonical_codes)):
+            raise ConfigLoadError(
+                f"{label}.codes must not contain duplicate diagnostic identities"
+            )
+        declaration = raw["declaration"]
+        if not is_valid_suppression_reference(declaration):
+            raise ConfigLoadError(
+                f"{label}.declaration must be repo/relative/spec.md#SUP-ID"
+            )
+        if mechanism == "ignore" and not canonical_codes:
+            raise ConfigLoadError(f"{label} ignore rules require at least one code")
+        if mechanism == "meta" and (sections or canonical_codes):
+            raise ConfigLoadError(
+                f"{label} meta rules require sections = [] and codes = []"
+            )
+        parsed.append(
+            SuppressionRule(
+                mechanism=mechanism,
+                provenance=(
+                    "meta"
+                    if mechanism == "meta"
+                    else ("config_file" if not sections else "config_section")
+                ),
+                path=path,
+                sections=tuple(sorted(sections)),
+                codes=tuple(sorted(canonical_codes)),
+                declaration=declaration,
+                origin=SuppressionOrigin(source=source, position=position),
+            )
+        )
+    return tuple(parsed)
 
 
 def _parse_ignore_table(value: Any, field_name: str) -> dict[str, tuple[str, ...]]:

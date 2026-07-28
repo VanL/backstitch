@@ -49,6 +49,17 @@ def test_module_docstring_file_qualified_ref() -> None:
     assert ref.line == 3
 
 
+def test_prose_mention_of_noqa_does_not_hide_its_spec_reference() -> None:
+    parsed = parse_python_bytes(
+        b'"""For backstitch: noqa behavior, see docs/specs/04-x.md [EXC-5]."""\n',
+        "src/prose.py",
+    )
+
+    assert [(ref.spec_path, ref.section_ids) for ref in parsed.refs] == [
+        ("docs/specs/04-x.md", ("EXC-5",))
+    ]
+
+
 def test_class_docstring_bare_ref() -> None:
     owners = _refs_by_owner(RUNTIME)
     ref = owners["Runtime"][0]

@@ -21,17 +21,24 @@ from enum import StrEnum
 
 from backstitch.canonical import lf_split
 from backstitch.diagnostics import canonicalize_code, is_ordinary_diagnostic_code
-from backstitch.models import Issue, Severity
+from backstitch.grammar import is_valid_suppression_reference
+from backstitch.models import (
+    Issue,
+    Severity,
+    SuppressionDecision,
+    SuppressionDeclaration,
+    SuppressionOrigin,
+    SuppressionRule,
+)
 from backstitch.settings import LintSettings
 
 META_DEFAULT_SUPPRESSED: frozenset[str] = frozenset({"SPEC_SECTION_UNMAPPED"})
 
-TRACEABILITY_META_RE = re.compile(r"^_Traceability:\s*meta_?\s*$", re.IGNORECASE)
-TRACEABILITY_IGNORE_RE = re.compile(
-    r"^_Traceability:\s*ignore\s+(.+?)_?\s*$",
+TRACEABILITY_DIRECTIVE_RE = re.compile(
+    r"^_Traceability:\s*(?P<mechanism>meta|ignore)"
+    r"(?:\s+(?P<body>.*?))?(?P<close>_?)\s*$",
     re.IGNORECASE,
 )
-HTML_META_RE = re.compile(r"<!--\s*backstitch:\s*meta\s*-->", re.IGNORECASE)
 # A line that opens with the underscore marker sigil, or contains a
 # backstitch HTML comment ANYWHERE (HTML markers may trail headings), but
 # matches neither valid form.
@@ -41,8 +48,9 @@ MALFORMED_HTML_MARKER_RE = re.compile(r"<!--\s*backstitch:", re.IGNORECASE)
 # matches and is rejected as "ignore with no codes" rather than falling
 # through unrecognized (where a trailing heading marker would silently
 # delete the heading's section).
-HTML_IGNORE_RE = re.compile(
-    r"<!--\s*backstitch:\s*ignore\b[ \t]*(.*?)\s*-->",
+HTML_DIRECTIVE_RE = re.compile(
+    r"<!--\s*backstitch:\s*(?P<mechanism>meta|ignore)"
+    r"\b[ \t]*(?P<body>.*?)\s*-->",
     re.IGNORECASE,
 )
 RESERVED_SKIP_MARKER_RE = re.compile(
@@ -79,9 +87,17 @@ class SuppressionReason(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class SuppressedIssue:
-    issue: Issue
-    reason: SuppressionReason
+class ParsedSuppressionDirective:
+    mechanism: str
+    codes: frozenset[str]
+    declaration: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedNoqaDirective:
+    codes: frozenset[str]
+    declaration: str | None
+    line: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +153,11 @@ class SuppressionIndex:
     used_config_file_rules: set[str] = field(default_factory=set)
     used_config_section_rules: set[str] = field(default_factory=set)
     suppression_diagnostics: list[SuppressionDiagnostic] = field(default_factory=list)
+    rules: tuple[SuppressionRule, ...] = ()
+    declarations: dict[str, SuppressionDeclaration] = field(default_factory=dict)
+    used_rules: set[SuppressionRule] = field(default_factory=set)
+    referenced_declarations: set[str] = field(default_factory=set)
+    inline_code_span_rules: tuple[tuple[int, int, SuppressionRule], ...] = ()
 
     def record_config_usage(
         self, *, file_rule: str | None, section_rule: str | None
@@ -224,34 +245,119 @@ def parse_traceability_marker_line(
     path: str | None = None,
     line: int | None = None,
 ) -> tuple[bool, frozenset[str], list[SuppressionDiagnostic]]:
+    directive, diagnostics = parse_traceability_directive_line(
+        text,
+        allow_unknown=allow_unknown,
+        location=location,
+        path=path,
+        line=line,
+    )
+    if directive is None:
+        return False, frozenset(), diagnostics
+    return directive.mechanism == "meta", directive.codes, diagnostics
+
+
+def parse_traceability_directive_line(
+    text: str,
+    *,
+    allow_unknown: bool = False,
+    location: str = "inline marker",
+    path: str | None = None,
+    line: int | None = None,
+) -> tuple[ParsedSuppressionDirective | None, list[SuppressionDiagnostic]]:
+    """Parse one ordinary spec suppression, including an optional declaration."""
+
     stripped = text.strip()
     # [EVC-8.3.2] owns this reserved repository-source grammar.  It is
     # deliberately not an ordinary ignore/meta marker and malformed forms do
     # not take EXC's strict unknown-code path.  The Markdown parser emits its
     # dedicated warning diagnostics independently.
     if RESERVED_SKIP_MARKER_RE.search(stripped):
-        return False, frozenset(), []
-    if TRACEABILITY_META_RE.match(stripped):
-        return True, META_DEFAULT_SUPPRESSED, []
-    match = TRACEABILITY_IGNORE_RE.match(stripped)
-    if match:
-        return _parse_ignore_codes(
-            match.group(1),
+        return None, []
+    match = TRACEABILITY_DIRECTIVE_RE.match(stripped)
+    if match is None:
+        match = HTML_DIRECTIVE_RE.search(stripped)
+    if match is not None:
+        mechanism = match.group("mechanism").lower()
+        body = (match.group("body") or "").strip()
+        declaration: str | None = None
+        if re.search(r"\s+because\s+", body, re.IGNORECASE) and " because " not in body:
+            return None, [
+                _suppression_diagnostic(
+                    "SUPPRESSION_INVALID_SYNTAX",
+                    f"declaration delimiter must be lowercase ` because ` in {location}",
+                    path=path,
+                    line=line,
+                )
+            ]
+        if " because " in body:
+            if body.count(" because ") != 1:
+                return None, [
+                    _suppression_diagnostic(
+                        "SUPPRESSION_INVALID_SYNTAX",
+                        f"malformed declaration clause in {location}",
+                        path=path,
+                        line=line,
+                    )
+                ]
+            body, declaration = body.rsplit(" because ", 1)
+            body = body.strip()
+            declaration = declaration.strip()
+            if match.re is TRACEABILITY_DIRECTIVE_RE and not match.group("close"):
+                return None, [
+                    _suppression_diagnostic(
+                        "SUPPRESSION_INVALID_SYNTAX",
+                        (
+                            "underscore declaration form requires one closing `_` "
+                            f"in {location}"
+                        ),
+                        path=path,
+                        line=line,
+                    )
+                ]
+            if not is_valid_suppression_reference(declaration):
+                return None, [
+                    _suppression_diagnostic(
+                        "SUPPRESSION_INVALID_SYNTAX",
+                        f"invalid suppression declaration reference in {location}",
+                        path=path,
+                        line=line,
+                    )
+                ]
+        if mechanism == "meta":
+            if body:
+                return None, [
+                    _suppression_diagnostic(
+                        "SUPPRESSION_INVALID_SYNTAX",
+                        f"malformed meta marker in {location}",
+                        path=path,
+                        line=line,
+                    )
+                ]
+            return (
+                ParsedSuppressionDirective(
+                    mechanism="meta",
+                    codes=META_DEFAULT_SUPPRESSED,
+                    declaration=declaration,
+                ),
+                [],
+            )
+        _unused_meta, codes, diagnostics = _parse_ignore_codes(
+            body,
             allow_unknown=allow_unknown,
             location=location,
             path=path,
             line=line,
         )
-    if HTML_META_RE.search(stripped):
-        return True, META_DEFAULT_SUPPRESSED, []
-    match = HTML_IGNORE_RE.search(stripped)
-    if match:
-        return _parse_ignore_codes(
-            match.group(1),
-            allow_unknown=allow_unknown,
-            location=location,
-            path=path,
-            line=line,
+        if not codes:
+            return None, diagnostics
+        return (
+            ParsedSuppressionDirective(
+                mechanism="ignore",
+                codes=codes,
+                declaration=declaration,
+            ),
+            diagnostics,
         )
     # [EXC-4]: a line that STARTS like a marker but parses as neither form
     # (`_Traceability: ignore_` with no codes, `_Traceability: bogus_`) is
@@ -261,16 +367,12 @@ def parse_traceability_marker_line(
         message = f"malformed traceability marker in {location}: {stripped!r}"
         if not allow_unknown:
             raise UnknownSuppressionCodeError(message)
-        return (
-            False,
-            frozenset(),
-            [
-                _suppression_diagnostic(
-                    "SUPPRESSION_INVALID_SYNTAX", message, path=path, line=line
-                )
-            ],
-        )
-    return False, frozenset(), []
+        return None, [
+            _suppression_diagnostic(
+                "SUPPRESSION_INVALID_SYNTAX", message, path=path, line=line
+            )
+        ]
+    return None, []
 
 
 def parse_noqa_text(
@@ -290,7 +392,36 @@ def parse_noqa_text(
     stderr -- a discarded warning makes typo suppressions silent.
     """
 
-    codes: set[str] = set()
+    directives, diagnostics = parse_noqa_directives(
+        text,
+        allow_unknown=allow_unknown,
+        location=location,
+        path=path,
+        line=line,
+    )
+    return (
+        frozenset(code for directive in directives for code in directive.codes),
+        diagnostics,
+    )
+
+
+def is_noqa_directive_line(text: str) -> bool:
+    """Return whether one physical line has the anchored Python marker."""
+
+    return NOQA_LINE_RE.match(text.strip()) is not None
+
+
+def parse_noqa_directives(
+    text: str,
+    *,
+    allow_unknown: bool = False,
+    location: str = "inline noqa",
+    path: str | None = None,
+    line: int | None = None,
+) -> tuple[tuple[ParsedNoqaDirective, ...], list[SuppressionDiagnostic]]:
+    """Parse Python suppression directives without discarding provenance."""
+
+    directives: list[ParsedNoqaDirective] = []
     diagnostics: list[SuppressionDiagnostic] = []
     for offset, raw_line in enumerate(lf_split(text)):
         diagnostic_line = line + offset if line is not None else None
@@ -311,6 +442,41 @@ def parse_noqa_text(
                 )
             )
             continue
+        declaration: str | None = None
+        if re.search(r"\s+because\s+", rest, re.IGNORECASE) and " because " not in rest:
+            diagnostics.append(
+                _suppression_diagnostic(
+                    "SUPPRESSION_INVALID_SYNTAX",
+                    f"declaration delimiter must be lowercase ` because ` in {location}",
+                    path=path,
+                    line=diagnostic_line,
+                )
+            )
+            continue
+        if " because " in rest:
+            if rest.count(" because ") != 1:
+                diagnostics.append(
+                    _suppression_diagnostic(
+                        "SUPPRESSION_INVALID_SYNTAX",
+                        f"malformed declaration clause in {location}",
+                        path=path,
+                        line=diagnostic_line,
+                    )
+                )
+                continue
+            rest, declaration = rest.rsplit(" because ", 1)
+            rest = rest.strip()
+            declaration = declaration.strip()
+            if not is_valid_suppression_reference(declaration):
+                diagnostics.append(
+                    _suppression_diagnostic(
+                        "SUPPRESSION_INVALID_SYNTAX",
+                        f"invalid suppression declaration reference in {location}",
+                        path=path,
+                        line=diagnostic_line,
+                    )
+                )
+                continue
         tokens = [t for t in re.split(r"[,\s]+", rest) if t]
         bad = sorted({t for t in tokens if not CODE_TOKEN_RE.match(t)})
         if bad:
@@ -335,9 +501,16 @@ def parse_noqa_text(
             path=path,
             line=diagnostic_line,
         )
-        codes.update(parsed)
         diagnostics.extend(parse_diagnostics)
-    return frozenset(codes), diagnostics
+        if parsed:
+            directives.append(
+                ParsedNoqaDirective(
+                    codes=parsed,
+                    declaration=declaration,
+                    line=diagnostic_line,
+                )
+            )
+    return tuple(directives), diagnostics
 
 
 def _is_non_suppressible(
@@ -459,6 +632,30 @@ def should_suppress(
     code_file: str | None = None,
     suppressible_levels: tuple[Severity, ...] = ("warning", "info"),
 ) -> tuple[bool, SuppressionReason | None]:
+    decision = suppression_decision(
+        issue,
+        index,
+        spec_file=spec_file,
+        section_id=section_id,
+        code_file=code_file,
+        suppressible_levels=suppressible_levels,
+    )
+    if decision is None:
+        return False, None
+    return True, SuppressionReason(decision.reason)
+
+
+def suppression_decision(
+    issue: Issue,
+    index: SuppressionIndex,
+    *,
+    spec_file: str | None = None,
+    section_id: str | None = None,
+    code_file: str | None = None,
+    suppressible_levels: tuple[Severity, ...] = ("warning", "info"),
+) -> SuppressionDecision | None:
+    """Apply the one canonical ordered rule path and return its audit decision."""
+
     resolved_spec_file = spec_file or (
         issue.path if issue.path and issue.path.endswith(".md") else None
     )
@@ -466,80 +663,77 @@ def should_suppress(
     resolved_code_file = code_file or (
         issue.path if issue.path and issue.path.endswith(".py") else None
     )
-    file_rule, section_rule = _match_config_ignore_attempts(
-        issue,
-        index,
-        spec_file=resolved_spec_file,
-        section_id=resolved_section_id,
-        code_file=resolved_code_file,
-    )
-
-    if _is_non_suppressible(issue, suppressible_levels):
-        index.record_config_usage(file_rule=file_rule, section_rule=section_rule)
-        _warn_unsuppressible_code_attempt(
-            issue,
-            index,
-            file_rule=file_rule,
-            section_rule=section_rule,
+    decision: SuppressionDecision | None = None
+    span_rules = {
+        rule: (start, end) for start, end, rule in index.inline_code_span_rules
+    }
+    for rule in index.rules:
+        target_path = (
+            resolved_spec_file
+            if rule.provenance in {"meta", "inline_spec", "config_section"}
+            or rule.sections
+            else (resolved_code_file or resolved_spec_file or issue.path)
         )
-        return False, None
-
-    suppressed = False
-    reason: SuppressionReason | None = None
-
-    if _section_is_meta(resolved_spec_file, resolved_section_id, index):
-        if _meta_suppresses(issue, code_file=resolved_code_file):
-            suppressed = True
-            reason = SuppressionReason.META
-
-    if file_rule is not None:
-        suppressed = True
-        reason = SuppressionReason.CONFIG_FILE
-        index.record_config_usage(file_rule=file_rule, section_rule=None)
-
-    if section_rule is not None:
-        suppressed = True
-        reason = SuppressionReason.CONFIG_SECTION
-        index.record_config_usage(file_rule=None, section_rule=section_rule)
-
-    if resolved_spec_file and resolved_section_id:
-        section_codes = index.inline_spec_ignores.get(
-            (resolved_spec_file, resolved_section_id),
-            frozenset(),
-        )
-        if issue.code in section_codes:
-            suppressed = True
-            reason = SuppressionReason.INLINE_SPEC
-
-    if resolved_spec_file and (
-        resolved_section_id is None
-        or (resolved_spec_file, resolved_section_id) not in index.sections_with_markers
-    ):
-        # EXC-4.1: file-level markers apply "unless a section overrides
-        # it" -- a section with its own marker opts out of file-level
-        # inline ignores entirely.
-        file_codes = index.inline_file_ignores.get(resolved_spec_file, frozenset())
-        if issue.code in file_codes:
-            suppressed = True
-            reason = SuppressionReason.INLINE_SPEC
-
-    if resolved_code_file:
-        code_codes = index.inline_code_ignores.get(resolved_code_file, frozenset())
-        if issue.code in code_codes:
-            suppressed = True
-            reason = SuppressionReason.INLINE_CODE
-        # [EXC-5] comment form: statement-scoped -- the issue's line must
-        # fall inside the span the directive attached to.
-        if issue.line is not None:
-            for start, end, codes in index.inline_code_span_ignores.get(
-                resolved_code_file, ()
+        if target_path is None or not (
+            target_path == rule.path or _path_matches_glob(target_path, rule.path)
+        ):
+            continue
+        if rule.sections:
+            if resolved_section_id is None or not any(
+                section == "*" or section == resolved_section_id
+                for section in rule.sections
             ):
-                if start <= issue.line <= end and issue.code in codes:
-                    suppressed = True
-                    reason = SuppressionReason.INLINE_CODE
-                    break
-
-    return suppressed, reason
+                continue
+        if (
+            rule.provenance == "inline_spec"
+            and not rule.sections
+            and resolved_section_id is not None
+            and (resolved_spec_file, resolved_section_id) in index.sections_with_markers
+        ):
+            continue
+        if rule in span_rules:
+            start, end = span_rules[rule]
+            if issue.line is None or not start <= issue.line <= end:
+                continue
+        if rule.mechanism == "meta":
+            if resolved_spec_file is None or not _meta_suppresses(
+                issue,
+                code_file=resolved_code_file,
+            ):
+                continue
+        elif issue.code not in rule.codes:
+            continue
+        index.used_rules.add(rule)
+        if rule.origin.source == "lint.per-file-ignores":
+            index.used_config_file_rules.add(rule.path)
+        elif rule.origin.source == "lint.per-section-ignores":
+            index.used_config_section_rules.add(f"{rule.path}::{rule.sections[0]}")
+        if _is_non_suppressible(issue, suppressible_levels):
+            index.suppression_diagnostics.append(
+                _suppression_diagnostic(
+                    "SUPPRESSION_UNSUPPRESSIBLE_CODE",
+                    (
+                        f"suppression ignored for non-suppressible code {issue.code}"
+                        f" in {rule.origin.source}"
+                    ),
+                    path=rule.origin.source,
+                    line=rule.origin.line,
+                )
+            )
+            continue
+        declaration = (
+            index.declarations.get(rule.declaration)
+            if rule.declaration is not None
+            else None
+        )
+        decision = SuppressionDecision(
+            issue=issue,
+            reason=rule.provenance,
+            declaration=rule.declaration,
+            rationale=declaration.rationale if declaration is not None else None,
+            rule=rule,
+        )
+    return decision
 
 
 def build_suppression_index(
@@ -554,9 +748,163 @@ def build_suppression_index(
     | None = None,
     sections_with_markers: frozenset[tuple[str, str]] = frozenset(),
     marker_diagnostics: list[SuppressionDiagnostic] | None = None,
+    declarations: tuple[SuppressionDeclaration, ...] = (),
+    inline_spec_rules: tuple[SuppressionRule, ...] = (),
+    inline_code_rules: tuple[SuppressionRule, ...] = (),
+    inline_code_span_rules: tuple[tuple[int, int, SuppressionRule], ...] = (),
     allow_unknown: bool = False,
 ) -> SuppressionIndex:
     canonical_lint = _canonicalize_lint_settings(lint)
+    legacy_meta_rules = tuple(
+        SuppressionRule(
+            mechanism="meta",
+            provenance="meta",
+            path=pattern,
+            sections=(),
+            codes=(),
+            declaration=None,
+            origin=SuppressionOrigin(
+                source="profile.meta_spec_globs",
+                position=position,
+            ),
+        )
+        for position, pattern in enumerate(meta_spec_globs)
+    )
+    legacy_file_rules = tuple(
+        SuppressionRule(
+            mechanism="ignore",
+            provenance="config_file",
+            path=pattern,
+            sections=(),
+            codes=tuple(codes),
+            declaration=None,
+            origin=SuppressionOrigin(
+                source="lint.per-file-ignores",
+                position=position,
+            ),
+        )
+        for position, (pattern, codes) in enumerate(
+            canonical_lint.per_file_ignores.items()
+        )
+    )
+    legacy_section_rules = tuple(
+        SuppressionRule(
+            mechanism="ignore",
+            provenance="config_section",
+            path=pattern.split("::", 1)[0],
+            sections=(pattern.split("::", 1)[1],),
+            codes=tuple(codes),
+            declaration=None,
+            origin=SuppressionOrigin(
+                source="lint.per-section-ignores",
+                position=position,
+            ),
+        )
+        for position, (pattern, codes) in enumerate(
+            canonical_lint.per_section_ignores.items()
+        )
+        if "::" in pattern
+    )
+    structured_meta = tuple(
+        rule for rule in canonical_lint.suppressions if rule.mechanism == "meta"
+    )
+    structured_ignore = tuple(
+        rule for rule in canonical_lint.suppressions if rule.mechanism == "ignore"
+    )
+    legacy_inline_spec_rules = (
+        ()
+        if inline_spec_rules
+        else (
+            *(
+                SuppressionRule(
+                    mechanism="ignore",
+                    provenance="inline_spec",
+                    path=path,
+                    sections=(section_id,),
+                    codes=tuple(sorted(codes)),
+                    declaration=None,
+                    origin=SuppressionOrigin(source=path, line=1),
+                )
+                for (path, section_id), codes in sorted(
+                    (inline_spec_ignores or {}).items()
+                )
+            ),
+            *(
+                SuppressionRule(
+                    mechanism="ignore",
+                    provenance="inline_spec",
+                    path=path,
+                    sections=(),
+                    codes=tuple(sorted(codes)),
+                    declaration=None,
+                    origin=SuppressionOrigin(source=path, line=1),
+                )
+                for path, codes in sorted((inline_file_ignores or {}).items())
+            ),
+        )
+    )
+    legacy_inline_code_rules = (
+        ()
+        if inline_code_rules
+        else tuple(
+            SuppressionRule(
+                mechanism="ignore",
+                provenance="inline_code",
+                path=path,
+                sections=(),
+                codes=tuple(sorted(codes)),
+                declaration=None,
+                origin=SuppressionOrigin(source=path, line=1),
+            )
+            for path, codes in sorted((inline_code_ignores or {}).items())
+        )
+    )
+    candidate_rules = (
+        *legacy_meta_rules,
+        *structured_meta,
+        *legacy_file_rules,
+        *legacy_section_rules,
+        *structured_ignore,
+        *legacy_inline_spec_rules,
+        *legacy_inline_code_rules,
+        *inline_spec_rules,
+        *inline_code_rules,
+        *(rule for _start, _end, rule in inline_code_span_rules),
+    )
+    declarations_by_reference = {
+        declaration.reference: declaration for declaration in declarations
+    }
+    eligible_rules: list[SuppressionRule] = []
+    validation_diagnostics: list[SuppressionDiagnostic] = []
+    referenced_declarations: set[str] = set()
+    for rule in candidate_rules:
+        if rule.declaration is None:
+            if canonical_lint.require_suppression_declarations:
+                validation_diagnostics.append(
+                    _suppression_diagnostic(
+                        "SUPPRESSION_REASON_MISSING",
+                        "suppression requires a valid declaration reference",
+                        path=rule.origin.source,
+                        line=rule.origin.line,
+                    )
+                )
+                continue
+        else:
+            referenced_declarations.add(rule.declaration)
+            if rule.declaration not in declarations_by_reference:
+                validation_diagnostics.append(
+                    _suppression_diagnostic(
+                        "SUPPRESSION_REASON_MISSING",
+                        (
+                            "suppression declaration reference does not resolve: "
+                            f"{rule.declaration}"
+                        ),
+                        path=rule.origin.source,
+                        line=rule.origin.line,
+                    )
+                )
+                continue
+        eligible_rules.append(rule)
     index = SuppressionIndex(
         meta_spec_globs=meta_spec_globs,
         lint=canonical_lint,
@@ -566,9 +914,14 @@ def build_suppression_index(
         inline_code_ignores=dict(inline_code_ignores or {}),
         inline_code_span_ignores=dict(inline_code_span_ignores or {}),
         sections_with_markers=sections_with_markers,
+        rules=tuple(eligible_rules),
+        declarations=declarations_by_reference,
+        referenced_declarations=referenced_declarations,
+        inline_code_span_rules=inline_code_span_rules,
     )
     if marker_diagnostics:
         index.suppression_diagnostics.extend(marker_diagnostics)
+    index.suppression_diagnostics.extend(validation_diagnostics)
     _validate_config_codes(index, allow_unknown=allow_unknown)
     return index
 
@@ -579,24 +932,32 @@ def collect_unused_ignore_diagnostics(
     if not index.lint.warn_unused_ignores:
         return []
     diagnostics: list[SuppressionDiagnostic] = []
-    for pattern in index.lint.per_file_ignores:
-        if pattern not in index.used_config_file_rules:
+    for rule in index.rules:
+        audits_unused = rule.declaration is not None or rule.origin.source in {
+            "lint.per-file-ignores",
+            "lint.per-section-ignores",
+        }
+        if audits_unused and rule not in index.used_rules:
             diagnostics.append(
                 _suppression_diagnostic(
                     "SUPPRESSION_UNUSED",
-                    f"unused per-file-ignore: {pattern}",
-                    path=pattern,
-                    line=None,
+                    f"unused suppression rule: {rule.path}",
+                    path=(
+                        f"{rule.path}::{rule.sections[0]}"
+                        if rule.origin.source == "lint.per-section-ignores"
+                        else rule.path
+                    ),
+                    line=rule.origin.line,
                 )
             )
-    for pattern in index.lint.per_section_ignores:
-        if pattern not in index.used_config_section_rules:
+    for reference, declaration in index.declarations.items():
+        if reference not in index.referenced_declarations:
             diagnostics.append(
                 _suppression_diagnostic(
                     "SUPPRESSION_UNUSED",
-                    f"unused per-section-ignore: {pattern}",
-                    path=pattern,
-                    line=None,
+                    f"unreferenced suppression declaration: {reference}",
+                    path=declaration.path,
+                    line=declaration.start_line,
                 )
             )
     return diagnostics
@@ -635,6 +996,22 @@ def validate_lint_codes(
                             line=None,
                         )
                     )
+    for position, rule in enumerate(lint.suppressions):
+        for code in rule.codes:
+            if not is_ordinary_diagnostic_code(code):
+                message = (
+                    f"unknown issue code `{code}` in lint.suppressions[{position}]"
+                )
+                if not allow_unknown:
+                    raise UnknownSuppressionCodeError(message)
+                diagnostics.append(
+                    _suppression_diagnostic(
+                        "SUPPRESSION_UNKNOWN_CODE",
+                        message,
+                        path=rule.path,
+                        line=None,
+                    )
+                )
     return diagnostics
 
 
@@ -652,8 +1029,28 @@ def _canonicalize_lint_settings(lint: LintSettings) -> LintSettings:
 
     return LintSettings(
         warn_unused_ignores=lint.warn_unused_ignores,
+        require_suppression_declarations=lint.require_suppression_declarations,
         per_file_ignores=canonicalize_table(lint.per_file_ignores),
         per_section_ignores=canonicalize_table(lint.per_section_ignores),
+        suppressions=tuple(
+            SuppressionRule(
+                mechanism=rule.mechanism,
+                provenance=rule.provenance,
+                path=rule.path,
+                sections=tuple(sorted(rule.sections)),
+                codes=tuple(
+                    sorted(
+                        canonicalize_code(code)
+                        if is_ordinary_diagnostic_code(code)
+                        else code
+                        for code in rule.codes
+                    )
+                ),
+                declaration=rule.declaration,
+                origin=rule.origin,
+            )
+            for rule in lint.suppressions
+        ),
     )
 
 
