@@ -150,6 +150,8 @@ def test_benchmark_precheck_disables_ambient_xdist(
         encoding="utf-8",
     )
     environment = os.environ.copy()
+    environment.pop("PYTEST_XDIST_WORKER", None)
+    environment.pop("PYTEST_XDIST_WORKER_COUNT", None)
     environment["PYTEST_ADDOPTS"] = "-n auto"
 
     result = subprocess.run(

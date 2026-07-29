@@ -16,6 +16,7 @@ Related specs:
   [CFG-9]
 - `docs/specs/04-backstitch-traceability-exclusions.md` [EXC-4], [EXC-5],
   [EXC-6], [EXC-8], [EXC-9], [EXC-10]
+- `docs/specs/08-intent-coverage.md` [COV-3], [COV-8], [COV-9]
 
 ## 1. Purpose And Scope [INV-1]
 
@@ -447,10 +448,21 @@ byte image, and only the owner modules named in the closed allowed-owner
 table in `tests/test_canonical_owners.py` open repository files, proven by
 AST-level enumeration; no live-filesystem twin path exists in the package.
 
-Invariant: [INV.PERF.1] the advertised default `backstitch check` invocation
-performs zero static-syntax parses and at most one repository snapshot
-capture; `backstitch obligation list` parses each unique file at most once
-per invocation. Wall-clock budgets are non-normative and live only in marked
+Invariant: [INV.IDENTITY.1] coverage, check, obligation discovery, and semantic
+candidate discovery share one Python definition-identity owner and one
+accepted-snapshot path. A valid existing evidence-discovery module locator and
+candidate ID remains byte-identical when coverage is enabled; coverage may add
+only [COV-3]'s fallback module locator where discovery previously had no module
+candidate. No consumer reparses live source, invents a parallel qualifier, or
+reinterprets logical resolver edges as physical ordinals. One enumerating
+owner test and cross-surface identity fixtures enforce the shared boundary.
+
+Invariant: [INV.PERF.1] the advertised explicit `backstitch check`
+invocation, and bare `backstitch` when effective configuration selects
+`check`, perform zero static-syntax parses and at most one repository snapshot
+capture; bare dispatch also resolves file configuration exactly once.
+`backstitch obligation list` parses each unique file at most once per
+invocation. Wall-clock budgets are non-normative and live only in marked
 performance tests.
 
 Invariant: [INV.CFG.2] for every config key whose settings-dataclass default
@@ -458,6 +470,9 @@ is a concrete value, the packaged-default TOML value equals that dataclass
 default; keys whose dataclass default is None-means-packaged are exempt. On
 conflict the packaged TOML is canonical and the dataclass is corrected. A
 single enumerating test proves the equality.
+The normalized optional `default_command` setting is covered explicitly:
+packaged `false` normalizes to `None`, while repository `"check"` and
+`"analyze"` values normalize to the corresponding closed command literals.
 
 _Implementation mapping_:
 - `backstitch/canonical.py`
@@ -472,6 +487,10 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-07-28-intent-coverage-implementation-plan.md`
+  (active implementation plan; [INV.IDENTITY.1])
+- `docs/plans/2026-07-28-configured-default-command-plan.md`
+  (implemented and independently reviewed; uncommitted)
 - `docs/plans/2026-07-11-deterministic-semantic-gate-plan.md`
   (implementing)
 - `docs/plans/2026-07-15-agent-guided-evidence-cases-plan.md`

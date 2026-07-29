@@ -412,3 +412,110 @@ def test_repeated_definition_metadata_parsing_keeps_native_nodes_isolated() -> N
     gc.collect()
     assert parsed.doc_candidates[-1].text == "Doc 19."
     assert parsed.comment_nodes[-1].text == "Comment 19"
+
+
+def test_definition_source_projection_removes_only_direct_children() -> None:
+    source = (
+        b"@outer_decorator\n"
+        b"class Outer:\n"
+        b"    heading = 1\n"
+        b"\n"
+        b"    @child_decorator\n"
+        b"    def child(self):\n"
+        b"        return 1\n"
+        b"\n"
+        b"    trailing = 2\n"
+    )
+
+    parsed = parse_python_source(source)
+
+    outer, child = parsed.definitions
+    assert outer.source_projection == (
+        b"@outer_decorator\nclass Outer:\n    heading = 1\n\n\n    trailing = 2\n"
+    )
+    assert child.source_projection == (
+        b"    @child_decorator\n    def child(self):\n        return 1\n"
+    )
+    assert parsed.module_source_projection == b""
+
+
+def test_source_projection_keeps_blank_lines_outside_child_interval() -> None:
+    first = parse_python_source(
+        b"class Outer:\n"
+        b"    before = 1\n"
+        b"\n"
+        b"    def child(self):\n"
+        b"        return 1\n"
+        b"\n"
+        b"    after = 2\n"
+    )
+    second = parse_python_source(
+        b"class Outer:\n"
+        b"    before = 1\n"
+        b"\n"
+        b"    def child(self):\n"
+        b"        return 999\n"
+        b"\n"
+        b"    after = 2\n"
+    )
+
+    assert (
+        first.definitions[0].source_projection
+        == second.definitions[0].source_projection
+    )
+    assert (
+        first.definitions[1].source_projection
+        != second.definitions[1].source_projection
+    )
+
+
+def test_parser_emits_typed_no_spec_marker_candidates() -> None:
+    parsed = parse_python_source(
+        b'"""backstitch: no-spec -- generated module"""\n'
+        b"class Direct:  # backstitch: no-spec -- protocol shim\n"
+        b"    pass\n"
+        b"\n"
+        b"class Doc:\n"
+        b'    """Summary.\n'
+        b"    backstitch: no-spec -- data carrier\n"
+        b'    """\n'
+        b"    pass\n"
+        b"\n"
+        b"def missing():  # backstitch: no-spec\n"
+        b"    pass\n"
+        b"\n"
+        b"def malformed():  # backstitch: no-spec - wrong delimiter\n"
+        b"    pass\n"
+    )
+
+    assert [
+        (
+            item.owner_qualname,
+            item.origin,
+            item.line,
+            item.reason,
+            item.valid,
+        )
+        for item in parsed.no_spec_markers
+    ] == [
+        (None, "docstring", 1, "generated module", True),
+        ("Direct", "comment", 2, "protocol shim", True),
+        ("Doc", "docstring", 7, "data carrier", True),
+        ("missing", "comment", 11, None, False),
+        ("malformed", "comment", 14, None, False),
+    ]
+
+
+def test_no_spec_near_misses_and_string_mimicry_are_inert() -> None:
+    parsed = parse_python_source(
+        b'EXAMPLE = "backstitch: no-spec -- not a docstring"\n'
+        b"# backstitch: no-spec -- module comments are inert\n"
+        b"def spelling():  # backstitch: no-specification -- near miss\n"
+        b"    value = 1  # backstitch: no-spec -- wrong line\n"
+        b'    return "backstitch: no-spec -- string mimic"\n'
+        b"\n"
+        b"def casing():  # Backstitch: no-spec -- near miss\n"
+        b"    pass\n"
+    )
+
+    assert parsed.no_spec_markers == ()

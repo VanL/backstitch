@@ -19,7 +19,7 @@ SPEC = Path(__file__).resolve().parent.parent / "docs/specs/02-backstitch-core.m
 
 _SC11_ROW_RE = re.compile(
     r"^\| `([A-Z_]+)` \| `([A-Z0-9]+)` \|"
-    r" (error|warning|info|error/warning) \|"
+    r" (error|warning|info|error/warning|info/error) \|"
 )
 _SC15_STATUS_ROW_RE = re.compile(
     r"^\| `([A-Z_]+)` \| `([A-Z0-9]+)` \|"

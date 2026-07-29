@@ -357,6 +357,8 @@ class ParsedSpec:
     from the pre-heading preamble, ``section_markers`` as
     ``(section_id, is_meta, ignore_codes)`` for markers following a section
     definition.
+
+    Spec: docs/specs/08-intent-coverage.md [COV-8]
     """
 
     path: str
@@ -374,6 +376,7 @@ class ParsedSpec:
     marker_diagnostics: tuple[SuppressionDiagnostic, ...] = ()
     section_spans: tuple[tuple[str, int, int], ...] = ()
     section_search_text: tuple[tuple[str, str], ...] = ()
+    mapping_block_spans: tuple[tuple[str, int, int], ...] = ()
 
 
 @dataclass(slots=True)
@@ -848,7 +851,10 @@ def parse_markdown_spec_bytes(
     allow_unknown_codes: bool = False,
     parse_memo: MarkdownParseMemo | None = None,
 ) -> ParsedSpec:
-    """Parse one captured Markdown source without reopening the repository."""
+    """Parse one captured Markdown source without reopening the repository.
+
+    Spec: docs/specs/08-intent-coverage.md [COV-8]
+    """
 
     text = source.decode("utf-8")
     lines = list(lf_split(text))
@@ -905,6 +911,8 @@ def parse_markdown_spec_bytes(
     current_heading_level = 0
     mapping_section: SpecSection | None = None
     last_non_marker_block = "other"
+    mapping_block_spans: list[tuple[str, int, int]] = []
+    active_mapping_block_index: int | None = None
 
     # [EXC-4] §4.2 placement window: True from a section-defining heading
     # or invariant bullet until the first body block; only markers inside
@@ -1457,6 +1465,7 @@ def parse_markdown_spec_bytes(
             )
 
     def process_paragraph(index: int) -> None:
+        nonlocal active_mapping_block_index
         nonlocal last_non_marker_block
         nonlocal mapping_section
         nonlocal marker_window_open
@@ -1507,20 +1516,40 @@ def parse_markdown_spec_bytes(
             mapping_section = current_heading_section
             if mapping_section is None:
                 report_ownerless_mapping(line_no)
+                active_mapping_block_index = None
+            else:
+                mapping_block_spans.append(
+                    (mapping_section.section_id, source_start, source_end)
+                )
+                active_mapping_block_index = len(mapping_block_spans) - 1
             emit_mapping_tokens(inline, mapping_section)
             last_non_marker_block = "mapping_marker"
             return
         if inline.content.strip():
+            active_mapping_block_index = None
             marker_window_open = False
             mapping_section = None
             last_non_marker_block = "other"
 
     def process_mapping_list(start: int, end: int) -> None:
+        nonlocal active_mapping_block_index
         nonlocal last_non_marker_block
         nonlocal mapping_section
         nonlocal marker_window_open
 
         marker_window_open = False
+        if active_mapping_block_index is not None:
+            section_id, start_line, _ = mapping_block_spans[active_mapping_block_index]
+            list_end_line = _token_end_line(
+                tokens[start],
+                parser_line_to_source_line,
+                start_line,
+            )
+            mapping_block_spans[active_mapping_block_index] = (
+                section_id,
+                start_line,
+                list_end_line,
+            )
         for inline in _iter_list_item_first_inlines(tokens, start, end):
             invariant = _invariant_from_inline(inline)
             if invariant is not None:
@@ -1540,6 +1569,26 @@ def parse_markdown_spec_bytes(
             mapping_bullet = define_mapping_bullet_section(inline)
             if mapping_bullet is not None:
                 mapping_section = mapping_bullet
+            if (
+                mapping_section is not None
+                and mapping_section is not current_heading_section
+                and _inline_code_values(inline)
+            ):
+                mapping_line_start = _token_start_line(
+                    inline,
+                    parser_line_to_source_line,
+                )
+                mapping_block_spans.append(
+                    (
+                        mapping_section.section_id,
+                        mapping_line_start,
+                        _token_end_line(
+                            inline,
+                            parser_line_to_source_line,
+                            mapping_line_start,
+                        ),
+                    )
+                )
             emit_mapping_tokens(inline, mapping_section)
         last_non_marker_block = "mapping_list"
 
@@ -1732,6 +1781,7 @@ def parse_markdown_spec_bytes(
         marker_diagnostics=tuple(marker_diagnostics),
         section_spans=tuple(section_spans),
         section_search_text=section_search_text,
+        mapping_block_spans=tuple(mapping_block_spans),
     )
     if parse_memo is not None:
         cached_product.parsed_by_path[rel_path] = result

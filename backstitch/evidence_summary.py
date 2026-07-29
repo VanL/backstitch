@@ -24,6 +24,7 @@ from backstitch.obligations import (
     ObligationRecord,
     associate_mapping_declaration_indexes,
 )
+from backstitch.python_refs import python_structural_locator
 from backstitch.repository_snapshot import RepositorySnapshot
 
 _RELATION_ORDER = {
@@ -115,10 +116,13 @@ def _receipt(
     return row, span.decode("utf-8", errors="replace")
 
 
-def _definition_locator(definition: Definition, ordinal: int) -> str:
-    kind = definition.kind
-    qualname = unicodedata.normalize("NFC", definition.qualname)
-    return f"python-definition:{qualname}:{kind}:{ordinal}"
+def _definition_locator(path: str, definition: Definition, ordinal: int) -> str:
+    return python_structural_locator(
+        path=path,
+        qualname=definition.qualname,
+        kind=definition.kind,
+        ordinal=ordinal,
+    )
 
 
 def _python_atom(
@@ -197,7 +201,7 @@ def _python_atom(
     end_line = definition.end_line
     receipt, excerpt = _receipt(
         path=path,
-        structural_locator=_definition_locator(definition, ordinal),
+        structural_locator=_definition_locator(path, definition, ordinal),
         start_line=start_line,
         end_line=end_line,
         raw=raw,

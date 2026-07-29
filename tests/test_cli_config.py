@@ -66,6 +66,239 @@ def test_config_applied_exclude_prevents_scanning_fixture_tree(
     assert "PYTHON_SYNTAX_ERROR" not in result.stdout
 
 
+def test_bare_default_check_matches_explicit_current_repository(
+    config_repo: Path,
+) -> None:
+    config = config_repo / ".backstitch.toml"
+    config.write_text(
+        'default_command = "check"\n' + config.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    bare = run_cli(cwd=config_repo)
+    explicit = run_cli("check", "--repo-root", ".", cwd=config_repo)
+
+    assert bare.returncode == explicit.returncode == 0
+    assert bare.stdout == explicit.stdout
+    assert bare.stderr == explicit.stderr
+
+
+def test_bare_default_check_matches_explicit_failing_repository(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "docs/specs").mkdir(parents=True)
+    (tmp_path / "docs/specs/01-x.md").write_text(
+        ("# X\n\n## One [X-1]\n\n_Implementation mapping_:\n\n- `pkg/missing.py`\n"),
+        encoding="utf-8",
+    )
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / ".backstitch.toml").write_text(
+        "\n".join(
+            (
+                'default_command = "check"',
+                "[profile]",
+                'name = "backstitch-style-v1"',
+                'spec_roots = ["docs/specs"]',
+                "plan_roots = []",
+                'code_roots = ["pkg"]',
+                "test_roots = []",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    bare = run_cli(cwd=tmp_path)
+    explicit = run_cli("check", "--repo-root", ".", cwd=tmp_path)
+
+    assert bare.returncode == explicit.returncode == 1
+    assert bare.stdout == explicit.stdout
+    assert bare.stderr == explicit.stderr
+    assert "MAPPING_PATH_MISSING" in bare.stdout
+
+
+def test_bare_default_check_preserves_configured_output(config_repo: Path) -> None:
+    config = config_repo / ".backstitch.toml"
+    config.write_text(
+        (
+            'default_command = "check"\n'
+            + config.read_text(encoding="utf-8")
+            + '\n[check]\nformat = "json"\noutput = "bare-report.json"\n'
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(cwd=config_repo)
+    report = config_repo / "bare-report.json"
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert json.loads(report.read_text(encoding="utf-8"))["summary"]["errors"] == 0
+
+
+def test_bare_invocation_accepts_global_config_and_option_controls(
+    config_repo: Path,
+) -> None:
+    source = config_repo / ".backstitch.toml"
+    selected = config_repo / "selected.toml"
+    selected.write_text(
+        'default_command = "check"\n' + source.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    source.unlink()
+
+    result = run_cli(
+        "--config",
+        str(selected),
+        "--option",
+        "check.format",
+        '"json"',
+        ".",
+        cwd=config_repo,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["summary"]["errors"] == 0
+
+
+def test_bare_default_analyze_preserves_deterministic_preflight(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "docs/specs").mkdir(parents=True)
+    (tmp_path / "docs/specs/01-x.md").write_text(
+        ("# X\n\n## One [X-1]\n\n_Implementation mapping_:\n\n- `pkg/missing.py`\n"),
+        encoding="utf-8",
+    )
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / ".backstitch.toml").write_text(
+        "\n".join(
+            (
+                'default_command = "analyze"',
+                "[profile]",
+                'name = "backstitch-style-v1"',
+                'spec_roots = ["docs/specs"]',
+                "plan_roots = []",
+                'code_roots = ["pkg"]',
+                "test_roots = []",
+                "[analyze]",
+                'backend_id = "llm"',
+                'plugin_id = "openai"',
+                'plugin_distribution_name = "llm"',
+                'model = "never-called"',
+                'model_revision = "never-called-revision"',
+                "input_cost_microusd_per_million_tokens = 0",
+                "output_cost_microusd_per_million_tokens = 0",
+                "input_token_overhead = 256",
+                'cost_rate_source = "test fixture rates, reviewed 2026-07-28"',
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    bare = run_cli(cwd=tmp_path)
+    bare_path = run_cli(".", cwd=tmp_path)
+    bare_model = run_cli("--model", "never-called", cwd=tmp_path)
+    explicit = run_cli("analyze", "--repo-root", ".", cwd=tmp_path)
+
+    assert bare.returncode == explicit.returncode == 1
+    assert bare.stdout == explicit.stdout
+    assert bare.stderr == explicit.stderr
+    assert bare_path.returncode == bare_model.returncode == explicit.returncode
+    assert bare_path.stdout == bare_model.stdout == explicit.stdout
+    assert bare_path.stderr == bare_model.stderr == explicit.stderr
+    assert "MAPPING_PATH_MISSING" in bare.stdout
+
+
+def test_bare_no_config_reports_missing_command_without_dispatch(
+    tmp_path: Path,
+) -> None:
+    result = run_cli("--no-config", cwd=tmp_path)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "a command is required unless configuration sets default_command" in (
+        result.stderr
+    )
+    assert result.stderr.endswith("\n")
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize("argument", ("--help", "--version"))
+def test_parser_only_operations_ignore_invalid_repository_config(
+    tmp_path: Path,
+    argument: str,
+) -> None:
+    (tmp_path / ".backstitch.toml").write_text(
+        'default_command = "check --repo-root elsewhere"\n',
+        encoding="utf-8",
+    )
+
+    result = run_cli(argument, cwd=tmp_path)
+
+    assert result.returncode == 0
+    assert "default_command must be" not in result.stderr
+
+
+def test_explicit_check_wins_over_default_analyze(config_repo: Path) -> None:
+    config = config_repo / ".backstitch.toml"
+    config.write_text(
+        'default_command = "analyze"\n' + config.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    result = run_cli("check", "--repo-root", ".", cwd=config_repo)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.startswith("backstitch check:")
+
+
+def test_explicit_config_command_still_rejects_invalid_default(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".backstitch.toml").write_text(
+        'default_command = "check --format json"\n',
+        encoding="utf-8",
+    )
+
+    result = run_cli("check", "--repo-root", ".", cwd=tmp_path)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "default_command must be false, 'check', or 'analyze'" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "true",
+        '""',
+        '"packets"',
+        '"check --format json"',
+        '["check"]',
+        "{}",
+        "1",
+        "1.5",
+    ),
+)
+def test_bare_invocation_rejects_each_invalid_default_family(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    (tmp_path / ".backstitch.toml").write_text(
+        f"default_command = {value}\n",
+        encoding="utf-8",
+    )
+
+    result = run_cli(cwd=tmp_path)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "default_command must be false, 'check', or 'analyze'" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_no_config_flag_restores_builtin_behavior(config_repo: Path) -> None:
     result = run_cli("check", "--repo-root", str(config_repo), "--no-config")
     # Without config: built-in profile roots (backstitch/tests) are missing
@@ -82,6 +315,7 @@ def test_config_show_includes_packaged_defaults_and_resolved_policy(
     assert result.returncode == 0, result.stdout + result.stderr
     data = json.loads(result.stdout)
     assert data["config_layers"][0] == "packaged:backstitch/defaults.toml"
+    assert data["default_command"] is None
     assert "resolved_diagnostics" in data
     assert data["resolved_diagnostics"]["PYTHON_SYNTAX_ERROR"]["short_code"] == "BSC001"
     assert data["profile_overrides"]["test_roots"] == []
@@ -130,6 +364,60 @@ declaration = "docs/specs/04-exclusions.md#SUP-PROCESS"
             },
         }
     ]
+
+
+def test_config_show_projects_service_purl_and_adapter_model_id(
+    tmp_path: Path,
+) -> None:
+    selector = "pkg:service/openai.com/gpt-5.4-mini"
+    config = tmp_path / "models.toml"
+    config.write_text(
+        "\n".join(
+            [
+                "[analyze]",
+                'backend_id = "llm"',
+                'plugin_id = "openai"',
+                'plugin_distribution_name = "llm"',
+                'model = "legacy-model"',
+                'model_revision = "legacy-revision"',
+                "input_cost_microusd_per_million_tokens = 0",
+                "output_cost_microusd_per_million_tokens = 0",
+                "input_token_overhead = 256",
+                'cost_rate_source = "test rates, reviewed 2026-07-28"',
+                "",
+                f'[analyze.models."{selector}"]',
+                'adapter_model_id = "gpt-5.4-mini"',
+                'backend_id = "llm"',
+                'plugin_id = "openai"',
+                'plugin_distribution_name = "llm"',
+                'model_revision = "gpt-5.4-mini-2026-03-17"',
+                "input_cost_microusd_per_million_tokens = 750000",
+                "output_cost_microusd_per_million_tokens = 4500000",
+                "input_token_overhead = 256",
+                'cost_rate_source = "MM fixture, reviewed 2026-07-28"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "config",
+        "show",
+        "--repo-root",
+        str(tmp_path),
+        "--config",
+        str(config),
+        "--option",
+        "analyze.model",
+        "gpt-5.4-mini",
+    )
+
+    assert result.returncode == 0, result.stderr
+    analyze = json.loads(result.stdout)["analyze"]
+    assert analyze["model"] == selector
+    assert analyze["adapter_model_id"] == "gpt-5.4-mini"
+    assert analyze["available_models"] == ["legacy-model", selector]
 
 
 @pytest.mark.parametrize(

@@ -451,6 +451,10 @@ def test_wrapped_bracket_bullet_mapping_defines_subsection(
     assert [(m.section_id, m.target, m.line) for m in parsed.mappings] == [
         ("T-1.1", "pkg/owned.py", 8),
     ]
+    assert parsed.mapping_block_spans == (
+        ("T-1", 5, 8),
+        ("T-1.1", 7, 8),
+    )
 
 
 def test_invariant_item_inside_mapping_list_is_not_mapping_content(
@@ -895,6 +899,27 @@ def test_parser_owns_exact_heading_and_bullet_section_spans(tmp_path: Path) -> N
     assert parsed.section_spans == (
         ("S-1", 3, 12),
         ("S-2", 11, 11),
+    )
+
+
+def test_parser_owns_exact_mapping_block_spans(tmp_path: Path) -> None:
+    doc = tmp_path / "01-mapping-spans.md"
+    doc.write_text(
+        "## Contract [S-1]\n\n"
+        "_Implementation mapping_:\n\n"
+        "- `pkg/a.py`\n"
+        "- `pkg/b.py`\n\n"
+        "- `pkg/c.py`\n\n"
+        "Body.\n\n"
+        "_Implementation mapping_: `pkg/d.py`\n",
+        encoding="utf-8",
+    )
+
+    parsed = parse_markdown_spec(doc, tmp_path)
+
+    assert parsed.mapping_block_spans == (
+        ("S-1", 3, 9),
+        ("S-1", 12, 12),
     )
 
 

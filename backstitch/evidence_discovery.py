@@ -21,7 +21,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
 from typing import Literal
 
-from backstitch.canonical import canonical_json_bytes, lf_line_count, lf_slice
+from backstitch.canonical import canonical_json_bytes, lf_slice
 from backstitch.code_parser import (
     ParsedModule,
     StaticBinding,
@@ -40,6 +40,7 @@ from backstitch.models import (
     SpecMapping,
 )
 from backstitch.obligations import ObligationRecord
+from backstitch.python_refs import python_definition_inventory_bytes
 from backstitch.repository_snapshot import RepositorySnapshot
 from backstitch.settings import ObligationSettings
 
@@ -477,11 +478,11 @@ def _module_candidates(
         parts = list(relative.with_suffix("").parts)
         if parts and parts[-1] == "__init__":
             parts.pop()
+        if not parts:
+            continue
         if snapshot.path_exists((root / "__init__.py").as_posix()) and root.name:
             parts.insert(0, root.name)
-        if not parts or any(
-            not part.isidentifier() or keyword.iskeyword(part) for part in parts
-        ):
+        if any(not part.isidentifier() or keyword.iskeyword(part) for part in parts):
             continue
         names.add(_nfc(".".join(parts)))
     return tuple(sorted(names))
@@ -494,9 +495,33 @@ def resolved_python_module_names(
 ) -> dict[str, str | None]:
     """Resolve the one closed module identity for each captured Python path."""
 
-    derived_by_path = {
-        path: _module_candidates(path, profile, snapshot) for path in paths
-    }
+    roots = tuple(dict.fromkeys((*profile.code_roots, *profile.test_roots)))
+    derived_by_path: dict[str, tuple[str, ...]] = {}
+    for path in paths:
+        pure = PurePosixPath(path)
+        matching = [
+            PurePosixPath(root)
+            for root in roots
+            if pure.is_relative_to(PurePosixPath(root))
+        ]
+        if not matching:
+            derived_by_path[path] = ()
+            continue
+        longest = max(len(root.parts) for root in matching)
+        owners = [root for root in matching if len(root.parts) == longest]
+        if len(owners) != 1:
+            derived_by_path[path] = ()
+            continue
+        owner_profile = replace(
+            profile,
+            code_roots=(owners[0].as_posix(),),
+            test_roots=(),
+        )
+        derived_by_path[path] = _module_candidates(
+            path,
+            owner_profile,
+            snapshot,
+        )
     paths_by_name: dict[str, list[str]] = defaultdict(list)
     for path, names in derived_by_path.items():
         for name in names:
@@ -656,28 +681,6 @@ def _catalog_python(
     for path, raw, role in sources:
         raw_by_path[path] = raw
         module_name = module_name_by_path[path]
-        line_count = max(1, lf_line_count(raw))
-        module_candidate_id: str | None = None
-        if module_name is not None:
-            module = _make_node(
-                candidate_kind=(
-                    "test_definition" if role == "test" else "implementation_definition"
-                ),
-                path=path,
-                owner=module_name,
-                symbol=None,
-                module_name=module_name,
-                role=role,
-                start_line=1,
-                end_line=line_count,
-                node_line=1,
-                locator=f"python-module:{module_name}",
-                raw=raw,
-                work=work,
-            )
-            nodes[module.candidate_id] = module
-            module_candidate_id = module.candidate_id
-            module_candidate_by_path[path] = module.candidate_id
         try:
             parsed = parse_python_source(raw, include_static_facts=True)
         except UnicodeDecodeError:
@@ -685,19 +688,47 @@ def _catalog_python(
         if not parsed.parse_ok:
             continue
         parsed_by_path[path] = parsed
-        ordinals: dict[tuple[str, str], int] = defaultdict(int)
-        for parsed_definition in parsed.definitions:
-            qualname = _nfc(parsed_definition.qualname)
+        inventory = python_definition_inventory_bytes(
+            raw,
+            rel_path=path,
+            module_name=module_name,
+            parsed_module=parsed,
+        )
+        assert inventory is not None
+        module_definition = inventory[0]
+        module = _make_node(
+            candidate_kind=(
+                "test_definition" if role == "test" else "implementation_definition"
+            ),
+            path=path,
+            owner=module_name,
+            symbol=None,
+            module_name=module_name,
+            role=role,
+            start_line=module_definition.start_line,
+            end_line=module_definition.end_line,
+            node_line=1,
+            locator=module_definition.structural_locator,
+            raw=raw,
+            work=work,
+        )
+        nodes[module.candidate_id] = module
+        module_candidate_id = module.candidate_id
+        module_candidate_by_path[path] = module.candidate_id
+        for parsed_definition, canonical_definition in zip(
+            parsed.definitions,
+            inventory[1:],
+            strict=True,
+        ):
+            qualname = canonical_definition.qualname
+            assert qualname is not None
             parent = (
                 _nfc(parsed_definition.parent_qualname)
                 if parsed_definition.parent_qualname is not None
                 else None
             )
-            kind = parsed_definition.kind
-            key = (qualname, kind)
-            ordinal = ordinals[key]
-            ordinals[key] += 1
-            locator = f"python-definition:{qualname}:{kind}:{ordinal}"
+            kind = canonical_definition.kind
+            locator = canonical_definition.structural_locator
             parent_id = (
                 candidate_by_scope.get(
                     (path, parsed_definition.parent_scope_start_byte)
@@ -714,9 +745,9 @@ def _catalog_python(
                 symbol=qualname,
                 module_name=module_name,
                 role=role,
-                start_line=parsed_definition.attachment_line,
-                end_line=parsed_definition.end_line,
-                node_line=parsed_definition.start_line,
+                start_line=canonical_definition.attachment_line,
+                end_line=canonical_definition.end_line,
+                node_line=canonical_definition.start_line,
                 locator=locator,
                 raw=raw,
                 work=work,
@@ -1430,7 +1461,9 @@ def _path_symbol_matches(node: _Node, path: str, symbol: str | None) -> bool:
     path_matches = node.path == path or node.path.startswith(path.rstrip("/") + "/")
     if not path_matches:
         return False
-    is_module = node.structural_locator.startswith("python-module:")
+    is_module = node.structural_locator.startswith(
+        ("python-module:", "python-module-path:")
+    )
     if symbol is None or symbol == "<module>":
         return node.path == path and is_module
     node_symbol = node.symbol or ("module" if is_module else node.owner)
@@ -1914,7 +1947,9 @@ def _closure(
             for node in nodes.values()
             if node.lexical_score[0] > 0
             and node.candidate_kind in {"implementation_definition", "test_definition"}
-            and not node.structural_locator.startswith("python-module:")
+            and not node.structural_locator.startswith(
+                ("python-module:", "python-module-path:")
+            )
         ),
         key=lambda item: (
             -item.lexical_score[0],

@@ -193,11 +193,12 @@ def test_probe_invariant_dogfood_and_root_override_contract(tmp_path: Path) -> N
     )
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
-    assert report["summary"]["invariants"] == 8
+    assert report["summary"]["invariants"] == 9
     assert {item["invariant_id"] for item in report["invariants"]} == {
         "INV.CANON.1",
         "INV.CFG.2",
         "INV.CLI.1",
+        "INV.IDENTITY.1",
         "INV.LINE.1",
         "INV.PERF.1",
         "INV.RES.1",
@@ -239,6 +240,11 @@ def test_probe_invariant_dogfood_and_root_override_contract(tmp_path: Path) -> N
             "test_deterministic_commands_do_not_import_llm",
         ),
         (
+            "INV.IDENTITY.1",
+            "tests/test_canonical_owners.py",
+            "test_python_structural_locator_has_one_production_formatter_owner",
+        ),
+        (
             "INV.LINE.1",
             "tests/test_canonical_owners.py",
             "test_line_arithmetic_uses_the_lf_only_owner",
@@ -262,6 +268,11 @@ def test_probe_invariant_dogfood_and_root_override_contract(tmp_path: Path) -> N
             "INV.PERF.1",
             "tests/test_evidence_spike_cache_perf_pins.py",
             "test_self_corpus_default_check_uses_one_external_snapshot_capture",
+        ),
+        (
+            "INV.PERF.1",
+            "tests/test_evidence_spike_cache_perf_pins.py",
+            "test_bare_self_check_resolves_once_without_extra_parse_or_capture",
         ),
         (
             "INV.PERF.1",
@@ -335,6 +346,7 @@ def test_probe_invariant_dogfood_and_root_override_contract(tmp_path: Path) -> N
         "INV.CANON.1",
         "INV.CFG.2",
         "INV.CLI.1",
+        "INV.IDENTITY.1",
         "INV.LINE.1",
         "INV.PERF.1",
         "INV.RES.1",
@@ -357,6 +369,7 @@ def test_probe_invariant_dogfood_and_root_override_contract(tmp_path: Path) -> N
         "INV.CANON.1",
         "INV.CFG.2",
         "INV.CLI.1",
+        "INV.IDENTITY.1",
         "INV.LINE.1",
         "INV.PERF.1",
         "INV.RES.1",

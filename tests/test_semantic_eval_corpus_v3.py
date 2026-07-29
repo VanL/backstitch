@@ -37,6 +37,36 @@ CONTROL_TAGS = {
     "prompt_injection_source",
 }
 
+ANTI_GOODHART_CASES = {
+    "spec-contract-21-vacuous-restatement",
+    "spec-contract-22-overbroad-guarantee",
+    "spec-contract-23-tautology",
+    "spec-contract-24-implementation-narration",
+    "spec-contract-25-nondiscriminating-prose",
+}
+ANTI_GOODHART_REQUIREMENTS = {
+    "spec-contract-21-vacuous-restatement": (
+        b"removes surrounding whitespace and applies Unicode `casefold()`",
+        b"processes text and returns the processed result",
+    ),
+    "spec-contract-22-overbroad-guarantee": (
+        b"clamps integers below `0` to `0`, above `100` to `100`",
+        b"returns a valid score between `0` and `100`",
+    ),
+    "spec-contract-23-tautology": (
+        b"returns true exactly when the supplied value is not `None`",
+        b"returns either true or false depending on the input",
+    ),
+    "spec-contract-24-implementation-narration": (
+        b"returns the `status` value when present",
+        b'uses `payload.get("status", "unknown")` in a return statement',
+    ),
+    "spec-contract-25-nondiscriminating-prose": (
+        b"returns `allow` exactly for the state `ready`",
+        b"maps the supplied state to an access decision",
+    ),
+}
+
 
 def _projection(
     case: dict[str, Any], variant_id: str, field: str
@@ -86,8 +116,8 @@ def test_qualification_candidate_rederives_every_gold_source_fact() -> None:
     manifest = corpus.to_dict()
     cases = {case["case_id"]: case for case in manifest["cases"]}
 
-    assert len(corpus.case_ids) == 20
-    assert len(corpus.variant_keys) == 40
+    assert len(corpus.case_ids) == 25
+    assert len(corpus.variant_keys) == 50
     assert all(
         facts.deterministic_issue_count == 0 and facts.deterministic_problem is None
         for facts in observed.variants
@@ -191,7 +221,7 @@ def test_qualification_candidate_has_preregistered_floors_and_controls() -> None
         for tag in fixture["control_tags"]
     }
     assert tags == CONTROL_TAGS
-    assert sum(len(case["expected_findings"]) for case in manifest["cases"]) == 20
+    assert sum(len(case["expected_findings"]) for case in manifest["cases"]) == 25
     assert all(
         not any(
             finding["variant_id"] == "clean" for finding in case["expected_findings"]
@@ -233,3 +263,44 @@ def test_qualification_candidate_has_preregistered_floors_and_controls() -> None
     ]
 
     assert not list(QUALIFICATION_CANDIDATE.parent.glob("*report*.json"))
+
+
+def test_qualification_candidate_has_fixed_implementation_spec_mutations() -> None:
+    corpus = load_semantic_eval_corpus(QUALIFICATION_CANDIDATE, mode="enforce")
+    manifest = corpus.to_dict()
+    cases = {
+        case["case_id"]: case
+        for case in manifest["cases"]
+        if case["case_id"] in ANTI_GOODHART_CASES
+    }
+
+    assert set(cases) == ANTI_GOODHART_CASES
+    assert ANTI_GOODHART_CASES.issubset(set(manifest["critical_case_ids"]))
+    historical_case_ids = {
+        row["case_id"] for row in manifest["reviewed_historical_units"]
+    }
+    assert ANTI_GOODHART_CASES.isdisjoint(historical_case_ids)
+
+    for case_id, case in cases.items():
+        clean = corpus.fixture(case_id, "clean")
+        misaligned = corpus.fixture(case_id, "misaligned")
+        clean_spec = clean.read_bytes("docs/specs/01-contract.md")
+        misaligned_spec = misaligned.read_bytes("docs/specs/01-contract.md")
+        assert clean.files == misaligned.files
+        for path in clean.files:
+            if path != "docs/specs/01-contract.md":
+                assert clean.read_bytes(path) == misaligned.read_bytes(path)
+        assert clean_spec != misaligned_spec
+        clean_requirement, misaligned_requirement = ANTI_GOODHART_REQUIREMENTS[case_id]
+        assert clean_requirement in clean_spec
+        assert clean_requirement not in misaligned_spec
+        assert misaligned_requirement not in clean_spec
+        assert misaligned_requirement in misaligned_spec
+        clean_mapping = clean_spec.split(b"_Implementation mapping_:", 1)[1]
+        misaligned_mapping = misaligned_spec.split(b"_Implementation mapping_:", 1)[1]
+        assert clean_mapping == misaligned_mapping
+        assert len(case["expected_findings"]) == 1
+        finding = case["expected_findings"][0]
+        assert finding["code"] == "SEMANTIC_MISSING_TRACE"
+        assert finding["classification"] == "missing_trace"
+        assert finding["variant_id"] == "misaligned"

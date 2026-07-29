@@ -1034,6 +1034,198 @@ def _analysis_report_v4() -> tuple[dict[str, Any], bytes, dict[str, Any]]:
     return report, result_jsonl, packet_report
 
 
+def _analysis_report_v5() -> tuple[
+    dict[str, Any],
+    bytes,
+    dict[str, Any],
+    tuple[dict[str, Any], ...],
+    tuple[dict[str, Any], ...],
+]:
+    report, old_result_jsonl, packet_report = _analysis_report_v4()
+    packet = _current_packet()
+    identity = build_inference_identity(packet, _PROVIDER, _REQUEST)
+    result = json.loads(old_result_jsonl)
+    result["analysis_key"] = identity.analysis_key
+    result_jsonl = canonical_json_bytes(result) + b"\n"
+    diagnostic = report["semantic_diagnostics"][0]
+    diagnostic["analysis_key"] = identity.analysis_key
+    diagnostic["finding_hash"] = _finding_hash(diagnostic)
+    provenance = {
+        "adapter_id": _PROVIDER.adapter_id,
+        "adapter_version": _PROVIDER.adapter_version,
+        "plugin_version": _PROVIDER.plugin_distribution_version,
+        "model_class": None,
+        "provider_model_id": _PROVIDER.model_id,
+        "provider_model_revision": _PROVIDER.model_revision,
+        "response_id": None,
+        "input_tokens": None,
+        "output_tokens": None,
+    }
+    result_object = {
+        "schema_version": 1,
+        "object_type": "semantic-result",
+        "inference_contract": identity.contract,
+        "analysis_key": identity.analysis_key,
+        "result": result,
+        "provenance": provenance,
+        "raw_response_sha256": "d" * 64,
+    }
+    result_object_sha256 = hashlib.sha256(
+        canonical_json_bytes(result_object)
+    ).hexdigest()
+    review_contract = {
+        key: value for key, value in identity.contract.items() if key != "provider"
+    }
+    review_key = hashlib.sha256(canonical_json_bytes(review_contract)).hexdigest()
+    source = {
+        "packet_id": packet["packet_id"],
+        "packet_hash": packet["packet_hash"],
+        "analysis_key": identity.analysis_key,
+        "review_key": review_key,
+        "result_object_sha256": result_object_sha256,
+        "inference_contract": identity.contract,
+        "provenance": provenance,
+        "selection": "live",
+    }
+    event = {
+        "packet_id": packet["packet_id"],
+        "packet_hash": packet["packet_hash"],
+        "result_object_sha256": result_object_sha256,
+        "selection": "live",
+    }
+    report.update(
+        schema_version=5,
+        result_jsonl_sha256=hashlib.sha256(result_jsonl).hexdigest(),
+        result_reuse="evidence-stable",
+        selected_inference={
+            "provider": identity.contract["provider"],
+            "request": identity.contract["request"],
+            "analysis_contract_version": identity.contract["analysis_contract_version"],
+            "search_epoch": identity.contract["search_epoch"],
+            "prompts": [{"kind": packet["kind"], **identity.contract["prompt"]}],
+        },
+        exact_cache_hits=0,
+        carried_results=0,
+        result_sources=[source],
+        result_providers=[
+            {
+                "provider": identity.contract["provider"],
+                "observed_model": {
+                    "model_class": None,
+                    "provider_model_id": _PROVIDER.model_id,
+                    "provider_model_revision": _PROVIDER.model_revision,
+                },
+                "result_count": 1,
+                "carried_result_count": 0,
+            }
+        ],
+    )
+    return report, result_jsonl, packet_report, (result_object,), (event,)
+
+
+def test_analysis_report_v5_source_class_uses_operational_event_oracle() -> None:
+    report, result_jsonl, packet_report, result_objects, selection_events = (
+        _analysis_report_v5()
+    )
+    validated = validate_analysis_report(
+        report,
+        result_jsonl=result_jsonl,
+        packet_report=packet_report,
+        packets=_current_packets(),
+        selected_result_objects=result_objects,
+        selection_events=selection_events,
+        expected_scope="current_repository",
+        expected_semantic_status="evaluated",
+        expected_artifact_currentness="current",
+        expected_source_provenance="captured_current",
+    )
+    assert validated.to_dict()["result_sources"][0]["selection"] == "live"
+
+    report["result_sources"][0]["selection"] = "exact-cache"
+    report["exact_cache_hits"] = 1
+    report["cache_hits"] = 1
+    report["cache_misses"] = 0
+    report["kind_counts"]["cache_hits"]["section"] = 1
+    report["kind_counts"]["cache_misses"]["section"] = 0
+    with pytest.raises(AnalysisReportError, match="selection event"):
+        validate_analysis_report(
+            report,
+            result_jsonl=result_jsonl,
+            packet_report=packet_report,
+            packets=_current_packets(),
+            selected_result_objects=result_objects,
+            selection_events=selection_events,
+            expected_scope="current_repository",
+            expected_semantic_status="evaluated",
+            expected_artifact_currentness="current",
+            expected_source_provenance="captured_current",
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("object_hash", "result object hash mismatch"),
+        ("event", "does not match selection event"),
+        ("analysis_preimage", "analysis key does not recompute"),
+        ("review_key", "review key does not recompute"),
+        ("source_provider", "producer facts do not match"),
+        ("source_provenance", "producer facts do not match"),
+        ("source_count", "result_sources count"),
+        ("selection_count", "exact_cache_hits"),
+        ("provider_group", "result_providers does not recompute"),
+    ],
+)
+def test_analysis_report_v5_rejects_mutated_authoritative_facts(
+    mutation: str,
+    message: str,
+) -> None:
+    report, result_jsonl, packet_report, raw_objects, raw_events = _analysis_report_v5()
+    result_objects = list(deepcopy(raw_objects))
+    selection_events = list(deepcopy(raw_events))
+    source = report["result_sources"][0]
+
+    if mutation == "object_hash":
+        source["result_object_sha256"] = "0" * 64
+    elif mutation == "event":
+        selection_events[0]["selection"] = "exact-cache"
+    elif mutation == "analysis_preimage":
+        result_objects[0]["inference_contract"]["search_epoch"] = "mutated"
+        object_hash = hashlib.sha256(
+            canonical_json_bytes(result_objects[0])
+        ).hexdigest()
+        source["result_object_sha256"] = object_hash
+        selection_events[0]["result_object_sha256"] = object_hash
+    elif mutation == "review_key":
+        source["review_key"] = "0" * 64
+    elif mutation == "source_provider":
+        source["inference_contract"]["provider"]["model_revision"] = "mutated"
+    elif mutation == "source_provenance":
+        source["provenance"]["provider_model_revision"] = "mutated"
+    elif mutation == "source_count":
+        report["result_sources"] = []
+    elif mutation == "selection_count":
+        report["exact_cache_hits"] = 1
+    elif mutation == "provider_group":
+        report["result_providers"][0]["result_count"] = 2
+    else:
+        raise AssertionError(f"unhandled mutation: {mutation}")
+
+    with pytest.raises(AnalysisReportError, match=message):
+        validate_analysis_report(
+            report,
+            result_jsonl=result_jsonl,
+            packet_report=packet_report,
+            packets=_current_packets(),
+            selected_result_objects=result_objects,
+            selection_events=selection_events,
+            expected_scope="current_repository",
+            expected_semantic_status="evaluated",
+            expected_artifact_currentness="current",
+            expected_source_provenance="captured_current",
+        )
+
+
 @pytest.mark.parametrize(
     "population",
     [
@@ -1664,9 +1856,36 @@ _PROBLEM_CASES = [
         {
             "selectors": ["BSA001:independently_verified"],
             "reason": "identity_mismatch",
-            "qualification_report_sha256": "3" * 64,
+            "qualification_report_raw_sha256": "3" * 64,
+            "expected_derivation_identity": {
+                "snapshot_algorithm_version": 1,
+                "obligation_algorithm_version": 1,
+                "discovery_algorithm_version": 1,
+                "packet_contract_version": 1,
+                "normalization_version": 1,
+            },
+            "current_derivation_identity": {
+                "snapshot_algorithm_version": 1,
+                "obligation_algorithm_version": 1,
+                "discovery_algorithm_version": 1,
+                "packet_contract_version": 1,
+                "normalization_version": 1,
+            },
+            "expected_qualification_identity": {
+                "corpus_sha256": "6" * 64,
+                "mode": "enforce",
+                "trials": 1,
+                "eval_config": {},
+            },
+            "current_qualification_identity": {
+                "corpus_sha256": "6" * 64,
+                "mode": "enforce",
+                "trials": 1,
+                "eval_config": {},
+            },
             "expected_composition_sha256": "4" * 64,
             "current_composition_sha256": "5" * 64,
+            "unqualified_analyzer_providers": [],
         },
     ),
 ]

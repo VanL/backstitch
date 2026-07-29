@@ -59,6 +59,7 @@ Issues = "https://github.com/VanL/backstitch/issues"
 packages = ["backstitch"]
 
 [tool.backstitch]
+default_command = "analyze"
 # Top-level keys ([CFG-6.7]); NOT under [profile] -- TOML table scope would
 # make extend_exclude a profile key and fail strict load. extend_exclude
 # appends to defaults (which already exclude .worktrees); a bare `exclude`
@@ -76,13 +77,12 @@ spec_roots = ["docs/specs"]
 plan_roots = ["docs/plans"]
 code_roots = ["backstitch", "tests"]
 test_roots = ["tests"]
-planned_spec_globs = [
-    "docs/specs/08-intent-coverage.md",
-]
+planned_spec_globs = []
 
 [tool.backstitch.diagnostics]
-# This project dogfoods strict mode: every reported Backstitch diagnostic is a
-# violation, including diagnostics that the packaged defaults classify as info.
+# This project dogfoods strict mode. The later coverage-audit rule keeps
+# repository-state debt advisory while patch, exemption, floor, and policy
+# findings remain strict.
 suppressible_levels = ["error", "warning", "info"]
 
 [[tool.backstitch.diagnostics.levels]]
@@ -96,17 +96,29 @@ level = "error"
 select = ["BSA*"]
 level = "info"
 
+[[tool.backstitch.diagnostics.levels]]
+select = [
+    "INTENT_UNCOVERED_DEFINITION:repository",
+    "INTENT_INHERITED_ONLY:repository",
+    "INTENT_REQUIREMENT_UNIMPLEMENTED",
+    "INTENT_DRIFT_SUSPECT",
+    "INTENT_COVERAGE_INCOMPLETE:repository",
+]
+level = "info"
+
 [tool.backstitch.analyze]
-# The request alias is resolved by llm; the immutable cache identity uses the
-# exact provider revision observed during the 2026-07-15 compatibility probe.
+# Model Monster's pkg:service PURL is the stable inference identity. The raw
+# OpenAI model ID is transport configuration passed only to llm.
 backend_id = "llm"
 plugin_id = "openai"
 plugin_distribution_name = "llm"
-model = "gpt-4.1-mini"
-model_revision = "gpt-4.1-mini-2025-04-14"
+model = "pkg:service/openai.com/gpt-5.4-mini"
+adapter_model_id = "gpt-5.4-mini"
+model_revision = "gpt-5.4-mini-2026-03-17"
 concurrency = 1
 cache_path = ".backstitch/semantic-cache"
-cache_mode = "require"
+cache_mode = "read-write"
+result_reuse = "evidence-stable"
 search_epoch = "1"
 json_mode = "require"
 temperature = 0.0
@@ -122,10 +134,10 @@ maximum_provider_calls = 100
 lock_wait_timeout_seconds = 300
 maximum_runtime_seconds = 1800
 maximum_estimated_cost_microusd = 1000000
-input_cost_microusd_per_million_tokens = 400000
-output_cost_microusd_per_million_tokens = 1600000
+input_cost_microusd_per_million_tokens = 750000
+output_cost_microusd_per_million_tokens = 4500000
 input_token_overhead = 256
-cost_rate_source = "OpenAI GPT-4.1 mini model page (https://developers.openai.com/api/docs/models/gpt-4.1-mini), reviewed 2026-07-15"
+cost_rate_source = "OpenAI GPT-5.4 mini model page (https://developers.openai.com/api/docs/models/gpt-5.4-mini), reviewed 2026-07-28"
 
 [tool.backstitch.verify]
 enabled = false
@@ -196,9 +208,9 @@ declaration = "docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-DEFER
 [[tool.backstitch.lint.suppressions]]
 mechanism = "ignore"
 path = "docs/specs/08-intent-coverage.md"
-sections = []
+sections = ["COV-1", "COV-2", "COV-7"]
 codes = ["SPEC_SECTION_UNMAPPED"]
-declaration = "docs/specs/04-backstitch-traceability-exclusions.md#SUP-COV-PLANNED"
+declaration = "docs/specs/04-backstitch-traceability-exclusions.md#SUP-COV-INFLIGHT"
 
 [[tool.backstitch.lint.suppressions]]
 mechanism = "ignore"

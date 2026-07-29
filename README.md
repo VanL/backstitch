@@ -127,6 +127,9 @@ $ mkdir -p docs/specs docs/plans src tests
 
 ```toml
 # pyproject.toml
+[tool.backstitch]
+default_command = "check"
+
 [tool.backstitch.profile]
 name = "backstitch-style-v1"
 spec_roots = ["docs/specs"]
@@ -164,8 +167,11 @@ $ backstitch obligation list
 $ backstitch obligation docs/specs/01-example.md#EXAMPLE-1 --summarize-evidence
 $ backstitch obligation docs/specs/01-example.md#EXAMPLE-1 --find-evidence
 $ backstitch guide alignment
+$ backstitch
 $ backstitch check
+$ backstitch coverage
 $ backstitch check --format json --output spec-trace.json
+$ backstitch coverage --format json --output intent-coverage.json
 $ backstitch check --show-suppressions
 ```
 
@@ -178,6 +184,7 @@ that diff itself.
 The built-in `backstitch-style-v1` profile defaults to `docs/specs` for specs
 and `backstitch` plus `tests` for code. Override roots in configuration or with
 repeatable `--spec-root`, `--code-root`, and `--test-root` options.
+Bare `backstitch` delegates to the repository's configured default command.
 
 ## Command Reference
 
@@ -198,6 +205,7 @@ forms are also available where relevant.
 | `obligation` | List obligations or inspect readiness, declared evidence, and deterministic candidates |
 | `guide alignment` | Print the installed, versioned alignment quick start |
 | `check` | Build the deterministic trace graph and report findings |
+| `coverage` | Measure direct, inherited, exempt, and uncovered intent reach per Python definition |
 | `packets` | Generate bounded section or invariant review packets; no model calls |
 | `analyze` | Resolve immutable semantic results and apply repository policy |
 | `eval` | Measure one semantic identity against a closed mutation/control corpus |
@@ -214,11 +222,20 @@ $ backstitch obligation list --repo-root .
 $ backstitch obligation docs/specs/01-example.md#EXAMPLE-1 --find-evidence
 $ backstitch check --repo-root . --warnings-as-errors
 $ backstitch check --repo-root . --format json --output spec-trace.json
+$ backstitch coverage --repo-root . --format json --output intent-coverage.json
 $ backstitch packets --repo-root . --kind invariant --output invariants.jsonl
 $ backstitch packets --repo-root . --kind all --output packets.jsonl
 ```
 
 Run `backstitch <command> --help` for the full option set.
+
+`coverage` report mode works without Git and uses the same immutable snapshot
+and resolved trace graph as `check`. A whole-file edge is inherited coverage;
+an exact symbol, non-module owner, invariant declaration, or invariant binding
+is direct coverage. Reasoned inline or configured exemptions account for
+deliberate glue without manufacturing spec text. Ratchet mode compares the
+accepted snapshot with a repository-owned Git baseline and must be pinned in
+CI with `--require-ratchet REF`.
 
 ### Exit Codes
 
@@ -318,6 +335,9 @@ the `tool.backstitch` prefix. Explicit `--config PATH` and `extend` may name
 any TOML filename; those names never become implicit discovery conventions.
 
 ```toml
+[tool.backstitch]
+default_command = "check"
+
 [tool.backstitch.profile]
 name = "backstitch-style-v1"
 spec_roots = ["docs/specs"]
@@ -328,6 +348,26 @@ test_roots = ["tests"]
 format = "text"
 warnings_as_errors = false
 ```
+
+`default_command` accepts `false`, `"check"`, or `"analyze"`. Packaged
+defaults use `false`, so a repository must opt in. `"check"` is equivalent to
+`backstitch check --repo-root .`; `"analyze"` is equivalent to
+`backstitch analyze --repo-root .`. The value is one closed command name, not
+a shell command or a list, and it cannot contain arguments. Arguments typed
+after `backstitch` are forwarded to the selected command. A leading path is
+`--repo-root` shorthand, so `backstitch .` works, and an analyze default accepts
+the usual flags such as `backstitch --model gpt-5.4-mini`. Set `false` in a
+child config to disable an inherited default.
+
+Bare `"analyze"` has the same credential reads, cache writes, bounded provider
+calls, and possible cost as explicit current-repository analysis. Do not use
+bare invocation in secret-bearing hostile-target automation. Such workflows
+must name `analyze`, the trusted config, and workflow-owned overrides
+explicitly.
+
+Roll out a Backstitch version that supports `default_command` before adding the
+key to downstream repositories. Remove the key before downgrading to an older
+strict version, which will correctly reject it as unknown.
 
 One invocation-scoped resolver applies the cascade `CLI > defined environment
 > selected config > extended config > packaged defaults`, then passes an
@@ -382,6 +422,20 @@ prompt, provider, request controls, contract version, and explicit search
 epoch. Policy is deliberately excluded, so a policy-only change reprojects the
 same frozen result with zero calls.
 
+`result_reuse = "evidence-stable"` is the default. For each unchanged
+packet/prompt/request/epoch review identity, the first complete result remains
+in force even when a later run selects a different model. Changed evidence is
+an ordinary miss under the newly selected model. Set
+`result_reuse = "exact-inference"` to require the selected provider's exact
+cache key, or change `search_epoch` to resample the evidence-stable decision.
+Reports preserve the original producing provider for carried results.
+
+Trusted model descriptors use Model Monster `pkg:service` PURLs as stable
+identity, for example `pkg:service/openai.com/gpt-5.4-mini`. The separate
+`adapter_model_id` is the raw name passed to `llm`. `LLM_MODEL` and `--model`
+may select a trusted descriptor by its PURL or by an unambiguous adapter model
+ID; provider identity remains the PURL.
+
 The repository ignores `.backstitch/`. Treat its semantic cache as disposable
 acceleration state and its reports as fresh run outputs, not as source or
 reviewed evidence to commit. The usual local flows are:
@@ -389,8 +443,8 @@ reviewed evidence to commit. The usual local flows are:
 - update findings with bounded provider calls by explicitly selecting the
   trusted `pyproject.toml` and applying the reviewed static `read-write`
   options; valid hits are reused and only misses call the provider;
-- replay with zero provider calls by using the default `require` profile; a
-  missing object fails with exit `2`;
+- replay with zero provider calls by overriding `cache_mode = "require"`; a
+  missing baseline or exact object fails with exit `2`;
 - diagnose without reading or writing cache objects by using a trusted config
   whose `[analyze] cache_mode` is `"off"`; and
 - retain a deliberate new sample by changing the trusted `search_epoch` (and
@@ -447,6 +501,10 @@ Python 3.11 can therefore analyze newer target syntax such as PEP 695 generics
 and PEP 701 f-strings without relying on the host interpreter's `ast` grammar.
 
 ### Testing
+
+Backstitch's own committed repository config deliberately selects
+`default_command = "analyze"`. Bare `backstitch` here is provider-capable; use
+explicit `backstitch check --repo-root .` for the hermetic self-corpus gate.
 
 The repository pytest configuration runs the live cloud-provider contract test
 in the default local suite. A normal local run needs a working `llm` model and

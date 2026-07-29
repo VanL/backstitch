@@ -16,14 +16,16 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from collections.abc import MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from backstitch.canonical import lf_split
+from backstitch.canonical import lf_line_count, lf_split
 from backstitch.code_parser import (
     Definition,
     DocCandidate,
+    NoSpecMarkerCandidate,
     ParsedModule,
     parse_python_source,
 )
@@ -55,6 +57,7 @@ _DASH_CHARS = "-–—"
 _RESERVED_PREFIXES = ("Invariant:", "Invariant (draft):", "Tests-invariant:")
 _STRING_OPEN_RE = re.compile(r"(?i)^(?:r|u|b|f|br|rb|fr|rf)?(?P<quote>'''|\"\"\"|'|\")")
 _DECLARATION_RE = re.compile(rf"^\[(?P<id>{SECTION_ID})\]\s+(?P<statement>\S.*)$")
+_PYTHON_DEFINITION_KINDS = frozenset({"class", "function", "async-function"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +80,166 @@ class ParsedPython:
     span_suppression_rules: tuple[tuple[int, int, SuppressionRule], ...] = ()
     invariants: tuple[InvariantDeclaration, ...] = ()
     binding_refs: tuple[InvariantBind, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalPythonDefinition:
+    """One canonical physical Python owner for intent coverage.
+
+    Spec: docs/specs/08-intent-coverage.md [COV-3], [COV-4]
+    """
+
+    path: str
+    qualname: str | None
+    name: str | None
+    kind: str
+    structural_locator: str
+    parent_locator: str | None
+    ordinal: int
+    start_line: int
+    end_line: int
+    attachment_line: int
+    physical_start_byte: int
+    physical_end_byte: int
+    source_projection: bytes
+    no_spec_markers: tuple[NoSpecMarkerCandidate, ...] = ()
+
+    @property
+    def source_projection_sha256(self) -> str:
+        return f"sha256:{hashlib.sha256(self.source_projection).hexdigest()}"
+
+
+def python_structural_locator(
+    *,
+    path: str,
+    module_name: str | None = None,
+    qualname: str | None = None,
+    kind: str | None = None,
+    ordinal: int | None = None,
+) -> str:
+    """Format the one canonical Python structural-locator vocabulary."""
+
+    if qualname is None:
+        if kind is not None or ordinal is not None:
+            raise ValueError("module locators do not accept kind or ordinal")
+        if module_name is not None:
+            return f"python-module:{unicodedata.normalize('NFC', module_name)}"
+        return f"python-module-path:{unicodedata.normalize('NFC', path)}"
+    if (
+        module_name is not None
+        or kind not in _PYTHON_DEFINITION_KINDS
+        or ordinal is None
+        or ordinal < 0
+    ):
+        raise ValueError(
+            "definition locators require qualname, kind, and nonnegative ordinal"
+        )
+    normalized = unicodedata.normalize("NFC", qualname)
+    return f"python-definition:{normalized}:{kind}:{ordinal}"
+
+
+def python_definition_inventory_bytes(
+    source: bytes,
+    *,
+    rel_path: str,
+    module_name: str | None,
+    parsed_module: ParsedModule | None = None,
+    parse_memo: MutableMapping[tuple[str, str], ParsedModule] | None = None,
+) -> tuple[CanonicalPythonDefinition, ...] | None:
+    """Return the canonical module/definition inventory for captured bytes.
+
+    Spec: docs/specs/08-intent-coverage.md [COV-3], [COV-4]
+    """
+
+    try:
+        source_text = source.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    parse_key = (rel_path, hashlib.sha256(source).hexdigest())
+    parsed = parsed_module
+    if parsed is None and parse_memo is not None:
+        parsed = parse_memo.get(parse_key)
+    if parsed is None:
+        parsed = parse_python_source(source)
+        if parse_memo is not None:
+            parse_memo[parse_key] = parsed
+    if not parsed.parse_ok:
+        return None
+    assert parsed.module_source_projection is not None
+
+    normalized_path = unicodedata.normalize("NFC", rel_path)
+    normalized_module = (
+        None if module_name is None else unicodedata.normalize("NFC", module_name)
+    )
+    module_locator = python_structural_locator(
+        path=normalized_path,
+        module_name=normalized_module,
+    )
+    markers_by_scope: dict[int | None, list[NoSpecMarkerCandidate]] = {}
+    for marker in parsed.no_spec_markers:
+        markers_by_scope.setdefault(marker.owner_scope_start_byte, []).append(marker)
+    inventory: list[CanonicalPythonDefinition] = [
+        CanonicalPythonDefinition(
+            path=normalized_path,
+            qualname=normalized_module,
+            name=(
+                None
+                if normalized_module is None
+                else normalized_module.rsplit(".", 1)[-1]
+            ),
+            kind="module",
+            structural_locator=module_locator,
+            parent_locator=None,
+            ordinal=0,
+            start_line=1,
+            end_line=max(1, lf_line_count(source_text)),
+            attachment_line=1,
+            physical_start_byte=0,
+            physical_end_byte=len(source),
+            source_projection=parsed.module_source_projection,
+            no_spec_markers=tuple(markers_by_scope.get(None, ())),
+        )
+    ]
+    locator_by_scope: dict[int, str] = {}
+    ordinals: dict[tuple[str, str], int] = {}
+    for definition in parsed.definitions:
+        qualname = unicodedata.normalize("NFC", definition.qualname)
+        ordinal_key = (qualname, definition.kind)
+        ordinal = ordinals.get(ordinal_key, 0)
+        ordinals[ordinal_key] = ordinal + 1
+        locator = python_structural_locator(
+            path=normalized_path,
+            qualname=qualname,
+            kind=definition.kind,
+            ordinal=ordinal,
+        )
+        parent_locator = (
+            module_locator
+            if definition.parent_scope_start_byte is None
+            else locator_by_scope[definition.parent_scope_start_byte]
+        )
+        inventory.append(
+            CanonicalPythonDefinition(
+                path=normalized_path,
+                qualname=qualname,
+                name=unicodedata.normalize("NFC", definition.name),
+                kind=definition.kind,
+                structural_locator=locator,
+                parent_locator=parent_locator,
+                ordinal=ordinal,
+                start_line=definition.start_line,
+                end_line=definition.end_line,
+                attachment_line=definition.attachment_line,
+                physical_start_byte=definition.physical_start_byte,
+                physical_end_byte=definition.physical_end_byte,
+                source_projection=definition.source_projection,
+                no_spec_markers=tuple(
+                    markers_by_scope.get(definition.scope_start_byte, ())
+                ),
+            )
+        )
+        locator_by_scope[definition.scope_start_byte] = locator
+    return tuple(inventory)
 
 
 @dataclass(frozen=True, slots=True)

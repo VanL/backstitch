@@ -15,6 +15,7 @@ from backstitch.code_parser import ParsedModule
 from backstitch.config import ProfileConfig
 from backstitch.diagnostics import apply_policy_to_report, issue_with_policy
 from backstitch.exclusions import (
+    SuppressionIndex,
     build_suppression_index,
     collect_unused_ignore_diagnostics,
     suppression_decision,
@@ -68,7 +69,29 @@ def build_check_report_from_snapshot(
 ) -> CheckPipelineResult:
     """Build a command-ready report without reopening captured source files."""
 
-    raw_report, artifacts = scan_snapshot_with_artifacts(
+    raw_report, artifacts = scan_check_report_from_snapshot(
+        snapshot,
+        repo_root_display,
+        profile,
+        settings,
+        python_parse_memo=python_parse_memo,
+        markdown_parse_memo=markdown_parse_memo,
+    )
+    return apply_check_policy(raw_report, artifacts, profile, settings)
+
+
+def scan_check_report_from_snapshot(
+    snapshot: RepositorySnapshot,
+    repo_root_display: str,
+    profile: ProfileConfig,
+    settings: BackstitchSettings,
+    *,
+    python_parse_memo: MutableMapping[tuple[str, str], ParsedModule] | None = None,
+    markdown_parse_memo: MarkdownParseMemo | None = None,
+) -> tuple[Report, ScanArtifacts]:
+    """Return the shared raw graph and suppression facts from one snapshot."""
+
+    return scan_snapshot_with_artifacts(
         snapshot,
         repo_root_display,
         profile,
@@ -76,10 +99,9 @@ def build_check_report_from_snapshot(
         python_parse_memo=python_parse_memo,
         markdown_parse_memo=markdown_parse_memo,
     )
-    return _apply_check_policy(raw_report, artifacts, profile, settings)
 
 
-def _apply_check_policy(
+def apply_check_policy(
     raw_report: Report,
     artifacts: ScanArtifacts,
     profile: ProfileConfig,
@@ -89,22 +111,7 @@ def _apply_check_policy(
         raw_report,
         effective_policy=settings.diagnostics,
     )
-    index = build_suppression_index(
-        meta_spec_globs=profile.meta_spec_globs,
-        lint=settings.lint,
-        section_meta=artifacts.section_meta,
-        inline_file_ignores=artifacts.inline_file_ignores,
-        inline_spec_ignores=artifacts.inline_spec_ignores,
-        inline_code_ignores=artifacts.inline_code_ignores,
-        inline_code_span_ignores=artifacts.inline_code_span_ignores,
-        sections_with_markers=artifacts.sections_with_markers,
-        marker_diagnostics=list(artifacts.marker_diagnostics),
-        declarations=artifacts.suppression_declarations,
-        inline_spec_rules=artifacts.inline_spec_rules,
-        inline_code_rules=artifacts.inline_code_rules,
-        inline_code_span_rules=artifacts.inline_code_span_rules,
-        allow_unknown=settings.allow_unknown_keys,
-    )
+    index = _build_suppression_index(artifacts, profile, settings)
     kept: list[Issue] = []
     suppressed: list[SuppressionDecision] = [
         SuppressionDecision(
@@ -206,3 +213,68 @@ def _apply_check_policy(
         obligation_skip_audit=skip_audit,
         warnings=(),
     )
+
+
+def _build_suppression_index(
+    artifacts: ScanArtifacts,
+    profile: ProfileConfig,
+    settings: BackstitchSettings,
+) -> SuppressionIndex:
+    return build_suppression_index(
+        meta_spec_globs=profile.meta_spec_globs,
+        lint=settings.lint,
+        section_meta=artifacts.section_meta,
+        inline_file_ignores=artifacts.inline_file_ignores,
+        inline_spec_ignores=artifacts.inline_spec_ignores,
+        inline_code_ignores=artifacts.inline_code_ignores,
+        inline_code_span_ignores=artifacts.inline_code_span_ignores,
+        sections_with_markers=artifacts.sections_with_markers,
+        marker_diagnostics=list(artifacts.marker_diagnostics),
+        declarations=artifacts.suppression_declarations,
+        inline_spec_rules=artifacts.inline_spec_rules,
+        inline_code_rules=artifacts.inline_code_rules,
+        inline_code_span_rules=artifacts.inline_code_span_rules,
+        allow_unknown=settings.allow_unknown_keys,
+    )
+
+
+def apply_policy_and_suppression_to_issues(
+    issues: tuple[Issue, ...],
+    *,
+    artifacts: ScanArtifacts,
+    profile: ProfileConfig,
+    settings: BackstitchSettings,
+) -> tuple[tuple[Issue, ...], tuple[SuppressionDecision, ...]]:
+    """Apply the shared policy and source/config suppression seam to new issues."""
+
+    index = _build_suppression_index(artifacts, profile, settings)
+    kept: list[Issue] = []
+    suppressed: list[SuppressionDecision] = []
+    for issue in issues:
+        patched, off_issue = issue_with_policy(
+            issue,
+            effective_policy=settings.diagnostics,
+        )
+        if patched is None:
+            assert off_issue is not None
+            suppressed.append(
+                SuppressionDecision(
+                    issue=off_issue,
+                    reason="diagnostic level off",
+                    declaration=None,
+                    rationale=None,
+                    rule=None,
+                )
+            )
+            continue
+        decision = suppression_decision(
+            patched,
+            index,
+            suppressible_levels=settings.diagnostics.suppressible_levels,
+        )
+        if decision is not None:
+            suppressed.append(decision)
+        else:
+            kept.append(patched)
+    kept.sort(key=issue_sort_key)
+    return tuple(kept), tuple(suppressed)

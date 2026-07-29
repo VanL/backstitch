@@ -58,8 +58,8 @@ def test_self_corpus_suppressions_are_auditable() -> None:
         "docs/specs/04-backstitch-traceability-exclusions.md#SUP-DOM-META": 15,
         "docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-PROCESS": 2,
         "docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-DEFERRED-MCP": 1,
-        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-COV-PLANNED": 9,
-        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-TEST-CITATIONS": 165,
+        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-COV-INFLIGHT": 3,
+        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-TEST-CITATIONS": 169,
     }
     assert Counter(record["declaration"] for record in suppressed) == expected_counts
     assert all(record["reason"] for record in suppressed)
@@ -81,8 +81,9 @@ def test_self_corpus_suppressions_are_auditable() -> None:
                 "docs/specs/07-verification-and-evidence-cases.md"
             )
             assert record["section_id"] == "EVC-8.6"
-        elif declaration.endswith("#SUP-COV-PLANNED"):
+        elif declaration.endswith("#SUP-COV-INFLIGHT"):
             assert record["path"] == "docs/specs/08-intent-coverage.md"
+            assert record["section_id"] in {"COV-1", "COV-2", "COV-7"}
         else:
             assert declaration.endswith("#SUP-TEST-CITATIONS")
             assert record["path"].startswith("tests/")

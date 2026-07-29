@@ -1,10 +1,14 @@
 # Schema-3 semantic qualification candidate
 
 This corpus is an enforce-shaped preregistration input for [EVC-10.1]. It
-contains 20 clean negative variants and 20 independently source-reviewed
-synthetic misaligned variants. The misaligned units keep executable reciprocal
-trace declarations, so the semantic lane is measuring whether the evidence
-supports the obligation rather than rediscovering missing syntax.
+contains 25 clean negative variants and 25 synthetic misaligned variants.
+Twenty independently source-reviewed pairs retain the historical-row shape.
+Five additional [COV-7] candidate pairs keep implementation bytes fixed while
+replacing an informative spec contract with a vacuous restatement, overbroad
+guarantee, tautology, implementation narration, or non-discriminating prose.
+Every misaligned unit keeps executable reciprocal trace declarations, so the
+semantic lane is intended to measure whether the evidence supports the
+obligation rather than rediscovering missing syntax.
 
 The corpus is not stronger-policy authority. There is no analyzer/verifier
 output or qualification report in this directory. A provider-backed run must
@@ -19,7 +23,14 @@ misalignments. The independent review records that distinction. Do not promote
 this corpus until those rows are replaced or backed by stable historical source
 references that satisfy the human trust boundary in [EVC-10.1]. A strict
 `mode="enforce"` loader pass proves the closed artifact shape, not that human
-historical judgment.
+historical judgment. The five anti-Goodhart pairs are synthetic controls, not
+historical units, and are deliberately absent from `reviewed_historical_units`.
+Their source-only review also found that the active analyzer prompt cannot
+produce the spec-required `SEMANTIC_MISSING_TRACE` labels for these exact
+fully-owned packets: it assigns vague text to `ambiguous`, while exact
+implementation narration can satisfy its current `ok` rule. The Slice 8 stop
+condition therefore fired. A separate prompt/spec revision and requalification
+plan is required before these cases can become qualification-ready.
 
 ## Preregistration boundary
 
@@ -40,11 +51,13 @@ historical judgment.
 
 - 20 distinct source-reviewed synthetic target tuples in the historical-row
   schema (real historical provenance remains blocked)
-- 20 positive misaligned variants
-- 20 clean negative variants
+- five paired spec-side anti-Goodhart mutations with byte-identical
+  implementation files
+- 25 positive misaligned variants
+- 25 clean negative variants
 - all 12 closed control tags
-- five critical cases, including one critical valid-but-vacuous reciprocal
-  trace
+- ten critical cases, including one critical valid-but-vacuous reciprocal
+  trace and all five anti-Goodhart cases
 - confirmed and missing-trace expected classifications
 - explicit analyzer/verifier false-positive and false-negative stress intent
 - indeterminate, uncached-flip, misleading-nearby-code, out-of-packet-decoy,
@@ -75,10 +88,10 @@ constructs an analyzer or verifier.
 ## Frozen identities
 
 - manifest canonical object:
-  `sha256:2733b63dac761de505fe1a19f5600ddaf3f95e86df8b6c8863a2a7cac96bd725`
+  `sha256:ae71bdc532281ac26d6c36899ed91cf8cc4cf7cc94a7bacd30e18c087322e9e3`
 - manifest raw file (one final LF):
-  `sha256:b5f63053bc14683e5802210ebf6eb78dfa3e19b8d799cdbba0baf8cb1937a71a`
+  `sha256:285c1578cb3d4b9d42164fa5111d07b565c0520adf6eb392e1d4c28551ce9e56`
 - independent source review raw file:
-  `sha256:7fc5337c41417d472645bf90ea1bf0f7722e2678c3f6e2d781aca62badc555cd`
+  `sha256:cf123c7875086c64127bd2f4df142373f662afdc4ae22e10a94b0515aee2853e`
 - deterministic generator raw file:
-  `sha256:4aa34f92f233f00d7d73c7d855203cbc93e0591c68caebab3027773c5736f6b2`
+  `sha256:2a5ad15022bec043805b2c38d629c2b557c72886f17504b305e91ec52d3de9fe`

@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import ast
 import bisect
+import hashlib
+import re
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -70,6 +73,9 @@ _CONDITIONAL_BINDING_NODE_TYPES = frozenset(
         "with_statement",
     }
 )
+_NO_SPEC_COMMENT_PREFIX = "# backstitch: no-spec"
+_NO_SPEC_DOCSTRING_PREFIX = "backstitch: no-spec"
+_NO_SPEC_SEPARATOR_RE = re.compile(r"^ +-- +(?P<reason>.*)$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +99,15 @@ class Definition:
     scope_start_byte: int
     parent_scope_start_byte: int | None
     conditional: bool
+    physical_start_byte: int
+    physical_end_byte: int
+    source_projection: bytes
+
+    @property
+    def source_projection_sha256(self) -> str:
+        """Content identity of the exact own-source byte projection."""
+
+        return f"sha256:{hashlib.sha256(self.source_projection).hexdigest()}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +163,24 @@ class CommentNode:
     line: int
     column: int
     text: str
+    raw_text: str
+
+
+@dataclass(frozen=True, slots=True)
+class NoSpecMarkerCandidate:
+    """One exact inline intent-exemption marker, valid or malformed.
+
+    Spec: docs/specs/08-intent-coverage.md [COV-4]
+    """
+
+    owner_qualname: str | None
+    owner_kind: str
+    owner_scope_start_byte: int | None
+    origin: Literal["comment", "docstring"]
+    line: int
+    raw_text: str
+    reason: str | None
+    valid: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,12 +196,17 @@ class ParsedModule:
     comment_nodes: tuple[CommentNode, ...] = ()
     static_references: tuple[StaticReference, ...] = ()
     static_bindings: tuple[StaticBinding, ...] = ()
+    module_source_projection: bytes | None = None
+    no_spec_markers: tuple[NoSpecMarkerCandidate, ...] = ()
 
 
 def parse_python_source(
     source: bytes, *, include_static_facts: bool = False
 ) -> ParsedModule:
-    """Parse Python structure, deriving costly static facts only on request."""
+    """Parse Python structure, deriving costly static facts only on request.
+
+    Spec: docs/specs/08-intent-coverage.md [COV-3], [COV-4]
+    """
 
     parser = Parser(_LANGUAGE)
     tree = parser.parse(source)
@@ -206,6 +244,9 @@ def parse_python_source(
             scope_start_byte=entry.scope_start_byte,
             parent_scope_start_byte=entry.parent_scope_start_byte,
             conditional=entry.conditional,
+            physical_start_byte=entry.physical_start_byte,
+            physical_end_byte=entry.physical_end_byte,
+            source_projection=_source_projection(entry, owner_entries, source),
         )
         for entry in owner_entries
     )
@@ -220,6 +261,9 @@ def parse_python_source(
         if candidate.text is not None
     )
     comment_nodes = tuple(_comment_nodes(root, line_index, source))
+    no_spec_markers = tuple(
+        _no_spec_marker_candidates(owner_entries, doc_candidates, comment_nodes)
+    )
     static_references: tuple[StaticReference, ...] = ()
     static_bindings: tuple[StaticBinding, ...] = ()
     if include_static_facts:
@@ -238,6 +282,8 @@ def parse_python_source(
         comment_nodes=comment_nodes,
         static_references=static_references,
         static_bindings=static_bindings,
+        module_source_projection=_module_source_projection(owner_entries, source),
+        no_spec_markers=no_spec_markers,
     )
 
 
@@ -256,6 +302,12 @@ class _LineIndex:
 
     def line_for_byte(self, offset: int) -> int:
         return bisect.bisect_right(self.starts, max(offset, 0))
+
+    def physical_start(self, line: int) -> int:
+        return self.starts[line - 1]
+
+    def physical_end(self, line: int, source_length: int) -> int:
+        return self.starts[line] if line < len(self.starts) else source_length
 
 
 def _first_error_line(node: Node, line_index: _LineIndex) -> int:
@@ -306,6 +358,8 @@ class _OwnerEntry:
     scope_start_byte: int
     parent_scope_start_byte: int | None
     conditional: bool
+    physical_start_byte: int
+    physical_end_byte: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,9 +403,172 @@ def _owner_entries(
                 scope_start_byte=item.scope_start_byte,
                 parent_scope_start_byte=item.parent_scope_start_byte,
                 conditional=item.conditional,
+                physical_start_byte=line_index.physical_start(
+                    _start_line(item.wrapper, line_index)
+                ),
+                physical_end_byte=line_index.physical_end(end_line, len(source)),
             )
         )
     return owners
+
+
+def _without_intervals(
+    source: bytes,
+    start: int,
+    end: int,
+    intervals: Sequence[tuple[int, int]],
+) -> bytes:
+    """Project one byte interval after removing sorted direct-child intervals."""
+
+    chunks: list[bytes] = []
+    cursor = start
+    for child_start, child_end in sorted(intervals):
+        assert start <= child_start <= child_end <= end
+        chunks.append(source[cursor:child_start])
+        cursor = child_end
+    chunks.append(source[cursor:end])
+    return b"".join(chunks)
+
+
+def _source_projection(
+    owner: _OwnerEntry,
+    owners: Sequence[_OwnerEntry],
+    source: bytes,
+) -> bytes:
+    direct_children = [
+        (item.physical_start_byte, item.physical_end_byte)
+        for item in owners
+        if item.parent_scope_start_byte == owner.scope_start_byte
+    ]
+    return _without_intervals(
+        source,
+        owner.physical_start_byte,
+        owner.physical_end_byte,
+        direct_children,
+    )
+
+
+def _module_source_projection(
+    owners: Sequence[_OwnerEntry],
+    source: bytes,
+) -> bytes:
+    top_level = [
+        (item.physical_start_byte, item.physical_end_byte)
+        for item in owners
+        if item.parent_scope_start_byte is None
+    ]
+    return _without_intervals(source, 0, len(source), top_level)
+
+
+def _recognized_no_spec_reason(
+    text: str,
+    prefix: str,
+) -> tuple[bool, str | None] | None:
+    """Return marker validity and normalized reason, or None for a near miss."""
+
+    if not text.startswith(prefix):
+        return None
+    remainder = text[len(prefix) :]
+    if remainder and remainder[0] not in " \t\v\f\r\n":
+        return None
+    matched = _NO_SPEC_SEPARATOR_RE.fullmatch(remainder)
+    if matched is None:
+        return False, None
+    reason = unicodedata.normalize("NFC", matched.group("reason").strip())
+    if (
+        not reason
+        or any(character in reason for character in ("\r", "\n", "\0"))
+        or len(reason.encode("utf-8")) > 4096
+    ):
+        return False, None
+    return True, reason
+
+
+def _no_spec_marker_candidates(
+    owners: Sequence[_OwnerEntry],
+    doc_candidates: Sequence[DocCandidate],
+    comments: Sequence[CommentNode],
+) -> list[NoSpecMarkerCandidate]:
+    """Interpret exact marker grammar over parser-owned comments/docstrings."""
+
+    markers: list[NoSpecMarkerCandidate] = []
+    owner_by_keyword_line = {item.start_line: item for item in owners}
+    owner_by_doc_identity = {
+        (
+            item.qualname,
+            item.kind,
+            item.start_line,
+            item.end_line,
+        ): item
+        for item in owners
+    }
+    for comment in comments:
+        owner = owner_by_keyword_line.get(comment.line)
+        if owner is None:
+            continue
+        recognized = _recognized_no_spec_reason(
+            comment.raw_text.lstrip(" \t"),
+            _NO_SPEC_COMMENT_PREFIX,
+        )
+        if recognized is None:
+            continue
+        valid, reason = recognized
+        markers.append(
+            NoSpecMarkerCandidate(
+                owner_qualname=owner.qualname,
+                owner_kind=owner.kind,
+                owner_scope_start_byte=owner.scope_start_byte,
+                origin="comment",
+                line=comment.line,
+                raw_text=comment.raw_text,
+                reason=reason,
+                valid=valid,
+            )
+        )
+    for candidate in doc_candidates:
+        if candidate.owner_kind == "module":
+            owner_qualname = None
+            owner_kind = "module"
+            owner_scope_start_byte = None
+        else:
+            owner = owner_by_doc_identity.get(
+                (
+                    candidate.owner_qualname,
+                    candidate.owner_kind,
+                    candidate.definition_start,
+                    candidate.definition_end,
+                )
+            )
+            if owner is None:
+                continue
+            owner_qualname = owner.qualname
+            owner_kind = owner.kind
+            owner_scope_start_byte = owner.scope_start_byte
+        if candidate.text is None:
+            continue
+        for offset, logical_line in enumerate(lf_split(candidate.text) or [""]):
+            marker_text = logical_line.lstrip(" \t")
+            recognized = _recognized_no_spec_reason(
+                marker_text,
+                _NO_SPEC_DOCSTRING_PREFIX,
+            )
+            if recognized is None:
+                continue
+            valid, reason = recognized
+            markers.append(
+                NoSpecMarkerCandidate(
+                    owner_qualname=owner_qualname,
+                    owner_kind=owner_kind,
+                    owner_scope_start_byte=owner_scope_start_byte,
+                    origin="docstring",
+                    line=candidate.start_line + offset,
+                    raw_text=logical_line,
+                    reason=reason,
+                    valid=valid,
+                )
+            )
+    markers.sort(key=lambda item: (item.line, item.origin, item.owner_qualname or ""))
+    return markers
 
 
 def _owner_node_entries(
@@ -1124,11 +1341,13 @@ def _comment_nodes(
 
     def visit(node: Node) -> None:
         if node.type == "comment":
+            raw_text = _node_text(node)
             comments.append(
                 CommentNode(
                     line=_start_line(node, line_index),
                     column=_node_indent(node, source, line_index),
-                    text=_node_text(node).lstrip("#").strip(),
+                    text=raw_text.lstrip("#").strip(),
+                    raw_text=raw_text,
                 )
             )
             return

@@ -577,6 +577,64 @@ def test_self_corpus_default_check_uses_one_external_snapshot_capture(
     assert calls == 1
 
 
+def test_bare_self_check_resolves_once_without_extra_parse_or_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Tests-invariant: [INV.PERF.1]"""
+
+    import backstitch.code_parser as code_parser
+    import backstitch.obligation_runtime as obligation_runtime
+
+    config_calls = 0
+    snapshot_calls = 0
+    syntax_calls = 0
+    original_resolve = cli.resolve_config
+    original_capture = obligation_runtime.capture_repository_snapshot
+    original_syntax = code_parser._static_syntax_facts
+    config = tmp_path / "bare-check.toml"
+    config.write_text(
+        (
+            f'extend = "{(_REPO_ROOT / "pyproject.toml").as_posix()}"\n'
+            'default_command = "check"\n'
+        ),
+        encoding="utf-8",
+    )
+
+    def counted_resolve(*args: Any, **kwargs: Any) -> Any:
+        nonlocal config_calls
+        config_calls += 1
+        return original_resolve(*args, **kwargs)
+
+    def counted_capture(*args: Any, **kwargs: Any) -> Any:
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        return original_capture(*args, **kwargs)
+
+    def counted_syntax(*args: Any, **kwargs: Any) -> Any:
+        nonlocal syntax_calls
+        syntax_calls += 1
+        return original_syntax(*args, **kwargs)
+
+    monkeypatch.chdir(_REPO_ROOT)
+    monkeypatch.setattr(cli, "resolve_config", counted_resolve)
+    monkeypatch.setattr(
+        obligation_runtime,
+        "capture_repository_snapshot",
+        counted_capture,
+    )
+    monkeypatch.setattr(code_parser, "_static_syntax_facts", counted_syntax)
+
+    exit_code = cli.main(("--config", str(config)))
+    captured = capsys.readouterr()
+
+    assert exit_code == 0, captured.out + captured.err
+    assert config_calls == 1
+    assert snapshot_calls == 1
+    assert syntax_calls == 0
+
+
 def _write_obligation_repo(root: Path, *, obligation_count: int = 1) -> None:
     for relative in ("docs/specs", "docs/plans", "backstitch", "extra", "tests"):
         (root / relative).mkdir(parents=True, exist_ok=True)

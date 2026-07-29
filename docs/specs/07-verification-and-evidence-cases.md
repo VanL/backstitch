@@ -1020,6 +1020,29 @@ selector.` When no failure-authority selector is
 requested, unavailable qualification leaves `independently_verified` advisory
 and report-only as before.
 
+That before-cache ordering applies when the configured/current composition is
+already sufficient to decide qualification. Evidence-stable read-write may
+need [SEM-4]'s sorted review-lock acquisition and baseline recheck to discover
+the actual producing analyzer identities. This is the sole permitted cache
+work before the final qualification decision. It creates no result or
+baseline, constructs no adapter, and makes no provider call. After the recheck,
+qualification for the complete selected result set still fails before any
+analysis lock, result production, baseline publication, or report publication.
+
+Evidence-stable analyzer reuse does not transfer qualification between
+providers. Each carried result retains the analyzer identity that produced
+it. When no failure-authority selector is requested, a carried result may
+participate in ordinary advisory analysis and current verification under that
+honest provenance. When any exact independently-verified selector would gain
+failure authority, every analyzer result selected for the run must have the
+analyzer identity bound by the configured passing qualification artifact. Any
+carried result from another analyzer identity makes qualification unavailable and
+exits `2` before provider work or report publication; Backstitch never lowers
+the selector or attributes the result to the newly selected model. V1 does
+not load a catalog of qualification artifacts. The operator must choose
+`result_reuse = "exact-inference"` and establish current-model results under a
+qualified composition, or change `search_epoch` and requalify.
+
 Coordinated promotion gives these packaged levels:
 
 | BSA code | evidence_bound | verification_indeterminate | independently_verified | mechanically_verified | human_verified | disputed_by_verifier | human_rejected |
@@ -1059,6 +1082,15 @@ _Implementation mapping_:
 `--find-evidence` discovers a closed, deterministic candidate universe from
 the same captured source snapshot and resolved report used for readiness. It
 does not call a model.
+
+Intent coverage may reuse this read-only definition catalog, accepted snapshot,
+and raw resolver graph under [COV-3]. The shared owner preserves every valid
+existing candidate identity byte-for-byte; coverage adds only its
+`python-module-path:<canonical-path>` fallback where this discovery path
+currently emits no module candidate. Coverage classification and worklist
+membership do not become candidate trace state, declared evidence, or
+alignment authority. Neither consumer reparses source or mutates the shared
+catalog.
 
 The closed candidate kinds are:
 
@@ -1251,6 +1283,14 @@ No public v1 command named `proposal`, `validate`, `activate`, `deactivate`,
 `skip`, or `unskip` exists. `backstitch check` remains the deterministic
 repository-wide traceability gate. There is no separate obligation-specific
 check pipeline.
+
+`backstitch coverage` is a separate deterministic read-only aggregate over
+the same accepted snapshot, definition inventory, and raw graph. It may list
+uncovered definitions and requirement complements, but creates no obligation
+proposal, disposition, activation, evidence relation, or durable state.
+Reviewers may use this section's obligation reads and guidance while triaging
+[COV-6]'s worklist; only an ordinary reviewed source diff changes later
+coverage or alignment.
 
 `obligation list` includes executable suppression obligations in canonical
 identity order. `obligation get` returns their declaration, normalized rules,
@@ -2075,7 +2115,8 @@ qualification/required_qualification_unavailable: {
   selectors, reason, qualification_report_raw_sha256,
   expected_derivation_identity, current_derivation_identity,
   expected_qualification_identity, current_qualification_identity,
-  expected_composition_sha256, current_composition_sha256
+  expected_composition_sha256, current_composition_sha256,
+  unqualified_analyzer_providers
 }
 ```
 
@@ -2111,6 +2152,11 @@ comes from the validated report, while current uses the resolved enforce
 configuration and configured corpus digest. Current is null only when no
 complete enforce configuration can be resolved. This problem's line-safe
 message uses [EVC-6]'s required requalification action.
+`unqualified_analyzer_providers` is the canonical-JSON-sorted unique array of
+exact [SEM-3] provider identities selected from evidence-stable result
+envelopes but not covered by the qualified current composition. It is nonempty
+only for a late post-review-lock `identity_mismatch`; early qualification
+failures use `[]`.
 
 Untraced candidates do not cause exit 1. Deterministic trace findings affect
 `backstitch check` and current analyze through existing configured severity and
@@ -2516,9 +2562,10 @@ be supplied to historical analysis. Current `analyze --repo-root` and its
 optional packet/report output pair always compile the unfiltered selected
 corpus.
 
-The immediately prior analysis report schema 3 retains [SEM-7]'s closed
-analysis, finding, problem, debt, cost, and cache records and adds exactly
-these required top-level fields:
+The current analysis report schema 5 retains [SEM-7]'s closed analysis,
+finding, problem, debt, cost, cache, selected-inference, result-source, and
+producer records. The EVC fields first added by analysis-report schema 3 remain
+required and are exactly:
 
 ```text
 scope
@@ -4133,21 +4180,25 @@ Implementation is not complete until real-boundary tests prove:
     `provider_source = "analyze"` mode and an optional complete override tuple.
     Analyze mode requires no distinct credential configuration or duplicate
     cost table; override mode rejects every partial/fallback shape. A different
-    `--model` or `LLM_MODEL` cannot retain stale revision/cost metadata under
-    reuse. Same-model and distinct-model compositions receive separate
-    inference identities when their resolved contracts differ, but both face
-    the identical corpus precision, recall, critical-case, stability, and
-    replay qualification gate.
+    `--model` or `LLM_MODEL` selects a complete trusted model descriptor and
+    cannot retain stale revision/cost metadata. Same-model and distinct-model
+    compositions receive separate inference identities. Evidence-stable
+    analyzer results retain their producing identity; qualification never
+    transfers to the selected model.
 28. An exact failure-authority selector with missing, corrupt, failing, or
-    identity-mismatched qualification exits 2 before cache/provider work and
-    emits the requalification action. Firing probes cover equal CLI/environment
-    model values, rejected different CLI/environment values, complete analyze
-    descriptor changes, complete verifier-override changes, and equal-to-
-    distinct composition changes. Every analyzer/verifier composition and
-    source-derivation-version field invalidates the selector; packet/claim
-    instance, per-event trial index/effective epoch, path, budget, and policy
-    changes do not. Changing configured `verify.eval.trials`, any threshold, or
-    another qualification-identity field does invalidate authority. With no
+    identity-mismatched qualification exits 2 before provider work and emits
+    the requalification action. It also precedes cache work unless [SEM-4]'s
+    sorted review-lock selection is required to discover carried producers;
+    that exceptional path still creates no result or baseline. Firing probes
+    cover equal CLI/environment model values, catalog-resolved different
+    CLI/environment values, unknown model selectors, carried results from a
+    different analyzer identity, complete analyze descriptor changes, complete
+    verifier-override changes, and equal-to-distinct composition changes.
+    Every analyzer/verifier composition and source-derivation-version field
+    invalidates the selector; packet/claim instance, per-event trial
+    index/effective epoch, path, budget, and policy changes do not. Changing
+    configured `verify.eval.trials`, any threshold, or another
+    qualification-identity field does invalidate authority. With no
     failure-authority selector, the same unavailable artifacts remain
     report-only and non-promoting.
 29. Evaluation derives a distinct effective analyzer epoch per trial and a
@@ -4243,12 +4294,12 @@ plan required the following exact reconciliations and one independent review:
   superseded `[tool.backstitch.analyze.eval]` is always rejected as settings;
   only its schema-2 report fields remain explicit historical artifact input and
   grant no policy authority. Superseded case/proposal/activation keys are
-  rejected as unknown, not ignored. [CFG-5]'s model/revision pair rule applies whenever
-  enabled verify uses `provider_source = "analyze"`, even if analyze is
-  cache-off: `--model` and `LLM_MODEL` may be absent or equal the complete
-  config-declared analyze model, but cannot replace it while retaining revision
-  or cost metadata. A different reused model requires an atomic config change
-  to the complete analyze descriptor.
+  rejected as unknown, not ignored. [CFG-5]'s descriptor-selection rule applies
+  whenever enabled verify uses `provider_source = "analyze"`, even if analyze
+  is cache-off: `--model` and `LLM_MODEL` select either the flat descriptor or
+  an exact trusted catalog descriptor and cannot retain another model's
+  revision or cost metadata. Evidence-stable carried results retain their
+  original analyzer identity and never borrow current-model qualification.
 - [EXC-4], [EXC-6], [EXC-7], and [EXC-8] adopt [EVC-8.3.2]'s skip grammar,
   audit projection, malformed behavior, and source-read-only boundary. Skip
   suppresses semantic execution only. It neither changes alignment nor
@@ -4339,6 +4390,10 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-07-28-intent-coverage-implementation-plan.md`
+  (active implementation plan; [EVC-7]/[EVC-8] shared read-only inventory)
+- `docs/plans/2026-07-28-evidence-stable-semantic-result-reuse-plan.md`
+  (specification and implementation plan)
 - `docs/plans/2026-07-28-documented-suppression-governance-plan.md`
   (implemented and independently reviewed)
 

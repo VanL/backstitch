@@ -182,13 +182,20 @@ stronger policy. Enforce authority requires all of these at once:
 - exact configured corpus and report paths and hashes;
 - an exact independently-verified semantic-code selector.
 
-The schema-3 qualification candidate now provides the structural corpus shape
-and synthetic controls, but it does not establish the required 20 historical
-misalignment units. Its substantive historical-unit count is therefore zero,
-and no reviewed provider-backed enforce report is pinned. Current policy is
-report-only and has no independently-verified failure authority. This is
-deliberate. Repeatability without measured precision could produce a stable
-rubber stamp.
+The schema-3 qualification candidate now provides the structural corpus shape,
+synthetic controls, and five [COV-7] spec-side pairs. Each pair keeps
+implementation and reciprocal mapping bytes fixed while replacing an
+informative contract with one of the preregistered non-informative forms. These
+provider-free candidates do not establish the required 20 historical
+misalignment units. Source review also found that the active analyzer prompt
+classifies vague text as `ambiguous` and reserves `missing_trace` for a missing
+owner, while [SEM-8] preregisters `SEMANTIC_MISSING_TRACE` for these fully
+owned spec-side mutations. The Slice 8 stop condition therefore requires a
+separate prompt/spec revision and requalification plan. The substantive
+historical-unit count remains zero, and no reviewed provider-backed enforce
+report is pinned. Current policy is report-only and has no independently
+verified failure authority. This is deliberate. Repeatability without measured
+precision could produce a stable rubber stamp.
 
 ## Measured Current Status
 

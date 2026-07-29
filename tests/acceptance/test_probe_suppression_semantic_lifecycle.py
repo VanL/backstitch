@@ -228,7 +228,7 @@ def test_probe_suppression_semantic_miss_and_zero_call_replay(
     )
 
     assert calls == 2
-    assert first.report["schema_version"] == 4
+    assert first.report["schema_version"] == 5
     assert first.report["kind_counts"]["provider_calls"] == {
         "section": 1,
         "invariant": 0,

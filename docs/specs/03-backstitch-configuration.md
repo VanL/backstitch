@@ -6,8 +6,10 @@ This spec defines how `backstitch` discovers, loads, validates, and applies
 project configuration from TOML files. It governs defaults for CLI commands
 without replacing explicit CLI flags.
 
-Related core behavior: `docs/specs/02-backstitch-core.md` [SC-3], [SC-5], [SC-7],
-[SC-12].
+Related behavior:
+
+- `docs/specs/02-backstitch-core.md` [SC-3], [SC-5], [SC-7], [SC-12]
+- `docs/specs/08-intent-coverage.md` [COV-4], [COV-5], [COV-9]
 
 ## 1. Purpose And Scope [CFG-1]
 
@@ -73,6 +75,7 @@ _Implementation mapping_:
 | Command | Discovery anchor |
 |---------|------------------|
 | `check` | `--repo-root` after `resolve()` |
+| `coverage` | positional path or `--repo-root` after `resolve()`, otherwise current working directory |
 | `packets` | `--repo-root` after `resolve()` |
 | `obligation list` / `obligation OBLIGATION_ID` | `--repo-root` after `resolve()`, or current working directory when omitted |
 | `analyze --repo-root` | repository root after `resolve()` |
@@ -213,19 +216,39 @@ append after earlier sources according to each key's merge rules):
 3. environment variables where this spec defines them
 4. explicit CLI flags and options
 
+`default_command` follows ordinary scalar file-layer precedence. A child
+config may replace an inherited command or set `false` to disable it. No
+environment variable, dedicated flag, or generic `--option` key changes the
+selected default command. Global config selection and generic options for
+the eventually selected command still participate in the one normal
+resolution. The canonical resolver receives the explicit command or its
+absence, merges packaged and file layers once, validates and selects the
+effective default when needed, and only then applies command-relevant
+environment values. `LLM_MODEL` therefore applies to bare analyze exactly as
+it does to explicit analyze and remains absent from bare check exactly as it
+does from explicit check. Dedicated arguments supplied without a subcommand
+are parsed for the closed default-command candidates before resolution, but
+their setting overrides are deferred by command owner. After file precedence
+selects the effective default, the resolver applies only that command's
+dedicated overrides at ordinary CLI precedence. This preserves one config read
+and prevents `--model` or check-only flags from leaking across commands.
+
 Environment variables in v1:
 
 | Variable | Affects | Notes |
 |----------|---------|-------|
 | `BACKSTITCH_WEFT_ROOT` | sibling Weft discovery | overrides `target_roots.weft` |
-| `LLM_MODEL` | `analyze` model fallback | overrides `analyze.model` when `--model` is omitted; a different nonblank configured model is rejected in cached modes |
+| `LLM_MODEL` | `analyze` model fallback | overrides `analyze.model` when `--model` is omitted; cached modes resolve the winning model through the closed descriptor catalog below |
 
 CLI flags always beat config and environment for the same setting.
-In `read-write` or `require` mode, a nonblank configured `analyze.model` and
-`model_revision` are one declared identity pair. `--model` or `LLM_MODEL` may
-not replace that model with a different value while silently retaining the
-configured revision; use a configuration that declares both values. A blank
-configured model may still be filled by ordinary CLI/environment precedence.
+When a file layer declares a nonblank flat `analyze.model`, a different
+winning `--model` or `LLM_MODEL` value must name one key in
+`[analyze.models]`, in every cache mode. The matching entry supplies the
+complete revision, backend/plugin/distribution identity, and cost inputs for
+that model. An unknown winning model is exit `2`; Backstitch never retains
+another model's descriptor. The existing cache-off runtime fallback remains
+only when file configuration declares no nonblank model: the selected model
+uses packaged blank optional identity/cost fields and no result cache.
 
 When enabled verification uses `provider_source = "analyze"`, the complete
 resolved analyze descriptor is atomic even when analyze cache mode is `off`:
@@ -244,6 +267,15 @@ containment against the final effective code roots.
 
 `--config PATH` selects a specific file and bypasses upward discovery. Relative
 `PATH` values are resolved against the process working directory.
+
+Coverage report mode follows this ordinary precedence. Coverage ratchet mode
+is narrower: [COV-5]/[COV-9] reject explicit `--config`, `--no-config`,
+`--profile`, every `--option`, home/environment/external layers, and every
+gate-affecting value not owned by packaged defaults or a no-follow
+repository-owned config layer present at both current and merge-base state.
+Only the root alias, `format`, `output`, and `--require-ratchet REF` are
+operational CLI inputs. `--require-ratchet` asserts the literal effective
+mode/base pair and never overrides either.
 
 _Implementation mapping_:
 - `backstitch/defaults.toml`
@@ -279,6 +311,12 @@ names contain dots, including `lint.per-file-ignores` and
 non-leaf table and is exit `2`. Reserved/non-consulted leaves such as
 `packets.output` are not runtime-overridable.
 
+`default_command` is also not a generic-option leaf. It selects whether bare
+invocation dispatches at all and is accepted only from the packaged or
+selected/discovered file layers. Once file configuration selects the
+command, other valid global `--option KEY VALUE` pairs apply normally to the
+already selected command's settings.
+
 `VALUE` is one argument and may not contain NUL, CR, or LF. Parse it by
 constructing exactly one synthetic TOML assignment, `value = <argument>`. If
 that parse succeeds, the synthetic document must contain exactly one
@@ -294,6 +332,16 @@ apply. A repeated generic key, an assignment to an unknown/non-leaf/reserved
 key, or a dedicated flag plus generic option for the same canonical key is
 exit `2`. `extend`, `allow_unknown_keys`, and `defaults.schema_version` are
 load-time structure and cannot be set by `--option`.
+
+The analyze descriptor leaves `backend_id`, `plugin_id`,
+`plugin_distribution_name`, `model_revision`,
+`input_cost_microusd_per_million_tokens`,
+`output_cost_microusd_per_million_tokens`, `input_token_overhead`, and
+`cost_rate_source` are also reserved from generic `--option`. The dedicated
+`--model` flag and generic `--option analyze.model VALUE` are equivalent
+selectors and conflict under the ordinary same-key rule. Either selects one
+complete trusted descriptor; no CLI form constructs or partially edits a
+descriptor.
 
 The complete dedicated-setting alias map is:
 
@@ -360,8 +408,23 @@ _Implementation mapping_:
 |-----|------|------------|---------|
 | `extend` | string | all commands | Load and merge another config first |
 | `allow_unknown_keys` | bool | load time | Downgrade unknown-key errors to warnings (default `false`) |
+| `default_command` | `false` \| `"check"` \| `"analyze"` | bare invocation | Select one current-directory command; `false` disables bare dispatch |
 | `exclude` | array of glob strings | scan | Replace default scan excludes ([CFG-6.7]); applies to spec discovery and code scan |
 | `extend_exclude` | array of glob strings | scan | Append to the active exclude list ([CFG-6.7]); applies to spec discovery and code scan |
+
+The packaged value is `false`. `"check"` is equivalent to explicit
+`backstitch check --repo-root .`; `"analyze"` is equivalent to explicit
+`backstitch analyze --repo-root .`, where `.` is the process working
+directory. The equivalence is handler-level: the same resolved settings,
+output contract, exit classes, deterministic preflight, cache policy, and
+provider controls apply.
+
+The value is deliberately not a string containing arguments and not an
+array. Command-specific setting defaults belong in their existing tables,
+such as `[analyze].model` and `[check].format`. Operational arguments that
+lack a config key require an explicit command. A config that needs no bare
+action uses `false`; blank strings and every other boolean, string, array,
+table, integer, or floating-point value are invalid.
 
 The profile name has exactly one spelling: `[profile].name` (that is,
 `[tool.backstitch.profile]` `name` in `pyproject.toml`). There is no
@@ -423,12 +486,14 @@ not suppress invariant diagnostics.
 `packets.output` is reserved in v1. The command continues to require
 `--output` on the CLI ([SC-5]).
 
-### 6.5 `[analyze]` / `[tool.backstitch.analyze]`
+### 6.5 `[analyze]` / `[tool.backstitch.analyze]` [CFG-6.5]
 
 | Key | Type | Maps from |
 |-----|------|-----------|
 | `model` | string | CLI `--model` default |
 | `concurrency` | integer | CLI `--concurrency` |
+| `result_reuse` | `"evidence-stable"` \| `"exact-inference"` | Cross-provider analyzer-result selection ([SEM-4]) |
+| `models` | table keyed by exact model selector | Trusted cached-model descriptor catalog |
 
 All other semantic inference, cache, completeness, budget, finding, and
 disposition keys are defined exactly in [SEM-9]. They are strict known keys
@@ -437,6 +502,69 @@ keys, including the historical-only `[analyze.eval]` producer spelling, follow
 [CFG-8]. Current evaluation configuration lives only under `[verify.eval]`.
 Packaged values are conservative. A repository's applied TOML owns stricter
 policy, and workflow YAML must not duplicate those non-secret controls.
+
+`result_reuse` defaults to `"evidence-stable"`. It carries forward one
+complete, previously selected evidence-bound inference result while its
+[SEM-3] review identity is unchanged. `"exact-inference"` preserves the
+existing rule that only the winning model/provider's exact `analysis_key` is
+a hit. Neither value reuses a result across packet, prompt, request,
+analysis-contract, or search-epoch changes. Changing `search_epoch` remains
+the explicit durable resampling mechanism.
+
+`[analyze.models]` is a closed catalog whose quoted child keys are canonical
+Model Monster `pkg:service` PURLs in the form
+`pkg:service/{service_namespace}/{service_name}[@{version}][?{qualifiers}]`.
+The namespace is required and in DNS order; a subpath is forbidden. The key is
+the canonical identity selector accepted by `LLM_MODEL` and `--model`. Each child
+contains exactly the nonblank raw `adapter_model_id` passed to the provider,
+`backend_id`, `plugin_id`,
+`plugin_distribution_name`, `model_revision`,
+`input_cost_microusd_per_million_tokens`,
+`output_cost_microusd_per_million_tokens`, `input_token_overhead`, and
+`cost_rate_source`. Unknown child fields, blank or whitespace-bearing selector
+keys, partial descriptors, wrong types, and invalid ranges are
+exit `2`. The flat `[analyze]` identity/cost fields remain the descriptor for
+the flat `model`, preserving existing configuration. A catalog child whose
+selector equals the nonblank flat model is invalid; one selector has exactly
+one descriptor owner. `adapter_model_id` aliases must also be unique across the
+flat descriptor and catalog.
+
+The flat descriptor is one atomic non-packaged file-layer group containing
+exactly `model`, `backend_id`, `plugin_id`, `plugin_distribution_name`,
+`model_revision`, both cost-rate fields, `input_token_overhead`, and
+`cost_rate_source`, plus optional `adapter_model_id` (which defaults to
+`model`). If a discovered, selected, parent, or child file layer
+supplies any group member, that same layer must supply the complete group.
+The group replaces the inherited flat descriptor as one unit; field-by-field
+inheritance is invalid. Packaged defaults may retain blank optional descriptor
+members for the documented cache-off fallback, but no repository file layer
+may construct a partial descriptor.
+
+The catalog PURL is the inference-contract `provider.model_id`;
+`adapter_model_id` is transport configuration and does not replace that stable
+identity. Catalog descriptors are file-owned trusted configuration. Environment and
+CLI layers select a model through `--model`, `--option analyze.model`, or
+`LLM_MODEL` by canonical identity or its unique `adapter_model_id` alias. The
+resolved `model` is always restored to the canonical identity. These layers
+cannot synthesize, partially override, or import a descriptor
+from a target repository. A positive global analyze cost ceiling
+requires the selected descriptor's explicit nonnegative rates and overhead
+and nonblank source. `config show` renders the selected effective descriptor
+and a sorted `available_models` list; it does not duplicate inactive descriptor
+bodies into the invocation snapshot.
+
+`extend` merges `[analyze.models]` by exact selector key. A later layer may add
+a selector or replace one complete descriptor; descriptor children are atomic
+and never deep-merge field by field. A partial replacement is invalid rather
+than inheriting omitted identity or cost fields. The flat descriptor group
+uses the same replace-not-deep-merge rule across `extend`. The sorted
+`available_models` list is the lexical ordering of the final nonblank flat
+model plus all catalog selectors, with duplicates removed; adapter aliases are
+not listed.
+
+_Implementation mapping_:
+
+- `backstitch/settings.py`
 
 When `extend` names `pyproject.toml`, the loader selects the target file's
 `[tool.backstitch]` table before merging. Other TOML filenames contribute
@@ -604,9 +732,10 @@ otherwise.
 Circular `extend` chains must error.
 
 `exclude`, `extend_exclude`, `[profile]`, `[check]`, `[packets]`, `[analyze]`,
-`[obligations]`, `[verify]`, `[target_roots]`, `[lint]`, and `[diagnostics]` all have defaults in the
-packaged default TOML. Python dataclass defaults may mirror those values for
-type construction, but the packaged TOML is the behavioral source of truth.
+`[obligations]`, `[verify]`, `[target_roots]`, `[lint]`, `[diagnostics]`, and
+`[coverage]` all have defaults in the packaged default TOML. Python dataclass
+defaults may mirror those values for type construction, but the packaged TOML
+is the behavioral source of truth.
 
 ### 6.11 Traceability exclusions
 
@@ -669,7 +798,79 @@ level = "info"
 `off` hides the diagnostic from normal output but keeps it visible in the
 suppression/audit view.
 
+### 6.14 `[coverage]` / `[tool.backstitch.coverage]`
+
+The coverage table is closed:
+
+| Key | Type and range | Packaged value |
+|---|---|---|
+| `mode` | `"report"` or `"ratchet"` | `"report"` |
+| `format` | `"text"` or `"json"` | `"text"` |
+| `output` | nonblank path string or absent | absent |
+| `granularity` | exact literal `"definition"` | `"definition"` |
+| `inherited_counts` | boolean | `false` |
+| `ratchet_base` | string; nonblank only when ratchet runs | `""` |
+| `maximum_baseline_files` | positive integer, excluding booleans | `20000` |
+| `maximum_file_bytes` | positive integer, excluding booleans | `5000000` |
+| `maximum_baseline_bytes` | positive integer, excluding booleans | `100000000` |
+| `maximum_history_commits` | positive integer, excluding booleans | `1000` |
+| `maximum_git_command_seconds` | positive finite number | `10.0` |
+| `maximum_git_commands` | positive integer, excluding booleans | `64` |
+| `maximum_git_output_bytes` | positive integer, excluding booleans | `100000000` |
+| `maximum_commit_message_bytes` | positive integer, excluding booleans | `1000000` |
+| `maximum_runtime_seconds` | positive finite number | `60.0` |
+| `exemptions` | array of closed exemption tables below | `[]` |
+| `floors` | table keyed by canonical repository-relative directory scope | `{}` |
+
+Each `[[coverage.exemptions]]` row contains exactly one of `path` or `glob`
+plus `reason`. Selectors are nonblank repository-relative POSIX strings with
+no absolute prefix, backslash, `.`/`..` segment, CR, LF, or NUL. `path` uses
+canonical path equality; `glob` uses the existing repository-glob matcher.
+Reasons obey [COV-4]'s NFC, line-safety, and 4096-byte rules. A floor child
+contains only optional `direct` and `accounted` finite numbers in `[0,1]` and
+must contain at least one. Its canonical scope must equal or be nested within
+a final effective code root.
+
+Coverage scalars use ordinary later-layer replacement. `coverage.exemptions`
+is an array and therefore replaces across `extend`; authored row order remains
+provenance but not classification priority. `coverage.floors` follows ordinary
+deep-table merge by exact canonical scope, with a later `direct` or
+`accounted` leaf replacing that leaf. Selectors and floor scopes are anchored
+to the accepted repository root, not the contributing config directory.
+Configured `output` follows the existing contributing-layer path anchoring;
+CLI `--output` follows current-working-directory anchoring. The immutable
+settings snapshot retains contributing-layer provenance for every effective
+coverage and policy input required by [COV-5].
+
+`format` and `output` are presentation-only and may be set by dedicated
+coverage flags. All other leaves are behavior or authority inputs. Report mode
+admits normal generic-option precedence for runtime-consulted scalar leaves;
+`exemptions`, `floors`, and their members are non-leaf and cannot be addressed
+through `--option`. Ratchet mode rejects every generic option and explicit
+config/profile selection as [COV-9] requires.
+
 ## 7. CLI Additions [CFG-7]
+
+With no explicit subcommand, global `--config`, `--no-config`, and
+`--option` controls retain their normal syntax. Resolution anchors at the
+current working directory. `--config PATH` may select a file whose
+`default_command` enables dispatch; `--no-config` observes the packaged
+`false` value and therefore returns the missing-command exit `2`.
+`--help` and `--version` remain parser-only operations and do not resolve
+repository configuration. Remaining arguments are forwarded to the selected
+default command. A leading path is its `--repo-root` shorthand, so
+`backstitch .` is valid; bare analyze also accepts `--model`, with the same
+CLI-over-environment-over-file precedence as explicit analyze.
+
+Bare invocation is a local convenience over repository configuration, not a
+hostile-target automation primitive. Selecting `"analyze"` authorizes the
+same credential, network, cache, and bounded-cost behavior as explicit
+current-repository analyze. Selecting `"check"` authorizes the same configured
+report output behavior as explicit check. Secret-bearing hostile-target
+workflows must not use bare invocation; [SEM-9] and [EVC-11]'s explicit
+trusted-command/config/override boundary remains mandatory.
+This restriction is enforced at the workflow contract and test boundary;
+the CLI does not guess operator intent or trust from the same process inputs.
 
 `backstitch` must add:
 
@@ -759,6 +960,23 @@ The loader must fail with exit code `2` and a clear message when:
   repeats a key, conflicts with a dedicated CLI flag, parses as more than one
   synthetic TOML assignment, or produces a value that fails the existing
   type, range, identity, containment, or cross-field validation
+- `default_command` has a type or value other than `false`, `"check"`, or
+  `"analyze"`: exit `2` before command, snapshot, cache, provider, or output
+  work
+- an explicit config-consuming command has an invalid `default_command`:
+  the explicit command still wins selection, but strict validation rejects
+  the invalid known value with exit `2` before command work
+- bare invocation resolves effective `default_command = false`: exit `2`
+  with the missing-command error and no fallback command
+- bare invocation has an invalid global config control or generic option:
+  exit `2` before default dispatch
+- any coverage key is unknown, has the wrong type/range, violates the closed
+  exemption/floor shape, has an invalid repository-relative selector/scope,
+  or uses ratchet without a nonblank base
+- coverage ratchet receives a forbidden CLI/config/profile/option source, a
+  gate input with non-repository provenance, a mismatched
+  `--require-ratchet`, an unavailable ref/merge base/object, or a configured
+  budget that is exceeded
 
 For `analyze.concurrency`: values below `1` are invalid (exit `2`). Support
 for values above `1` is optional in v1 — an implementation that declines must
@@ -865,6 +1083,52 @@ actually consults
   and ranges, zero sentinels, cache/json combinations, plugin distribution
   identity, path anchoring, cost overhead, eval thresholds/sample units,
   duplicate dispositions, and final semantic failure authority
+- packaged defaults set `default_command = false`, while Backstitch's
+  committed repository config sets `"analyze"`; `config show` proves that
+  selection without provider work, explicit `backstitch check` remains the
+  zero-error, zero-warning hermetic self-corpus gate, and controlled-adapter
+  tests prove bare analyze equivalence
+- standalone and `pyproject.toml` configs can select each allowed command
+- an extended child inherits, replaces, and disables a parent default under
+  ordinary scalar precedence
+- `config show` renders normalized `default_command` as `null`, `"check"`,
+  or `"analyze"`
+- explicit commands, `--help`, and `--version` never redirect through the
+  configured default
+- default `check` remains structurally provider-free, and default `analyze`
+  retains the current deterministic-before-provider boundary
+- bare analyze includes `LLM_MODEL` in the canonical environment layer while
+  bare check excludes it; both paths resolve file configuration exactly once
+  and pass the same immutable settings snapshot into the selected handler
+- cached `LLM_MODEL` and `--model` selection resolves the exact matching flat
+  or catalog descriptor, rejects unknown/partial/ambiguous descriptors before
+  cache/provider work, and never retains another model's revision or rates
+- every flat descriptor member is atomic across file and `extend` layers; a
+  partial child cannot inherit identity or rates, every non-model descriptor
+  leaf is rejected through generic `--option`, and both `--model` forms still
+  select a complete trusted descriptor
+- both `result_reuse` values fire through real immutable cache objects:
+  evidence-stable selection retains the baseline result and its producer
+  provenance, while exact-inference selection uses only the selected
+  provider's `analysis_key`
+- a configured `check.output` write and a bounded provider-capable analyze
+  invocation match their explicit-command behavior in local tests, while
+  trusted hostile-target workflows are statically checked to retain explicit
+  commands and trusted config selection
+- direct resolver tests distinguish legacy non-CLI resolution, explicit
+  command resolution, and bare-command selection, and prove identical
+  settings/model provenance reaches explicit and bare analyze without a
+  second raw config assembly
+- malformed values, disabled bare invocation, and invalid global controls
+  fire their exact exit-`2` paths with no traceback
+- every coverage scalar, exemption selector/reason branch, and floor leaf has
+  a firing or no-op-prevention test; tests cover packaged values, report-mode
+  precedence, `extend` replacement/deep merge, path anchoring, unknown keys,
+  invalid types/ranges/shapes, and `config show`
+- ratchet tests enumerate every forbidden provenance/CLI contribution,
+  repository-owned layer condition, literal `--require-ratchet REF` match and
+  mismatch, and show that presentation-only format/output overrides cannot
+  change the canonical policy identity
 - `ruff` and `mypy` over new loader modules
 
 `lint.require_suppression_declarations` and every field of
@@ -900,6 +1164,8 @@ Implementation must update:
   boundary and precedence)
 - `docs/implementation/02-repository-map.md` (new modules)
 - `docs/specs/00-specs-index.md`
+- `README.md` documents configured bare invocation, its exact command
+  equivalences, and the explicit trust/cost warning for `"analyze"`
 
 _Implementation mapping_:
 - `docs/implementation/02-repository-map.md`
@@ -907,6 +1173,13 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-07-28-intent-coverage-implementation-plan.md`
+  (active implementation plan; [CFG-3], [CFG-5], [CFG-6], [CFG-8], and
+  [CFG-9] coverage registrations)
+- `docs/plans/2026-07-28-evidence-stable-semantic-result-reuse-plan.md`
+  (specification and implementation plan)
+- `docs/plans/2026-07-28-configured-default-command-plan.md`
+  (implemented and independently reviewed; uncommitted)
 - `docs/plans/2026-07-28-documented-suppression-governance-plan.md`
   (implemented and independently reviewed)
 

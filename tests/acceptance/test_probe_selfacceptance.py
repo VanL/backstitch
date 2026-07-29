@@ -119,3 +119,10 @@ def test_probe_13_self_acceptance_round_trip(
     loaded_row = loaded.to_dict()
     assert loaded_row["status"] == "failed"
     assert loaded_row["analysis_exit_code"] == 2
+
+
+def test_probe_committed_default_selects_analyze() -> None:
+    result = _run("config", "show", "--repo-root", ".")
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["default_command"] == "analyze"

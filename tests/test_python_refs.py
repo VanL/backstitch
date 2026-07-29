@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from backstitch.python_refs import parse_python_bytes, parse_python_file
+from backstitch.python_refs import (
+    parse_python_bytes,
+    parse_python_file,
+    python_definition_inventory_bytes,
+    python_structural_locator,
+)
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "traceability_project"
 RUNTIME = FIXTURE_ROOT / "src" / "runtime.py"
@@ -19,6 +24,140 @@ def test_byte_parser_matches_filesystem_wrapper() -> None:
     assert parse_python_bytes(RUNTIME.read_bytes(), "src/runtime.py") == (
         parse_python_file(RUNTIME, FIXTURE_ROOT)
     )
+
+
+def test_definition_inventory_synthesizes_named_and_fallback_modules() -> None:
+    source = b"class Service:\n    async def run(self):\n        return None\n"
+
+    named = python_definition_inventory_bytes(
+        source,
+        rel_path="src/service.py",
+        module_name="src.service",
+    )
+    fallback = python_definition_inventory_bytes(
+        source,
+        rel_path="bad-name/service.py",
+        module_name=None,
+    )
+
+    assert named is not None
+    assert [
+        (item.qualname, item.kind, item.structural_locator, item.parent_locator)
+        for item in named
+    ] == [
+        ("src.service", "module", "python-module:src.service", None),
+        (
+            "Service",
+            "class",
+            "python-definition:Service:class:0",
+            "python-module:src.service",
+        ),
+        (
+            "Service.run",
+            "async-function",
+            "python-definition:Service.run:async-function:0",
+            "python-definition:Service:class:0",
+        ),
+    ]
+    assert fallback is not None
+    assert fallback[0].qualname is None
+    assert fallback[0].structural_locator == "python-module-path:bad-name/service.py"
+    assert fallback[1].parent_locator == fallback[0].structural_locator
+
+
+def test_definition_inventory_assigns_ordinals_after_nfc_normalization() -> None:
+    inventory = python_definition_inventory_bytes(
+        (
+            "def caf\N{LATIN SMALL LETTER E WITH ACUTE}():\n"
+            "    return 1\n\n"
+            "def cafe\N{COMBINING ACUTE ACCENT}():\n"
+            "    return 2\n"
+        ).encode(),
+        rel_path="src/unicode.py",
+        module_name="src.unicode",
+    )
+
+    assert inventory is not None
+    assert [item.structural_locator for item in inventory[1:]] == [
+        "python-definition:caf\N{LATIN SMALL LETTER E WITH ACUTE}:function:0",
+        "python-definition:caf\N{LATIN SMALL LETTER E WITH ACUTE}:function:1",
+    ]
+
+
+def test_definition_inventory_uses_exact_source_projections() -> None:
+    inventory = python_definition_inventory_bytes(
+        b"module_value = 1\n"
+        b"\n"
+        b"class Outer:\n"
+        b"    before = 1\n"
+        b"\n"
+        b"    def child(self):\n"
+        b"        return 1\n"
+        b"\n"
+        b"    after = 2\n",
+        rel_path="src/owners.py",
+        module_name="src.owners",
+    )
+
+    assert inventory is not None
+    module, outer, child = inventory
+    assert module.source_projection == b"module_value = 1\n\n"
+    assert outer.source_projection == (
+        b"class Outer:\n    before = 1\n\n\n    after = 2\n"
+    )
+    assert child.source_projection == (b"    def child(self):\n        return 1\n")
+    assert all(
+        item.source_projection_sha256.startswith("sha256:") for item in inventory
+    )
+
+
+def test_definition_inventory_rejects_invalid_utf8_and_syntax() -> None:
+    assert (
+        python_definition_inventory_bytes(
+            b"\xff",
+            rel_path="src/bad.py",
+            module_name="src.bad",
+        )
+        is None
+    )
+    assert (
+        python_definition_inventory_bytes(
+            b"def broken(:\n",
+            rel_path="src/bad.py",
+            module_name="src.bad",
+        )
+        is None
+    )
+
+
+def test_python_structural_locator_is_the_public_identity_formatter() -> None:
+    assert (
+        python_structural_locator(
+            path="src/worker.py",
+            module_name="src.worker",
+        )
+        == "python-module:src.worker"
+    )
+    assert (
+        python_structural_locator(path="bad-name/worker.py", module_name=None)
+        == "python-module-path:bad-name/worker.py"
+    )
+    assert (
+        python_structural_locator(
+            path="src/worker.py",
+            qualname="Worker.run",
+            kind="function",
+            ordinal=2,
+        )
+        == "python-definition:Worker.run:function:2"
+    )
+    with pytest.raises(ValueError):
+        python_structural_locator(
+            path="src/worker.py",
+            qualname="Worker.run",
+            kind="method",
+            ordinal=0,
+        )
 
 
 def test_backlink_comment_nested_in_expression_is_not_pruned() -> None:

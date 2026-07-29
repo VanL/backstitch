@@ -9,6 +9,8 @@ import hashlib
 import json
 import shutil
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +34,15 @@ from backstitch.semantic_cache import (
     ProviderCallResult,
     SemanticCacheInspection,
     SemanticProvenance,
+)
+from backstitch.semantic_eval import (
+    SemanticEvalRequest,
+    derive_semantic_eval_observed_facts,
+    run_semantic_eval,
+)
+from backstitch.semantic_eval_reports import (
+    load_semantic_eval_corpus,
+    load_semantic_eval_report,
 )
 from backstitch.semantic_evidence import normalize_model_result
 from backstitch.semantic_identity import (
@@ -120,6 +131,171 @@ PROVENANCE = SemanticProvenance(
     input_tokens=10,
     output_tokens=5,
 )
+QUALIFICATION_CORPUS = (
+    Path(__file__).parent
+    / "semantic_eval"
+    / "v3"
+    / "qualification-candidate"
+    / "manifest.json"
+)
+
+
+def _write_real_qualification(
+    tmp_path: Path,
+    analyze: ResolvedSemanticSettings,
+    verify: ResolvedVerificationSettings,
+) -> VerifyEvalSettings:
+    corpus = load_semantic_eval_corpus(QUALIFICATION_CORPUS, mode="enforce")
+    observed = derive_semantic_eval_observed_facts(corpus)
+    case_rows = {
+        row["case_id"]: row
+        for row in cast(list[dict[str, Any]], corpus.to_dict()["cases"])
+    }
+    response_by_hash: dict[str, tuple[str, list[dict[str, object]]]] = {}
+    for variant in observed.variants:
+        case = case_rows[variant.case_id]
+        expected = next(
+            (
+                row
+                for row in cast(list[dict[str, Any]], case["expected_findings"])
+                if row["variant_id"] == variant.variant_id
+            ),
+            None,
+        )
+        classification = (
+            cast(str, expected["classification"]) if expected is not None else "ok"
+        )
+        for packet in variant.packets:
+            regions = cast(list[dict[str, object]], packet["evidence_regions"])
+            evidence = (
+                []
+                if classification == "ok"
+                else [
+                    {
+                        key: region[key]
+                        for key in ("role", "path", "start_line", "end_line")
+                    }
+                    for region in regions
+                    if classification != "missing_trace"
+                    or region["role"] == "requirement"
+                ]
+            )
+            response_by_hash[cast(str, packet["packet_hash"])] = (
+                classification,
+                evidence,
+            )
+
+    def provenance(provider: ProviderIdentity) -> SemanticProvenance:
+        return SemanticProvenance(
+            adapter_id=provider.adapter_id,
+            adapter_version=provider.adapter_version,
+            plugin_version=provider.plugin_distribution_version or None,
+            model_class="tests.RealQualificationModel",
+            provider_model_id=provider.model_id,
+            provider_model_revision=provider.model_revision,
+            response_id="qualification-response",
+            input_tokens=10,
+            output_tokens=5,
+        )
+
+    def analyzer_factory() -> ProviderAdapter:
+        def call(prompt: str) -> ProviderCallResult:
+            packet = cast(dict[str, Any], json.loads(prompt.rsplit("\n\n", 1)[1]))
+            packet_hash = hashlib.sha256(canonical_json_bytes(packet)).hexdigest()
+            classification, evidence = response_by_hash[packet_hash]
+            return ProviderCallResult(
+                json.dumps(
+                    {
+                        "packet_id": packet["packet_id"],
+                        "classification": classification,
+                        "confidence": 1.0,
+                        "rationale": "Controlled real qualification artifact.",
+                        "summary": "Controlled qualification result.",
+                        "evidence": evidence,
+                    }
+                ),
+                provenance(analyze.provider_identity),
+            )
+
+        return call
+
+    def verifier_factory() -> ProviderAdapter:
+        def call(prompt: str) -> ProviderCallResult:
+            request = cast(dict[str, Any], json.loads(prompt.rsplit("\n\n", 1)[1]))
+            claim = cast(dict[str, Any], request["claim"])
+            return ProviderCallResult(
+                json.dumps(
+                    {
+                        "packet_id": claim["packet_id"],
+                        "claim_hash": hashlib.sha256(
+                            canonical_json_bytes(claim)
+                        ).hexdigest(),
+                        "verdict": "support",
+                        "support_score": 1.0,
+                        "summary": "Controlled claim support.",
+                        "evidence": [
+                            {
+                                key: item[key]
+                                for key in ("role", "path", "start_line", "end_line")
+                            }
+                            for item in cast(list[dict[str, Any]], claim["evidence"])
+                        ],
+                    }
+                ),
+                provenance(verify.provider_identity),
+            )
+
+        return call
+
+    output = tmp_path / "qualification-report.json"
+    evaluation = VerifyEvalSettings(
+        mode="enforce",
+        qualification_corpus=str(QUALIFICATION_CORPUS),
+        qualification_corpus_sha256=corpus.corpus_sha256,
+        qualification_report="",
+        qualification_report_sha256="",
+        trials=2,
+        interval_method="wilson",
+        confidence_level=0.95,
+        minimum_positive_units=1,
+        minimum_negative_units=1,
+        minimum_evidence_sufficiency_rate=0.0,
+        minimum_conditional_precision=0.0,
+        minimum_conditional_recall=0.0,
+        minimum_end_to_end_recall=0.0,
+        minimum_recall_lower_bound=0.0,
+        maximum_false_positive_rate=1.0,
+        maximum_false_positive_upper_bound=1.0,
+        maximum_indeterminate_rate=1.0,
+        maximum_uncached_flip_rate=1.0,
+        require_all_critical=False,
+    )
+    run = run_semantic_eval(
+        SemanticEvalRequest(
+            manifest_path=QUALIFICATION_CORPUS,
+            output_path=output,
+            settings=replace(
+                analyze,
+                maximum_provider_calls=200,
+                maximum_runtime_seconds=300,
+            ),
+            verification_settings=replace(
+                verify,
+                maximum_provider_calls=200,
+                maximum_runtime_seconds=300,
+            ),
+            eval_settings=evaluation,
+            adapter_factory=analyzer_factory,
+            verification_adapter_factory=verifier_factory,
+        )
+    )
+    assert run.exit_code == 0
+    report = load_semantic_eval_report(output, corpus=corpus)
+    return replace(
+        evaluation,
+        qualification_report=str(output),
+        qualification_report_sha256=report.report_sha256,
+    )
 
 
 def _packet(
@@ -308,6 +484,7 @@ def _resolved(**overrides: object) -> ResolvedSemanticSettings:
         "concurrency": 1,
         "cache_path": Path("unused-cache"),
         "cache_mode": "off",
+        "result_reuse": "exact-inference",
         "search_epoch": "1",
         "require_complete": True,
         "required_kinds": ("section",),
@@ -702,7 +879,7 @@ def test_current_report_counts_operational_events_and_zero_suppressions_vacuousl
     run = run_semantic_analysis(request)
 
     assert run.exit_code == 0
-    assert run.report["schema_version"] == 4
+    assert run.report["schema_version"] == 5
     assert run.report["packet_schema_versions"] == [3]
     assert run.report["kind_counts"] == {
         "eligible": {"section": 1, "invariant": 0, "suppression": 0},
@@ -712,6 +889,278 @@ def test_current_report_counts_operational_events_and_zero_suppressions_vacuousl
         "cache_misses": {"section": 0, "invariant": 0, "suppression": 0},
         "provider_calls": {"section": 1, "invariant": 0, "suppression": 0},
     }
+    assert run.report["result_reuse"] == "exact-inference"
+
+
+def test_evidence_stable_mixed_run_carries_unchanged_and_calls_changed(
+    tmp_path: Path,
+) -> None:
+    first = _packet()
+    second = _packet(packet_id="docs/specs/01-x.md#X-2", identity="X-2")
+    initial_packets = tuple(
+        ValidatedSemanticPacket.from_row(row, cache_eligible=True)
+        for row in (first, second)
+    )
+    cache_path = tmp_path / "cache"
+    provider_calls = 0
+
+    def adapter_factory(provider: ProviderIdentity) -> AdapterFactory:
+        def factory() -> ProviderAdapter:
+            def call(prompt: str) -> ProviderCallResult:
+                nonlocal provider_calls
+                provider_calls += 1
+                packet = json.loads(prompt.rsplit("\n\n", 1)[1])
+                response = _model_row()
+                response["packet_id"] = packet["packet_id"]
+                return ProviderCallResult(
+                    json.dumps(response),
+                    replace(
+                        PROVENANCE,
+                        provider_model_id=provider.model_id,
+                        provider_model_revision=provider.model_revision,
+                        response_id=f"response-{provider_calls}",
+                    ),
+                )
+
+            return call
+
+        return factory
+
+    def request_for(
+        packets: tuple[ValidatedSemanticPacket, ...],
+        provider: ProviderIdentity,
+        stem: str,
+    ) -> SemanticAnalysisRequest:
+        packet_jsonl = b"".join(
+            canonical_json_bytes(packet.to_dict()) + b"\n" for packet in packets
+        )
+        return SemanticAnalysisRequest(
+            packets=packets,
+            packet_jsonl_sha256=hashlib.sha256(packet_jsonl).hexdigest(),
+            packet_report=_packet_report_v3(packet_jsonl, packets),
+            settings=_resolved(
+                provider_identity=provider,
+                cache_path=cache_path,
+                cache_mode="read-write",
+                result_reuse="evidence-stable",
+                minimum_packets=2,
+            ),
+            policy=_policy(tmp_path),
+            adapter_factory=adapter_factory(provider),
+            result_path=tmp_path / f"{stem}.jsonl",
+            report_path=tmp_path / f"{stem}-report.json",
+        )
+
+    initial = run_semantic_analysis(request_for(initial_packets, PROVIDER, "initial"))
+    assert initial.exit_code == 0
+    assert provider_calls == 2
+
+    changed_second = dict(second)
+    changed_requirement = dict(cast(dict[str, object], changed_second["requirement"]))
+    changed_requirement["text"] = "Must return two."
+    changed_second["requirement"] = changed_requirement
+    changed_second["packet_hash"] = semantic_packet_hash(changed_second)
+    next_packets = (
+        initial_packets[0],
+        ValidatedSemanticPacket.from_row(changed_second, cache_eligible=True),
+    )
+    next_provider = replace(
+        PROVIDER,
+        model_id="pkg:service/openai.com/gpt-next",
+        model_revision="2026-07-28",
+    )
+
+    mixed = run_semantic_analysis(request_for(next_packets, next_provider, "mixed"))
+
+    assert mixed.exit_code == 0
+    assert mixed.report["provider_calls"] == 1
+    assert mixed.report["cache_hits"] == 1
+    assert mixed.report["carried_results"] == 1
+    assert [row["selection"] for row in mixed.report["result_sources"]] == [
+        "carried",
+        "live",
+    ]
+    assert len(mixed.report["result_providers"]) == 2
+    assert provider_calls == 3
+
+    qualified_settings = _resolved(
+        provider_identity=next_provider,
+        cache_path=cache_path,
+        cache_mode="read-write",
+        result_reuse="evidence-stable",
+        minimum_packets=2,
+    )
+    verification = _resolved_verify(
+        qualified_settings,
+        cache_path=tmp_path / "qualification-verify-cache",
+    )
+    evaluation = _write_real_qualification(
+        tmp_path,
+        qualified_settings,
+        verification,
+    )
+    policy_root = tmp_path / "strong-policy"
+    policy_root.mkdir()
+    strong_policy = _policy(
+        policy_root,
+        "[[diagnostics.levels]]\n"
+        'select = ["BSA001:independently_verified"]\n'
+        'level = "error"\n',
+    )
+
+    blocked_request = replace(
+        request_for(next_packets, next_provider, "qualification-blocked"),
+        settings=qualified_settings,
+        policy=strong_policy,
+        verification_settings=verification,
+        evaluation_settings=evaluation,
+    )
+    blocked = run_semantic_analysis(blocked_request)
+
+    assert blocked.exit_code == 2
+    assert provider_calls == 3
+    assert blocked.report["provider_calls"] == 0
+    assert blocked.report["problems"][0]["code"] == (
+        "required_qualification_unavailable"
+    )
+    foreign = blocked.report["problems"][0]["details"]["unqualified_analyzer_providers"]
+    assert [row["model_id"] for row in foreign] == [PROVIDER.model_id]
+
+
+def test_foreign_multi_packet_winner_blocks_qualified_waiter_before_calls(
+    tmp_path: Path,
+) -> None:
+    packets = tuple(
+        ValidatedSemanticPacket.from_row(row, cache_eligible=True)
+        for row in (
+            _packet(),
+            _packet(packet_id="docs/specs/01-x.md#X-2", identity="X-2"),
+        )
+    )
+    packet_jsonl = b"".join(
+        canonical_json_bytes(packet.to_dict()) + b"\n" for packet in packets
+    )
+    packet_report = _packet_report_v3(packet_jsonl, packets)
+    cache_path = tmp_path / "cache"
+    qualified_provider = replace(
+        PROVIDER,
+        model_id="pkg:service/openai.com/qualified",
+        model_revision="qualified-revision",
+    )
+    foreign_provider = replace(
+        PROVIDER,
+        model_id="pkg:service/openai.com/foreign",
+        model_revision="foreign-revision",
+    )
+    qualified_settings = _resolved(
+        provider_identity=qualified_provider,
+        cache_path=cache_path,
+        cache_mode="read-write",
+        result_reuse="evidence-stable",
+        minimum_packets=2,
+    )
+    verification = _resolved_verify(
+        qualified_settings,
+        cache_path=tmp_path / "qualification-verify-cache",
+    )
+    evaluation = _write_real_qualification(
+        tmp_path,
+        qualified_settings,
+        verification,
+    )
+    policy_root = tmp_path / "strong-policy"
+    policy_root.mkdir()
+    strong_policy = _policy(
+        policy_root,
+        "[[diagnostics.levels]]\n"
+        'select = ["BSA001:independently_verified"]\n'
+        'level = "error"\n',
+    )
+    winner_entered = threading.Event()
+    release_winner = threading.Event()
+    calls = {"winner": 0, "loser": 0}
+
+    def factory(
+        provider: ProviderIdentity,
+        lane: str,
+    ) -> AdapterFactory:
+        def build() -> ProviderAdapter:
+            def call(prompt: str) -> ProviderCallResult:
+                calls[lane] += 1
+                if lane == "winner" and calls[lane] == 1:
+                    winner_entered.set()
+                    assert release_winner.wait(timeout=2)
+                packet = cast(dict[str, Any], json.loads(prompt.rsplit("\n\n", 1)[1]))
+                response = _model_row()
+                response["packet_id"] = packet["packet_id"]
+                return ProviderCallResult(
+                    json.dumps(response),
+                    replace(
+                        PROVENANCE,
+                        provider_model_id=provider.model_id,
+                        provider_model_revision=provider.model_revision,
+                    ),
+                )
+
+            return call
+
+        return build
+
+    def request(
+        provider: ProviderIdentity,
+        lane: str,
+        *,
+        qualified: bool,
+    ) -> SemanticAnalysisRequest:
+        return SemanticAnalysisRequest(
+            packets=packets,
+            packet_jsonl_sha256=hashlib.sha256(packet_jsonl).hexdigest(),
+            packet_report=packet_report,
+            settings=(
+                qualified_settings
+                if qualified
+                else _resolved(
+                    provider_identity=provider,
+                    cache_path=cache_path,
+                    cache_mode="read-write",
+                    result_reuse="evidence-stable",
+                    minimum_packets=2,
+                )
+            ),
+            policy=strong_policy if qualified else _policy(tmp_path),
+            adapter_factory=factory(provider, lane),
+            verification_settings=verification if qualified else None,
+            evaluation_settings=evaluation if qualified else None,
+            result_path=tmp_path / f"{lane}.jsonl",
+            report_path=tmp_path / f"{lane}-report.json",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        winner_future = pool.submit(
+            run_semantic_analysis,
+            request(foreign_provider, "winner", qualified=False),
+        )
+        assert winner_entered.wait(timeout=2)
+        assert len(list((cache_path / "review-locks").glob("*.lock"))) == 2
+        loser_future = pool.submit(
+            run_semantic_analysis,
+            request(qualified_provider, "loser", qualified=True),
+        )
+        time.sleep(0.05)
+        assert not loser_future.done()
+        assert calls["loser"] == 0
+        release_winner.set()
+        winner = winner_future.result(timeout=3)
+        loser = loser_future.result(timeout=3)
+
+    assert winner.exit_code == 0
+    assert calls == {"winner": 2, "loser": 0}
+    assert loser.exit_code == 2
+    assert loser.report["provider_calls"] == 0
+    assert loser.report["problems"][0]["code"] == ("required_qualification_unavailable")
+    foreign = loser.report["problems"][0]["details"]["unqualified_analyzer_providers"]
+    assert [row["model_id"] for row in foreign] == [foreign_provider.model_id]
+    assert len(list((cache_path / "baselines").glob("*.json"))) == 2
 
 
 @pytest.mark.parametrize("ownership_state", ["replaced", "absent"])
@@ -875,13 +1324,14 @@ def test_shared_runner_rechecks_qualification_with_request_eval_settings(
         policy: SemanticPolicy,
         verification: ResolvedVerificationSettings | None,
         current: VerifyEvalSettings | None,
-    ) -> None:
+    ) -> tuple[None, None]:
         del policy, verification
         observed.append(current)
+        return None, None
 
     monkeypatch.setattr(
         semantic_analysis,
-        "required_independent_qualification_problem",
+        "_resolve_independent_qualification",
         qualify,
     )
 
@@ -1711,12 +2161,19 @@ def test_cli_resolves_env_model_into_identity_and_reads_packet_bytes_once(
         "\n".join(
             [
                 "[analyze]",
-                'plugin_id = "openai"',
-                'plugin_distribution_name = "llm"',
-                'model = ""',
-                'model_revision = "2026-01-01"',
                 'json_mode = "require"',
                 'cache_mode = "read-write"',
+                "",
+                '[analyze.models."pkg:service/openai.com/env-model"]',
+                'adapter_model_id = "env-model"',
+                'backend_id = "llm"',
+                'plugin_id = "openai"',
+                'plugin_distribution_name = "llm"',
+                'model_revision = "2026-01-01"',
+                "input_cost_microusd_per_million_tokens = 0",
+                "output_cost_microusd_per_million_tokens = 0",
+                "input_token_overhead = 256",
+                'cost_rate_source = "controlled test rates"',
             ]
         )
         + "\n",
@@ -1739,7 +2196,7 @@ def test_cli_resolves_env_model_into_identity_and_reads_packet_bytes_once(
 
     monkeypatch.setattr(semantic_analysis, "run_semantic_analysis", fake_run)
     monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
-    monkeypatch.setenv("LLM_MODEL", "env-model")
+    monkeypatch.setenv("LLM_MODEL", "pkg:service/openai.com/env-model")
 
     exit_code = main(
         [
@@ -1757,7 +2214,10 @@ def test_cli_resolves_env_model_into_identity_and_reads_packet_bytes_once(
 
     assert exit_code == 0
     assert packet_reads == 1
-    assert captured[0].settings.provider_identity.model_id == "env-model"
+    assert (
+        captured[0].settings.provider_identity.model_id
+        == "pkg:service/openai.com/env-model"
+    )
     assert captured[0].settings.cache_mode == "read-write"
 
 
@@ -1779,10 +2239,15 @@ def test_cli_rejects_cached_env_model_that_disagrees_with_declared_revision_pair
         "\n".join(
             [
                 "[analyze]",
+                'backend_id = "llm"',
                 'plugin_id = "openai"',
                 'plugin_distribution_name = "llm"',
                 'model = "declared-model"',
                 'model_revision = "declared-model-2026-01-01"',
+                "input_cost_microusd_per_million_tokens = 0",
+                "output_cost_microusd_per_million_tokens = 0",
+                "input_token_overhead = 256",
+                'cost_rate_source = "controlled test rates"',
                 'json_mode = "require"',
                 'cache_mode = "read-write"',
             ]
@@ -1814,9 +2279,7 @@ def test_cli_rejects_cached_env_model_that_disagrees_with_declared_revision_pair
     )
 
     assert exit_code == 2
-    assert "cached model override disagrees with configured model/revision pair" in (
-        capsys.readouterr().err
-    )
+    assert "has no trusted analyze model descriptor" in capsys.readouterr().err
 
 
 def _write_all_skipped_current_repo(root: Path) -> None:
@@ -1974,6 +2437,83 @@ def test_cli_current_analysis_publishes_one_source_bound_artifact_set(
     assert len(result_path.read_text(encoding="utf-8").splitlines()) == 1
 
 
+def test_bare_default_analyze_matches_explicit_provider_capable_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import backstitch.analysis_llm as analysis_llm
+    from backstitch.cli import main
+
+    _write_current_analysis_repo(tmp_path)
+    tmp_path.joinpath(".backstitch.toml").write_text(
+        "\n".join(
+            (
+                'default_command = "analyze"',
+                "[analyze]",
+                'backend_id = "llm"',
+                'plugin_id = "openai"',
+                'plugin_distribution_name = "llm"',
+                'model = "controlled-model"',
+                'model_revision = "2026-07-28"',
+                "input_cost_microusd_per_million_tokens = 0",
+                "output_cost_microusd_per_million_tokens = 0",
+                "input_token_overhead = 256",
+                'cost_rate_source = "controlled test rates"',
+                "maximum_provider_calls = 1",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    calls = 0
+
+    def adapter_factory(*args: object, **kwargs: object) -> ProviderAdapter:
+        provider = cast(ProviderIdentity, kwargs["provider_identity"])
+
+        def call(prompt: str) -> ProviderCallResult:
+            nonlocal calls
+            calls += 1
+            return ProviderCallResult(
+                json.dumps(
+                    {
+                        "packet_id": "docs/specs/01-core.md#CORE-1",
+                        "classification": "ok",
+                        "confidence": 0.9,
+                        "rationale": "The declared implementation matches.",
+                        "summary": "The obligation is supported.",
+                        "evidence": [],
+                    }
+                ),
+                SemanticProvenance(
+                    adapter_id=provider.adapter_id,
+                    adapter_version=provider.adapter_version,
+                    plugin_version=provider.plugin_distribution_version or None,
+                    model_class="tests.ControlledDefaultModel",
+                    provider_model_id=provider.model_id or None,
+                    provider_model_revision=provider.model_revision or None,
+                    response_id="default-command-response",
+                    input_tokens=10,
+                    output_tokens=5,
+                ),
+            )
+
+        return call
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(analysis_llm, "default_provider_adapter", adapter_factory)
+
+    bare_exit = main([])
+    bare_output = capsys.readouterr()
+    explicit_exit = main(["analyze", "--repo-root", "."])
+    explicit_output = capsys.readouterr()
+
+    assert bare_exit == explicit_exit == 0
+    assert bare_output.out == explicit_output.out
+    assert bare_output.err == explicit_output.err
+    assert calls == 2
+
+
 def test_cli_cache_modes_rebuild_resample_and_fail_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2044,6 +2584,10 @@ def test_cli_cache_modes_rebuild_resample_and_fail_closed(
                     'plugin_distribution_name = "llm"',
                     'model = "lifecycle-controlled-model"',
                     'model_revision = "2026-07-27"',
+                    "input_cost_microusd_per_million_tokens = 0",
+                    "output_cost_microusd_per_million_tokens = 0",
+                    "input_token_overhead = 256",
+                    'cost_rate_source = "controlled test rates"',
                     'json_mode = "require"',
                     f'cache_path = "{cache.as_posix()}"',
                     f'cache_mode = "{mode}"',
@@ -2350,6 +2894,10 @@ def test_cli_current_verifier_uses_complete_resolved_provider_descriptor(
         'plugin_distribution_name = "llm"',
         'model = "controlled-model"',
         'model_revision = "2026-07-16"',
+        "input_cost_microusd_per_million_tokens = 0",
+        "output_cost_microusd_per_million_tokens = 0",
+        "input_token_overhead = 256",
+        'cost_rate_source = "controlled test rates"',
         'json_mode = "prefer"',
         'cache_mode = "off"',
         "",
@@ -2386,7 +2934,7 @@ def test_cli_current_verifier_uses_complete_resolved_provider_descriptor(
                 "input_cost_microusd_per_million_tokens = 0",
                 "output_cost_microusd_per_million_tokens = 0",
                 "input_token_overhead = 256",
-                'cost_rate_source = ""',
+                'cost_rate_source = "controlled test rates"',
             )
         )
     tmp_path.joinpath(".backstitch.toml").write_text(

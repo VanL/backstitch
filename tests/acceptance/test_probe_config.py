@@ -47,3 +47,13 @@ def test_probe_7_unknown_config_key_exits_two_naming_key_and_file(
     assert result.returncode == 2
     assert "spec_rootz" in result.stderr
     assert str(config) in result.stderr
+
+
+def test_probe_bare_no_config_has_no_fallback_command() -> None:
+    result = run_cli("--no-config")
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "a command is required unless configuration sets default_command" in (
+        result.stderr
+    )

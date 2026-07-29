@@ -10,8 +10,10 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import types
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -27,15 +29,22 @@ from backstitch.semantic_cache import (
     CacheProtocolError,
     ProviderAdapter,
     ProviderCallResult,
+    SemanticCacheFailure,
     SemanticCacheRun,
     SemanticProvenance,
+    SemanticResultEnvelope,
     analyze_with_cache,
     cleanup_lock,
     inspect_semantic_cache,
+    load_required_evidence_stable_result,
+    load_semantic_baseline,
+    prepare_evidence_stable_cache,
+    resolve_prepared_evidence_stable_result,
 )
 from backstitch.semantic_identity import (
     ProviderIdentity,
     RequestIdentity,
+    build_analysis_identities,
     build_inference_identity,
 )
 from backstitch.semantic_packets import canonical_json_bytes, semantic_packet_hash
@@ -261,6 +270,468 @@ def test_read_write_publishes_exact_canonical_packet_and_result_objects(
         ).hexdigest()
     )
     assert result_path.read_bytes() == canonical_json_bytes(result_object)
+
+
+def test_evidence_stable_preparation_backfills_and_carries_immutable_baseline(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "cache"
+    packet = _validated()
+    exact = _run(cache_path, (packet,))
+    old_identity, review = build_analysis_identities(
+        packet.to_dict(), PROVIDER, REQUEST
+    )
+
+    with prepare_evidence_stable_cache(
+        packets=(packet,),
+        cache_path=cache_path,
+        cache_mode="read-write",
+        provider_identity=PROVIDER,
+        identities=(old_identity,),
+        lock_wait_timeout_seconds=1,
+        poll_interval_seconds=0.01,
+    ) as prepared:
+        assert prepared.owned_review_keys == (review.review_key,)
+        assert prepared.items[0].selection is not None
+        assert prepared.items[0].selection.source == "exact-cache"
+        selection = resolve_prepared_evidence_stable_result(
+            prepared.items[0],
+            call_provider=lambda: pytest.fail("exact hit must not call provider"),
+        )
+
+    assert selection.source == "exact-cache"
+    assert isinstance(selection.envelope, SemanticResultEnvelope)
+    assert prepared.selection_events == (selection,)
+    assert prepared.result_envelopes == (selection.envelope,)
+    assert selection.envelope.result == exact.results[0]
+    baseline_path = cache_path / "baselines" / f"{review.review_key}.json"
+    baseline = json.loads(baseline_path.read_bytes())
+    assert baseline == {
+        "schema_version": 1,
+        "object_type": "semantic-result-baseline",
+        "review_contract": review.contract,
+        "review_key": review.review_key,
+        "analysis_key": old_identity.analysis_key,
+    }
+    assert baseline_path.read_bytes() == canonical_json_bytes(baseline)
+
+    new_provider = replace(PROVIDER, model_id="gpt-new", model_revision="2026-02-01")
+    new_identity, same_review = build_analysis_identities(
+        packet.to_dict(), new_provider, REQUEST
+    )
+    assert same_review.review_key == review.review_key
+    with prepare_evidence_stable_cache(
+        packets=(packet,),
+        cache_path=cache_path,
+        cache_mode="require",
+        provider_identity=new_provider,
+        identities=(new_identity,),
+        lock_wait_timeout_seconds=1,
+        poll_interval_seconds=0.01,
+    ) as replay:
+        carried = replay.items[0].selection
+
+    assert carried is not None
+    assert carried.source == "carried"
+    assert carried.envelope.analysis_key == old_identity.analysis_key
+    assert carried.envelope.provider_identity == PROVIDER
+    assert carried.envelope.result == exact.results[0]
+    assert replay.items[0].producing_provider_identity == PROVIDER
+
+
+def test_baseline_validation_rejects_absent_target_and_mismatched_review_key(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "cache"
+    packet = _validated()
+    identity, review = build_analysis_identities(packet.to_dict(), PROVIDER, REQUEST)
+    baseline_path = cache_path / "baselines" / f"{review.review_key}.json"
+    baseline_path.parent.mkdir(parents=True)
+    baseline_path.write_bytes(
+        canonical_json_bytes(
+            {
+                "schema_version": 1,
+                "object_type": "semantic-result-baseline",
+                "review_contract": review.contract,
+                "review_key": review.review_key,
+                "analysis_key": identity.analysis_key,
+            }
+        )
+    )
+
+    with pytest.raises(CacheProtocolError, match="without its result object"):
+        load_semantic_baseline(cache_path, packet.to_dict(), review)
+
+    mismatched_path = cache_path / "baselines" / f"{'f' * 64}.json"
+    mismatched_path.write_bytes(baseline_path.read_bytes())
+    with pytest.raises(CacheProtocolError, match="review key does not match its path"):
+        load_semantic_baseline(
+            cache_path,
+            packet.to_dict(),
+            replace(review, review_key="f" * 64),
+        )
+
+
+def test_evidence_stable_preparation_acquires_unique_review_locks_lexically(
+    tmp_path: Path,
+) -> None:
+    packets = (_validated("X-2"), _validated("X-1"))
+    identities = tuple(
+        build_analysis_identities(packet.to_dict(), PROVIDER, REQUEST)[0]
+        for packet in packets
+    )
+    expected = tuple(
+        sorted(identity.review_identity.review_key for identity in identities)
+    )
+
+    with prepare_evidence_stable_cache(
+        packets=packets,
+        cache_path=tmp_path / "cache",
+        cache_mode="read-write",
+        provider_identity=PROVIDER,
+        identities=identities,
+        lock_wait_timeout_seconds=1,
+        poll_interval_seconds=0.01,
+    ) as prepared:
+        assert prepared.owned_review_keys == expected
+        assert all(item.selection is None for item in prepared.items)
+        assert all(
+            item.producing_provider_identity == PROVIDER for item in prepared.items
+        )
+        for key in expected:
+            assert (tmp_path / "cache" / "review-locks" / f"{key}.lock").is_file()
+
+    assert not any((tmp_path / "cache" / "review-locks").glob("*.lock"))
+
+
+def test_require_evidence_stable_lookup_is_read_only_and_returns_exact_fallback(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "cache"
+    packet = _validated()
+    _run(cache_path, (packet,))
+    identity, _ = build_analysis_identities(packet.to_dict(), PROVIDER, REQUEST)
+    before = {
+        path.relative_to(cache_path): path.read_bytes()
+        for path in cache_path.rglob("*")
+        if path.is_file()
+    }
+
+    selection = load_required_evidence_stable_result(
+        cache_path,
+        packet.to_dict(),
+        identity,
+        PROVIDER,
+    )
+
+    assert selection is not None
+    assert selection.source == "exact-cache"
+    after = {
+        path.relative_to(cache_path): path.read_bytes()
+        for path in cache_path.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert not (cache_path / "review-guards").exists()
+
+
+def test_different_provider_race_makes_one_call_and_one_baseline(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "cache"
+    packet = _validated()
+    providers = (
+        PROVIDER,
+        replace(PROVIDER, model_id="gpt-new", model_revision="2026-02-01"),
+    )
+    barrier = threading.Barrier(2)
+    calls: list[str] = []
+    calls_lock = threading.Lock()
+
+    def worker(provider: ProviderIdentity) -> Any:
+        identity, _ = build_analysis_identities(packet.to_dict(), provider, REQUEST)
+        barrier.wait(timeout=2)
+        with prepare_evidence_stable_cache(
+            packets=(packet,),
+            cache_path=cache_path,
+            cache_mode="read-write",
+            provider_identity=provider,
+            identities=(identity,),
+            lock_wait_timeout_seconds=2,
+            poll_interval_seconds=0.01,
+        ) as prepared:
+
+            def call() -> ProviderCallResult:
+                with calls_lock:
+                    calls.append(provider.model_id)
+                return _response_for_prompt(
+                    identity.prompt_bytes.decode("utf-8")
+                    + "\n\n"
+                    + json.dumps(packet.to_dict())
+                )
+
+            return resolve_prepared_evidence_stable_result(
+                prepared.items[0], call_provider=call
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = tuple(pool.map(worker, providers))
+
+    assert len(calls) == 1
+    assert sorted(result.source for result in results) == ["carried", "live"]
+    assert len({result.envelope.analysis_key for result in results}) == 1
+    assert len(list((cache_path / "baselines").glob("*.json"))) == 1
+    assert not list((cache_path / "review-locks").glob("*.lock"))
+
+
+def test_require_second_baseline_read_wins_real_publication_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import backstitch.semantic_cache as semantic_cache
+
+    cache_path = tmp_path / "cache"
+    packet = _validated()
+    old_provider = PROVIDER
+    selected_provider = replace(
+        PROVIDER, model_id="gpt-new", model_revision="2026-02-01"
+    )
+    _run(cache_path, (packet,), provider_identity=old_provider)
+    _run(cache_path, (packet,), provider_identity=selected_provider)
+    old_identity, _ = build_analysis_identities(packet.to_dict(), old_provider, REQUEST)
+    selected_identity, _ = build_analysis_identities(
+        packet.to_dict(), selected_provider, REQUEST
+    )
+    exact_read = threading.Event()
+    allow_second_read = threading.Event()
+    real_exact_read = semantic_cache.load_exact_semantic_result
+
+    with prepare_evidence_stable_cache(
+        packets=(packet,),
+        cache_path=cache_path,
+        cache_mode="read-write",
+        provider_identity=old_provider,
+        identities=(old_identity,),
+        lock_wait_timeout_seconds=2,
+        poll_interval_seconds=0.01,
+    ) as prepared:
+
+        def read_exact_then_pause(*args: Any, **kwargs: Any) -> Any:
+            result = real_exact_read(*args, **kwargs)
+            exact_read.set()
+            assert allow_second_read.wait(timeout=2)
+            return result
+
+        monkeypatch.setattr(
+            semantic_cache, "load_exact_semantic_result", read_exact_then_pause
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                load_required_evidence_stable_result,
+                cache_path,
+                packet.to_dict(),
+                selected_identity,
+                selected_provider,
+            )
+            assert exact_read.wait(timeout=2)
+            published = resolve_prepared_evidence_stable_result(
+                prepared.items[0],
+                call_provider=lambda: pytest.fail("old exact result must be reused"),
+            )
+            allow_second_read.set()
+            selected = future.result(timeout=2)
+
+    assert published.envelope.analysis_key == old_identity.analysis_key
+    assert selected is not None
+    assert selected.source == "carried"
+    assert selected.envelope.analysis_key == old_identity.analysis_key
+
+
+def test_baseline_rejects_corrupt_target_without_fallback(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "cache"
+    packet = _validated()
+    _run(cache_path, (packet,))
+    identity, review = build_analysis_identities(packet.to_dict(), PROVIDER, REQUEST)
+    with prepare_evidence_stable_cache(
+        packets=(packet,),
+        cache_path=cache_path,
+        cache_mode="read-write",
+        provider_identity=PROVIDER,
+        identities=(identity,),
+        lock_wait_timeout_seconds=1,
+        poll_interval_seconds=0.01,
+    ) as prepared:
+        resolve_prepared_evidence_stable_result(
+            prepared.items[0],
+            call_provider=lambda: pytest.fail("exact result must be reused"),
+        )
+    result_path = cache_path / "results" / f"{identity.analysis_key}.json"
+    target = json.loads(result_path.read_bytes())
+    target["raw_response_sha256"] = "not-a-hash"
+    result_path.write_bytes(canonical_json_bytes(target))
+
+    with pytest.raises(CacheProtocolError, match="raw response hash"):
+        load_semantic_baseline(cache_path, packet.to_dict(), review)
+
+
+def test_provider_failure_remains_primary_and_releases_review_lock(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "cache"
+    packet = _validated()
+    identity, review = build_analysis_identities(packet.to_dict(), PROVIDER, REQUEST)
+
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        with prepare_evidence_stable_cache(
+            packets=(packet,),
+            cache_path=cache_path,
+            cache_mode="read-write",
+            provider_identity=PROVIDER,
+            identities=(identity,),
+            lock_wait_timeout_seconds=1,
+            poll_interval_seconds=0.01,
+        ) as prepared:
+            resolve_prepared_evidence_stable_result(
+                prepared.items[0],
+                call_provider=lambda: (_ for _ in ()).throw(
+                    RuntimeError("provider unavailable")
+                ),
+            )
+
+    assert not (cache_path / "review-locks" / f"{review.review_key}.lock").exists()
+    assert not (cache_path / "baselines" / f"{review.review_key}.json").exists()
+
+
+def test_review_lock_wait_is_capped_by_absolute_runtime_deadline(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "cache"
+    packet = _validated()
+    identity, review = build_analysis_identities(packet.to_dict(), PROVIDER, REQUEST)
+
+    with prepare_evidence_stable_cache(
+        packets=(packet,),
+        cache_path=cache_path,
+        cache_mode="read-write",
+        provider_identity=PROVIDER,
+        identities=(identity,),
+        lock_wait_timeout_seconds=2,
+        poll_interval_seconds=0.01,
+    ):
+        started = time.monotonic()
+        with pytest.raises(SemanticCacheFailure) as raised:
+            with prepare_evidence_stable_cache(
+                packets=(packet,),
+                cache_path=cache_path,
+                cache_mode="read-write",
+                provider_identity=PROVIDER,
+                identities=(identity,),
+                lock_wait_timeout_seconds=2,
+                poll_interval_seconds=0.01,
+                runtime_deadline=started + 0.05,
+            ):
+                pytest.fail("contending review owner must not acquire the lock")
+
+    assert raised.value.stage == "budget"
+    assert raised.value.code == "budget_exceeded"
+    assert time.monotonic() - started < 0.5
+    assert not (cache_path / "review-locks" / f"{review.review_key}.lock").exists()
+
+
+def test_nested_analysis_lock_wait_respects_runtime_and_publishes_no_baseline(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "cache"
+    packet = _validated()
+    identity, review = build_analysis_identities(packet.to_dict(), PROVIDER, REQUEST)
+    provider_entered = threading.Event()
+    release_provider = threading.Event()
+
+    def blocked_adapter(prompt: str) -> ProviderCallResult:
+        provider_entered.set()
+        assert release_provider.wait(timeout=2)
+        return _response_for_prompt(prompt)
+
+    with prepare_evidence_stable_cache(
+        packets=(packet,),
+        cache_path=cache_path,
+        cache_mode="read-write",
+        provider_identity=PROVIDER,
+        identities=(identity,),
+        lock_wait_timeout_seconds=2,
+        poll_interval_seconds=0.01,
+    ) as prepared:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                analyze_with_cache,
+                packets=(packet,),
+                cache_path=cache_path,
+                cache_mode="read-write",
+                provider_identity=PROVIDER,
+                request_identity=REQUEST,
+                adapter_factory=lambda: blocked_adapter,
+                search_epoch="1",
+                lock_wait_timeout_seconds=2,
+                poll_interval_seconds=0.01,
+            )
+            assert provider_entered.wait(timeout=2)
+            try:
+                with pytest.raises(SemanticCacheFailure) as raised:
+                    resolve_prepared_evidence_stable_result(
+                        prepared.items[0],
+                        call_provider=lambda: pytest.fail(
+                            "analysis-lock waiter must not call the provider"
+                        ),
+                        runtime_deadline=time.monotonic() + 0.05,
+                    )
+            finally:
+                release_provider.set()
+            exact = future.result(timeout=2)
+
+    assert raised.value.stage == "budget"
+    assert raised.value.code == "budget_exceeded"
+    assert exact.problems == ()
+    assert not (cache_path / "baselines" / f"{review.review_key}.json").exists()
+
+
+def test_provider_runtime_overrun_publishes_neither_result_nor_baseline(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "cache"
+    packet = _validated()
+    identity, review = build_analysis_identities(packet.to_dict(), PROVIDER, REQUEST)
+
+    with prepare_evidence_stable_cache(
+        packets=(packet,),
+        cache_path=cache_path,
+        cache_mode="read-write",
+        provider_identity=PROVIDER,
+        identities=(identity,),
+        lock_wait_timeout_seconds=2,
+        poll_interval_seconds=0.01,
+    ) as prepared:
+
+        def overlong_provider() -> ProviderCallResult:
+            time.sleep(0.08)
+            return _response_for_prompt(
+                identity.prompt_bytes.decode("utf-8")
+                + "\n\n"
+                + json.dumps(packet.to_dict())
+            )
+
+        with pytest.raises(SemanticCacheFailure) as raised:
+            resolve_prepared_evidence_stable_result(
+                prepared.items[0],
+                call_provider=overlong_provider,
+                runtime_deadline=time.monotonic() + 0.04,
+            )
+
+    assert raised.value.stage == "budget"
+    assert raised.value.code == "budget_exceeded"
+    assert not (cache_path / "results" / f"{identity.analysis_key}.json").exists()
+    assert not (cache_path / "baselines" / f"{review.review_key}.json").exists()
 
 
 def test_required_replay_is_byte_identical_and_constructs_no_adapter(
@@ -1831,7 +2302,9 @@ def test_verifier_cleanup_uses_disjoint_lock_guard_and_audit_paths(
     assert "analysis_key" not in audit
 
 
-def test_cleanup_requires_exactly_one_analysis_or_verify_key(tmp_path: Path) -> None:
+def test_cleanup_requires_exactly_one_analysis_review_or_verify_key(
+    tmp_path: Path,
+) -> None:
     cache_path = tmp_path / "cache"
     with pytest.raises(CacheProtocolError, match="exactly one"):
         cleanup_lock(
@@ -1843,6 +2316,7 @@ def test_cleanup_requires_exactly_one_analysis_or_verify_key(tmp_path: Path) -> 
         cleanup_lock(
             cache_path=cache_path,
             analysis_key="1" * 64,
+            review_key="3" * 64,
             verify_key="2" * 64,
             lock_stale_seconds=1,
             reason="owner dead",
@@ -1882,3 +2356,55 @@ def test_cleanup_lock_cli_accepts_verify_key(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert Path(result.stdout.strip()).is_file()
     assert not lock_path.exists()
+
+
+def test_review_cleanup_uses_disjoint_closed_audit_and_cli_key(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "cache"
+    review_key = "8" * 64
+    lock_path = cache_path / "review-locks" / f"{review_key}.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_bytes(b"legacy stale review lock")
+    old = (datetime.now(UTC) - timedelta(hours=2)).timestamp()
+    os.utime(lock_path, (old, old))
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "backstitch",
+            "cache",
+            "cleanup-lock",
+            "--cache-path",
+            str(cache_path),
+            "--review-key",
+            review_key,
+            "--lock-stale-seconds",
+            "1",
+            "--reason",
+            "review owner confirmed dead",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    audit_path = Path(result.stdout.strip())
+    assert audit_path.parent == cache_path / "audit" / "review-locks"
+    assert not lock_path.exists()
+    assert (cache_path / "review-guards" / f"{review_key}.guard").is_file()
+    audit = json.loads(audit_path.read_bytes())
+    assert set(audit) == {
+        "schema_version",
+        "object_type",
+        "review_key",
+        "lock_sha256",
+        "lock_bytes",
+        "lock_lstat",
+        "reason",
+        "cleaned_at_utc",
+    }
+    assert audit["object_type"] == "semantic-review-lock-cleanup"
+    assert audit["review_key"] == review_key

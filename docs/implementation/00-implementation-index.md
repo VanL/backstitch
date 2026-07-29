@@ -24,3 +24,4 @@ read order stay aligned instead of competing.
 6. `06-choosing-a-local-model.md`
 7. `07-deterministic-semantic-gate.md`
 8. `08-aligned-intent-read-model.md`
+9. `09-intent-coverage.md`

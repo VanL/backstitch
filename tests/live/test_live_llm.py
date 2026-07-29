@@ -1148,21 +1148,24 @@ def _exercise_live_llm_analysis_contract(
     if local_config is not None:
         _assert_model_listed(local_config)
         _assert_local_transport(local_config)
-
-    cache_identity_options = [
-        "--option",
-        "analyze.backend_id",
-        "llm",
-        "--option",
-        "analyze.plugin_id",
-        "live-contract",
-        "--option",
-        "analyze.plugin_distribution_name",
-        "llm",
-        "--option",
-        "analyze.model_revision",
-        "live-contract-v1",
-    ]
+    live_config = live_root / ".backstitch.toml"
+    live_config.write_text(
+        live_config.read_text(encoding="utf-8").replace(
+            "[analyze]\n",
+            "[analyze]\n"
+            'backend_id = "llm"\n'
+            'plugin_id = "live-contract"\n'
+            'plugin_distribution_name = "llm"\n'
+            f'model = "{live_model}"\n'
+            'model_revision = "live-contract-v1"\n'
+            "input_cost_microusd_per_million_tokens = 0\n"
+            "output_cost_microusd_per_million_tokens = 0\n"
+            "input_token_overhead = 256\n"
+            'cost_rate_source = "live contract fixture"\n',
+            1,
+        ),
+        encoding="utf-8",
+    )
 
     # 3. Real provider call through the public analyze command.
     if proxy is not None:
@@ -1178,8 +1181,7 @@ def _exercise_live_llm_analysis_contract(
         "--concurrency",
         "1",
         "--config",
-        str(live_root / ".backstitch.toml"),
-        *cache_identity_options,
+        str(live_config),
         "--option",
         "analyze.cache_mode",
         "read-write",
@@ -1217,8 +1219,7 @@ def _exercise_live_llm_analysis_contract(
         "--concurrency",
         "1",
         "--config",
-        str(live_root / ".backstitch.toml"),
-        *cache_identity_options,
+        str(live_config),
         "--option",
         "analyze.cache_mode",
         "require",

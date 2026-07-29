@@ -8,7 +8,7 @@ Quick pointers to the key guidance documents in this repository.
 |------|---------|
 | `AGENTS.md` | Canonical agent entry point |
 | `CLAUDE.md` | Alias for tools that expect Claude-style root guidance |
-| `pyproject.toml` | Package metadata, dependency declarations, console script, and Python tool configuration |
+| `pyproject.toml` | Package metadata, dependency declarations, console script, Python tool configuration, and the repository's provider-capable bare `analyze` default |
 | `bin/release.py` | Maintainer release helper for version updates, checks, release commit, and tag push |
 | `bin/check-doc-paths` | Guidance-corpus gate: every backticked repo-relative path claim in agent-context, specs, implementation docs, and skills must resolve |
 | `bin/coalesce-check` | Coalescing-layer gate: resolves `docs/coalescing.md` SHA claims and retrieval cues (locally, in siblings, and against `origin/main`) and derives the lessons-tier count |
@@ -18,7 +18,7 @@ Quick pointers to the key guidance documents in this repository.
 | Path | Purpose |
 |------|---------|
 | `backstitch/` | Python package for the backstitch CLI and traceability implementation |
-| `backstitch/defaults.toml` | Packaged lowest-precedence defaults for profile, excludes, diagnostics, and policy ([SC-15], [CFG-5]) |
+| `backstitch/defaults.toml` | Packaged lowest-precedence defaults for bare dispatch, profile, excludes, diagnostics, and policy ([SC-15], [CFG-5]) |
 | `backstitch/diagnostics.py` | Diagnostic registry with explicit deterministic/semantic families, short-code aliases, selector matching, and ordered policy application ([SC-11], [SC-15]) |
 | `backstitch/canonical.py` | Sole canonical JSON, canonical repository-path, and LF-only line/slicing primitive owner ([INV-11] [INV.CANON.1], [INV.LINE.1]) |
 | `backstitch/contract_validation.py` | Shared scalar and closed-record validation mechanics with artifact-family error and NFC policy preserved at thin wrappers ([INV-11]) |
@@ -37,28 +37,31 @@ Quick pointers to the key guidance documents in this repository.
 | `backstitch/obligations.py` | Source-derived section, invariant, and suppression obligation inventory, readiness, disposition, blockers, and bootstrap entries ([EVC-2], [EVC-8.3]) |
 | `backstitch/evidence_summary.py` | Exact declared-evidence rows, reciprocity, source spans, and receipts from the accepted snapshot ([EVC-4.1], [EVC-8.3]) |
 | `backstitch/evidence_discovery.py` | Deterministic structural/lexical candidate discovery, conservative Python relations, trace states, receipts, and review guidance ([EVC-7]) |
+| `backstitch/intent_coverage.py` | Pure canonical-definition classification, exemptions, reverse requirement coverage, exact floors, and triage order ([COV-3], [COV-4], [COV-6]) |
+| `backstitch/intent_coverage_reporting.py` | Closed content-bound schema-1 intent-coverage report and consistency validation ([COV-3], [COV-9]) |
+| `backstitch/git_baseline.py` | Bounded shell-free Git baseline, ratchet, drift, acknowledgment, and stale-history fact owner ([COV-5], [COV-8]) |
 | `backstitch/obligation_api.py` | Transport-neutral obligation envelopes, canonical-core response-byte enforcement, closed problems/guidance, and content-bound pagination ([EVC-8.4]) |
 | `backstitch/alignment_guide.py` | Installed versioned alignment quick start shared by public agent and human workflows ([EVC-8.1]) |
 | `backstitch/alignment_eval.py` | Closed Phase A/B product preregistration, authoritative product identities, independently source-bound gold, and result recomputation ([EVC-10.2]) |
 | `backstitch/reporting.py` | Text/JSON rendering, suppressed view ([SC-6], [EXC-7]) |
-| `backstitch/settings.py` | Sole invocation-scoped config resolver: packaged defaults, repository TOML, defined environment, generic/dedicated CLI layers, strict validation, and immutable settings provenance ([CFG-5.1], [SC-5.1]) |
+| `backstitch/settings.py` | Sole invocation-scoped config resolver: packaged defaults, repository TOML, bare/explicit command context, defined environment, generic/dedicated CLI layers, strict validation, and immutable settings provenance ([CFG-5.1], [SC-5.1]) |
 | `backstitch/exclusions.py` | Canonical documented-suppression rule engine and decisions ([EXC-*]) |
 | `backstitch/target_roots.py` | Worktree-safe sibling discovery ([SC-12]) |
 | `backstitch/analysis_packets.py` | Sole source-aligned packet producer over one immutable obligation runtime; the former `generate_packets` path is removed ([SC-6], [SC-7], [EVC-9.1], [INV-5]) |
 | `backstitch/analysis_results.py` | Discriminated section/invariant/suppression result JSONL validation and kind-separated summaries ([SC-6], [INV-5]) |
 | `backstitch/analysis_llm.py` | Lazy-`llm` adapter, evidence-locality, and weak-binding normalization boundary ([SC-7], [SC-8], [INV-5]) |
 | `backstitch/semantic_packets.py` | Canonical schema-3 section/invariant and schema-4 suppression projections, exact model-visible evidence regions, and code-owned prompt descriptors ([SEM-3], [EVC-9.1]) |
-| `backstitch/semantic_identity.py` | Offline provider/request/contract fingerprint and content-addressed analysis key ([SEM-3]) |
+| `backstitch/semantic_identity.py` | Offline provider-sensitive inference identity, provider-independent review identity, and their content-addressed keys ([SEM-3]) |
 | `backstitch/semantic_evidence.py` | Closed model-result normalization and trusted packet-local excerpt reconstruction ([SEM-5]) |
-| `backstitch/semantic_cache.py` | Immutable untrusted semantic cache, single flight, no-replace publication, and audited lock cleanup ([SEM-4]) |
+| `backstitch/semantic_cache.py` | Immutable exact results and evidence-stable first-writer baselines, run-wide lexical review locks, single flight, no-replace publication, and audited lock cleanup ([SEM-4]) |
 | `backstitch/semantic_policy.py` | Semantic finding identity, dispositions, policy provenance, and diagnostic projection ([SEM-2], [SEM-6]) |
-| `backstitch/semantic_reports.py` | Closed packet/analysis reports and staged publication of complete packet/result/report artifact sets ([SEM-7]) |
-| `backstitch/semantic_analysis.py` | Unified cache, completeness, budget, policy, publication, and exit-code runner ([SEM-1], [SEM-7]) |
+| `backstitch/semantic_reports.py` | Closed packet/analysis reports, schema-5 producer/source reconciliation, and staged publication of complete packet/result/report artifact sets ([SEM-7]) |
+| `backstitch/semantic_analysis.py` | Unified exact/evidence-stable selection, late qualification, completeness, budget, policy, publication, and exit-code runner ([SEM-1], [SEM-7]) |
 | `backstitch/semantic_eval.py` | Closed mutation/control corpus runner, metrics, Wilson intervals, and qualification ([SEM-8]) |
 | `backstitch/semantic_eval_reports.py` | Closed eval-report validation, cross-field consistency, and self-acceptance loading ([SEM-8], [SC-13]) |
 | `backstitch/prompts/` | Packaged section, invariant, and suppression semantic-review prompts ([SC-7], [INV-5]) |
 | `backstitch/doctor.py` | Environment doctor checks ([SC-14]) |
-| `backstitch/cli.py` | Parser/dispatch, one-shot settings resolution and injection, command option normalization, output writes, and exit-code mapping ([SC-5], [SC-5.1], [CFG-5.1], [CFG-7]) |
+| `backstitch/cli.py` | Parser/dispatch, fixed bare `check`/`analyze` delegation, one-shot settings resolution and injection, command option normalization, output writes, and exit-code mapping ([SC-5], [SC-5.1], [CFG-5.1], [CFG-7]) |
 | `tests/acceptance/` | Black-box [SC-10] probes, including invariant and suppression lifecycle dogfood and artifact compatibility |
 | `tests/semantic_eval/v1/` | Historical analyzer-only mutation corpus retained for migration tests ([SEM-8]) |
 | `tests/semantic_eval/v3/` | Current schema-3 runner smoke corpus and non-authoritative qualification candidate ([EVC-10.1]) |
@@ -111,6 +114,7 @@ Quick pointers to the key guidance documents in this repository.
 | `docs/implementation/05-release-publishing.md` | Release helper, publishing gate, rollback, and operator notes |
 | `docs/implementation/07-deterministic-semantic-gate.md` | Semantic identity, cache, evidence, authority, eval, and rollout rationale |
 | `docs/implementation/08-aligned-intent-read-model.md` | Immutable snapshot, obligation/readiness, evidence summary, discovery, CLI, and human-authority rationale |
+| `docs/implementation/09-intent-coverage.md` | Intent-coverage ownership, trust boundaries, classification rationale, and rollout |
 | `docs/lessons.md` | Canonical lessons ledger |
 
 ## Skills

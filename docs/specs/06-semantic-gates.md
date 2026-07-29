@@ -1,6 +1,10 @@
 # Deterministic-Enough Semantic Gate Spec
 
 Status: Active
+
+Related coverage behavior: `docs/specs/08-intent-coverage.md` [COV-7],
+[COV-8], [COV-9].
+
 ## 1. Purpose And Scope [SEM-1]
 
 Backstitch semantic analysis is a bounded search heuristic over deterministic
@@ -275,7 +279,7 @@ Before cache lookup, Backstitch constructs this offline inference contract:
   "provider": {
     "backend_id": "llm",
     "plugin_id": "repository-declared-plugin",
-    "model_id": "repository-declared-model",
+    "model_id": "pkg:service/example.com/repository-declared-model",
     "model_revision": "repository-declared-revision",
     "adapter_id": "backstitch.llm",
     "adapter_version": 2,
@@ -343,6 +347,24 @@ Changing any inference-contract field creates a new analysis key. Policy,
 rendering, concurrency, result/report paths, suppressions, and operational
 counters do not.
 
+Backstitch also constructs a provider-independent review contract containing
+exactly `analysis_contract_version`, `packet_hash`, `prompt`, `request`, and
+`search_epoch` from the inference contract above. `review_key` is SHA-256 of
+that contract's canonical JSON. The provider descriptor is deliberately
+absent. Equal review keys mean that the complete model-visible packet, semantic
+question, normalization/analysis contract, request controls, and explicit
+resampling epoch are unchanged. They do not claim that two models would
+produce equal output.
+
+The review key supports one product rule: a complete evidence-bound inference
+result may remain in force across provider/model selection changes while its
+review key is unchanged. The carried unit is the complete canonical result
+plus its original inference contract and provenance. Classification,
+rationale, summary, selected evidence, `analysis_key`, and producer identity
+travel together; no field is relabeled as output from the currently selected
+model. Packet, prompt, request, contract, or epoch changes always create a new
+review key and cannot carry the old result.
+
 _Implementation mapping_:
 
 - `backstitch/semantic_packets.py`
@@ -356,7 +378,11 @@ The cache is untrusted and stores versioned canonical objects:
 ```text
 packets/<packet_hash>.json
 results/<analysis_key>.json
+baselines/<review_key>.json
 verify-results/<verify_key>.json
+review-locks/<review_key>.lock
+review-guards/<review_key>.guard
+audit/review-locks/<review_key>.<audit_sha256>.json
 locks/<analysis_key>.lock
 guards/<analysis_key>.guard
 audit/locks/<analysis_key>.<audit_sha256>.json
@@ -372,12 +398,19 @@ root is supported: the next `read-write` run rebuilds needed objects, while a
 `require` run reports misses. Fine-grained pruning and concurrent whole-root
 deletion are not current Backstitch commands.
 
-CI may restore and save only immutable `packets/`, `results/`, and
-`verify-results/` object trees through a trusted cache service. Lock, guard,
-audit, staging, and report trees are never transferred as reusable cache
-state. Restored bytes are untrusted and receive the same complete validation
-as local bytes. Cache restoration failure changes only expected call count,
-cost, or `require`-mode availability; it cannot change cache authority.
+CI may restore and save only immutable `packets/`, `results/`, `baselines/`,
+and `verify-results/` object trees through a trusted cache service. Lock,
+guard, audit, staging, and report trees are never transferred as reusable
+cache state. Restore either targets an empty cache root or merges each object
+with immutable no-replace validation: an existing byte-identical object is
+accepted and different bytes at the same path fail restore. Result trees are
+restored before baseline trees. Ordinary archive extraction may not overwrite
+or merge divergent baseline trees, and any restored baseline whose target is
+absent is corrupt. Restore order therefore cannot choose or replace a baseline.
+Restored bytes are untrusted and receive the same complete validation as local
+bytes. Cache restoration failure changes only expected call count, cost,
+selected disposable baseline, or `require`-mode availability; it cannot change
+source, disposition, verification, or policy authority.
 
 A packet object contains exactly `schema_version = 1`,
 `object_type = "semantic-packet"`, one current [EVC-9.1] model projection,
@@ -404,6 +437,52 @@ row remains `evidence_bound`; trusted verification and dispositions project
 separately. Evidence uses the exact [SEM-5] packet-local contract for its
 kind.
 
+A baseline object contains exactly `schema_version = 1`,
+`object_type = "semantic-result-baseline"`, `review_contract`, `review_key`,
+and `analysis_key`. Its `analysis_key` names one immutable result object whose
+inference contract derives the same review contract. Publication order is
+result first, baseline second. Baselines use atomic no-replace publication:
+the first valid result selected for a review key remains the baseline until a
+review-key input changes. A concurrent loser validates and uses the winner; it
+never overwrites it. A baseline with a missing, corrupt, mismatched, or
+non-evidence-bound target is corrupt cache, not a miss and not permission to
+choose another result.
+
+With `analyze.result_reuse = "evidence-stable"`, lookup checks the baseline
+before constructing an analyzer adapter. A valid baseline is a hit even when
+its producer differs from the currently selected provider. If no baseline
+exists, `read-write` acquires the per-review-key single-flight lock, rechecks
+the baseline, validates qualification for any winner, and only then may use or
+create the selected provider's exact result and publish the baseline. For a
+multi-packet run, it collects all absent-baseline review keys, acquires their
+locks in lexical key order, rechecks all baselines, and performs qualification
+and the complete call/cost/runtime preflight before any provider work. The
+review-lock owner alone elects the first baseline, so concurrent
+different-model read-write invocations have at most one active provider call
+for each review key and every successful waiter uses the
+scheduling-dependent winner. A failed or explicitly cleaned owner may be
+retried later under the ordinary single-flight rules; no failed call becomes a
+baseline. `require`
+takes a lock-free linearizable read: it reads the baseline, validates the
+selected provider's exact result or miss when the baseline is absent, then
+reads the baseline again. A valid second-read baseline wins and undergoes
+qualification validation for its producer. If the second read is absent, the
+operation linearizes at that read and may return the valid exact result or its
+ordinary exact miss. It performs no lock or baseline write and does not
+participate in an in-flight election. With
+`"exact-inference"`, baseline objects are ignored and only the selected
+provider's exact `analysis_key` may hit. Exact-inference runs do not replace or
+repoint an existing baseline. Changing `search_epoch` creates a new review key
+and is the supported way to establish a new evidence-stable decision after
+explicit resampling.
+
+Legacy cache roots remain readable for exact `analysis_key` hits. They have no
+baseline objects and therefore grant no cross-provider carry-forward by
+themselves. A `read-write` exact hit under the new implementation may
+backfill its baseline without changing the result object. No unbounded scan of
+legacy `results/` is permitted. Rollout that needs immediate cross-model reuse
+warms the cache once with the old selected model before changing selectors.
+
 Verifier event/cache identity, closed result object, reason-free projection,
 event key, claim hash, trial-specific effective epoch, normalization, and
 provenance are exactly [EVC-3.1]. Analyzer and verifier objects use disjoint
@@ -413,16 +492,41 @@ request, epoch, evidence, and canonical bytes before it can contribute to an
 aggregate. Corruption, mismatch, or require-mode miss is exit `2`, never an
 indeterminate model verdict.
 
-Verifier single-flight uses the same state machine and filesystem guarantees
-as analyzer single-flight, substituting `verify_key`,
+Review-key single-flight and verifier single-flight use the same state machine
+and filesystem guarantees as analyzer single-flight, substituting
+`review_key`, `semantic-review-lock`, `semantic-review-lock-guard`, and the
+three review paths shown above, or `verify_key`,
 `semantic-verification-lock`, `semantic-verification-lock-guard`, and the
 three verifier paths shown above for their analyzer counterparts. Analyzer and
-verifier keys never share a lock, guard, or cleanup-audit path. The explicit
-cleanup command accepts exactly one of `--analysis-key HASH` or
-`--verify-key HASH`; verify cleanup uses the verifier paths and records
-`verify_key` instead of `analysis_key` in the otherwise corresponding closed
-audit object. `verify.lock_wait_timeout_seconds` governs verifier waits; stale
-age remains an explicit cleanup-command input rather than repository config.
+review/verifier keys never share a lock, guard, or cleanup-audit path. The
+explicit cleanup command accepts exactly one of `--analysis-key HASH`,
+`--review-key HASH`, or `--verify-key HASH`; review and verify cleanup use
+their respective paths and key member in the otherwise corresponding closed
+audit object. `analyze.lock_wait_timeout_seconds` governs analysis and review
+waits; `verify.lock_wait_timeout_seconds` governs verifier waits. Stale age
+remains an explicit cleanup-command input rather than repository config.
+
+For the review-key substitution, the completion object polled by waiters is
+`baselines/<review_key>.json`, not a result path. The owner still publishes and
+validates any new analysis result under the nested analysis-key protocol
+first. It then publishes the baseline and removes its unchanged token-owned
+review lock in one review-guard critical section. Owner failure or timeout
+removes every unchanged token-owned review lock already acquired by that run;
+process death leaves each one abandoned for explicit cleanup. A result left by
+a crash before baseline publication is a valid exact object and may be used to
+finish a later election.
+
+Evidence-stable read-write lock order is exactly review key, then analysis key.
+When a run needs several review locks it acquires the complete unique set in
+lexical review-key order before any analysis lock or provider call. It holds
+each outer lock while rechecking the baseline, performing the all-result
+qualification and operational preflight, consulting or producing the selected
+exact result, publishing the result first, and publishing the baseline second.
+No code path acquires a review lock while owning an analysis lock.
+Exact-inference uses only the analysis lock. Guard advisory locks remain short
+critical sections and never span provider work or waiter sleep. Each lock wait
+is bounded by the analyze lock timeout and the whole sequence remains bounded
+by the command runtime ceiling.
 
 Provenance has exactly `adapter_id`, `adapter_version`, nullable
 `plugin_version`, nullable `model_class`, nullable `provider_model_id`, nullable
@@ -438,18 +542,22 @@ Cache modes are:
 - `off`: do not read or write cache objects; analyzer work calls once per
   packet, while verifier work calls once per normalized finding and configured
   `(base_search_epoch, effective_search_epoch)` pair
-- `read-write`: reuse each valid analyzer or verifier work-item hit, call only
-  for misses, and publish successful misses immutably
-- `require`: require one valid analyzer object for every packet and one valid
-  verifier object for every normalized finding/required epoch pair; construct
-  no adapter and make zero provider calls; any miss exits `2`
+- `read-write`: apply the selected analyzer result-reuse rule, reuse each valid
+  analyzer or verifier work-item hit, call only for misses, and publish
+  successful misses and eligible baselines immutably
+- `require`: apply the selected analyzer result-reuse rule, require one valid
+  analyzer result for every packet and one valid verifier object for every
+  normalized finding/required epoch pair; construct no adapter and make zero
+  provider calls; any miss exits `2`
 
 `read-write` is the normal update mode. An inference-relevant change creates
-a miss for every work identity whose model-visible packet, prompt, provider,
-request, contract, or epoch changed. Adding support for a new packet kind
-does not alter old-kind identities. Changes to suppression scope, mappings,
-or matched issues may legitimately alter existing packet projections and
-therefore their keys. Meta/rung changes may alter packet eligibility. A
+a miss under `exact-inference` for every work identity whose model-visible
+packet, prompt, provider, request, contract, or epoch changed. Under
+`evidence-stable`, a provider-only change carries the baseline; packet,
+prompt, request, contract, and epoch changes miss. Adding support for a new
+packet kind does not alter old-kind identities. Changes to suppression scope,
+mappings, or matched issues may legitimately alter existing packet projections
+and therefore their keys. Meta/rung changes may alter packet eligibility. A
 policy-only change remains a zero-call replay. `off` is an uncached run, not a
 cache-refresh alias: it neither reads nor publishes cache objects. Changing
 `search_epoch` is the explicit resampling mechanism when new immutable cache
@@ -525,6 +633,8 @@ An abandoned lock is removed only by:
 backstitch cache cleanup-lock --cache-path PATH \
   --analysis-key HASH --lock-stale-seconds SECONDS --reason TEXT
 backstitch cache cleanup-lock --cache-path PATH \
+  --review-key HASH --lock-stale-seconds SECONDS --reason TEXT
+backstitch cache cleanup-lock --cache-path PATH \
   --verify-key HASH --lock-stale-seconds SECONDS --reason TEXT
 ```
 
@@ -545,6 +655,14 @@ replacement, then removes the lock only if its bytes and lstat identity are
 unchanged. A retry after audit publication creates or validates its own audit
 event and may remove the still-unchanged stale lock. It never runs or retries
 analysis.
+
+The review-key variant performs the same algorithm with closed
+`semantic-review-lock-cleanup` audit objects containing `review_key` instead
+of `analysis_key` and publishes them at
+`audit/review-locks/<review_key>.<audit_sha256>.json`. Its lock and guard
+objects likewise contain `review_key` and use the review object types and paths
+shown above. Cleanup never nests lock acquisition: analysis-, review-, and
+verify-key cleanup owns only the matching guard.
 
 Canonical result JSONL rendered from fixed packet order and cache objects is
 byte-identical on replay. Run-local duration, wait time, cache counters, and
@@ -844,8 +962,8 @@ readiness counts, byte counts, and derivation identities must satisfy
 [EVC-9.1] before cache or provider work. Packet-schema-2 input remains bounded
 historical validation/presentation only and cannot produce this report.
 
-The current analysis report is the closed schema 4 contract in [EVC-9.1];
-historical analysis retains the closed schema 3 reader. The current contract
+The current analysis report is the closed schema 5 contract in [EVC-9.1];
+historical analysis retains the closed schema 3 and 4 readers. The current contract
 retains the following analyzer fields from schema 3 and the former schema-1
 report while adding scope, semantic status, artifact integrity/currentness,
 source provenance/snapshot, packet-report content hash, alignment summary and
@@ -854,7 +972,9 @@ fields include
 `artifact = "backstitch-analysis-report"`, `packet_jsonl_sha256`,
 `result_jsonl_sha256`, `status` (`complete`, `incomplete`, or `failed`),
 `analysis_exit_code`, `packet_count`, `result_count`, `packet_warning_count`,
-`packet_warning_debt`, `finding_debt`, `cache_hits`, `cache_misses`, `provider_calls`,
+`packet_warning_debt`, `finding_debt`, `cache_hits`, `cache_misses`,
+`provider_calls`, `result_reuse`, `exact_cache_hits`, `carried_results`,
+`selected_inference`, `result_sources`, `result_providers`,
 `prompt_byte_count`, `elapsed_milliseconds`, nullable
 `estimated_cost_microusd`, nullable `cost_rate_source`,
 `effective_policy_layers`, `semantic_diagnostics`, `unused_dispositions`, and
@@ -874,25 +994,83 @@ packet report and exits `2` before adapter construction. A required
 suppressions is vacuously complete so deleting the last suppression does not
 break CI.
 
-Packet-report schema 3 and analysis-report schema 4 are the current producer
-contracts when suppression packets are supported. Readers retain exact
-packet-report schema 2 and analysis-report schema 3 support for the
-immediately prior section/invariant-only historical contract. Compatibility
-readers never reinterpret an old row as a suppression row.
-Analysis-report schema 4 adds `packet_schema_versions` from packet-report
-schema 3 and `kind_counts`. `kind_counts` contains exactly `eligible`,
+Packet-report schema 3 and analysis-report schema 5 are the current producer
+contracts. Readers retain exact packet-report schema 2 and analysis-report
+schema 3 and 4 support. Compatibility readers never invent result-reuse
+metadata or reinterpret an old row as a suppression row.
+Analysis-report schema 4 added `packet_schema_versions` from packet-report
+schema 3 and `kind_counts`; schema 5 retains both. `kind_counts` contains exactly `eligible`,
 `emitted`, `results`, `cache_hits`, `cache_misses`, and `provider_calls`;
 each contains exactly nonnegative `section`, `invariant`, and `suppression`
 integers. Eligible/emitted copy the packet report. Results and work counts
 recompute from canonical rows and operational events; each nested total
-equals the corresponding existing aggregate count. Every other
-analysis-report schema-3 field and semantic rule is unchanged.
+equals the corresponding existing aggregate count.
+
+Schema 5 adds `result_reuse`, `selected_inference`, `exact_cache_hits`,
+`carried_results`, `result_sources`, and `result_providers`. `result_reuse` is
+the resolved [SEM-4] enum. `selected_inference` contains exactly `provider`,
+`request`, `analysis_contract_version`, `search_epoch`, and `prompts`. Its
+first four members have their exact [SEM-3] inference-contract shapes.
+`prompts` is in canonical packet-kind order and each row contains exactly
+`kind` plus that kind's code-owned `id`, `version`, and `sha256` prompt
+descriptor. It supplies the selected-provider preimage needed to reconstruct
+the selected analysis key for each packet without consulting configuration:
+the packet kind selects a row, and only that row's `id`, `version`, and
+`sha256` form the inference-contract prompt. `kind` is report indexing, not a
+review- or inference-contract member.
+
+`result_sources` is in canonical result-row order and has one closed row per
+result containing exactly `packet_id`, `packet_hash`, `analysis_key`,
+`review_key`, `result_object_sha256`, `inference_contract`, `provenance`, and
+`selection`. `selection` is `live`, `exact-cache`, or `carried`. Each row joins
+exactly one canonical result by packet identity and hashes. Report production
+passes the ordered selected closed result envelopes to the validator as
+authoritative inputs; cache-off live work constructs the same envelope in
+memory without persisting it. Report production also passes an ordered,
+non-report operational selection event per result containing exactly
+`packet_id`, `packet_hash`, `result_object_sha256`, and `selection`. This event
+is created at the runtime branch that observed a newly produced result, an
+existing result whose analysis key equals the selected key, or a baseline
+whose result key differs from the selected key. Those cases are respectively
+`live`, `exact-cache`, and `carried`; it is not derived from the report. The
+validator requires
+each persisted source row to equal its event, hashes each complete envelope to
+reproduce `result_object_sha256`, requires the row inference contract and
+provenance to equal that envelope, hashes `inference_contract` to reproduce
+`analysis_key`, removes its provider to reproduce the exact review contract
+and `review_key`, and validates its packet, nested result, and prompt against
+the joined inputs. It independently reconstructs the selected analysis key
+from `selected_inference`: `carried` is required exactly when the row analysis
+key differs; `live` or `exact-cache` is required when it equals. A validator
+invocation without both the ordered selected envelopes and ordered operational
+selection events is invalid; report fields never attest to their own producer
+provenance or cache/live source.
+
+`exact_cache_hits` and `carried_results` are nonnegative integers whose sum is
+`cache_hits`. They respectively count `exact-cache` and `carried`
+`result_sources` rows. `live` rows are successful current provider calls;
+provider failures may make `provider_calls` greater than the live-row count,
+and the existing operational-fact validation owns that reconciliation.
+`result_providers` is sorted by canonical JSON of `provider` plus
+`observed_model` and contains one row per distinct producing identity with
+exactly `provider`, `observed_model`, `result_count`, and
+`carried_result_count`. `provider` has the exact [SEM-3] provider shape.
+`observed_model` contains exactly nullable `model_class`,
+`provider_model_id`, and `provider_model_revision` copied from the immutable
+`result_sources.provenance`. Counts are recomputed from the source ledger,
+are nonnegative,
+`carried_result_count <= result_count`, provider result counts sum to
+`result_count`, and provider carried counts sum to `carried_results`. Live
+results and exact hits retain the selected provider and their observed return
+identity; carried rows retain their original producer. Every other schema-4
+field and semantic rule is unchanged.
 
 Every invocation that reaches artifact publication constructs its result and
-report from that invocation's current or historical input, valid cache hits,
-live misses, and current policy. A failure before report publication remains
-an explicit error and log event. A prior result file or report is never used as
-a semantic cache and never satisfies completeness. Run artifacts may be
+report from that invocation's current or historical input, valid exact or
+baseline-selected cache hits, live misses, and current policy. A failure before
+report publication remains an explicit error and log event. A prior output
+file or report is never used as a semantic cache and never satisfies
+completeness; only [SEM-4] immutable cache objects may do so. Run artifacts may be
 overwritten atomically by later invocations and may be retained as short-lived
 CI artifacts; they are not ordinary repository source.
 
@@ -1091,6 +1269,9 @@ Version 1 requires at least one case from every closed family:
 | `implementation_branch_reversal` | positive | Invert one guarded behavior; expect `SEMANTIC_CONFIRMED_MISMATCH` |
 | `binding_assertion_weakened` | positive | Replace a binding assertion with a tautology/non-binding assertion; expect `SEMANTIC_WEAK_BINDING` |
 | `trace_relation_vacuous` | positive | Preserve valid reciprocal trace syntax while making the declared behavioral relation substantively vacuous; expect `SEMANTIC_MISSING_TRACE` |
+| `spec_contract_vacuous` | positive | Keep implementation and reciprocal trace syntax fixed while replacing informative governing text with vacuous prose; expect `SEMANTIC_MISSING_TRACE` |
+| `spec_contract_overbroad` | positive | Keep implementation and reciprocal trace syntax fixed while replacing a discriminating contract with prose broad enough to fit incompatible implementations; expect `SEMANTIC_MISSING_TRACE` |
+| `spec_contract_nondiscriminating` | positive | Keep implementation and reciprocal trace syntax fixed while removing the text that distinguishes the current behavior from the paired mutation; expect `SEMANTIC_MISSING_TRACE` |
 | `equivalent_refactor` | negative | Apply a behaviorally equivalent expression change |
 | `nonsemantic_comment_edit` | negative | Change only an explanatory comment |
 | `prompt_injection_comment` | negative | Insert instruction-like text captured in the packet; it has no authority |
@@ -1099,6 +1280,15 @@ Version 1 requires at least one case from every closed family:
 Literal removal of a mapping, backlink, bind, or binding-test relation is a
 deterministic alignment/readiness evaluation unit under [EVC-2.1] and does not
 count as semantic recall.
+
+The three `spec_contract_*` families are [COV-7]'s anti-Goodhart lane. Their
+transform path is a spec file, their implementation bytes remain identical
+between clean and mutated variants, and the ordinary current-source semantic
+packet and analyzer remain the only judge. They add no proposal provenance,
+author label, or diff packet. Promotion to enforce mode requires the committed
+corpus manifest, every fixture hash, corpus digest, qualification report, and
+report hash to be refreshed together; a report bound to the pre-expansion
+corpus cannot authorize failure.
 
 `corpus_manifest_sha256` hashes the exact validated manifest file bytes.
 Trial index starts at zero. Its effective search epoch is
@@ -1323,7 +1513,8 @@ The supported non-secret configuration surface is exact:
 backend_id = "llm"
 plugin_id = "repository-declared-plugin"
 plugin_distribution_name = "installed-plugin-distribution"
-model = "provider-model-id"
+model = "pkg:service/example.com/provider-model"
+adapter_model_id = "provider-model-id"
 model_revision = "repository-declared-revision"
 concurrency = 1
 json_mode = "require"          # prefer | require | off
@@ -1332,6 +1523,7 @@ seed = 42
 max_tokens = 512
 cache_path = ".backstitch/semantic-cache"
 cache_mode = "require"         # off | read-write | require
+result_reuse = "evidence-stable" # evidence-stable | exact-inference
 search_epoch = "1"
 require_complete = true
 required_kinds = ["section", "invariant", "suppression"]
@@ -1347,6 +1539,17 @@ input_cost_microusd_per_million_tokens = 0
 output_cost_microusd_per_million_tokens = 0
 input_token_overhead = 256
 cost_rate_source = ""
+
+[analyze.models."pkg:service/example.com/alternate-provider-model"]
+adapter_model_id = "alternate-provider-model-id"
+backend_id = "llm"
+plugin_id = "repository-declared-plugin"
+plugin_distribution_name = "installed-plugin-distribution"
+model_revision = "repository-declared-alternate-revision"
+input_cost_microusd_per_million_tokens = 0
+output_cost_microusd_per_million_tokens = 0
+input_token_overhead = 256
+cost_rate_source = ""
 ```
 
 The exact packaged `[verify]` default is `enabled = false`; its enabled form,
@@ -1354,10 +1557,16 @@ provider override, and `[verify.eval]` qualification table are [EVC-5] and
 [EVC-10.1]. `[analyze.eval]` is not a current producer setting.
 
 `analyze.model` maps to inference-contract `provider.model_id` after ordinary
-CLI/config precedence. `backend_id` has packaged default `llm`; `plugin_id`,
-`model_revision`, and `model` have no invented cached identity. `cache_mode =
-"off"` retains the existing optional model resolution. `read-write` and
-`require` require all five declared provider identity strings to be nonblank before
+CLI/config precedence. Catalog selectors use the Model Monster `pkg:service`
+PURL form defined by [CFG-6]; `adapter_model_id` is passed to the provider
+adapter and does not replace the PURL in provider identity. CLI and environment
+precedence may select a trusted descriptor by PURL or unique adapter alias. A
+cached selected model uses either the flat descriptor or the exact
+`[analyze.models."<model-purl>"]` descriptor defined by [CFG-6].
+`backend_id` has packaged default `llm`; `plugin_id`, `model_revision`, and
+`model` have no invented cached identity. `cache_mode = "off"` retains the
+existing optional model resolution. `read-write` and `require` require the
+selected descriptor's five provider identity strings to be nonblank before
 adapter construction. Packaged defaults use `cache_mode = "off"`,
 `json_mode = "prefer"` and a zero cost ceiling. Backstitch's applied dogfood
 config sets every shown analyze key explicitly. Every `[verify]` and
@@ -1369,6 +1578,7 @@ The normative value contract is:
 | Keys | Type and range |
 |---|---|
 | `backend_id`, `plugin_id`, `plugin_distribution_name`, `model`, `model_revision` | strings; nonblank after trimming in cached modes |
+| `adapter_model_id` | raw provider model string; nonblank in catalog descriptors; optional for flat legacy descriptors and defaults to `model` |
 | `search_epoch` | string; nonblank after trimming in every mode |
 | `concurrency`, `max_tokens` | integers excluding booleans, at least 1 |
 | `json_mode` | `prefer`, `require`, or `off` |
@@ -1376,6 +1586,8 @@ The normative value contract is:
 | `seed` | integer excluding booleans, at least 0 |
 | `cache_path` | nonblank path string, resolved relative to the file that contributed the winning value; CLI values resolve from cwd |
 | `cache_mode` | `off`, `read-write`, or `require` |
+| `result_reuse` | `evidence-stable` or `exact-inference` |
+| `models` | table keyed by canonical Model Monster `pkg:service` selectors; each value is the closed [CFG-6] descriptor; adapter aliases are globally unique |
 | `require_complete` | boolean |
 | `required_kinds` | list containing each of `section`, `invariant`, `suppression` at most once; normalize to that canonical order |
 | `minimum_packets` | integer excluding booleans, at least 0 |
@@ -1402,7 +1614,8 @@ identities, duplicate required kinds, noncanonical hashes, unknown keys, and
 all invalid combinations exit `2` before cache or adapter work.
 
 Packaged defaults are exact: `backend_id = "llm"`; blank `plugin_id`,
-`plugin_distribution_name`, `model`, and `model_revision`; `concurrency = 1`;
+`plugin_distribution_name`, `model`, `adapter_model_id`, and `model_revision`;
+`concurrency = 1`;
 `json_mode = "prefer"`; `temperature = 0.0`; `seed = 42`; `max_tokens = 512`;
 `cache_path = ".backstitch/semantic-cache"`; `cache_mode = "off"`;
 `search_epoch = "1"`; `require_complete = false`; `required_kinds = []`;
@@ -1582,7 +1795,30 @@ Executable gates cover:
   changes `packet_hash`, code-owned prompt instructions change prompt identity
   and `analysis_key` without changing packet hash, and policy/render/
   concurrency changes do not change `analysis_key`
-- prompt/model/request/contract/search-epoch changes miss the cache
+- prompt/model/request/contract/search-epoch changes miss in
+  `exact-inference` mode
+- provider/model changes retain an unchanged evidence-stable baseline with
+  original result/provenance, while exact-inference mode misses
+- schema-5 selected inference and every result-source inference preimage,
+  review key, result-object hash, provenance, selection class, aggregate, and
+  provider group have mutation tests against independent selected envelopes
+  and operational selection events; no producer, cache/live source, or
+  carried-result total is trusted independently
+- require-mode lookup reads baseline, validates an exact hit or miss, then
+  reads baseline again; a real publication race proves the second baseline
+  wins and the absent-second-read negative control has a fixed linearization
+  point
+- packet, prompt, request, contract, and search-epoch mutations each change
+  `review_key` and prevent baseline reuse
+- concurrent different-model first writers converge on exactly one immutable
+  winner through the review-key lock (the scheduling-dependent winner is not
+  claimed deterministic), make at most one provider call, and a waiter with
+  incompatible strong qualification fails before a second call;
+  corrupt/missing/mismatched targets fail closed
+- review-to-analysis is the only nested lock order; review cleanup races,
+  abandoned review locks, timeout, and token/guard mutation all fail closed
+- legacy exact hits remain readable, bounded read-write warmup backfills
+  baselines, and no lookup scans the full legacy result tree
 - cache hit performs zero model calls and emits byte-identical canonical output
 - one changed packet creates exactly one provider call in `read-write` mode
 - cache corruption, provenance mismatch, evidence drift, duplicate IDs, and
@@ -1627,11 +1863,15 @@ Executable gates cover:
 - a deleted cache rebuilds within configured bounds in `read-write` and fails
   before adapter construction in `require`
 - a corrupt restored cache exits `2` without provider fallback
+- cache restore into a nonempty root accepts byte-identical immutable objects,
+  rejects divergent baseline bytes, restores results before baselines, and
+  never lets archive order select a baseline
 - publishable runs regenerate reports, while pre-report failures stay explicit
   and never reuse or fabricate a report
 - reports and cache roots are ignored by Git and absent from tracked source
-- CI restore/save includes only immutable packet/result object trees and fires
-  the specified restore/save failure priority
+- CI restore/save includes only immutable packet/result/baseline object trees,
+  uses empty-root or no-replace restore, and fires the specified restore/save
+  failure priority
 - manual pull-request dispatch validates pull-request number and exact current
   head SHA
 - trusted tool, config, output, and cache roots are disjoint from target source
@@ -1665,6 +1905,10 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-07-28-intent-coverage-implementation-plan.md`
+  (active implementation plan; [COV-7]/[SEM-8] anti-Goodhart corpus)
+- `docs/plans/2026-07-28-evidence-stable-semantic-result-reuse-plan.md`
+  (specification and implementation plan)
 - `docs/plans/2026-07-28-documented-suppression-governance-plan.md`
   (implemented and independently reviewed)
 

@@ -19,7 +19,7 @@ from typing import Any, cast
 
 import pytest
 
-from backstitch.models import ERROR_SEVERITY_CODES, ISSUE_CODES, Report
+from backstitch.models import ERROR_SEVERITY_CODES, ISSUE_CODES, Issue, Report
 from backstitch.obligation_runtime import build_obligation_runtime
 from backstitch.profiles import get_profile
 from backstitch.settings import BackstitchSettings
@@ -115,11 +115,31 @@ PROFILE = get_profile("backstitch-style-v1").with_overrides(
 )
 
 TRACE_DIAGNOSTIC_CODES = frozenset(
-    code for code in ISSUE_CODES if not code.startswith("SUPPRESSION_")
+    code for code in ISSUE_CODES if not code.startswith(("SUPPRESSION_", "INTENT_"))
 )
 SUPPRESSION_DIAGNOSTIC_CODES = frozenset(
     code for code in ISSUE_CODES if code.startswith("SUPPRESSION_")
 )
+INTENT_DIAGNOSTIC_CONTEXTS = {
+    "INTENT_UNCOVERED_DEFINITION": {
+        "repository": "info",
+        "patch": "error",
+    },
+    "INTENT_INHERITED_ONLY": {
+        "repository": "info",
+        "patch": "error",
+    },
+    "INTENT_EXEMPTION_UNUSED": {None: "warning"},
+    "INTENT_EXEMPTION_UNREASONED": {None: "error"},
+    "INTENT_REQUIREMENT_UNIMPLEMENTED": {None: "info"},
+    "INTENT_DRIFT_SUSPECT": {None: "info"},
+    "INTENT_COVERAGE_FLOOR_REGRESSION": {None: "error"},
+    "INTENT_COVERAGE_INCOMPLETE": {
+        "repository": "info",
+        "patch": "error",
+    },
+    "INTENT_COVERAGE_POLICY_REGRESSION": {None: "error"},
+}
 
 
 @pytest.fixture(scope="module")
@@ -180,6 +200,32 @@ def test_context_dependent_severities_fire_both_ways(
         ("required", "error"),
         ("draft", "warning"),
     }
+
+
+def test_intent_coverage_registry_rows_and_contexts_all_fire() -> None:
+    assert {code for code in ISSUE_CODES if code.startswith("INTENT_")} == set(
+        INTENT_DIAGNOSTIC_CONTEXTS
+    )
+
+    fired = {
+        (code, context): Issue(
+            code=code,
+            severity=expected,
+            path="pkg/example.py",
+            line=1,
+            message="firing proof",
+            context=context,
+        )
+        for code, contexts in INTENT_DIAGNOSTIC_CONTEXTS.items()
+        for context, expected in contexts.items()
+    }
+
+    for (code, context), issue in fired.items():
+        expected = INTENT_DIAGNOSTIC_CONTEXTS[code][context]
+        assert issue.default_severity == expected
+        assert issue.severity == expected
+        assert issue.short_code is not None
+        assert issue.short_code.startswith("BSN")
 
 
 def _run_check_json(path: Path) -> dict[str, Any]:

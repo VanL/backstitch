@@ -290,6 +290,10 @@ def _fixture_config(shape: ScaleShape) -> bytes:
         'plugin_distribution_name = "llm"\n'
         'model = "semantic-scale-fixture"\n'
         'model_revision = "1"\n'
+        "input_cost_microusd_per_million_tokens = 0\n"
+        "output_cost_microusd_per_million_tokens = 0\n"
+        "input_token_overhead = 0\n"
+        'cost_rate_source = "deterministic performance fixture"\n'
         'json_mode = "require"\n'
         'cache_path = ".backstitch/performance-cache"\n'
         'cache_mode = "require"\n'

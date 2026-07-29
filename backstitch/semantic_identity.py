@@ -101,10 +101,29 @@ class RequestIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewIdentity:
+    """Provider-independent identity of one complete semantic review."""
+
+    _canonical_contract: bytes
+    review_key: str
+
+    @property
+    def contract(self) -> dict[str, Any]:
+        value = json.loads(self._canonical_contract)
+        assert isinstance(value, dict)
+        return value
+
+    @property
+    def contract_bytes(self) -> bytes:
+        return self._canonical_contract
+
+
+@dataclass(frozen=True, slots=True)
 class InferenceIdentity:
     _canonical_contract: bytes
     analysis_key: str
     _prompt_bytes: bytes
+    review_identity: ReviewIdentity
 
     @property
     def contract(self) -> dict[str, Any]:
@@ -115,6 +134,10 @@ class InferenceIdentity:
     @property
     def prompt_bytes(self) -> bytes:
         return self._prompt_bytes
+
+    @property
+    def contract_bytes(self) -> bytes:
+        return self._canonical_contract
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,15 +253,14 @@ def build_composition_identity(
     )
 
 
-def build_inference_identity(
+def _build_review_contract(
     packet: dict[str, Any],
-    provider: ProviderIdentity,
     request: RequestIdentity,
     *,
-    analysis_contract_version: int = 1,
-    search_epoch: str = "1",
-) -> InferenceIdentity:
-    """Construct and hash the closed contract without touching a provider."""
+    analysis_contract_version: int,
+    search_epoch: str,
+) -> tuple[dict[str, Any], bytes]:
+    """Build the one provider-independent preimage shared by both identities."""
 
     if (
         isinstance(analysis_contract_version, bool)
@@ -251,21 +273,102 @@ def build_inference_identity(
     packet_hash = packet.get("packet_hash")
     if not is_sha256_hex(packet_hash):
         raise ValueError("packet_hash must be 64 lowercase hexadecimal characters")
-    prompt_bytes = prompt_instruction_bytes(packet["kind"])
+    kind = packet.get("kind")
+    if kind not in {"section", "invariant", "suppression"}:
+        raise ValueError("packet kind is invalid")
+    prompt_bytes = prompt_instruction_bytes(kind)
     prompt = prompt_descriptor(packet["kind"], instruction_bytes=prompt_bytes)
-    contract = {
+    return (
+        {
+            "analysis_contract_version": analysis_contract_version,
+            "packet_hash": packet["packet_hash"],
+            "prompt": asdict(prompt),
+            "request": asdict(request),
+            "search_epoch": search_epoch,
+        },
+        prompt_bytes,
+    )
+
+
+def build_analysis_identities(
+    packet: dict[str, Any],
+    provider: ProviderIdentity,
+    request: RequestIdentity,
+    *,
+    analysis_contract_version: int = 1,
+    search_epoch: str = "1",
+) -> tuple[InferenceIdentity, ReviewIdentity]:
+    """Construct both semantic identities from one frozen canonical owner."""
+
+    review_contract, prompt_bytes = _build_review_contract(
+        packet,
+        request,
+        analysis_contract_version=analysis_contract_version,
+        search_epoch=search_epoch,
+    )
+    review_canonical = canonical_json_bytes(review_contract)
+    review_identity = ReviewIdentity(
+        _canonical_contract=review_canonical,
+        review_key=hashlib.sha256(review_canonical).hexdigest(),
+    )
+    inference_contract = {
         "analysis_contract_version": analysis_contract_version,
         "packet_hash": packet["packet_hash"],
-        "prompt": asdict(prompt),
+        "prompt": review_contract["prompt"],
         "provider": asdict(provider),
-        "request": asdict(request),
+        "request": review_contract["request"],
         "search_epoch": search_epoch,
     }
+    inference_canonical = canonical_json_bytes(inference_contract)
+    return (
+        InferenceIdentity(
+            _canonical_contract=inference_canonical,
+            analysis_key=hashlib.sha256(inference_canonical).hexdigest(),
+            _prompt_bytes=prompt_bytes,
+            review_identity=review_identity,
+        ),
+        review_identity,
+    )
+
+
+def build_inference_identity(
+    packet: dict[str, Any],
+    provider: ProviderIdentity,
+    request: RequestIdentity,
+    *,
+    analysis_contract_version: int = 1,
+    search_epoch: str = "1",
+) -> InferenceIdentity:
+    """Construct and hash the closed provider-sensitive inference contract."""
+
+    return build_analysis_identities(
+        packet,
+        provider,
+        request,
+        analysis_contract_version=analysis_contract_version,
+        search_epoch=search_epoch,
+    )[0]
+
+
+def build_review_identity(
+    packet: dict[str, Any],
+    request: RequestIdentity,
+    *,
+    analysis_contract_version: int = 1,
+    search_epoch: str = "1",
+) -> ReviewIdentity:
+    """Construct and hash the provider-independent semantic review contract."""
+
+    contract, _ = _build_review_contract(
+        packet,
+        request,
+        analysis_contract_version=analysis_contract_version,
+        search_epoch=search_epoch,
+    )
     canonical = canonical_json_bytes(contract)
-    return InferenceIdentity(
+    return ReviewIdentity(
         _canonical_contract=canonical,
-        analysis_key=hashlib.sha256(canonical).hexdigest(),
-        _prompt_bytes=prompt_bytes,
+        review_key=hashlib.sha256(canonical).hexdigest(),
     )
 
 

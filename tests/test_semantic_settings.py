@@ -7,6 +7,7 @@ Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-12.2]
 
 from __future__ import annotations
 
+import json
 import tomllib
 from dataclasses import asdict
 from pathlib import Path
@@ -19,6 +20,7 @@ from backstitch.settings import (
     ConfigLoadError,
     VerifySettings,
     resolve_config,
+    settings_to_json,
 )
 
 SEMANTIC_CODES = {
@@ -130,8 +132,50 @@ def _valid_cached_analyze_lines() -> list[str]:
         'plugin_distribution_name = "plugin-dist"',
         'model = "model"',
         'model_revision = "revision"',
+        "input_cost_microusd_per_million_tokens = 0",
+        "output_cost_microusd_per_million_tokens = 0",
+        "input_token_overhead = 256",
+        'cost_rate_source = "provider prices, reviewed 2026-07-28"',
         'json_mode = "require"',
         'cache_mode = "read-write"',
+    ]
+
+
+def _flat_analyze_descriptor_lines(
+    model: str = "flat-model",
+    *,
+    revision: str = "flat-revision",
+) -> list[str]:
+    return [
+        'backend_id = "llm"',
+        'plugin_id = "flat-plugin"',
+        'plugin_distribution_name = "flat-dist"',
+        f'model = "{model}"',
+        f'model_revision = "{revision}"',
+        "input_cost_microusd_per_million_tokens = 10",
+        "output_cost_microusd_per_million_tokens = 20",
+        "input_token_overhead = 30",
+        'cost_rate_source = "flat provider prices, reviewed 2026-07-28"',
+    ]
+
+
+def _catalog_descriptor_lines(
+    selector: str = "pkg:service/openai.com/gpt-5.4-mini",
+    *,
+    revision: str = "catalog-revision",
+    adapter_model_id: str = "gpt-5.4-mini",
+) -> list[str]:
+    return [
+        f'[analyze.models."{selector}"]',
+        f'adapter_model_id = "{adapter_model_id}"',
+        'backend_id = "catalog-backend"',
+        'plugin_id = "catalog-plugin"',
+        'plugin_distribution_name = "catalog-dist"',
+        f'model_revision = "{revision}"',
+        "input_cost_microusd_per_million_tokens = 40",
+        "output_cost_microusd_per_million_tokens = 50",
+        "input_token_overhead = 60",
+        'cost_rate_source = "catalog provider prices, reviewed 2026-07-28"',
     ]
 
 
@@ -256,6 +300,7 @@ def test_packaged_semantic_defaults_are_exact(tmp_path: Path) -> None:
         "plugin_id": "",
         "plugin_distribution_name": "",
         "model": "",
+        "adapter_model_id": "",
         "model_revision": "",
         "concurrency": 1,
         "json_mode": "prefer",
@@ -268,6 +313,7 @@ def test_packaged_semantic_defaults_are_exact(tmp_path: Path) -> None:
             ).resolve()
         ),
         "cache_mode": "off",
+        "result_reuse": "evidence-stable",
         "search_epoch": "1",
         "require_complete": False,
         "required_kinds": (),
@@ -283,6 +329,7 @@ def test_packaged_semantic_defaults_are_exact(tmp_path: Path) -> None:
         "output_cost_microusd_per_million_tokens": 0,
         "input_token_overhead": 256,
         "cost_rate_source": "",
+        "available_models": (),
     }
     assert dispositions == ()
     assert asdict(settings.verify) == {"enabled": False}
@@ -298,11 +345,13 @@ def test_repository_dogfood_semantic_configuration_is_explicit() -> None:
         "backend_id": "llm",
         "plugin_id": "openai",
         "plugin_distribution_name": "llm",
-        "model": "gpt-4.1-mini",
-        "model_revision": "gpt-4.1-mini-2025-04-14",
+        "model": "pkg:service/openai.com/gpt-5.4-mini",
+        "adapter_model_id": "gpt-5.4-mini",
+        "model_revision": "gpt-5.4-mini-2026-03-17",
         "concurrency": 1,
         "cache_path": ".backstitch/semantic-cache",
-        "cache_mode": "require",
+        "cache_mode": "read-write",
+        "result_reuse": "evidence-stable",
         "search_epoch": "1",
         "json_mode": "require",
         "temperature": 0.0,
@@ -318,13 +367,13 @@ def test_repository_dogfood_semantic_configuration_is_explicit() -> None:
         "lock_wait_timeout_seconds": 300,
         "maximum_runtime_seconds": 1800,
         "maximum_estimated_cost_microusd": 1_000_000,
-        "input_cost_microusd_per_million_tokens": 400_000,
-        "output_cost_microusd_per_million_tokens": 1_600_000,
+        "input_cost_microusd_per_million_tokens": 750_000,
+        "output_cost_microusd_per_million_tokens": 4_500_000,
         "input_token_overhead": 256,
         "cost_rate_source": (
-            "OpenAI GPT-4.1 mini model page "
-            "(https://developers.openai.com/api/docs/models/gpt-4.1-mini), "
-            "reviewed 2026-07-15"
+            "OpenAI GPT-5.4 mini model page "
+            "(https://developers.openai.com/api/docs/models/gpt-5.4-mini), "
+            "reviewed 2026-07-28"
         ),
     }
     assert backstitch["verify"] == {
@@ -681,7 +730,7 @@ def test_verify_analyze_reuse_requires_explicit_cost_inputs_for_positive_budget(
         ),
     )
 
-    with pytest.raises(ConfigLoadError, match="explicit analyze rate"):
+    with pytest.raises(ConfigLoadError, match="flat descriptor.*complete"):
         resolve_config(tmp_path, explicit=config)
 
 
@@ -1148,6 +1197,10 @@ def test_explicit_trusted_config_keeps_mutable_paths_outside_target_root(
                 'plugin_distribution_name = "llm"',
                 'model = "trusted-model"',
                 'model_revision = "trusted-revision"',
+                "input_cost_microusd_per_million_tokens = 0",
+                "output_cost_microusd_per_million_tokens = 0",
+                "input_token_overhead = 256",
+                'cost_rate_source = "provider prices, reviewed 2026-07-28"',
                 'json_mode = "require"',
                 'cache_path = "cache/semantic"',
                 'cache_mode = "read-write"',
@@ -1524,14 +1577,12 @@ def test_cached_config_defers_model_until_cli_and_environment_precedence(
     lines[4] = 'model = ""'
     config = _write_config(tmp_path, "\n".join(lines) + "\n")
 
-    settings = resolve_config(
-        tmp_path,
-        explicit=config,
-        environment={"LLM_MODEL": "runtime-model"},
-    )
-
-    assert settings.analyze.cache_mode == "read-write"
-    assert settings.analyze.model == "runtime-model"
+    with pytest.raises(ConfigLoadError, match="model.*nonblank"):
+        resolve_config(
+            tmp_path,
+            explicit=config,
+            environment={"LLM_MODEL": "runtime-model"},
+        )
 
 
 def test_resolver_rejects_model_override_that_breaks_cached_identity(
@@ -1539,7 +1590,7 @@ def test_resolver_rejects_model_override_that_breaks_cached_identity(
 ) -> None:
     config = _write_config(tmp_path, "\n".join(_valid_cached_analyze_lines()) + "\n")
 
-    with pytest.raises(ConfigLoadError, match="model/revision pair"):
+    with pytest.raises(ConfigLoadError, match="trusted analyze model descriptor"):
         resolve_config(
             tmp_path,
             explicit=config,
@@ -1554,18 +1605,15 @@ def test_positive_cost_ceiling_requires_explicit_rates_overhead_and_source(
         tmp_path,
         '[analyze]\nmaximum_estimated_cost_microusd = 1\ncost_rate_source = "2026-07-14 provider page"\n',
     )
-    with pytest.raises(ConfigLoadError, match="explicit"):
+    with pytest.raises(ConfigLoadError, match="flat descriptor.*complete"):
         resolve_config(tmp_path, explicit=config)
 
     config.write_text(
         "\n".join(
             [
                 "[analyze]",
+                *_flat_analyze_descriptor_lines(),
                 "maximum_estimated_cost_microusd = 1",
-                "input_cost_microusd_per_million_tokens = 0",
-                "output_cost_microusd_per_million_tokens = 10",
-                "input_token_overhead = 256",
-                'cost_rate_source = "2026-07-14 provider page"',
             ]
         )
         + "\n",
@@ -1582,11 +1630,13 @@ def test_positive_cost_ceiling_requires_explicit_rates_overhead_and_source(
         "\n".join(
             [
                 "[analyze]",
-                "maximum_estimated_cost_microusd = 1",
-                "input_cost_microusd_per_million_tokens = 0",
-                "output_cost_microusd_per_million_tokens = 10",
-                "input_token_overhead = 256",
+                *[
+                    line
+                    for line in _flat_analyze_descriptor_lines()
+                    if not line.startswith("cost_rate_source")
+                ],
                 'cost_rate_source = ""',
+                "maximum_estimated_cost_microusd = 1",
             ]
         )
         + "\n",
@@ -1604,10 +1654,8 @@ def test_positive_cost_inputs_may_come_from_an_effective_parent_layer(
         "\n".join(
             [
                 "[analyze]",
-                "input_cost_microusd_per_million_tokens = 0",
-                "output_cost_microusd_per_million_tokens = 10",
-                "input_token_overhead = 256",
-                'cost_rate_source = "2026-07-14 provider page"',
+                *_flat_analyze_descriptor_lines(),
+                'adapter_model_id = "parent-provider-model"',
             ]
         )
         + "\n",
@@ -1621,7 +1669,7 @@ def test_positive_cost_inputs_may_come_from_an_effective_parent_layer(
 
     settings = resolve_config(tmp_path, explicit=child)
     assert settings.analyze.maximum_estimated_cost_microusd == 1
-    assert settings.analyze.output_cost_microusd_per_million_tokens == 10
+    assert settings.analyze.output_cost_microusd_per_million_tokens == 20
 
 
 def test_packet_count_cross_field_is_validated(tmp_path: Path) -> None:
@@ -1631,3 +1679,530 @@ def test_packet_count_cross_field_is_validated(tmp_path: Path) -> None:
     )
     with pytest.raises(ConfigLoadError, match="maximum_packets"):
         resolve_config(tmp_path, explicit=config)
+
+
+def test_result_reuse_defaults_and_both_values_fire(tmp_path: Path) -> None:
+    packaged = resolve_config(tmp_path, use_repo_config=False, environment={})
+    assert packaged.analyze.result_reuse == "evidence-stable"
+
+    for value in ("evidence-stable", "exact-inference"):
+        config = _write_config(
+            tmp_path,
+            f'[analyze]\nresult_reuse = "{value}"\n',
+        )
+        assert (
+            resolve_config(
+                tmp_path, explicit=config, environment={}
+            ).analyze.result_reuse
+            == value
+        )
+
+    config.write_text(
+        '[analyze]\nresult_reuse = "sometimes"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigLoadError, match="result_reuse"):
+        resolve_config(tmp_path, explicit=config, environment={})
+
+
+def test_catalog_model_selection_is_atomic_and_observable(tmp_path: Path) -> None:
+    config = _write_config(
+        tmp_path,
+        "\n".join(
+            [
+                "[analyze]",
+                *_flat_analyze_descriptor_lines(),
+                'cache_mode = "read-write"',
+                'json_mode = "require"',
+                "",
+                *_catalog_descriptor_lines(),
+            ]
+        )
+        + "\n",
+    )
+
+    settings = resolve_config(
+        tmp_path,
+        explicit=config,
+        environment={"LLM_MODEL": "pkg:service/openai.com/gpt-5.4-mini"},
+    )
+
+    assert settings.analyze.model == "pkg:service/openai.com/gpt-5.4-mini"
+    assert settings.analyze.adapter_model_id == "gpt-5.4-mini"
+    assert settings.analyze.backend_id == "catalog-backend"
+    assert settings.analyze.plugin_id == "catalog-plugin"
+    assert settings.analyze.plugin_distribution_name == "catalog-dist"
+    assert settings.analyze.model_revision == "catalog-revision"
+    assert settings.analyze.input_cost_microusd_per_million_tokens == 40
+    assert settings.analyze.output_cost_microusd_per_million_tokens == 50
+    assert settings.analyze.input_token_overhead == 60
+    assert settings.analyze.cost_rate_source.startswith("catalog provider")
+    assert settings.analyze.available_models == (
+        "flat-model",
+        "pkg:service/openai.com/gpt-5.4-mini",
+    )
+
+    payload = json.loads(settings_to_json(settings))
+    assert payload["analyze"]["available_models"] == [
+        "flat-model",
+        "pkg:service/openai.com/gpt-5.4-mini",
+    ]
+    assert payload["analyze"]["adapter_model_id"] == "gpt-5.4-mini"
+    assert payload["analyze"]["model_revision"] == "catalog-revision"
+    assert "models" not in payload["analyze"]
+
+
+def test_ambient_adapter_alias_selects_flat_service_purl(tmp_path: Path) -> None:
+    selector = "pkg:service/openai.com/gpt-5.4-mini"
+    config = _write_config(
+        tmp_path,
+        "\n".join(
+            [
+                "[analyze]",
+                *_flat_analyze_descriptor_lines(selector),
+                'adapter_model_id = "gpt-5.4-mini"',
+            ]
+        )
+        + "\n",
+    )
+
+    settings = resolve_config(
+        tmp_path,
+        explicit=config,
+        environment={"LLM_MODEL": "gpt-5.4-mini"},
+    )
+
+    assert settings.analyze.model == selector
+    assert settings.analyze.adapter_model_id == "gpt-5.4-mini"
+    assert settings.analyze.available_models == (selector,)
+    assert settings.analyze_model_source == "LLM_MODEL environment variable"
+
+
+@pytest.mark.parametrize("source", ("environment", "generic", "dedicated"))
+def test_adapter_alias_selects_catalog_service_purl(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    selector = "pkg:service/openai.com/gpt-5.4-mini"
+    config = _write_config(
+        tmp_path,
+        "\n".join(
+            [
+                "[analyze]",
+                *_flat_analyze_descriptor_lines(),
+                "",
+                *_catalog_descriptor_lines(),
+            ]
+        )
+        + "\n",
+    )
+    kwargs: dict[str, object] = {"explicit": config, "environment": {}}
+    if source == "environment":
+        kwargs["environment"] = {"LLM_MODEL": "gpt-5.4-mini"}
+    elif source == "generic":
+        kwargs["cli_options"] = (("analyze.model", "gpt-5.4-mini"),)
+    else:
+        kwargs["cli_overrides"] = {"analyze.model": "gpt-5.4-mini"}
+
+    settings = resolve_config(tmp_path, **kwargs)
+
+    assert settings.analyze.model == selector
+    assert settings.analyze.adapter_model_id == "gpt-5.4-mini"
+    assert settings.analyze.available_models == ("flat-model", selector)
+
+
+def test_duplicate_adapter_aliases_are_rejected_even_for_purl_selection(
+    tmp_path: Path,
+) -> None:
+    selector = "pkg:service/openai.com/gpt-5.4-mini"
+    config = _write_config(
+        tmp_path,
+        "\n".join(
+            [
+                "[analyze]",
+                *_flat_analyze_descriptor_lines("pkg:service/openai.com/legacy-model"),
+                'adapter_model_id = "gpt-5.4-mini"',
+                "",
+                *_catalog_descriptor_lines(),
+            ]
+        )
+        + "\n",
+    )
+
+    with pytest.raises(ConfigLoadError, match="ambiguous.*adapter_model_id"):
+        resolve_config(
+            tmp_path,
+            explicit=config,
+            environment={"LLM_MODEL": selector},
+        )
+
+
+@pytest.mark.parametrize("selector_source", ("environment", "generic", "dedicated"))
+def test_catalog_selection_obeys_cli_environment_precedence(
+    tmp_path: Path,
+    selector_source: str,
+) -> None:
+    config = _write_config(
+        tmp_path,
+        "\n".join(
+            [
+                "[analyze]",
+                *_flat_analyze_descriptor_lines(),
+                "",
+                *_catalog_descriptor_lines(
+                    "pkg:service/openai.com/environment-model",
+                    revision="env-rev",
+                    adapter_model_id="environment-model",
+                ),
+                "",
+                *_catalog_descriptor_lines(
+                    "pkg:service/openai.com/cli-model",
+                    revision="cli-rev",
+                    adapter_model_id="cli-model",
+                ),
+            ]
+        )
+        + "\n",
+    )
+    kwargs: dict[str, object] = {
+        "explicit": config,
+        "environment": {"LLM_MODEL": "pkg:service/openai.com/environment-model"},
+    }
+    expected = "pkg:service/openai.com/environment-model"
+    expected_source = "LLM_MODEL environment variable"
+    if selector_source == "generic":
+        kwargs["cli_options"] = (("analyze.model", "pkg:service/openai.com/cli-model"),)
+        expected = "pkg:service/openai.com/cli-model"
+        expected_source = "--option analyze.model"
+    elif selector_source == "dedicated":
+        kwargs["cli_overrides"] = {"analyze.model": "pkg:service/openai.com/cli-model"}
+        expected = "pkg:service/openai.com/cli-model"
+        expected_source = "--model"
+
+    settings = resolve_config(tmp_path, **kwargs)
+
+    assert settings.analyze.model == expected
+    assert settings.analyze.model_revision == (
+        "env-rev" if expected.endswith("/environment-model") else "cli-rev"
+    )
+    assert settings.analyze.adapter_model_id == (
+        "environment-model" if expected.endswith("/environment-model") else "cli-model"
+    )
+    assert settings.analyze_model_source == expected_source
+
+
+@pytest.mark.parametrize("cache_mode", ("off", "read-write", "require"))
+@pytest.mark.parametrize("source", ("environment", "generic", "dedicated"))
+def test_unknown_model_override_is_rejected_when_file_owns_flat_descriptor(
+    tmp_path: Path,
+    cache_mode: str,
+    source: str,
+) -> None:
+    config = _write_config(
+        tmp_path,
+        "\n".join(
+            [
+                "[analyze]",
+                *_flat_analyze_descriptor_lines(),
+                f'cache_mode = "{cache_mode}"',
+                'json_mode = "off"',
+            ]
+        )
+        + "\n",
+    )
+    kwargs: dict[str, object] = {"explicit": config, "environment": {}}
+    if source == "environment":
+        kwargs["environment"] = {"LLM_MODEL": "unknown-model"}
+    elif source == "generic":
+        kwargs["cli_options"] = (("analyze.model", "unknown-model"),)
+    else:
+        kwargs["cli_overrides"] = {"analyze.model": "unknown-model"}
+
+    with pytest.raises(ConfigLoadError, match="trusted analyze model descriptor"):
+        resolve_config(tmp_path, **kwargs)
+
+
+def test_cache_off_runtime_model_fallback_requires_no_file_model(
+    tmp_path: Path,
+) -> None:
+    config = _write_config(tmp_path, '[analyze]\ncache_mode = "off"\n')
+
+    settings = resolve_config(
+        tmp_path,
+        explicit=config,
+        environment={"LLM_MODEL": "runtime-model"},
+    )
+
+    assert settings.analyze.model == "runtime-model"
+    assert settings.analyze.adapter_model_id == "runtime-model"
+    assert settings.analyze.model_revision == ""
+    assert settings.analyze.available_models == ()
+
+
+def test_flat_descriptor_adapter_model_id_defaults_and_may_be_explicit(
+    tmp_path: Path,
+) -> None:
+    config = _write_config(
+        tmp_path,
+        "\n".join(["[analyze]", *_flat_analyze_descriptor_lines()]) + "\n",
+    )
+    defaulted = resolve_config(tmp_path, explicit=config, environment={})
+    assert defaulted.analyze.model == "flat-model"
+    assert defaulted.analyze.adapter_model_id == "flat-model"
+
+    config.write_text(
+        "\n".join(
+            [
+                "[analyze]",
+                *_flat_analyze_descriptor_lines(),
+                'adapter_model_id = "provider-flat-model"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    explicit = resolve_config(tmp_path, explicit=config, environment={})
+    assert explicit.analyze.model == "flat-model"
+    assert explicit.analyze.adapter_model_id == "provider-flat-model"
+
+
+@pytest.mark.parametrize(
+    "missing",
+    (
+        "backend_id",
+        "plugin_id",
+        "plugin_distribution_name",
+        "model_revision",
+        "input_cost_microusd_per_million_tokens",
+        "output_cost_microusd_per_million_tokens",
+        "input_token_overhead",
+        "cost_rate_source",
+        "adapter_model_id",
+    ),
+)
+def test_catalog_descriptors_are_complete(tmp_path: Path, missing: str) -> None:
+    lines = _catalog_descriptor_lines()
+    lines = [line for line in lines if not line.startswith(f"{missing} =")]
+    config = _write_config(tmp_path, "\n".join(lines) + "\n")
+
+    with pytest.raises(ConfigLoadError, match="complete.*descriptor|missing"):
+        resolve_config(tmp_path, explicit=config, environment={})
+
+
+@pytest.mark.parametrize(
+    "bad_line",
+    (
+        'unknown = "value"',
+        'backend_id = ""',
+        'adapter_model_id = ""',
+        "input_token_overhead = -1",
+    ),
+)
+def test_catalog_descriptor_fields_are_closed_and_strict(
+    tmp_path: Path,
+    bad_line: str,
+) -> None:
+    lines = _catalog_descriptor_lines()
+    key = bad_line.split(" =", 1)[0]
+    lines = [line for line in lines if not line.startswith(f"{key} =")]
+    lines.append(bad_line)
+    config = _write_config(tmp_path, "\n".join(lines) + "\n")
+
+    with pytest.raises(ConfigLoadError, match=key):
+        resolve_config(tmp_path, explicit=config, environment={})
+
+
+@pytest.mark.parametrize(
+    "selector",
+    (
+        " ",
+        "catalog-model",
+        "pkg:pypi/openai",
+        "pkg:service/com.openai/model",
+        "pkg:service/openai.com/model#subpath",
+        "pkg:service/openai.com/model%2Dname",
+        "pkg:service/openai.com/model?z=last&a=first",
+        "pkg:service/openai.com/model?repository=private",
+        "pkg:service/openai.com/model%ZZ",
+        "pkg:SERVICE/openai.com/model",
+    ),
+)
+def test_catalog_selector_must_be_canonical_service_purl(
+    tmp_path: Path,
+    selector: str,
+) -> None:
+    config = _write_config(
+        tmp_path,
+        "\n".join(_catalog_descriptor_lines(selector)) + "\n",
+    )
+
+    with pytest.raises(ConfigLoadError, match="model selector"):
+        resolve_config(tmp_path, explicit=config, environment={})
+
+
+@pytest.mark.parametrize(
+    "selector",
+    (
+        "pkg:service/openai.com/gpt-5.4-mini",
+        "pkg:service/anthropic.com/claude-opus@20251101",
+        "pkg:service/openrouter.ai:openai.com/gpt-5.4-mini",
+        "pkg:service/vendor.xyz/model",
+        "pkg:service/openai.com/gpt-5.4-mini?a=one&mm.profile=acme",
+    ),
+)
+def test_catalog_selector_accepts_canonical_service_purl_forms(
+    tmp_path: Path,
+    selector: str,
+) -> None:
+    config = _write_config(
+        tmp_path,
+        "\n".join(_catalog_descriptor_lines(selector)) + "\n",
+    )
+
+    settings = resolve_config(
+        tmp_path,
+        explicit=config,
+        environment={"LLM_MODEL": selector},
+    )
+
+    assert settings.analyze.model == selector
+    assert settings.analyze.adapter_model_id == "gpt-5.4-mini"
+
+
+def test_catalog_selector_cannot_duplicate_flat_descriptor_owner(
+    tmp_path: Path,
+) -> None:
+    config = _write_config(
+        tmp_path,
+        "\n".join(
+            [
+                "[analyze]",
+                *_flat_analyze_descriptor_lines("pkg:service/openai.com/gpt-5.4-mini"),
+                "",
+                *_catalog_descriptor_lines(),
+            ]
+        )
+        + "\n",
+    )
+
+    with pytest.raises(ConfigLoadError, match="one descriptor owner"):
+        resolve_config(tmp_path, explicit=config, environment={})
+
+
+def test_duplicate_catalog_selector_is_rejected_by_toml_boundary(
+    tmp_path: Path,
+) -> None:
+    descriptor = "\n".join(_catalog_descriptor_lines())
+    config = _write_config(tmp_path, f"{descriptor}\n{descriptor}\n")
+
+    with pytest.raises(ConfigLoadError, match="Invalid TOML"):
+        resolve_config(tmp_path, explicit=config, environment={})
+
+
+def test_extend_replaces_catalog_children_atomically(tmp_path: Path) -> None:
+    parent = tmp_path / "parent.toml"
+    parent.write_text(
+        "\n".join(_catalog_descriptor_lines(revision="parent-revision")) + "\n",
+        encoding="utf-8",
+    )
+    child = tmp_path / "child.toml"
+    child.write_text(
+        "\n".join(
+            [
+                'extend = "parent.toml"',
+                *_catalog_descriptor_lines(revision="child-revision"),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    selected = resolve_config(
+        tmp_path,
+        explicit=child,
+        environment={"LLM_MODEL": "pkg:service/openai.com/gpt-5.4-mini"},
+    )
+    assert selected.analyze.model_revision == "child-revision"
+
+    child.write_text(
+        "\n".join(
+            [
+                'extend = "parent.toml"',
+                '[analyze.models."pkg:service/openai.com/gpt-5.4-mini"]',
+                'model_revision = "partial-revision"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigLoadError, match="complete.*descriptor|missing"):
+        resolve_config(tmp_path, explicit=child, environment={})
+
+
+def test_flat_descriptor_is_atomic_across_file_layers(tmp_path: Path) -> None:
+    parent = tmp_path / "parent.toml"
+    parent.write_text(
+        "\n".join(
+            [
+                "[analyze]",
+                *_flat_analyze_descriptor_lines(),
+                'adapter_model_id = "parent-provider-model"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    child = tmp_path / "child.toml"
+    child.write_text(
+        'extend = "parent.toml"\n[analyze]\nmodel_revision = "partial"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigLoadError, match="flat descriptor.*complete"):
+        resolve_config(tmp_path, explicit=child, environment={})
+
+    child.write_text(
+        "\n".join(
+            [
+                'extend = "parent.toml"',
+                "[analyze]",
+                *_flat_analyze_descriptor_lines(
+                    "replacement-model", revision="replacement-revision"
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    settings = resolve_config(tmp_path, explicit=child, environment={})
+    assert settings.analyze.model == "replacement-model"
+    assert settings.analyze.adapter_model_id == "replacement-model"
+    assert settings.analyze.model_revision == "replacement-revision"
+
+
+@pytest.mark.parametrize(
+    "key",
+    (
+        "backend_id",
+        "plugin_id",
+        "plugin_distribution_name",
+        "model_revision",
+        "input_cost_microusd_per_million_tokens",
+        "output_cost_microusd_per_million_tokens",
+        "input_token_overhead",
+        "cost_rate_source",
+        "adapter_model_id",
+        "models",
+    ),
+)
+def test_generic_options_cannot_edit_descriptor_fields(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    with pytest.raises(ConfigLoadError, match="not runtime-overridable"):
+        resolve_config(
+            tmp_path,
+            use_repo_config=False,
+            environment={},
+            cli_options=((f"analyze.{key}", "value"),),
+        )

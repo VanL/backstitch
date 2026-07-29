@@ -8,6 +8,7 @@ Plan: docs/plans/2026-07-08-configurable-diagnostics-plan.md
 Plan: docs/plans/2026-07-09-backstitch-invariant-traceability-plan.md
 Plan: docs/plans/2026-07-02-backstitch-four-way-reconciliation-plan.md
 Plan: docs/plans/2026-07-07-tree-sitter-code-parser-plan.md
+Plan: docs/plans/2026-07-28-configured-default-command-plan.md
 
 This document explains why the reconciled implementation is shaped the way
 it is — boundaries, tradeoffs, and provenance — not a narration of the code.
@@ -83,6 +84,20 @@ Load-bearing boundaries:
   of importing `llm`: the import lives inside `analysis_llm.default_adapter`
   and the `analyze` CLI handler, and a subprocess test asserts
   `llm ∉ sys.modules` for deterministic commands ([SC-8]).
+- **Bare dispatch is config selection with selected-command argument parsing.**
+  The packaged
+  `default_command = false` keeps an unconfigured bare invocation inert.
+  Repository `"check"` or `"analyze"` values are normalized by the sole
+  settings resolver, after file merge and before command-scoped environment
+  values. Before that one resolution, the CLI parses arguments for the two
+  closed candidates and passes their dedicated overrides keyed by owner. The
+  resolver applies only the selected command's overrides. A leading path is
+  `--repo-root` shorthand; otherwise current-repository input is implicit
+  unless the invocation supplies an input. The existing handler receives the
+  selected arguments and the same immutable settings snapshot. The CLI does
+  not recurse through `main`, start a subprocess, accept arguments in the
+  config value, or resolve config twice
+  ([SC-5], [CFG-5.1], [INV.PERF.1]).
 - **Constrained decoding when available.** `default_adapter` requests
   provider-enforced JSON output (`json_object=True`) whenever the resolved
   model's `Options` declares that field — a capability check, never a
@@ -189,6 +204,21 @@ behavioral source of truth for built-in profile defaults, default excludes, the
 diagnostic registry, and diagnostic policy. `pyproject.toml` carries the
 committed repository overlay. Choices and their reasons:
 
+- `default_command = "analyze"` makes the repository's bare invocation enter
+  current-repository semantic analysis. That is an intentional local
+  credential, cache, provider, and bounded-cost choice. The hermetic
+  self-corpus gate therefore remains explicit `backstitch check`; config tests
+  inspect the committed selection without triggering provider work. The
+  packaged `false` remains the rollback and inheritance-disable value, and
+  secret-bearing workflows still invoke `analyze` and trusted config
+  explicitly.
+- The analyzer identity is the Model Monster service PURL
+  `pkg:service/openai.com/gpt-5.4-mini`; `adapter_model_id = "gpt-5.4-mini"`
+  is only the raw `llm` transport name. The repository uses `read-write` with
+  evidence-stable reuse: unchanged evidence keeps the immutable first-writer
+  result and changed evidence calls the currently selected model. Review locks
+  are acquired for the complete run in lexical order and remain held through
+  qualification and budget preflight.
 - `extend_exclude` (never bare `exclude`): the packaged defaults already exclude
   `.worktrees`; replacing them would scan four archived bake-off
   implementations into the corpus.
@@ -224,9 +254,10 @@ committed repository overlay. Choices and their reasons:
   `config show` exposes both the config layer list and the resolved
   per-diagnostic policy so this behavior is inspectable.
 
-The self-corpus gate requires exit 0 with zero errors AND zero warnings on
-the default invocation; the dogfood-delta test proves the config is live by
-diffing against `--no-config`.
+The hermetic self-corpus gate is explicit `backstitch check --repo-root .` and
+requires exit 0 with zero errors and zero warnings. The dogfood-delta test
+separately proves the committed config is live by diffing against
+`--no-config`; provider-capable bare analyze is not a hermetic gate.
 
 ## Verification Map
 

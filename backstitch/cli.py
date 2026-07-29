@@ -25,27 +25,46 @@ Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-5.1], [EVC-8],
 from __future__ import annotations
 
 import argparse
+import contextlib
+import dataclasses
 import hashlib
+import io
 import json
 import os
 import sys
 import time
 from collections.abc import Sequence
-from pathlib import Path
-from typing import Any, cast
+from fnmatch import fnmatch
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal, cast
 
 from backstitch import __version__
 from backstitch.check_pipeline import (
+    apply_check_policy,
     build_check_report_from_snapshot,
+    scan_check_report_from_snapshot,
 )
 from backstitch.config import ProfileConfig, uncontained_test_root
 from backstitch.grammar import candidate_ref_digest
 from backstitch.profiles import get_profile
 from backstitch.reporting import render_json, render_text
 from backstitch.resolver import ScanError
-from backstitch.settings import BackstitchSettings, ConfigLoadError, resolve_config
+from backstitch.settings import (
+    CONFIG_CONSUMING_COMMANDS,
+    BackstitchSettings,
+    ConfigLoadError,
+    resolve_config,
+)
 
 NO_CONFIG_HELP = "skip repository configuration; packaged defaults still load"
+_TOP_LEVEL_COMMANDS = frozenset(
+    {
+        *CONFIG_CONSUMING_COMMANDS,
+        "summarize-analysis",
+        "cache",
+        "guide",
+    }
+)
 
 
 def _add_option_argument(
@@ -166,6 +185,39 @@ def _add_check_parser(subparsers: argparse._SubParsersAction[Any]) -> None:
             "exit 1 when warnings exist, not only errors; the explicit"
             " --no-warnings-as-errors overrides a config-set value"
         ),
+    )
+
+
+def _add_coverage_parser(subparsers: argparse._SubParsersAction[Any]) -> None:
+    coverage = subparsers.add_parser(
+        "coverage",
+        help="measure intent coverage for canonical Python definitions",
+    )
+    coverage.add_argument(
+        "path",
+        nargs="?",
+        type=Path,
+        metavar="PATH",
+        help="target repository root (default: current directory)",
+    )
+    coverage.add_argument(
+        "--repo-root",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="target repository root (exact alias of positional PATH)",
+    )
+    coverage.add_argument("--profile", default=None, help="built-in profile name")
+    coverage.add_argument("--format", choices=("text", "json"), default=None)
+    coverage.add_argument("--output", type=Path, default=None, metavar="PATH")
+    coverage.add_argument("--config", type=Path, default=None, metavar="PATH")
+    coverage.add_argument("--no-config", action="store_true", help=NO_CONFIG_HELP)
+    _add_option_argument(coverage)
+    coverage.add_argument(
+        "--require-ratchet",
+        default=None,
+        metavar="REF",
+        help="require ratchet mode with exactly this configured base ref",
     )
 
 
@@ -345,6 +397,7 @@ def _add_other_parsers(subparsers: argparse._SubParsersAction[Any]) -> None:
     cleanup.add_argument("--cache-path", type=Path, required=True, metavar="PATH")
     cleanup_key = cleanup.add_mutually_exclusive_group(required=True)
     cleanup_key.add_argument("--analysis-key", metavar="HASH")
+    cleanup_key.add_argument("--review-key", metavar="HASH")
     cleanup_key.add_argument("--verify-key", metavar="HASH")
     cleanup.add_argument(
         "--lock-stale-seconds", type=int, required=True, metavar="SECONDS"
@@ -385,18 +438,24 @@ def build_parser() -> argparse.ArgumentParser:
         help=NO_CONFIG_HELP,
     )
     _add_option_argument(parser, dest="global_options")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command")
     _add_check_parser(subparsers)
+    _add_coverage_parser(subparsers)
     _add_other_parsers(subparsers)
     return parser
 
 
-_CONFIG_COMMANDS = frozenset(
-    {"check", "packets", "analyze", "eval", "doctor", "config", "obligation"}
-)
+def _coverage_root(args: argparse.Namespace) -> Path:
+    if args.path is not None and args.repo_root is not None:
+        raise ConfigLoadError("positional PATH and --repo-root are mutually exclusive")
+    return cast(Path, args.repo_root or args.path or Path(".")).resolve()
 
 
 def _settings_anchor(args: argparse.Namespace) -> Path:
+    if args.command is None:
+        return Path.cwd()
+    if args.command == "coverage":
+        return _coverage_root(args)
     if args.command in {"check", "packets", "obligation", "config"}:
         return cast(Path, args.repo_root).resolve()
     if args.command == "analyze":
@@ -413,9 +472,10 @@ def _settings_anchor(args: argparse.Namespace) -> Path:
 
 def _dedicated_cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
     overrides: dict[str, Any] = {}
-    if args.command in {"check", "packets"}:
+    if args.command in {"check", "packets", "coverage"}:
         if args.profile is not None:
             overrides["profile.name"] = args.profile
+    if args.command in {"check", "packets"}:
         for attribute, key in (
             ("spec_roots", "profile.spec_roots"),
             ("plan_roots", "profile.plan_roots"),
@@ -432,6 +492,11 @@ def _dedicated_cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
             overrides["check.output"] = str(args.output)
         if args.warnings_as_errors is not None:
             overrides["check.warnings_as_errors"] = args.warnings_as_errors
+    if args.command == "coverage":
+        if args.format is not None:
+            overrides["coverage.format"] = args.format
+        if args.output is not None:
+            overrides["coverage.output"] = str(args.output)
     if args.command in {"analyze", "doctor"} and args.model is not None:
         overrides["analyze.model"] = args.model
     if args.command == "analyze" and args.concurrency is not None:
@@ -440,22 +505,14 @@ def _dedicated_cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _resolve_invocation_settings(args: argparse.Namespace) -> BackstitchSettings:
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if key == "BACKSTITCH_WEFT_ROOT"
-        or (
-            key == "LLM_MODEL"
-            and args.command in {"analyze", "eval", "doctor", "config"}
-        )
-    }
     return resolve_config(
         _settings_anchor(args),
         explicit=args.config,
         use_repo_config=not args.no_config,
-        environment=environment,
+        environment=os.environ,
         cli_options=tuple((key, value) for key, value in args.options),
         cli_overrides=_dedicated_cli_overrides(args),
+        invocation_command=args.command,
     )
 
 
@@ -568,6 +625,924 @@ def _cmd_check(args: argparse.Namespace, settings: BackstitchSettings) -> int:
     if any(issue.severity in fail_on for issue in pipeline.report.issues):
         return 1
     return 0
+
+
+def _cmd_coverage(args: argparse.Namespace, settings: BackstitchSettings) -> int:
+    from backstitch.diagnostics import issue_with_policy
+    from backstitch.evidence_discovery import resolved_python_module_names
+    from backstitch.git_baseline import (
+        DriftEvent,
+        DriftTransition,
+        GitBaselineError,
+        PolicyEvent,
+        PolicyTransition,
+        StaleDocTrend,
+        baseline_metadata,
+        compute_drift_event,
+        current_content_identity,
+        fold_policy_transitions,
+        load_git_baseline,
+        policy_identity,
+    )
+    from backstitch.intent_coverage import (
+        CoverageDefinition,
+        CoverageExemptionFact,
+        CoverageFloorFact,
+        CoverageUnscannableFile,
+        DefinitionRole,
+        classify_intent_coverage,
+        coverage_definitions_from_python_inventory,
+        evaluate_coverage_floors,
+    )
+    from backstitch.intent_coverage_reporting import (
+        build_coverage_report,
+        render_coverage_json,
+    )
+    from backstitch.intent_history import (
+        IntentRevisionProjector,
+        build_stale_doc_history,
+    )
+    from backstitch.markdown_specs import MarkdownParseMemo
+    from backstitch.models import Issue
+    from backstitch.obligation_runtime import capture_obligation_snapshot
+    from backstitch.python_refs import python_definition_inventory_bytes
+    from backstitch.repository_snapshot import SnapshotCaptureError
+    from backstitch.semantic_reports import atomic_replace_bytes
+    from backstitch.settings import resolve_repository_config_from_blobs
+
+    root = _coverage_root(args)
+    profile = _configured_profile(settings)
+    _validate_test_root_containment(root, profile)
+    if args.require_ratchet is not None and (
+        settings.coverage.mode != "ratchet"
+        or settings.coverage.ratchet_base != args.require_ratchet
+    ):
+        return _error(
+            "--require-ratchet requires ratchet mode and an exact matching "
+            "coverage.ratchet_base"
+        )
+    markdown_parse_memo: MarkdownParseMemo = {}
+    python_parse_memo: dict[tuple[str, str], Any] = {}
+    try:
+        snapshot = capture_obligation_snapshot(
+            root,
+            profile,
+            settings,
+            markdown_parse_memo=markdown_parse_memo,
+        )
+    except SnapshotCaptureError as exc:
+        raise ScanError(str(exc)) from exc
+    git_baseline = None
+    ratchet_phase_deadline: float | None = None
+    if settings.coverage.mode == "ratchet":
+        ratchet_phase_deadline = (
+            time.monotonic() + settings.coverage.maximum_runtime_seconds
+        )
+        try:
+            git_baseline = load_git_baseline(
+                root,
+                settings.coverage.ratchet_base,
+                limits=_coverage_git_limits(
+                    settings,
+                    maximum_runtime_seconds=max(
+                        ratchet_phase_deadline - time.monotonic(),
+                        0.000_001,
+                    ),
+                ),
+            )
+        except GitBaselineError as exc:
+            return _error(str(exc))
+    raw_report, artifacts = scan_check_report_from_snapshot(
+        snapshot,
+        root.as_posix(),
+        profile,
+        settings,
+        python_parse_memo=python_parse_memo,
+        markdown_parse_memo=markdown_parse_memo,
+    )
+    python_rows = tuple(
+        row
+        for row in snapshot.files
+        if row.path.endswith(".py") and _path_under_any(row.path, profile.code_roots)
+    )
+    module_names = resolved_python_module_names(
+        tuple(row.path for row in python_rows),
+        profile,
+        snapshot,
+    )
+    definitions: list[CoverageDefinition] = []
+    exemption_facts: list[CoverageExemptionFact] = []
+    invalid_exemption_markers: list[tuple[str, int, str | None]] = []
+    unscannable_paths: list[str] = []
+    for row in python_rows:
+        if row.raw_bytes is None:
+            unscannable_paths.append(row.path)
+            continue
+        inventory = python_definition_inventory_bytes(
+            row.raw_bytes,
+            rel_path=row.path,
+            module_name=module_names[row.path],
+            parse_memo=python_parse_memo,
+        )
+        if inventory is None:
+            unscannable_paths.append(row.path)
+            continue
+        role: DefinitionRole = (
+            "test" if _path_under_any(row.path, profile.test_roots) else "production"
+        )
+        projected = coverage_definitions_from_python_inventory(
+            inventory,
+            role=role,
+            tree=_longest_root(row.path, profile.code_roots),
+        )
+        definitions.extend(projected)
+        definition_by_locator = {item.structural_locator: item for item in projected}
+        for source_definition in inventory:
+            owner = definition_by_locator[source_definition.structural_locator]
+            for marker in source_definition.no_spec_markers:
+                if not marker.valid or marker.reason is None:
+                    invalid_exemption_markers.append(
+                        (row.path, marker.line, owner.qualname)
+                    )
+                    continue
+                exemption_facts.append(
+                    CoverageExemptionFact(
+                        exemption_id=_coverage_stable_id(
+                            [
+                                "intent-exemption-v1",
+                                "inline",
+                                row.path,
+                                marker.line,
+                                marker.reason,
+                            ]
+                        ),
+                        matched_definition_ids=(owner.definition_id,),
+                        origin="inline",
+                        path=row.path,
+                        line=marker.line,
+                        selector=owner.structural_locator,
+                        reason=marker.reason,
+                    )
+                )
+
+    for configured in settings.coverage.exemptions:
+        matched = tuple(
+            sorted(
+                item.definition_id
+                for item in definitions
+                if (
+                    item.path == configured.selector
+                    if configured.kind == "path"
+                    else fnmatch(item.path, configured.selector)
+                )
+            )
+        )
+        origin: Literal["config_path", "config_glob"] = (
+            "config_path" if configured.kind == "path" else "config_glob"
+        )
+        exemption_facts.append(
+            CoverageExemptionFact(
+                exemption_id=_coverage_stable_id(
+                    [
+                        "intent-exemption-v1",
+                        origin,
+                        configured.selector,
+                    ]
+                ),
+                matched_definition_ids=matched,
+                origin=origin,
+                path=(
+                    settings.config_path.as_posix()
+                    if settings.config_path is not None
+                    else ""
+                ),
+                line=None,
+                selector=configured.selector,
+                reason=configured.reason,
+            )
+        )
+
+    changed_definition_ids: frozenset[str] = frozenset()
+    baseline_row = None
+    policy_events: tuple[PolicyEvent, ...] = ()
+    drift_events: tuple[DriftEvent, ...] = ()
+    ratchet_definition_locations: dict[str, CoverageDefinition] = {}
+    stale_doc_trends: tuple[StaleDocTrend, ...] = ()
+    spec_growth: dict[str, object] | None = None
+    if git_baseline is not None:
+        if settings.config_path is None:
+            return _error("ratchet mode requires a repository config file")
+        try:
+            config_path = settings.config_path.resolve().relative_to(root).as_posix()
+        except (OSError, ValueError):
+            return _error("ratchet config path must be inside the repository")
+        assert ratchet_phase_deadline is not None
+        phase_deadline = ratchet_phase_deadline
+        revision_projector = IntentRevisionProjector()
+        try:
+            _coverage_check_deadline(phase_deadline)
+        except ValueError as exc:
+            return _error(str(exc))
+        try:
+            revision_blobs = dict(git_baseline.blobs)
+            baseline_settings = resolve_repository_config_from_blobs(
+                root,
+                config_path,
+                revision_blobs,
+            )
+            baseline_profile = _configured_profile(baseline_settings)
+            baseline_policy = _coverage_policy_projection(
+                baseline_settings,
+                baseline_profile,
+            )
+            previous_policy = baseline_policy
+            previous_state = revision_projector.project(
+                git_baseline.merge_base,
+                revision_blobs,
+                repo_root=root,
+                settings=baseline_settings,
+            )
+            baseline_state = previous_state
+            ratchet_definition_locations.update(baseline_state.definitions)
+            policy_transitions: list[PolicyTransition] = []
+            drift_rows: list[DriftEvent] = []
+            for transition in git_baseline.transitions:
+                _coverage_check_deadline(phase_deadline)
+                for path, raw in transition.changes:
+                    if raw is None:
+                        revision_blobs.pop(path, None)
+                    else:
+                        revision_blobs[path] = raw
+                revision_settings = resolve_repository_config_from_blobs(
+                    root,
+                    config_path,
+                    revision_blobs,
+                )
+                revision_profile = _configured_profile(revision_settings)
+                revision_policy = _coverage_policy_projection(
+                    revision_settings,
+                    revision_profile,
+                )
+                revision_state = revision_projector.project(
+                    transition.commit,
+                    revision_blobs,
+                    repo_root=root,
+                    settings=revision_settings,
+                )
+                ratchet_definition_locations.update(revision_state.definitions)
+                policy_transitions.append(
+                    PolicyTransition(
+                        parent_commit=transition.parent_commit,
+                        transition_commit=transition.commit,
+                        before=previous_policy,
+                        after=revision_policy,
+                        commit_message=transition.message,
+                    )
+                )
+                for edge_id in sorted(
+                    previous_state.drift_states.keys()
+                    & revision_state.drift_states.keys()
+                ):
+                    event = compute_drift_event(
+                        DriftTransition(
+                            parent_commit=transition.parent_commit,
+                            child_commit=transition.commit,
+                            before=previous_state.drift_states[edge_id],
+                            after=revision_state.drift_states[edge_id],
+                            commit_message=transition.message,
+                            current_diff=True,
+                        )
+                    )
+                    if event is not None:
+                        drift_rows.append(event)
+                previous_policy = revision_policy
+                previous_state = revision_state
+            head_state = previous_state
+            current_blobs = _coverage_current_blobs(
+                revision_blobs,
+                snapshot,
+                settings,
+                profile,
+                root,
+            )
+            current_state = revision_projector.project(
+                f"accepted:{snapshot.snapshot_hash}",
+                current_blobs,
+                repo_root=root,
+                settings=settings,
+            )
+            ratchet_definition_locations.update(current_state.definitions)
+            current_policy = _coverage_policy_projection(settings, profile)
+            policy_transitions.append(
+                PolicyTransition(
+                    parent_commit=git_baseline.head_commit,
+                    transition_commit=None,
+                    before=previous_policy,
+                    after=current_policy,
+                )
+            )
+            for edge_id in sorted(
+                previous_state.drift_states.keys() & current_state.drift_states.keys()
+            ):
+                event = compute_drift_event(
+                    DriftTransition(
+                        parent_commit=git_baseline.head_commit,
+                        child_commit=None,
+                        before=previous_state.drift_states[edge_id],
+                        after=current_state.drift_states[edge_id],
+                        current_diff=True,
+                    )
+                )
+                if event is not None:
+                    drift_rows.append(event)
+            policy_events = fold_policy_transitions(policy_transitions)
+            drift_events = tuple(sorted(drift_rows, key=lambda item: item.event_id))
+            changed_definition_ids = frozenset(
+                item.definition_id
+                for item in definitions
+                if (
+                    item.definition_id not in baseline_state.definitions
+                    or baseline_state.definitions[
+                        item.definition_id
+                    ].source_projection_sha256
+                    != item.source_projection_sha256
+                )
+            )
+            current_policy_sha256 = policy_identity(current_policy)
+            baseline_policy_sha256 = policy_identity(baseline_policy)
+            source_hashes = {
+                row.path: f"sha256:{row.raw_sha256}"
+                for row in snapshot.files
+                if row.raw_sha256 is not None
+            }
+            baseline_row = baseline_metadata(
+                git_baseline,
+                current_snapshot_sha256=f"sha256:{snapshot.snapshot_hash}",
+                current_content_sha256=current_content_identity(source_hashes),
+                baseline_policy_sha256=baseline_policy_sha256,
+                current_policy_sha256=current_policy_sha256,
+            )
+            changed_sections = {
+                key
+                for key in baseline_state.section_rows.keys()
+                | current_state.section_rows.keys()
+                if baseline_state.section_rows.get(key)
+                != current_state.section_rows.get(key)
+            }
+            spec_growth = {
+                "changed_sections": len(changed_sections),
+                "utf8_byte_delta": sum(
+                    current_state.section_rows.get(key, ("", 0))[1]
+                    - baseline_state.section_rows.get(key, ("", 0))[1]
+                    for key in changed_sections
+                ),
+                "requirement_ids": sorted(
+                    _coverage_stable_id(["intent-requirement-v1", path, section_id])
+                    for path, section_id in changed_sections
+                ),
+            }
+            stale_history = build_stale_doc_history(
+                git_baseline.history_blobs,
+                git_baseline.history_transitions,
+                repo_root=root,
+                config_path=config_path,
+                current_state=head_state,
+                history_complete=git_baseline.history_complete,
+                projector=revision_projector,
+                deadline=phase_deadline,
+            )
+            stale_doc_trends = stale_history.trends
+            _coverage_check_deadline(phase_deadline)
+        except (ConfigLoadError, GitBaselineError, ValueError) as exc:
+            return _error(str(exc))
+
+    result = classify_intent_coverage(
+        tuple(
+            sorted(
+                definitions,
+                key=lambda item: (item.path, item.structural_locator),
+            )
+        ),
+        raw_report,
+        exemptions=tuple(exemption_facts),
+        inherited_counts=settings.coverage.inherited_counts,
+        requirement_rungs={
+            (section.path, section.section_id): _coverage_requirement_rung(
+                section.path,
+                profile,
+            )
+            for section in raw_report.spec_sections
+        },
+    )
+    floor_results = evaluate_coverage_floors(
+        result,
+        tuple(
+            CoverageFloorFact(
+                scope=item.scope,
+                direct_target=item.direct,
+                accounted_target=item.accounted,
+            )
+            for item in settings.coverage.floors
+        ),
+        inherited_counts=settings.coverage.inherited_counts,
+    )
+    coverage_issues: list[Issue] = []
+    for item in result.definitions:
+        code = (
+            "INTENT_UNCOVERED_DEFINITION"
+            if item.classification == "uncovered"
+            else (
+                "INTENT_INHERITED_ONLY" if item.classification == "inherited" else None
+            )
+        )
+        if code is None:
+            continue
+        issue, _ = issue_with_policy(
+            Issue(
+                code=code,
+                severity="info",
+                path=item.definition.path,
+                line=item.definition.start_line,
+                symbol=item.definition.qualname,
+                context="repository",
+                message=(
+                    "definition has no direct intent edge"
+                    if code == "INTENT_UNCOVERED_DEFINITION"
+                    else "definition is covered only by a whole-file intent edge"
+                ),
+            ),
+            effective_policy=settings.diagnostics,
+        )
+        if issue is not None:
+            coverage_issues.append(issue)
+        if item.definition.definition_id in changed_definition_ids and (
+            item.classification == "uncovered"
+            or (
+                item.classification == "inherited"
+                and not settings.coverage.inherited_counts
+            )
+        ):
+            patch_issue, _ = issue_with_policy(
+                Issue(
+                    code=code,
+                    severity="error",
+                    path=item.definition.path,
+                    line=item.definition.start_line,
+                    symbol=item.definition.qualname,
+                    context="patch",
+                    message="changed definition lacks direct intent coverage",
+                ),
+                effective_policy=settings.diagnostics,
+            )
+            if patch_issue is not None:
+                coverage_issues.append(patch_issue)
+    for path in unscannable_paths:
+        issue, _ = issue_with_policy(
+            Issue(
+                code="INTENT_COVERAGE_INCOMPLETE",
+                severity="info",
+                path=path,
+                line=None,
+                context="repository",
+                message="Python file could not be classified for intent coverage",
+            ),
+            effective_policy=settings.diagnostics,
+        )
+        if issue is not None:
+            coverage_issues.append(issue)
+        current_row = next(row for row in python_rows if row.path == path)
+        if (
+            git_baseline is not None
+            and git_baseline.blobs.get(path) != current_row.raw_bytes
+        ):
+            patch_issue, _ = issue_with_policy(
+                Issue(
+                    code="INTENT_COVERAGE_INCOMPLETE",
+                    severity="error",
+                    path=path,
+                    line=None,
+                    context="patch",
+                    message="changed Python file could not be classified",
+                ),
+                effective_policy=settings.diagnostics,
+            )
+            if patch_issue is not None:
+                coverage_issues.append(patch_issue)
+    for path, line, symbol in invalid_exemption_markers:
+        issue, _ = issue_with_policy(
+            Issue(
+                code="INTENT_EXEMPTION_UNREASONED",
+                severity="error",
+                path=path,
+                line=line,
+                symbol=symbol,
+                message="inline no-spec marker requires a valid nonblank reason",
+            ),
+            effective_policy=settings.diagnostics,
+        )
+        if issue is not None:
+            coverage_issues.append(issue)
+    for exemption in result.exemptions:
+        if exemption.state != "unused":
+            continue
+        issue, _ = issue_with_policy(
+            Issue(
+                code="INTENT_EXEMPTION_UNUSED",
+                severity="warning",
+                path=exemption.path,
+                line=exemption.line,
+                message=f"intent exemption matches no definition: {exemption.selector}",
+            ),
+            effective_policy=settings.diagnostics,
+        )
+        if issue is not None:
+            coverage_issues.append(issue)
+    for requirement in result.requirements:
+        if (
+            requirement.rung != "active"
+            or requirement.implementation_state != "declared_without_live_owner"
+        ):
+            continue
+        issue, _ = issue_with_policy(
+            Issue(
+                code="INTENT_REQUIREMENT_UNIMPLEMENTED",
+                severity="info",
+                path=requirement.path,
+                line=None,
+                section_id=requirement.section_id,
+                message="implementation mappings resolve to no live definition owner",
+            ),
+            effective_policy=settings.diagnostics,
+        )
+        if issue is not None:
+            coverage_issues.append(issue)
+    for floor in floor_results:
+        if floor.passes:
+            continue
+        issue, _ = issue_with_policy(
+            Issue(
+                code="INTENT_COVERAGE_FLOOR_REGRESSION",
+                severity="error",
+                path=floor.scope,
+                line=None,
+                message="intent coverage is below a configured floor",
+            ),
+            effective_policy=settings.diagnostics,
+        )
+        if issue is not None:
+            coverage_issues.append(issue)
+    for event in drift_events:
+        if event.acknowledged:
+            continue
+        definition = ratchet_definition_locations.get(event.definition_id)
+        if definition is None:
+            return _error(f"drift event has no retained definition: {event.event_id}")
+        issue, _ = issue_with_policy(
+            Issue(
+                code="INTENT_DRIFT_SUSPECT",
+                severity="info",
+                path=definition.path,
+                line=definition.start_line,
+                symbol=definition.qualname,
+                message="implementation changed without governing evidence movement",
+            ),
+            effective_policy=settings.diagnostics,
+        )
+        if issue is not None:
+            coverage_issues.append(issue)
+    combined_report = dataclasses.replace(
+        raw_report,
+        issues=(*raw_report.issues, *coverage_issues),
+    )
+    pipeline = apply_check_policy(
+        combined_report,
+        artifacts,
+        profile,
+        settings,
+    )
+    policy_issues = tuple(
+        Issue(
+            code="INTENT_COVERAGE_POLICY_REGRESSION",
+            severity="error",
+            path=(
+                settings.config_path.resolve().relative_to(root).as_posix()
+                if settings.config_path is not None
+                else ""
+            ),
+            line=None,
+            message=(
+                "unacknowledged intent coverage policy transition "
+                f"{event.key}: {event.event_id}"
+            ),
+        )
+        for event in policy_events
+        if not event.acknowledged
+    )
+    from backstitch.models import issue_sort_key
+
+    issues = tuple(
+        sorted(
+            (*pipeline.report.issues, *policy_issues),
+            key=issue_sort_key,
+        )
+    )
+    unscannable_files = tuple(
+        CoverageUnscannableFile(
+            path=path,
+            role=(
+                "test" if _path_under_any(path, profile.test_roots) else "production"
+            ),
+            tree=_longest_root(path, profile.code_roots),
+            issue_identities=tuple(
+                sorted(
+                    {
+                        (issue.code, issue.path, issue.line)
+                        for issue in raw_report.issues
+                        if issue.path == path
+                    },
+                    key=lambda row: (row[0], row[1], row[2] or 0),
+                )
+            ),
+        )
+        for path in sorted(unscannable_paths)
+    )
+    payload = build_coverage_report(
+        result,
+        profile=profile.name,
+        repo_root=root.as_posix(),
+        mode=settings.coverage.mode,
+        inherited_counts=settings.coverage.inherited_counts,
+        issues=issues,
+        floors=floor_results,
+        unscannable_files=unscannable_files,
+        baseline=baseline_row,
+        changed_definition_ids=changed_definition_ids,
+        policy_events=policy_events,
+        drift_events=drift_events,
+        stale_doc_trends=stale_doc_trends,
+        spec_growth=spec_growth,
+    )
+    if settings.coverage.format == "json":
+        rendered = render_coverage_json(
+            payload,
+            source_result=result,
+            inherited_counts=settings.coverage.inherited_counts,
+            floors=floor_results,
+            unscannable_files=unscannable_files,
+            issues=issues,
+            baseline=baseline_row,
+            changed_definition_ids=changed_definition_ids,
+            policy_events=policy_events,
+            drift_events=drift_events,
+            stale_doc_trends=stale_doc_trends,
+            spec_growth=spec_growth,
+        )
+    else:
+        summary = payload["summary"]
+        definition_rows = {
+            item["definition_id"]: item for item in payload["definitions"]
+        }
+        worklist_lines = "".join(
+            "uncovered "
+            f"{definition_rows[definition_id]['role']} "
+            f"{definition_rows[definition_id]['path']} "
+            f"{definition_rows[definition_id]['structural_locator']}\n"
+            for definition_id in payload["worklist"]
+        )
+        rendered = (
+            "Intent coverage: "
+            f"{summary['direct']} direct, {summary['inherited']} inherited, "
+            f"{summary['exempt']} exempt, {summary['uncovered']} uncovered, "
+            f"{summary['total']} total\n"
+            f"{worklist_lines}"
+        )
+    output = (
+        Path(settings.coverage.output) if settings.coverage.output is not None else None
+    )
+    if output is not None:
+        try:
+            atomic_replace_bytes(output, rendered.encode("utf-8"))
+        except OSError as exc:
+            return _error(f"cannot write --output {output}: {exc}")
+    else:
+        sys.stdout.write(rendered)
+    fail_on = set(settings.diagnostics.fail_on)
+    return (
+        1 if policy_issues or any(issue.severity in fail_on for issue in issues) else 0
+    )
+
+
+def _path_under_any(path: str, roots: Sequence[str]) -> bool:
+    pure = PurePosixPath(path)
+    return any(pure.is_relative_to(PurePosixPath(root)) for root in roots)
+
+
+def _coverage_stable_id(preimage: object) -> str:
+    from backstitch.canonical import canonical_json_bytes
+
+    return "sha256:" + hashlib.sha256(canonical_json_bytes(preimage)).hexdigest()
+
+
+def _coverage_requirement_rung(
+    path: str,
+    profile: ProfileConfig,
+) -> Literal["active", "planned", "exploratory", "meta"]:
+    if any(fnmatch(path, pattern) for pattern in profile.meta_spec_globs):
+        return "meta"
+    if any(fnmatch(path, pattern) for pattern in profile.planned_spec_globs):
+        return "planned"
+    if any(fnmatch(path, pattern) for pattern in profile.exploratory_spec_globs):
+        return "exploratory"
+    return "active"
+
+
+def _coverage_git_limits(
+    settings: BackstitchSettings,
+    *,
+    maximum_runtime_seconds: float | None = None,
+) -> Any:
+    from backstitch.git_baseline import GitLimits
+
+    coverage = settings.coverage
+    return GitLimits(
+        maximum_baseline_files=coverage.maximum_baseline_files,
+        maximum_file_bytes=coverage.maximum_file_bytes,
+        maximum_baseline_bytes=coverage.maximum_baseline_bytes,
+        maximum_history_commits=coverage.maximum_history_commits,
+        maximum_git_command_seconds=coverage.maximum_git_command_seconds,
+        maximum_git_commands=coverage.maximum_git_commands,
+        maximum_git_output_bytes=coverage.maximum_git_output_bytes,
+        maximum_commit_message_bytes=coverage.maximum_commit_message_bytes,
+        maximum_runtime_seconds=(
+            coverage.maximum_runtime_seconds
+            if maximum_runtime_seconds is None
+            else maximum_runtime_seconds
+        ),
+    )
+
+
+def _coverage_policy_projection(
+    settings: BackstitchSettings,
+    profile: ProfileConfig,
+) -> dict[str, object]:
+    """Project the exact closed COV-5 policy mapping."""
+
+    coverage = settings.coverage
+    diagnostics = settings.diagnostics
+    lint = settings.lint
+    return {
+        "schema": "intent-coverage-policy-v1",
+        "profile": {
+            "name": settings.profile,
+            "spec_roots": list(profile.spec_roots),
+            "code_roots": list(profile.code_roots),
+            "test_roots": list(profile.test_roots),
+            "planned_spec_globs": list(profile.planned_spec_globs),
+            "exploratory_spec_globs": list(profile.exploratory_spec_globs),
+            "meta_spec_globs": list(profile.meta_spec_globs),
+            "process_spec_globs": list(
+                settings.profile_overrides.process_spec_globs or ()
+            ),
+        },
+        "exclude": list(settings.exclude),
+        "coverage": {
+            "mode": coverage.mode,
+            "granularity": coverage.granularity,
+            "inherited_counts": coverage.inherited_counts,
+            "ratchet_base": coverage.ratchet_base,
+            "exemptions": [
+                {
+                    "id": _coverage_stable_id(
+                        [
+                            "intent-exemption-v1",
+                            ("config_path" if item.kind == "path" else "config_glob"),
+                            item.selector,
+                        ]
+                    ),
+                    "kind": item.kind,
+                    "selector": item.selector,
+                    "reason": item.reason,
+                }
+                for item in coverage.exemptions
+            ],
+            "floors": [
+                {
+                    "scope": item.scope,
+                    "direct": item.direct,
+                    "accounted": item.accounted,
+                }
+                for item in sorted(coverage.floors, key=lambda row: row.scope)
+            ],
+            "maximum_baseline_files": coverage.maximum_baseline_files,
+            "maximum_file_bytes": coverage.maximum_file_bytes,
+            "maximum_baseline_bytes": coverage.maximum_baseline_bytes,
+            "maximum_history_commits": coverage.maximum_history_commits,
+            "maximum_git_command_seconds": coverage.maximum_git_command_seconds,
+            "maximum_git_commands": coverage.maximum_git_commands,
+            "maximum_git_output_bytes": coverage.maximum_git_output_bytes,
+            "maximum_commit_message_bytes": coverage.maximum_commit_message_bytes,
+            "maximum_runtime_seconds": coverage.maximum_runtime_seconds,
+        },
+        "diagnostics": {
+            "default_level": diagnostics.default_level,
+            "fail_on": list(diagnostics.fail_on),
+            "suppressible_levels": list(diagnostics.suppressible_levels),
+            "levels": [
+                {"selectors": list(item.selectors), "level": item.level}
+                for item in diagnostics.levels
+            ],
+        },
+        "suppressions": {
+            "warn_unused_ignores": lint.warn_unused_ignores,
+            "require_suppression_declarations": (lint.require_suppression_declarations),
+            "per_file_ignores": [
+                {"selector": selector, "codes": list(codes)}
+                for selector, codes in sorted(lint.per_file_ignores.items())
+            ],
+            "per_section_ignores": [
+                {"selector": selector, "codes": list(codes)}
+                for selector, codes in sorted(lint.per_section_ignores.items())
+            ],
+            "rules": [
+                {
+                    "mechanism": item.mechanism,
+                    "provenance": item.provenance,
+                    "path": item.path,
+                    "sections": list(item.sections),
+                    "codes": list(item.codes),
+                    "declaration": item.declaration,
+                    "origin": {
+                        "source": item.origin.source,
+                        "position": item.origin.position,
+                        "line": item.origin.line,
+                    },
+                }
+                for item in lint.suppressions
+            ],
+        },
+    }
+
+
+def _coverage_current_blobs(
+    head_blobs: dict[str, bytes],
+    snapshot: Any,
+    settings: BackstitchSettings,
+    profile: ProfileConfig,
+    root: Path,
+) -> dict[str, bytes]:
+    """Overlay the accepted snapshot on HEAD without reopening source paths."""
+
+    current = dict(head_blobs)
+    roots = tuple(
+        dict.fromkeys(
+            (
+                *profile.spec_roots,
+                *profile.plan_roots,
+                *profile.code_roots,
+                *profile.test_roots,
+            )
+        )
+    )
+    for path in tuple(current):
+        if _path_under_any(path, roots) and snapshot.path_kind(path) != "regular_file":
+            current.pop(path)
+    for row in snapshot.files:
+        if row.raw_bytes is None:
+            current.pop(row.path, None)
+        else:
+            current[row.path] = row.raw_bytes
+    for identity in settings.config_layer_identities:
+        try:
+            path = Path(identity.path).resolve().relative_to(root).as_posix()
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                "ratchet config layer must be inside the repository"
+            ) from exc
+        current[path] = identity.raw_bytes
+    return current
+
+
+def _coverage_check_deadline(deadline: float) -> None:
+    if time.monotonic() > deadline:
+        raise ValueError("intent coverage Git phase exceeded runtime budget")
+
+
+def _longest_root(path: str, roots: Sequence[str]) -> str:
+    pure = PurePosixPath(path)
+    matches = [
+        PurePosixPath(root)
+        for root in roots
+        if pure.is_relative_to(PurePosixPath(root))
+    ]
+    if not matches:
+        raise ValueError(f"Python path is outside configured code roots: {path}")
+    longest = max(len(root.parts) for root in matches)
+    owners = sorted({root.as_posix() for root in matches if len(root.parts) == longest})
+    if len(owners) != 1:
+        raise ConfigLoadError(
+            f"Python path has equal-specificity code-root owners: {path}"
+        )
+    return owners[0]
 
 
 def _cmd_packets(args: argparse.Namespace, settings: BackstitchSettings) -> int:
@@ -711,7 +1686,7 @@ def _cmd_analyze(args: argparse.Namespace, settings: BackstitchSettings) -> int:
     analyze_settings = settings.analyze
     model_name = resolve_model_name(
         None,
-        configured=analyze_settings.model or None,
+        configured=analyze_settings.adapter_model_id or analyze_settings.model or None,
     )
     resolved = resolve_semantic_settings(analyze_settings)
     resolved_verify = resolve_verification_settings(settings.verify, resolved)
@@ -1021,7 +1996,10 @@ def _cmd_eval(args: argparse.Namespace, settings: BackstitchSettings) -> int:
     if corpus_path == output_path:
         raise ConfigLoadError("eval --corpus and --output paths must be distinct")
 
-    model_name = resolve_model_name(None, configured=settings.analyze.model or None)
+    model_name = resolve_model_name(
+        None,
+        configured=settings.analyze.adapter_model_id or settings.analyze.model or None,
+    )
     resolved = resolve_semantic_settings(settings.analyze)
     resolved_verify = resolve_verification_settings(settings.verify, resolved)
     if resolved_verify is None or not isinstance(settings.verify, VerifySettings):
@@ -1146,6 +2124,7 @@ def _cmd_cache(args: argparse.Namespace) -> int:
     result = cleanup_lock(
         cache_path=args.cache_path,
         analysis_key=args.analysis_key,
+        review_key=args.review_key,
         verify_key=args.verify_key,
         lock_stale_seconds=args.lock_stale_seconds,
         reason=args.reason,
@@ -1166,7 +2145,7 @@ def _cmd_doctor(args: argparse.Namespace, settings: BackstitchSettings) -> int:
     )
 
     results = run_doctor(
-        settings.analyze.model or None,
+        settings.analyze.adapter_model_id or settings.analyze.model or None,
         model_source=settings.analyze_model_source,
         probe=args.probe,
     )
@@ -1702,14 +2681,9 @@ def _run_obligation(
     return 0
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Run the backstitch CLI."""
+def _merge_config_controls(args: argparse.Namespace) -> None:
+    """Normalize global and subcommand config spellings onto one namespace."""
 
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    # [CFG-7]: merge the global `backstitch --config/--no-config <command>`
-    # spellings with the per-command flags; any mix of --config and
-    # --no-config across spellings is a usage error (exit 2).
     local_config = getattr(args, "config", None)
     args.config = local_config or args.global_config
     args.no_config = bool(getattr(args, "no_config", False) or args.global_no_config)
@@ -1717,11 +2691,173 @@ def main(argv: Sequence[str] | None = None) -> int:
         *args.global_options,
         *getattr(args, "options", []),
     ]
+
+
+def _dispatch_config_command(
+    args: argparse.Namespace,
+    settings: BackstitchSettings,
+) -> int:
+    if args.command == "check":
+        return _cmd_check(args, settings)
+    if args.command == "coverage":
+        return _cmd_coverage(args, settings)
+    if args.command == "packets":
+        return _cmd_packets(args, settings)
+    if args.command == "analyze":
+        return _cmd_analyze(args, settings)
+    if args.command == "eval":
+        return _cmd_eval(args, settings)
+    if args.command == "doctor":
+        return _cmd_doctor(args, settings)
+    if args.command == "config":
+        return _cmd_config(args, settings)
+    if args.command == "obligation":
+        return _cmd_obligation(args, settings)
+    raise ValueError(f"unknown command: {args.command}")
+
+
+def _explicit_command(argv: Sequence[str]) -> str | None:
+    """Return an explicit top-level command after leading global controls."""
+
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--no-config":
+            index += 1
+            continue
+        if token == "--config":
+            index += 2
+            continue
+        if token.startswith("--config="):
+            index += 1
+            continue
+        if token == "--option":
+            index += 3
+            continue
+        if token in _TOP_LEVEL_COMMANDS:
+            return token
+        return None
+    return None
+
+
+def _default_candidate_argv(
+    command: str,
+    argv: Sequence[str],
+) -> tuple[str, ...]:
+    """Translate bare shorthand into one selected command candidate."""
+
+    controls: list[str] = []
+    remaining = list(argv)
+    while remaining:
+        token = remaining[0]
+        width = (
+            1
+            if token == "--no-config" or token.startswith("--config=")
+            else 2
+            if token == "--config"
+            else 3
+            if token == "--option"
+            else 0
+        )
+        if width == 0 or len(remaining) < width:
+            break
+        controls.extend(remaining[:width])
+        del remaining[:width]
+    if remaining and not remaining[0].startswith("-"):
+        repo_root = remaining.pop(0)
+        return (command, *controls, "--repo-root", repo_root, *remaining)
+    owns_input = "--repo-root" in remaining or (
+        command == "analyze" and "--packets" in remaining
+    )
+    if owns_input:
+        return (command, *controls, *remaining)
+    return (command, *controls, "--repo-root", ".", *remaining)
+
+
+def _parse_default_candidates(
+    parser: argparse.ArgumentParser,
+    argv: Sequence[str],
+) -> dict[str, argparse.Namespace]:
+    """Parse allowed defaults without emitting errors for the other command."""
+
+    candidates: dict[str, argparse.Namespace] = {}
+    for command in ("check", "analyze"):
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                args = parser.parse_args(_default_candidate_argv(command, argv))
+            except SystemExit:
+                continue
+        _merge_config_controls(args)
+        candidates[command] = args
+    return candidates
+
+
+def _resolve_default_invocation_settings(
+    candidates: dict[str, argparse.Namespace],
+) -> BackstitchSettings:
+    """Resolve bare dispatch once with command-specific dedicated overrides."""
+
+    controls = next(iter(candidates.values()))
+    return resolve_config(
+        Path.cwd(),
+        explicit=controls.config,
+        use_repo_config=not controls.no_config,
+        environment=os.environ,
+        cli_options=tuple((key, value) for key, value in controls.options),
+        cli_overrides_by_command={
+            command: _dedicated_cli_overrides(args)
+            for command, args in candidates.items()
+        },
+        invocation_command=None,
+    )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the backstitch CLI."""
+
+    parser = build_parser()
+    raw_argv = tuple(sys.argv[1:] if argv is None else argv)
+    explicit_command = _explicit_command(raw_argv)
+    parser_only = any(token in {"-h", "--help", "--version"} for token in raw_argv)
+    if explicit_command is None and not parser_only:
+        candidates = _parse_default_candidates(parser, raw_argv)
+        if not candidates:
+            parser.parse_args(raw_argv)
+            raise AssertionError("argument parser returned after rejecting arguments")
+        try:
+            settings = _resolve_default_invocation_settings(candidates)
+            if settings.default_command is None:
+                return _error(
+                    "a command is required unless configuration sets default_command"
+                )
+            args = candidates.get(settings.default_command)
+            if args is None:
+                parser.parse_args(
+                    _default_candidate_argv(settings.default_command, raw_argv)
+                )
+                raise AssertionError(
+                    "argument parser returned after rejecting default arguments"
+                )
+            return _dispatch_config_command(args, settings)
+        except (ScanError, ValueError, OSError) as exc:
+            return _error(str(exc))
+        except Exception as exc:  # noqa: BLE001 -- [SC-5]: no traceback, ever.
+            return _error(f"internal error: {exc}")
+
+    args = parser.parse_args(raw_argv)
+    # [CFG-7]: merge the global `backstitch --config/--no-config <command>`
+    # spellings with the per-command flags; any mix of --config and
+    # --no-config across spellings is a usage error (exit 2).
+    _merge_config_controls(args)
     try:
         if args.config is not None and args.no_config:
             msg = "--config and --no-config are mutually exclusive"
             raise ConfigLoadError(msg)
-        if args.command not in _CONFIG_COMMANDS:
+        if args.command is None:
+            return _error(
+                "a command is required unless configuration sets default_command"
+            )
+        if args.command not in CONFIG_CONSUMING_COMMANDS:
             if args.config is not None or args.no_config or args.options:
                 raise ConfigLoadError(
                     f"{args.command} does not accept --config, --no-config, or --option"
@@ -1740,21 +2876,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.command == "obligation":
                 return _cmd_obligation(args, None, config_error=exc)
             raise
-        if args.command == "check":
-            return _cmd_check(args, settings)
-        if args.command == "packets":
-            return _cmd_packets(args, settings)
-        if args.command == "analyze":
-            return _cmd_analyze(args, settings)
-        if args.command == "eval":
-            return _cmd_eval(args, settings)
-        if args.command == "doctor":
-            return _cmd_doctor(args, settings)
-        if args.command == "config":
-            return _cmd_config(args, settings)
-        if args.command == "obligation":
-            return _cmd_obligation(args, settings)
-        raise ValueError(f"unknown command: {args.command}")
+        return _dispatch_config_command(args, settings)
     except (ScanError, ValueError, OSError) as exc:
         return _error(str(exc))
     except Exception as exc:  # noqa: BLE001 -- [SC-5]: no traceback, ever.

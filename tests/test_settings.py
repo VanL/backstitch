@@ -9,6 +9,8 @@ Spec: docs/specs/04-backstitch-traceability-exclusions.md [EXC-3], [EXC-6]
 from __future__ import annotations
 
 import hashlib
+import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -18,13 +20,280 @@ import backstitch.settings as settings_module
 from backstitch.settings import (
     DEFAULT_EXCLUDES,
     ConfigLoadError,
+    CoverageExemption,
+    CoverageFloor,
     discover_config_path,
     expand_path_value,
     is_excluded,
     resolve_config,
+    settings_to_json,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _descriptor_lines(model: str, *, revision: str | None = None) -> list[str]:
+    return [
+        'backend_id = "llm"',
+        'plugin_id = "test-plugin"',
+        'plugin_distribution_name = "test-dist"',
+        f'model = "{model}"',
+        f'model_revision = "{revision or model + "-revision"}"',
+        "input_cost_microusd_per_million_tokens = 0",
+        "output_cost_microusd_per_million_tokens = 0",
+        "input_token_overhead = 256",
+        'cost_rate_source = "test fixture rates, reviewed 2026-07-28"',
+    ]
+
+
+def _catalog_lines(selector: str) -> list[str]:
+    purl = f"pkg:service/openai.com/{selector}"
+    return [
+        f'[analyze.models."{purl}"]',
+        f'adapter_model_id = "{selector}"',
+        'backend_id = "llm"',
+        'plugin_id = "test-plugin"',
+        'plugin_distribution_name = "test-dist"',
+        f'model_revision = "{selector}-revision"',
+        "input_cost_microusd_per_million_tokens = 0",
+        "output_cost_microusd_per_million_tokens = 0",
+        "input_token_overhead = 256",
+        'cost_rate_source = "test fixture rates, reviewed 2026-07-28"',
+    ]
+
+
+def _analyze_descriptor_config(model: str) -> str:
+    return "\n".join(["[analyze]", *_descriptor_lines(model)]) + "\n"
+
+
+def test_packaged_default_command_false_normalizes_to_none(tmp_path: Path) -> None:
+    resolved = resolve_config(
+        tmp_path,
+        use_repo_config=False,
+        environment={},
+    )
+
+    assert resolved.default_command is None
+
+
+@pytest.mark.parametrize("command", ("check", "analyze"))
+def test_default_command_accepts_closed_command_names(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(f'default_command = "{command}"\n', encoding="utf-8")
+
+    resolved = resolve_config(tmp_path, environment={})
+
+    assert resolved.default_command == command
+
+
+def test_pyproject_can_select_default_command(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.backstitch]\ndefault_command = "analyze"\n',
+        encoding="utf-8",
+    )
+
+    resolved = resolve_config(tmp_path, environment={})
+
+    assert resolved.default_command == "analyze"
+
+
+def test_config_json_renders_normalized_default_command(tmp_path: Path) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text('default_command = "check"\n', encoding="utf-8")
+
+    payload = json.loads(settings_to_json(resolve_config(tmp_path, environment={})))
+
+    assert payload["default_command"] == "check"
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "true",
+        '""',
+        '"packets"',
+        '"check --format json"',
+        '["check"]',
+        "{}",
+        "1",
+        "1.5",
+    ),
+)
+def test_default_command_rejects_every_non_contract_value(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(f"default_command = {value}\n", encoding="utf-8")
+
+    with pytest.raises(ConfigLoadError, match="default_command must be"):
+        resolve_config(tmp_path, environment={})
+
+
+def test_default_command_uses_scalar_extend_precedence_and_false_disables(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "parent.toml"
+    inherited = tmp_path / "inherited.toml"
+    child = tmp_path / "child.toml"
+    disabled = tmp_path / "disabled.toml"
+    parent.write_text('default_command = "check"\n', encoding="utf-8")
+    inherited.write_text('extend = "parent.toml"\n', encoding="utf-8")
+    child.write_text(
+        'extend = "parent.toml"\ndefault_command = "analyze"\n',
+        encoding="utf-8",
+    )
+    disabled.write_text(
+        'extend = "parent.toml"\ndefault_command = false\n',
+        encoding="utf-8",
+    )
+
+    assert (
+        resolve_config(tmp_path, explicit=parent, environment={}).default_command
+        == "check"
+    )
+    assert (
+        resolve_config(tmp_path, explicit=inherited, environment={}).default_command
+        == "check"
+    )
+    assert (
+        resolve_config(tmp_path, explicit=child, environment={}).default_command
+        == "analyze"
+    )
+    assert (
+        resolve_config(tmp_path, explicit=disabled, environment={}).default_command
+        is None
+    )
+
+
+def test_default_command_is_not_a_generic_option(tmp_path: Path) -> None:
+    with pytest.raises(ConfigLoadError, match="not runtime-overridable"):
+        resolve_config(
+            tmp_path,
+            use_repo_config=False,
+            environment={},
+            cli_options=(("default_command", '"check"'),),
+        )
+
+
+def test_bare_resolver_selects_analyze_before_applying_llm_model(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text('default_command = "analyze"\n', encoding="utf-8")
+
+    resolved = resolve_config(
+        tmp_path,
+        environment={"LLM_MODEL": "environment-model"},
+        invocation_command=None,
+    )
+
+    assert resolved.default_command == "analyze"
+    assert resolved.analyze.model == "environment-model"
+    assert resolved.analyze_model_source == "LLM_MODEL environment variable"
+
+
+def test_bare_resolver_excludes_llm_model_for_default_check(tmp_path: Path) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text('default_command = "check"\n', encoding="utf-8")
+
+    resolved = resolve_config(
+        tmp_path,
+        environment={"LLM_MODEL": "environment-model"},
+        invocation_command=None,
+    )
+
+    assert resolved.default_command == "check"
+    assert resolved.analyze.model == ""
+    assert resolved.analyze_model_source == "llm default model"
+
+
+@pytest.mark.parametrize(
+    ("invocation_command", "expected_model"),
+    (("analyze", "environment-model"), ("check", "")),
+)
+def test_explicit_resolver_command_controls_llm_model_scope(
+    tmp_path: Path,
+    invocation_command: str,
+    expected_model: str,
+) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text('default_command = "check"\n', encoding="utf-8")
+
+    resolved = resolve_config(
+        tmp_path,
+        environment={"LLM_MODEL": "environment-model"},
+        invocation_command=invocation_command,
+    )
+
+    assert resolved.default_command == "check"
+    assert resolved.analyze.model == expected_model
+
+
+def test_legacy_resolver_call_preserves_caller_environment_semantics(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text('default_command = "check"\n', encoding="utf-8")
+
+    resolved = resolve_config(
+        tmp_path,
+        environment={"LLM_MODEL": "environment-model"},
+    )
+
+    assert resolved.analyze.model == "environment-model"
+
+
+@pytest.mark.parametrize("command", ("check", "analyze"))
+def test_bare_and_explicit_resolvers_produce_identical_settings_snapshot(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(
+        (
+            f'default_command = "{command}"\n'
+            + "\n".join(
+                [
+                    "[analyze]",
+                    *_descriptor_lines("config-model", revision="rev-1"),
+                    "",
+                    *_catalog_lines("environment-model"),
+                ]
+            )
+            + "\n"
+        ),
+        encoding="utf-8",
+    )
+    environment = {"LLM_MODEL": "pkg:service/openai.com/environment-model"}
+
+    bare = resolve_config(
+        tmp_path,
+        environment=environment,
+        invocation_command=None,
+    )
+    explicit = resolve_config(
+        tmp_path,
+        environment=environment,
+        invocation_command=command,
+    )
+
+    assert bare == explicit
+    assert bare.config_layer_identities == explicit.config_layer_identities
+    assert bare.analyze_model_source == explicit.analyze_model_source
+
+
+def test_resolver_rejects_unknown_explicit_command_context(tmp_path: Path) -> None:
+    with pytest.raises(ConfigLoadError, match="unknown config-consuming"):
+        resolve_config(
+            tmp_path,
+            use_repo_config=False,
+            environment={},
+            invocation_command="summarize-analysis",
+        )
 
 
 def test_documented_suppression_settings_parse_and_canonicalize(
@@ -221,26 +490,51 @@ def test_resolve_config_applies_cli_over_environment_over_explicit_config(
     tmp_path: Path,
 ) -> None:
     config = tmp_path / "arbitrary-name.toml"
-    config.write_text('[analyze]\nmodel = "config-model"\n', encoding="utf-8")
+    config.write_text(
+        "\n".join(
+            [
+                "[analyze]",
+                *_descriptor_lines("config-model"),
+                "",
+                *_catalog_lines("environment-model"),
+                "",
+                *_catalog_lines("cli-model"),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     resolved = resolve_config(
         tmp_path,
         explicit=config,
-        environment={"LLM_MODEL": "environment-model"},
-        cli_options=(("analyze.model", "cli-model"),),
+        environment={"LLM_MODEL": "pkg:service/openai.com/environment-model"},
+        cli_options=(("analyze.model", "pkg:service/openai.com/cli-model"),),
     )
 
-    assert resolved.analyze.model == "cli-model"
+    assert resolved.analyze.model == "pkg:service/openai.com/cli-model"
+    assert resolved.analyze.adapter_model_id == "cli-model"
     assert resolved.analyze_model_source == "--option analyze.model"
     assert resolved.config_path == config.resolve()
 
 
 def test_resolve_config_precedence_fires_at_every_layer(tmp_path: Path) -> None:
     parent = tmp_path / "parent.toml"
-    parent.write_text('[analyze]\nmodel = "parent-model"\n', encoding="utf-8")
+    parent.write_text(_analyze_descriptor_config("parent-model"), encoding="utf-8")
     child = tmp_path / "child.toml"
     child.write_text(
-        'extend = "parent.toml"\n[analyze]\nmodel = "child-model"\n',
+        "\n".join(
+            [
+                'extend = "parent.toml"',
+                "[analyze]",
+                *_descriptor_lines("child-model"),
+                "",
+                *_catalog_lines("environment-model"),
+                "",
+                *_catalog_lines("cli-model"),
+            ]
+        )
+        + "\n",
         encoding="utf-8",
     )
     inherited = tmp_path / "inherited.toml"
@@ -261,18 +555,22 @@ def test_resolve_config_precedence_fires_at_every_layer(tmp_path: Path) -> None:
     environment_settings = resolve_config(
         tmp_path,
         explicit=child,
-        environment={"LLM_MODEL": "environment-model"},
+        environment={"LLM_MODEL": "pkg:service/openai.com/environment-model"},
     )
-    assert environment_settings.analyze.model == "environment-model"
+    assert (
+        environment_settings.analyze.model == "pkg:service/openai.com/environment-model"
+    )
+    assert environment_settings.analyze.adapter_model_id == "environment-model"
     assert environment_settings.analyze_model_source == "LLM_MODEL environment variable"
 
     cli_settings = resolve_config(
         tmp_path,
         explicit=child,
-        environment={"LLM_MODEL": "environment-model"},
-        cli_options=(("analyze.model", "cli-model"),),
+        environment={"LLM_MODEL": "pkg:service/openai.com/environment-model"},
+        cli_options=(("analyze.model", "pkg:service/openai.com/cli-model"),),
     )
-    assert cli_settings.analyze.model == "cli-model"
+    assert cli_settings.analyze.model == "pkg:service/openai.com/cli-model"
+    assert cli_settings.analyze.adapter_model_id == "cli-model"
     assert cli_settings.analyze_model_source == "--option analyze.model"
 
 
@@ -487,7 +785,7 @@ def test_arbitrary_explicit_and_extended_names_do_not_become_discovery_names(
     tmp_path: Path,
 ) -> None:
     parent = tmp_path / "parent-settings.any.toml"
-    parent.write_text('[analyze]\nmodel = "parent-model"\n', encoding="utf-8")
+    parent.write_text(_analyze_descriptor_config("parent-model"), encoding="utf-8")
     child = tmp_path / "selected-settings.any.toml"
     child.write_text(
         f'extend = "{parent.name}"\n[analyze]\nconcurrency = 2\n',
@@ -643,7 +941,10 @@ def test_analyze_discovers_config_from_packets_parent(
     project = tmp_path / "project"
     project.mkdir()
     config = project / ".backstitch.toml"
-    config.write_text('[analyze]\nmodel = "from-packets-dir"\n', encoding="utf-8")
+    config.write_text(
+        _analyze_descriptor_config("from-packets-dir"),
+        encoding="utf-8",
+    )
     packets = project / "packets.jsonl"
     packets.write_text("", encoding="utf-8")
     elsewhere = tmp_path / "elsewhere"
@@ -657,8 +958,18 @@ def test_analyze_discovers_config_from_packets_parent(
 # --- Loading and schema [CFG-4], [CFG-6] --------------------------------
 
 
-def test_resolve_config_from_fixture_project() -> None:
-    project = FIXTURES / "config_project"
+def test_resolve_config_from_fixture_project(tmp_path: Path) -> None:
+    project = tmp_path / "config_project"
+    shutil.copytree(FIXTURES / "config_project", project)
+    config = project / ".backstitch.toml"
+    original = config.read_text(encoding="utf-8")
+    config.write_text(
+        original.replace(
+            '[analyze]\nmodel = "gpt-configured"',
+            "\n".join(["[analyze]", *_descriptor_lines("gpt-configured")]),
+        ),
+        encoding="utf-8",
+    )
     settings = resolve_config(project)
     assert settings.profile == "backstitch-style-v1"
     assert settings.profile_overrides.spec_roots == ("docs/specifications",)
@@ -683,6 +994,530 @@ def test_no_config_returns_defaults(tmp_path: Path) -> None:
     assert settings.config_layers == ("packaged:backstitch/defaults.toml",)
     assert settings.diagnostics.fail_on == ("error",)
     assert settings.profile_overrides.test_roots == ("tests",)
+
+
+def test_packaged_coverage_defaults_are_closed_and_have_no_repository_floor(
+    tmp_path: Path,
+) -> None:
+    settings = resolve_config(
+        tmp_path,
+        use_repo_config=False,
+        environment={},
+        invocation_command="coverage",
+    )
+
+    assert settings.coverage.mode == "report"
+    assert settings.coverage.format == "text"
+    assert settings.coverage.output is None
+    assert settings.coverage.granularity == "definition"
+    assert settings.coverage.inherited_counts is False
+    assert settings.coverage.ratchet_base == ""
+    assert settings.coverage.exemptions == ()
+    # The plan's ``backstitch/`` floor is repository dogfood, not a packaged
+    # default. Otherwise a project that replaces code_roots with ``src`` would
+    # inherit an invalid floor with no TOML clear-table operation.
+    assert settings.coverage.floors == ()
+    assert settings.coverage.maximum_baseline_files == 20_000
+    assert settings.coverage.maximum_file_bytes == 5_000_000
+    assert settings.coverage.maximum_baseline_bytes == 100_000_000
+    assert settings.coverage.maximum_history_commits == 1_000
+    assert settings.coverage.maximum_git_command_seconds == 10.0
+    assert settings.coverage.maximum_git_commands == 64
+    assert settings.coverage.maximum_git_output_bytes == 100_000_000
+    assert settings.coverage.maximum_commit_message_bytes == 1_000_000
+    assert settings.coverage.maximum_runtime_seconds == 60.0
+
+
+def test_coverage_settings_parse_canonicalize_and_render(tmp_path: Path) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(
+        """
+[profile]
+code_roots = ["src"]
+
+[coverage]
+mode = "report"
+format = "json"
+output = "reports/coverage.json"
+granularity = "definition"
+inherited_counts = true
+ratchet_base = "origin/main"
+maximum_baseline_files = 101
+maximum_file_bytes = 102
+maximum_baseline_bytes = 103
+maximum_history_commits = 104
+maximum_git_command_seconds = 1.5
+maximum_git_commands = 105
+maximum_git_output_bytes = 106
+maximum_commit_message_bytes = 107
+maximum_runtime_seconds = 2.5
+
+[[coverage.exemptions]]
+path = "src/generated.py"
+reason = "  Generated from the service schema.  "
+
+[[coverage.exemptions]]
+glob = "src/vendor/**/*.py"
+reason = "Vendored upstream source."
+
+[coverage.floors."src/"]
+direct = 0.25
+accounted = 0.75
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    settings = resolve_config(
+        tmp_path,
+        environment={},
+        invocation_command="coverage",
+    )
+
+    assert settings.coverage.output == str(
+        (tmp_path / "reports/coverage.json").resolve()
+    )
+    assert settings.coverage.exemptions == (
+        CoverageExemption(
+            kind="path",
+            selector="src/generated.py",
+            reason="Generated from the service schema.",
+        ),
+        CoverageExemption(
+            kind="glob",
+            selector="src/vendor/**/*.py",
+            reason="Vendored upstream source.",
+        ),
+    )
+    assert settings.coverage.floors == (
+        CoverageFloor(scope="src", direct=0.25, accounted=0.75),
+    )
+    payload = json.loads(settings_to_json(settings))
+    assert payload["coverage"] == {
+        "mode": "report",
+        "format": "json",
+        "output": str((tmp_path / "reports/coverage.json").resolve()),
+        "granularity": "definition",
+        "inherited_counts": True,
+        "ratchet_base": "origin/main",
+        "exemptions": [
+            {
+                "kind": "path",
+                "selector": "src/generated.py",
+                "reason": "Generated from the service schema.",
+            },
+            {
+                "kind": "glob",
+                "selector": "src/vendor/**/*.py",
+                "reason": "Vendored upstream source.",
+            },
+        ],
+        "floors": [{"scope": "src", "direct": 0.25, "accounted": 0.75}],
+        "maximum_baseline_files": 101,
+        "maximum_file_bytes": 102,
+        "maximum_baseline_bytes": 103,
+        "maximum_history_commits": 104,
+        "maximum_git_command_seconds": 1.5,
+        "maximum_git_commands": 105,
+        "maximum_git_output_bytes": 106,
+        "maximum_commit_message_bytes": 107,
+        "maximum_runtime_seconds": 2.5,
+    }
+
+
+def test_coverage_extend_merges_floor_fields_and_replaces_exemptions(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "parent.toml"
+    child = tmp_path / "child.toml"
+    parent.write_text(
+        """
+[profile]
+code_roots = ["src"]
+[[coverage.exemptions]]
+glob = "src/generated/**"
+reason = "Parent generated tree."
+[coverage.floors."src/"]
+direct = 0.2
+accounted = 0.4
+""".lstrip(),
+        encoding="utf-8",
+    )
+    child.write_text(
+        """
+extend = "parent.toml"
+[[coverage.exemptions]]
+path = "src/one.py"
+reason = "Child generated file."
+[coverage.floors."src/"]
+direct = 0.3
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    settings = resolve_config(tmp_path, explicit=child, environment={})
+
+    assert settings.coverage.exemptions == (
+        CoverageExemption(
+            kind="path",
+            selector="src/one.py",
+            reason="Child generated file.",
+        ),
+    )
+    assert settings.coverage.floors == (
+        CoverageFloor(scope="src", direct=0.3, accounted=0.4),
+    )
+
+
+def test_coverage_output_anchors_to_the_contributing_extend_layer(
+    tmp_path: Path,
+) -> None:
+    parent_dir = tmp_path / "parent"
+    child_dir = tmp_path / "child"
+    parent_dir.mkdir()
+    child_dir.mkdir()
+    parent = parent_dir / "base.toml"
+    child = child_dir / "child.toml"
+    parent.write_text(
+        '[coverage]\noutput = "reports/coverage.json"\n', encoding="utf-8"
+    )
+    child.write_text('extend = "../parent/base.toml"\n', encoding="utf-8")
+
+    settings = resolve_config(tmp_path, explicit=child, environment={})
+
+    assert settings.coverage.output == str(
+        (parent_dir / "reports/coverage.json").resolve()
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    (
+        ('[coverage]\nmode = "other"\n', "coverage.mode"),
+        ('[coverage]\nformat = "yaml"\n', "coverage.format"),
+        ('[coverage]\noutput = ""\n', "coverage.output"),
+        ('[coverage]\ngranularity = "line"\n', "coverage.granularity"),
+        ("[coverage]\ninherited_counts = 1\n", "coverage.inherited_counts"),
+        ('[coverage]\nratchet_base = " main "\n', "coverage.ratchet_base"),
+        (
+            "[coverage]\nmaximum_baseline_files = 0\n",
+            "coverage.maximum_baseline_files",
+        ),
+        ("[coverage]\nmaximum_file_bytes = true\n", "coverage.maximum_file_bytes"),
+        (
+            "[coverage]\nmaximum_baseline_bytes = -1\n",
+            "coverage.maximum_baseline_bytes",
+        ),
+        (
+            "[coverage]\nmaximum_history_commits = 0\n",
+            "coverage.maximum_history_commits",
+        ),
+        (
+            "[coverage]\nmaximum_git_command_seconds = nan\n",
+            "coverage.maximum_git_command_seconds",
+        ),
+        (
+            "[coverage]\nmaximum_git_commands = 0\n",
+            "coverage.maximum_git_commands",
+        ),
+        (
+            "[coverage]\nmaximum_git_output_bytes = 0\n",
+            "coverage.maximum_git_output_bytes",
+        ),
+        (
+            "[coverage]\nmaximum_commit_message_bytes = 0\n",
+            "coverage.maximum_commit_message_bytes",
+        ),
+        (
+            "[coverage]\nmaximum_runtime_seconds = 0.0\n",
+            "coverage.maximum_runtime_seconds",
+        ),
+        ("[coverage]\nunknown = true\n", "coverage.unknown"),
+        ('coverage = "report"\n', "must be a table"),
+    ),
+)
+def test_coverage_rejects_each_invalid_scalar_or_unknown_key(
+    tmp_path: Path,
+    body: str,
+    message: str,
+) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(body, encoding="utf-8")
+
+    with pytest.raises(ConfigLoadError, match=message.replace(".", r"\.")):
+        resolve_config(tmp_path, environment={})
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    (
+        (
+            "[[coverage.exemptions]]\n"
+            'path = "src/a.py"\nglob = "src/*.py"\nreason = "Both."\n',
+            "exactly one of path or glob",
+        ),
+        (
+            '[[coverage.exemptions]]\npath = "src/a.py"\n',
+            "reason",
+        ),
+        (
+            '[[coverage.exemptions]]\npath = "/src/a.py"\nreason = "X"\n',
+            "repo-relative",
+        ),
+        (
+            '[[coverage.exemptions]]\npath = "src/*.py"\nreason = "X"\n',
+            "must not contain glob",
+        ),
+        (
+            '[[coverage.exemptions]]\nglob = "src/../*.py"\nreason = "X"\n',
+            "repo-relative",
+        ),
+        (
+            '[[coverage.exemptions]]\nglob = "src/./*.py"\nreason = "X"\n',
+            "repo-relative",
+        ),
+        (
+            '[[coverage.exemptions]]\npath = "src/a.py"\nreason = "   "\n',
+            "nonblank",
+        ),
+        (
+            '[[coverage.exemptions]]\npath = "src/a.py"\nreason = 7\n',
+            "nonblank string",
+        ),
+        (
+            '[[coverage.exemptions]]\npath = "src/a.py"\n'
+            'reason = """line one\nline two"""\n',
+            "single-line",
+        ),
+        (
+            "[[coverage.exemptions]]\n"
+            'path = "src/a.py"\nreason = "X"\nunknown = true\n',
+            "unknown config key",
+        ),
+        ("[coverage]\nexemptions = {}\n", "array of tables"),
+    ),
+)
+def test_coverage_rejects_invalid_exemption_shapes(
+    tmp_path: Path,
+    body: str,
+    message: str,
+) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(body, encoding="utf-8")
+
+    with pytest.raises(ConfigLoadError, match=message):
+        resolve_config(tmp_path, environment={})
+
+
+def test_coverage_rejects_over_limit_exemption_reason(tmp_path: Path) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(
+        f'[[coverage.exemptions]]\npath = "src/a.py"\nreason = "{"x" * 4097}"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigLoadError, match="4096 UTF-8 bytes"):
+        resolve_config(tmp_path, environment={})
+
+
+def test_coverage_closed_children_ignore_unknown_key_hatch(tmp_path: Path) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(
+        'allow_unknown_keys = true\n[coverage.floors."backstitch/"]\nunknown = 0.5\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigLoadError, match="unknown keys"):
+        resolve_config(tmp_path, environment={})
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    (
+        (
+            '[profile]\ncode_roots = ["src"]\n'
+            '[coverage.floors."other/"]\ndirect = 0.5\n',
+            "final effective code root",
+        ),
+        (
+            '[coverage.floors."/backstitch/"]\ndirect = 0.5\n',
+            "repo-relative",
+        ),
+        (
+            '[coverage.floors."backstitch/"]\ndirect = 1.1\n',
+            "coverage.floors.backstitch.direct",
+        ),
+        (
+            '[coverage.floors."backstitch/"]\nunknown = 0.5\n',
+            "unknown config key",
+        ),
+        (
+            '[coverage.floors."backstitch/"]\n',
+            "at least one of direct or accounted",
+        ),
+        ("[coverage]\nfloors = []\n", "coverage.floors must be a table"),
+    ),
+)
+def test_coverage_rejects_invalid_floor_shapes(
+    tmp_path: Path,
+    body: str,
+    message: str,
+) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(body, encoding="utf-8")
+
+    with pytest.raises(ConfigLoadError, match=message):
+        resolve_config(tmp_path, environment={})
+
+
+def test_coverage_floor_scope_is_canonicalized_before_extend_merge(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "parent.toml"
+    child = tmp_path / "child.toml"
+    parent.write_text(
+        '[coverage.floors."backstitch/"]\ndirect = 0.25\n',
+        encoding="utf-8",
+    )
+    child.write_text(
+        'extend = "parent.toml"\n[coverage.floors."backstitch"]\naccounted = 0.75\n',
+        encoding="utf-8",
+    )
+
+    settings = resolve_config(tmp_path, explicit=child, environment={})
+
+    assert settings.coverage.floors == (
+        CoverageFloor(scope="backstitch", direct=0.25, accounted=0.75),
+    )
+
+
+def test_coverage_ratchet_requires_base_and_repository_owned_layers(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    no_base = project / ".backstitch.toml"
+    no_base.write_text('[coverage]\nmode = "ratchet"\n', encoding="utf-8")
+    with pytest.raises(ConfigLoadError, match="ratchet_base"):
+        resolve_config(project, environment={}, invocation_command="coverage")
+
+    outside = tmp_path / "outside.toml"
+    outside.write_text(
+        '[coverage]\nmode = "ratchet"\nratchet_base = "origin/main"\n',
+        encoding="utf-8",
+    )
+    (project / ".backstitch.toml").write_text(
+        'extend = "../outside.toml"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigLoadError, match="outside the repository root"):
+        resolve_config(project, environment={}, invocation_command="coverage")
+
+
+def test_coverage_ratchet_rejects_explicit_config_and_gate_cli_contributions(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(
+        '[coverage]\nmode = "ratchet"\nratchet_base = "origin/main"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigLoadError, match="explicit --config"):
+        resolve_config(
+            tmp_path,
+            explicit=config,
+            environment={},
+            invocation_command="coverage",
+        )
+    with pytest.raises(ConfigLoadError, match="--option"):
+        resolve_config(
+            tmp_path,
+            environment={},
+            cli_options=(("coverage.inherited_counts", "true"),),
+            invocation_command="coverage",
+        )
+    with pytest.raises(ConfigLoadError, match="gate-affecting CLI"):
+        resolve_config(
+            tmp_path,
+            environment={},
+            cli_overrides={"profile.name": "backstitch-style-v1"},
+            invocation_command="coverage",
+        )
+
+
+def test_coverage_ratchet_allows_dedicated_presentation_overrides(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(
+        '[coverage]\nmode = "ratchet"\nratchet_base = "origin/main"\n',
+        encoding="utf-8",
+    )
+
+    settings = resolve_config(
+        tmp_path,
+        environment={},
+        cli_overrides={
+            "coverage.format": "json",
+            "coverage.output": str(tmp_path / "coverage.json"),
+        },
+        invocation_command="coverage",
+    )
+
+    assert settings.coverage.format == "json"
+    assert settings.coverage.output == str(tmp_path / "coverage.json")
+
+
+def test_coverage_policy_provenance_names_each_effective_coverage_key(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(
+        """
+[profile]
+code_roots = ["src"]
+[coverage]
+inherited_counts = true
+[[coverage.exemptions]]
+glob = "src/generated/**"
+reason = "Generated."
+[coverage.floors."src/"]
+direct = 0.5
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    settings = resolve_config(tmp_path, environment={})
+    by_key = {}
+    for item in settings.ratchet_policy_provenance:
+        by_key.setdefault(item.key, set()).add(item.source_kind)
+
+    assert by_key["coverage.mode"] == {"packaged"}
+    assert by_key["coverage.inherited_counts"] == {"repository_candidate"}
+    assert by_key["coverage.exemptions"] == {"repository_candidate"}
+    assert by_key["coverage.floors.src.direct"] == {"repository_candidate"}
+    assert by_key["profile.code_roots"] == {"repository_candidate"}
+    assert by_key["profile.test_roots"] == {"repository_candidate"}
+    assert by_key["diagnostics.levels"] == {"packaged"}
+    assert by_key["lint.suppressions"] == {"packaged"}
+    assert by_key["exclude"] == {"packaged"}
+
+
+def test_report_mode_coverage_scalars_are_generic_options(tmp_path: Path) -> None:
+    settings = resolve_config(
+        tmp_path,
+        use_repo_config=False,
+        environment={},
+        cli_options=(
+            ("coverage.format", '"json"'),
+            ("coverage.inherited_counts", "true"),
+            ("coverage.maximum_git_commands", "7"),
+        ),
+        invocation_command="coverage",
+    )
+
+    assert settings.coverage.format == "json"
+    assert settings.coverage.inherited_counts is True
+    assert settings.coverage.maximum_git_commands == 7
 
 
 def test_profile_test_roots_without_code_roots_retain_packaged_code_roots(
@@ -894,7 +1729,7 @@ def test_extend_merge_overrides_parent(tmp_path: Path) -> None:
                 "[profile]",
                 'spec_roots = ["docs/base"]',
                 "[analyze]",
-                'model = "gpt-base"',
+                *_descriptor_lines("gpt-base"),
             ]
         )
         + "\n",
@@ -902,7 +1737,14 @@ def test_extend_merge_overrides_parent(tmp_path: Path) -> None:
     )
     child = tmp_path / "child.toml"
     child.write_text(
-        'extend = "base.toml"\n[analyze]\nmodel = "gpt-child"\n',
+        "\n".join(
+            [
+                'extend = "base.toml"',
+                "[analyze]",
+                *_descriptor_lines("gpt-child"),
+            ]
+        )
+        + "\n",
         encoding="utf-8",
     )
     settings = resolve_config(tmp_path, explicit=child)
@@ -989,7 +1831,10 @@ def test_repo_config_cannot_define_diagnostic_registry(tmp_path: Path) -> None:
 def test_extend_resolves_relative_to_containing_file(tmp_path: Path) -> None:
     shared = tmp_path / "shared" / "base.toml"
     shared.parent.mkdir()
-    shared.write_text('[analyze]\nmodel = "gpt-shared"\n', encoding="utf-8")
+    shared.write_text(
+        _analyze_descriptor_config("gpt-shared"),
+        encoding="utf-8",
+    )
     nested = tmp_path / "project" / "nested"
     nested.mkdir(parents=True)
     child = nested / ".backstitch.toml"
@@ -1021,10 +1866,19 @@ def test_extend_chain_retains_exact_identities_and_reads_each_layer_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     parent = tmp_path / "parent.toml"
-    parent_bytes = b'[analyze]\nmodel = "parent"\n'
+    parent_bytes = _analyze_descriptor_config("parent").encode()
     parent.write_bytes(parent_bytes)
     child = tmp_path / "child.toml"
-    child_bytes = b'extend = "parent.toml"\n[analyze]\nmodel = "child"\n'
+    child_bytes = (
+        "\n".join(
+            [
+                'extend = "parent.toml"',
+                "[analyze]",
+                *_descriptor_lines("child"),
+            ]
+        )
+        + "\n"
+    ).encode()
     child.write_bytes(child_bytes)
     expected_paths = {parent.resolve(), child.resolve()}
     read_counts = dict.fromkeys(expected_paths, 0)

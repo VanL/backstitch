@@ -21,12 +21,15 @@ import re
 import stat
 import sys
 import tomllib
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, cast
+from urllib.parse import quote, unquote_to_bytes
 
+from backstitch.canonical import canonical_repository_path
 from backstitch.config import uncontained_test_root
 from backstitch.diagnostics import (
     DiagnosticConfigError,
@@ -54,6 +57,20 @@ PACKAGED_DEFAULTS_PATH = Path(__file__).with_name("defaults.toml").resolve()
 MAXIMUM_CONFIG_CHAIN_FILES = 64
 MAXIMUM_CONFIG_FILE_BYTES = 1_000_000
 MAXIMUM_CONFIG_CHAIN_BYTES = 5_000_000
+_INVOCATION_COMMAND_UNSET = object()
+CONFIG_CONSUMING_COMMANDS = frozenset(
+    {
+        "check",
+        "packets",
+        "coverage",
+        "analyze",
+        "eval",
+        "doctor",
+        "config",
+        "obligation",
+    }
+)
+_MODEL_ENVIRONMENT_COMMANDS = frozenset({"analyze", "eval", "doctor", "config"})
 
 _TOP_LEVEL_KEYS = frozenset(
     {
@@ -61,6 +78,7 @@ _TOP_LEVEL_KEYS = frozenset(
         "profile",
         "extend",
         "allow_unknown_keys",
+        "default_command",
         "exclude",
         "extend_exclude",
         "lint",
@@ -73,6 +91,7 @@ _TABLE_KEYS = frozenset(
         "check",
         "packets",
         "analyze",
+        "coverage",
         "verify",
         "obligations",
         "target_roots",
@@ -106,12 +125,88 @@ _LINT_KEYS = frozenset(
 _SUPPRESSION_KEYS = frozenset({"mechanism", "path", "sections", "codes", "declaration"})
 _CHECK_KEYS = frozenset({"format", "warnings_as_errors", "output"})
 _PACKETS_KEYS = frozenset({"output"})
+_COVERAGE_KEYS = frozenset(
+    {
+        "mode",
+        "format",
+        "output",
+        "granularity",
+        "inherited_counts",
+        "ratchet_base",
+        "exemptions",
+        "floors",
+        "maximum_baseline_files",
+        "maximum_file_bytes",
+        "maximum_baseline_bytes",
+        "maximum_history_commits",
+        "maximum_git_command_seconds",
+        "maximum_git_commands",
+        "maximum_git_output_bytes",
+        "maximum_commit_message_bytes",
+        "maximum_runtime_seconds",
+    }
+)
+_COVERAGE_EXEMPTION_KEYS = frozenset({"path", "glob", "reason"})
+_COVERAGE_FLOOR_KEYS = frozenset({"direct", "accounted"})
+_COVERAGE_PRESENTATION_KEYS = frozenset({"coverage.format", "coverage.output"})
+_ANALYZE_REQUIRED_FLAT_DESCRIPTOR_KEYS = frozenset(
+    {
+        "backend_id",
+        "plugin_id",
+        "plugin_distribution_name",
+        "model",
+        "model_revision",
+        "input_cost_microusd_per_million_tokens",
+        "output_cost_microusd_per_million_tokens",
+        "input_token_overhead",
+        "cost_rate_source",
+    }
+)
+_ANALYZE_FLAT_DESCRIPTOR_KEYS = _ANALYZE_REQUIRED_FLAT_DESCRIPTOR_KEYS | {
+    "adapter_model_id"
+}
+_ANALYZE_CATALOG_DESCRIPTOR_KEYS = (
+    _ANALYZE_REQUIRED_FLAT_DESCRIPTOR_KEYS - {"model"}
+) | {"adapter_model_id"}
+_SERVICE_PURL_RE = re.compile(
+    r"^pkg:service/"
+    r"(?P<namespace>[^/@?#]+)/"
+    r"(?P<name>[^/@?#]+)"
+    r"(?:@(?P<version>[^?#]+))?"
+    r"(?:\?(?P<qualifiers>[^#]+))?$"
+)
+_DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_SERVICE_QUALIFIER_KEY_RE = re.compile(r"^[a-z][a-z0-9._-]*$")
+_COMMON_DNS_TLDS = frozenset(
+    {
+        "ac",
+        "ai",
+        "app",
+        "art",
+        "audio",
+        "cn",
+        "co",
+        "com",
+        "dev",
+        "edu",
+        "gov",
+        "io",
+        "mil",
+        "net",
+        "org",
+        "tech",
+    }
+)
+_SERVICE_PRIVATE_ONLY_QUALIFIERS = frozenset(
+    {"repository", "repository_path", "repository_url", "repo_path"}
+)
 _ANALYZE_KEYS = frozenset(
     {
         "backend_id",
         "plugin_id",
         "plugin_distribution_name",
         "model",
+        "adapter_model_id",
         "model_revision",
         "concurrency",
         "json_mode",
@@ -120,6 +215,7 @@ _ANALYZE_KEYS = frozenset(
         "max_tokens",
         "cache_path",
         "cache_mode",
+        "result_reuse",
         "search_epoch",
         "require_complete",
         "required_kinds",
@@ -137,6 +233,7 @@ _ANALYZE_KEYS = frozenset(
         "input_token_overhead",
         "cost_rate_source",
         "dispositions",
+        "models",
     }
 )
 _VERIFY_KEYS = frozenset(
@@ -247,7 +344,20 @@ _GENERIC_OPTION_LEAVES = frozenset(
         "lint.warn_unused_ignores",
         "lint.require_suppression_declarations",
         *{f"check.{key}" for key in _CHECK_KEYS},
-        *{f"analyze.{key}" for key in _ANALYZE_KEYS},
+        *{
+            f"coverage.{key}"
+            for key in _COVERAGE_KEYS
+            if key not in {"exemptions", "floors"}
+        },
+        *{
+            f"analyze.{key}"
+            for key in _ANALYZE_KEYS
+            if key
+            not in (
+                (_ANALYZE_CATALOG_DESCRIPTOR_KEYS - {"adapter_model_id"})
+                | {"adapter_model_id", "models"}
+            )
+        },
         "verify.enabled",
         *{
             f"verify.{key}"
@@ -266,6 +376,7 @@ _GENERIC_OPTION_TABLE_PATHS = frozenset(
         "profile",
         "lint",
         "check",
+        "coverage",
         "analyze",
         "verify",
         "verify.provider",
@@ -350,6 +461,71 @@ class PacketsSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class CoverageExemption:
+    """One reasoned repository-relative intent-coverage exemption ([COV-4])."""
+
+    kind: Literal["path", "glob"]
+    selector: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageFloor:
+    """One independent intent-coverage assertion below a code root ([COV-5])."""
+
+    scope: str
+    direct: float | None = None
+    accounted: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageSettings:
+    """Closed intent-coverage settings and Git/history budgets ([COV-5])."""
+
+    mode: Literal["report", "ratchet"] = "report"
+    format: Literal["text", "json"] = "text"
+    output: str | None = None
+    granularity: Literal["definition"] = "definition"
+    inherited_counts: bool = False
+    ratchet_base: str = ""
+    exemptions: tuple[CoverageExemption, ...] = ()
+    floors: tuple[CoverageFloor, ...] = ()
+    maximum_baseline_files: int = 20_000
+    maximum_file_bytes: int = 5_000_000
+    maximum_baseline_bytes: int = 100_000_000
+    maximum_history_commits: int = 1_000
+    maximum_git_command_seconds: float = 10.0
+    maximum_git_commands: int = 64
+    maximum_git_output_bytes: int = 100_000_000
+    maximum_commit_message_bytes: int = 1_000_000
+    maximum_runtime_seconds: float = 60.0
+
+
+ConfigSourceKind = Literal[
+    "packaged",
+    "repository_candidate",
+    "external_file",
+    "environment",
+    "cli",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigValueProvenance:
+    """One effective ratchet-policy input contribution.
+
+    ``repository_candidate`` is deliberately provisional: the Git baseline
+    phase must still prove that the no-follow file is in the accepted snapshot
+    and addressable at the merge base. This settings phase can reject external
+    and invocation-owned inputs before any Git work starts.
+    """
+
+    key: str
+    source: str
+    source_kind: ConfigSourceKind
+
+
+@dataclass(frozen=True, slots=True)
 class SemanticDisposition:
     code: str
     packet_id: str
@@ -360,11 +536,28 @@ class SemanticDisposition:
 
 
 @dataclass(frozen=True, slots=True)
+class AnalyzeModelDescriptor:
+    """One complete trusted analyzer model descriptor ([CFG-6.5])."""
+
+    model: str
+    adapter_model_id: str
+    backend_id: str
+    plugin_id: str
+    plugin_distribution_name: str
+    model_revision: str
+    input_cost_microusd_per_million_tokens: int
+    output_cost_microusd_per_million_tokens: int
+    input_token_overhead: int
+    cost_rate_source: str
+
+
+@dataclass(frozen=True, slots=True)
 class AnalyzeSettings:
     backend_id: str = "llm"
     plugin_id: str = ""
     plugin_distribution_name: str = ""
     model: str = ""
+    adapter_model_id: str = ""
     model_revision: str = ""
     concurrency: int = 1
     json_mode: str = "prefer"
@@ -373,6 +566,7 @@ class AnalyzeSettings:
     max_tokens: int = 512
     cache_path: str = ".backstitch/semantic-cache"
     cache_mode: str = "off"
+    result_reuse: str = "evidence-stable"
     search_epoch: str = "1"
     require_complete: bool = False
     required_kinds: tuple[str, ...] = ()
@@ -389,6 +583,7 @@ class AnalyzeSettings:
     input_token_overhead: int = 256
     cost_rate_source: str = ""
     dispositions: tuple[SemanticDisposition, ...] = ()
+    available_models: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -498,11 +693,13 @@ class TargetRootSettings:
 class BackstitchSettings:
     profile: str | None = None
     allow_unknown_keys: bool = False
+    default_command: Literal["check", "analyze"] | None = None
     exclude: tuple[str, ...] = DEFAULT_EXCLUDES
     profile_overrides: ProfileSettings = field(default_factory=ProfileSettings)
     lint: LintSettings = field(default_factory=LintSettings)
     check: CheckSettings = field(default_factory=CheckSettings)
     packets: PacketsSettings = field(default_factory=PacketsSettings)
+    coverage: CoverageSettings = field(default_factory=CoverageSettings)
     analyze: AnalyzeSettings = field(default_factory=AnalyzeSettings)
     verify: DisabledVerifySettings | VerifySettings = field(
         default_factory=DisabledVerifySettings
@@ -515,6 +712,7 @@ class BackstitchSettings:
     config_layers: tuple[str, ...] = (PACKAGED_DEFAULTS_LAYER,)
     config_layer_identities: tuple[ConfigLayerIdentity, ...] = ()
     policy_rule_origins: tuple[PolicyRuleOrigin, ...] = ()
+    ratchet_policy_provenance: tuple[ConfigValueProvenance, ...] = ()
     analyze_model_source: str = "llm default model"
 
 
@@ -608,11 +806,16 @@ def resolve_config(
     environment: Mapping[str, str] | None = None,
     cli_options: Sequence[tuple[str, str]] = (),
     cli_overrides: Mapping[str, Any] | None = None,
+    cli_overrides_by_command: Mapping[str, Mapping[str, Any]] | None = None,
+    invocation_command: str | None | object = _INVOCATION_COMMAND_UNSET,
 ) -> BackstitchSettings:
     """Resolve one immutable invocation-scoped settings snapshot ([CFG-5.1])."""
 
     raw = copy.deepcopy(load_default_config_raw())
     _expand_raw_paths(raw, PACKAGED_DEFAULTS_PATH.parent)
+    provenance_layers: list[tuple[dict[str, Any], str, ConfigSourceKind]] = [
+        (copy.deepcopy(raw), PACKAGED_DEFAULTS_LAYER, "packaged")
+    ]
     layers = [PACKAGED_DEFAULTS_LAYER]
     packaged_rules = _raw_policy_rules(raw)
     policy_origins = [
@@ -644,9 +847,17 @@ def resolve_config(
             for warning in warnings:
                 print(f"warning: {warning}", file=sys.stderr)
             _validate_config_layers(repo_raw, repo_layers, config_path)
-            raw = _merge_config_layers(raw, repo_raw)
+            raw = _merge_config_layers(raw, repo_raw, file_layer=True)
             for layer in repo_layers:
                 source = str(layer.path)
+                source_kind: ConfigSourceKind = (
+                    "repository_candidate"
+                    if _path_is_within(layer.path, anchor.resolve())
+                    else "external_file"
+                )
+                provenance_layers.append(
+                    (copy.deepcopy(layer.body), source, source_kind)
+                )
                 layers.append(source)
                 config_layer_identities.append(
                     ConfigLayerIdentity(
@@ -668,18 +879,56 @@ def resolve_config(
                 lint_layer = layer.body.get("lint")
                 if isinstance(lint_layer, dict) and "suppressions" in lint_layer:
                     suppression_rule_source = source
-    environment_overlay = _environment_config_overlay(
-        os.environ if environment is None else environment
-    )
+    source_path = config_path or PACKAGED_DEFAULTS_PATH
+    default_command = _parse_default_command(raw, source_path=source_path)
+    selected_command: str | None
+    environment_values = os.environ if environment is None else environment
+    if invocation_command is _INVOCATION_COMMAND_UNSET:
+        selected_command = None
+        scoped_environment = environment_values
+    else:
+        if invocation_command is not None and (
+            not isinstance(invocation_command, str)
+            or invocation_command not in CONFIG_CONSUMING_COMMANDS
+        ):
+            raise ConfigLoadError(
+                f"unknown config-consuming invocation command: {invocation_command!r}"
+            )
+        selected_command = (
+            default_command if invocation_command is None else invocation_command
+        )
+        scoped_environment = {
+            key: value
+            for key, value in environment_values.items()
+            if key == "BACKSTITCH_WEFT_ROOT"
+            or (key == "LLM_MODEL" and selected_command in _MODEL_ENVIRONMENT_COMMANDS)
+        }
+    effective_cli_overrides = dict(cli_overrides or {})
+    if cli_overrides_by_command is not None:
+        unknown_commands = sorted(set(cli_overrides_by_command) - {"check", "analyze"})
+        if unknown_commands:
+            raise ConfigLoadError(
+                "unknown deferred default command override owner: "
+                f"{unknown_commands[0]!r}"
+            )
+        if invocation_command is not None:
+            raise ConfigLoadError(
+                "deferred default command overrides require a bare invocation"
+            )
+        if selected_command is not None:
+            effective_cli_overrides.update(
+                cli_overrides_by_command.get(selected_command, {})
+            )
+    environment_overlay = _environment_config_overlay(scoped_environment)
     cli_overlay = _cli_config_overlay(
         cli_options,
-        cli_overrides=cli_overrides or {},
+        cli_overrides=effective_cli_overrides,
     )
     if _nested_value(environment_overlay, "analyze", "model") is not None:
         analyze_model_source = "LLM_MODEL environment variable"
     if any(key == "analyze.model" for key, _value in cli_options):
         analyze_model_source = "--option analyze.model"
-    if "analyze.model" in (cli_overrides or {}):
+    if "analyze.model" in effective_cli_overrides:
         analyze_model_source = "--model"
     configured_model = _nested_value(raw, "analyze", "model")
     for overlay, source in (
@@ -687,6 +936,14 @@ def resolve_config(
         (cli_overlay, "cli"),
     ):
         _expand_raw_paths(overlay, Path.cwd())
+        if overlay:
+            provenance_layers.append(
+                (
+                    copy.deepcopy(overlay),
+                    source,
+                    cast(ConfigSourceKind, source),
+                )
+            )
         _validate_overlay_traversal(raw, overlay)
         raw = _merge_config_layers(raw, overlay)
         analyze = overlay.get("analyze")
@@ -696,14 +953,12 @@ def resolve_config(
             PolicyRuleOrigin(source=source, position=index)
             for index in range(len(_raw_policy_rules(overlay)))
         )
-    _validate_model_override_identity(
+    available_models, selected_catalog_descriptor = _select_analyze_model_descriptor(
         raw,
         configured_model=configured_model,
-        override_supplied=(
-            _nested_value(environment_overlay, "analyze", "model") is not None
-            or _nested_value(cli_overlay, "analyze", "model") is not None
-        ),
     )
+    if selected_catalog_descriptor:
+        explicit_analyze_keys.update(_ANALYZE_REQUIRED_FLAT_DESCRIPTOR_KEYS)
     settings = _parse_settings(
         raw,
         source_path=config_path or PACKAGED_DEFAULTS_PATH,
@@ -715,6 +970,9 @@ def resolve_config(
         analyze_model_source=analyze_model_source,
         explicit_analyze_keys=frozenset(explicit_analyze_keys),
         validate_unknown_keys=config_path is None,
+        default_command=default_command,
+        available_models=available_models,
+        ratchet_policy_provenance=_ratchet_policy_provenance(provenance_layers),
     )
     invalid_test_root = uncontained_test_root(
         anchor.resolve(),
@@ -727,7 +985,158 @@ def resolve_config(
             " final effective code root"
         )
         raise ConfigLoadError(msg)
+    if selected_command == "coverage" and settings.coverage.mode == "ratchet":
+        _validate_ratchet_invocation_sources(
+            settings,
+            root=anchor.resolve(),
+            explicit=explicit,
+            use_repo_config=use_repo_config,
+            cli_options=cli_options,
+            cli_overrides=effective_cli_overrides,
+        )
     return settings
+
+
+def resolve_repository_config_from_blobs(
+    repo_root: Path,
+    config_path: str,
+    blobs: Mapping[str, bytes],
+) -> BackstitchSettings:
+    """Resolve one repository-owned config chain from immutable Git blobs.
+
+    This is the ratchet-side counterpart to :func:`resolve_config`: it never
+    discovers or reads a filesystem path and admits only relative config
+    layers present in the supplied object-database snapshot.
+    """
+
+    root = repo_root.resolve()
+    canonical = canonical_repository_path(config_path)
+    if canonical is None or canonical.canonical != config_path:
+        raise ConfigLoadError("historical config path is not repository-relative")
+    seen: set[str] = set()
+    budget = _ConfigReadBudget()
+
+    def load_chain(path: str) -> tuple[dict[str, Any], tuple[_ConfigLayer, ...]]:
+        if path in seen:
+            raise ConfigLoadError(f"Circular extend chain detected at {path}")
+        seen.add(path)
+        raw = blobs.get(path)
+        if raw is None:
+            raise ConfigLoadError(f"historical config layer is missing: {path}")
+        budget.file_count += 1
+        budget.byte_count += len(raw)
+        if budget.file_count > MAXIMUM_CONFIG_CHAIN_FILES:
+            raise ConfigLoadError(
+                f"config extend chain exceeds {MAXIMUM_CONFIG_CHAIN_FILES} config files"
+            )
+        if len(raw) > MAXIMUM_CONFIG_FILE_BYTES:
+            raise ConfigLoadError(f"config file exceeds 1,000,000 raw bytes: {path}")
+        if budget.byte_count > MAXIMUM_CONFIG_CHAIN_BYTES:
+            raise ConfigLoadError("config extend chain exceeds 5,000,000 raw bytes")
+        display_path = root / PurePosixPath(path)
+        body = _extract_config_body(display_path, raw)
+        layer = _ConfigLayer(
+            path=display_path,
+            body=copy.deepcopy(body),
+            raw_sha256=hashlib.sha256(raw).hexdigest(),
+            raw_bytes=raw,
+            stat_identity=(0, 0, 0, len(raw), 0, 0),
+        )
+        _expand_raw_paths(body, display_path.parent)
+        extend = body.get("extend")
+        if extend is None:
+            return body, (layer,)
+        if not isinstance(extend, str) or not extend.strip():
+            raise ConfigLoadError(f"Invalid extend value in {path}")
+        expanded = Path(_expand_user_and_env(extend.strip()))
+        if expanded.is_absolute():
+            raise ConfigLoadError(
+                "historical config extend must remain inside the repository"
+            )
+        candidate = (PurePosixPath(path).parent / expanded.as_posix()).as_posix()
+        normalized = canonical_repository_path(candidate)
+        if normalized is None or normalized.canonical != candidate:
+            raise ConfigLoadError("historical config extend path is unsafe")
+        parent, parent_layers = load_chain(candidate)
+        merged = _merge_config_layers(parent, body, file_layer=True)
+        merged.pop("extend", None)
+        return merged, (*parent_layers, layer)
+
+    repo_raw, repo_layers = load_chain(config_path)
+    effective_path = root / PurePosixPath(config_path)
+    _validate_config_layers(repo_raw, repo_layers, effective_path)
+    raw = copy.deepcopy(load_default_config_raw())
+    _expand_raw_paths(raw, PACKAGED_DEFAULTS_PATH.parent)
+    raw = _merge_config_layers(raw, repo_raw, file_layer=True)
+    default_command = _parse_default_command(raw, source_path=effective_path)
+    configured_model = _nested_value(raw, "analyze", "model")
+    available_models, selected_catalog_descriptor = _select_analyze_model_descriptor(
+        raw,
+        configured_model=configured_model,
+    )
+    explicit_analyze_keys = {
+        key
+        for layer in repo_layers
+        for table in (layer.body.get("analyze"),)
+        if isinstance(table, dict)
+        for key in table
+    }
+    if selected_catalog_descriptor:
+        explicit_analyze_keys.update(_ANALYZE_REQUIRED_FLAT_DESCRIPTOR_KEYS)
+    policy_origins = tuple(
+        [
+            PolicyRuleOrigin(source=PACKAGED_DEFAULTS_LAYER, position=index)
+            for index in range(len(_raw_policy_rules(load_default_config_raw())))
+        ]
+        + [
+            PolicyRuleOrigin(source=str(layer.path), position=index)
+            for layer in repo_layers
+            for index in range(len(_raw_policy_rules(layer.body)))
+        ]
+    )
+    suppression_source = next(
+        (
+            str(layer.path)
+            for layer in reversed(repo_layers)
+            if isinstance(layer.body.get("lint"), dict)
+            and "suppressions" in cast(dict[str, Any], layer.body["lint"])
+        ),
+        PACKAGED_DEFAULTS_LAYER,
+    )
+    provenance_layers: list[tuple[dict[str, Any], str, ConfigSourceKind]] = [
+        (copy.deepcopy(load_default_config_raw()), PACKAGED_DEFAULTS_LAYER, "packaged"),
+        *[
+            (copy.deepcopy(layer.body), str(layer.path), "repository_candidate")
+            for layer in repo_layers
+        ],
+    ]
+    identities = tuple(
+        ConfigLayerIdentity(
+            path=str(layer.path),
+            raw_sha256=layer.raw_sha256,
+            raw_bytes=layer.raw_bytes,
+            stat_identity=layer.stat_identity,
+        )
+        for layer in repo_layers
+    )
+    return _parse_settings(
+        raw,
+        source_path=effective_path,
+        effective_config_path=effective_path,
+        config_layers=(
+            PACKAGED_DEFAULTS_LAYER,
+            *(str(row.path) for row in repo_layers),
+        ),
+        config_layer_identities=identities,
+        policy_rule_origins=policy_origins,
+        suppression_rule_source=suppression_source,
+        analyze_model_source="config [analyze].model",
+        explicit_analyze_keys=frozenset(explicit_analyze_keys),
+        validate_unknown_keys=False,
+        default_command=default_command,
+        available_models=available_models,
+        ratchet_policy_provenance=_ratchet_policy_provenance(provenance_layers),
+    )
 
 
 def _environment_config_overlay(environment: Mapping[str, str]) -> dict[str, Any]:
@@ -838,31 +1247,257 @@ def _nested_value(raw: dict[str, Any], *segments: str) -> Any:
     return value
 
 
-def _validate_model_override_identity(
+def _select_analyze_model_descriptor(
     raw: dict[str, Any],
     *,
     configured_model: Any,
-    override_supplied: bool,
-) -> None:
-    if not override_supplied:
-        return
-    effective_model = _nested_value(raw, "analyze", "model")
-    if (
-        not isinstance(configured_model, str)
-        or not configured_model.strip()
-        or not isinstance(effective_model, str)
-        or effective_model == configured_model
-    ):
-        return
-    cache_mode = _nested_value(raw, "analyze", "cache_mode")
-    verifier_uses_analyze = (
-        _nested_value(raw, "verify", "enabled") is True
-        and _nested_value(raw, "verify", "provider_source") == "analyze"
-    )
-    if cache_mode in {"read-write", "require"} or verifier_uses_analyze:
+) -> tuple[tuple[str, ...], bool]:
+    """Select one complete file-owned descriptor after model precedence."""
+
+    analyze = _expect_table(raw.get("analyze"), "analyze")
+    effective_model = _require_string(analyze, "model", "analyze")
+    catalog = _parse_analyze_model_catalog(analyze.get("models"))
+
+    flat_model = configured_model if isinstance(configured_model, str) else ""
+    if flat_model and flat_model in catalog:
         raise ConfigLoadError(
-            "cached model override disagrees with configured model/revision pair"
+            f"analyze model {flat_model!r} must have exactly one descriptor owner"
         )
+    available_models = tuple(
+        sorted({*(catalog.keys()), *([flat_model] if flat_model.strip() else [])})
+    )
+
+    flat_adapter_model_id = analyze.get("adapter_model_id")
+    if flat_adapter_model_id is None or flat_adapter_model_id == "":
+        flat_adapter_model_id = flat_model
+    if not isinstance(flat_adapter_model_id, str):
+        raise ConfigLoadError("analyze.adapter_model_id must be a string")
+
+    alias_owners: dict[str, list[str]] = {}
+    if flat_model.strip():
+        alias_owners.setdefault(flat_adapter_model_id, []).append(flat_model)
+    for selector, descriptor in catalog.items():
+        alias_owners.setdefault(descriptor.adapter_model_id, []).append(selector)
+    ambiguous_aliases = sorted(
+        alias for alias, owners in alias_owners.items() if len(owners) > 1
+    )
+    if ambiguous_aliases:
+        raise ConfigLoadError(
+            f"ambiguous analyze adapter_model_id alias: {ambiguous_aliases[0]!r}"
+        )
+
+    selected_model = effective_model
+    if effective_model not in catalog and effective_model != flat_model:
+        alias_owner = alias_owners.get(effective_model)
+        if alias_owner is not None:
+            selected_model = alias_owner[0]
+
+    if selected_model in catalog:
+        descriptor = catalog[selected_model]
+        analyze.update(
+            {
+                "backend_id": descriptor.backend_id,
+                "plugin_id": descriptor.plugin_id,
+                "plugin_distribution_name": descriptor.plugin_distribution_name,
+                "model": descriptor.model,
+                "adapter_model_id": descriptor.adapter_model_id,
+                "model_revision": descriptor.model_revision,
+                "input_cost_microusd_per_million_tokens": (
+                    descriptor.input_cost_microusd_per_million_tokens
+                ),
+                "output_cost_microusd_per_million_tokens": (
+                    descriptor.output_cost_microusd_per_million_tokens
+                ),
+                "input_token_overhead": descriptor.input_token_overhead,
+                "cost_rate_source": descriptor.cost_rate_source,
+            }
+        )
+        return available_models, True
+
+    if flat_model.strip() and selected_model == flat_model:
+        analyze["model"] = flat_model
+        analyze["adapter_model_id"] = flat_adapter_model_id
+        return available_models, False
+    if flat_model.strip():
+        raise ConfigLoadError(
+            f"model {effective_model!r} has no trusted analyze model descriptor"
+        )
+    analyze["adapter_model_id"] = effective_model
+    return available_models, False
+
+
+def _canonical_purl_component(
+    value: str,
+    *,
+    field_name: str,
+    safe: str,
+) -> str:
+    if re.search(r"%(?![0-9A-Fa-f]{2})", value):
+        raise ConfigLoadError(
+            f"analyze model selector has invalid percent encoding in {field_name}"
+        )
+    try:
+        decoded = unquote_to_bytes(value).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigLoadError(
+            f"analyze model selector has invalid UTF-8 in {field_name}"
+        ) from exc
+    if not decoded or any(ord(character) < 0x20 for character in decoded):
+        raise ConfigLoadError(f"analyze model selector has invalid {field_name}")
+    canonical = quote(decoded, safe=safe, encoding="utf-8", errors="strict")
+    if canonical != value:
+        raise ConfigLoadError(
+            "analyze model selector must be a canonical pkg:service PURL"
+        )
+    return decoded
+
+
+def _validate_dns_order_service_namespace(namespace: str) -> None:
+    for domain in namespace.split(":"):
+        labels = domain.split(".")
+        if (
+            len(labels) < 2
+            or any(not _DNS_LABEL_RE.fullmatch(label) for label in labels)
+            or (labels[0] in _COMMON_DNS_TLDS and labels[-1] not in _COMMON_DNS_TLDS)
+        ):
+            raise ConfigLoadError(
+                "analyze model selector pkg:service namespace must be DNS-order"
+            )
+
+
+def _validate_canonical_service_purl(selector: str) -> None:
+    match = _SERVICE_PURL_RE.fullmatch(selector)
+    if match is None:
+        raise ConfigLoadError(
+            "analyze model selector must be a canonical pkg:service PURL"
+        )
+    namespace = match.group("namespace")
+    _validate_dns_order_service_namespace(namespace)
+    name = _canonical_purl_component(
+        match.group("name"),
+        field_name="service name",
+        safe=":._-~",
+    )
+    if name in {".", ".."}:
+        raise ConfigLoadError(
+            "analyze model selector must contain a stable service name"
+        )
+    version = match.group("version")
+    if version is not None:
+        _canonical_purl_component(
+            version,
+            field_name="version",
+            safe="/:._-~",
+        )
+    qualifiers = match.group("qualifiers")
+    if qualifiers is None:
+        return
+    parsed_qualifiers: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for assignment in qualifiers.split("&"):
+        key, separator, raw_value = assignment.partition("=")
+        if not separator or not _SERVICE_QUALIFIER_KEY_RE.fullmatch(key) or key in seen:
+            raise ConfigLoadError(
+                "analyze model selector has invalid pkg:service qualifiers"
+            )
+        if key in _SERVICE_PRIVATE_ONLY_QUALIFIERS:
+            raise ConfigLoadError(
+                f"analyze model selector pkg:service forbids qualifier {key}"
+            )
+        _canonical_purl_component(
+            raw_value,
+            field_name=f"qualifier {key}",
+            safe="/:._-~",
+        )
+        seen.add(key)
+        parsed_qualifiers.append((key, raw_value))
+    canonical = "&".join(f"{key}={value}" for key, value in sorted(parsed_qualifiers))
+    if canonical != qualifiers:
+        raise ConfigLoadError(
+            "analyze model selector must be a canonical pkg:service PURL"
+        )
+
+
+def _parse_analyze_model_catalog(
+    value: Any,
+) -> dict[str, AnalyzeModelDescriptor]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigLoadError("analyze.models must be a table")
+
+    catalog: dict[str, AnalyzeModelDescriptor] = {}
+    for selector, raw_descriptor in value.items():
+        if not isinstance(selector, str):
+            raise ConfigLoadError(
+                "analyze model selector must be a canonical pkg:service PURL"
+            )
+        _validate_canonical_service_purl(selector)
+        if not isinstance(raw_descriptor, dict):
+            raise ConfigLoadError(
+                f"analyze.models.{selector} must be a complete descriptor table"
+            )
+        supplied = set(raw_descriptor)
+        missing = sorted(_ANALYZE_CATALOG_DESCRIPTOR_KEYS - supplied)
+        unknown = sorted(supplied - _ANALYZE_CATALOG_DESCRIPTOR_KEYS)
+        if missing:
+            raise ConfigLoadError(
+                f"analyze.models.{selector} must be a complete descriptor; "
+                f"missing: {', '.join(missing)}"
+            )
+        if unknown:
+            raise ConfigLoadError(
+                f"unknown analyze.models.{selector} descriptor field: {unknown[0]}"
+            )
+
+        identity_values = {
+            key: _require_string(
+                raw_descriptor,
+                key,
+                f"analyze.models.{selector}",
+            )
+            for key in (
+                "backend_id",
+                "plugin_id",
+                "plugin_distribution_name",
+                "model_revision",
+                "cost_rate_source",
+                "adapter_model_id",
+            )
+        }
+        blank = [key for key, item in identity_values.items() if not item.strip()]
+        if blank:
+            raise ConfigLoadError(
+                f"analyze.models.{selector}.{blank[0]} must be nonblank"
+            )
+        catalog[selector] = AnalyzeModelDescriptor(
+            model=selector,
+            adapter_model_id=identity_values["adapter_model_id"],
+            backend_id=identity_values["backend_id"],
+            plugin_id=identity_values["plugin_id"],
+            plugin_distribution_name=identity_values["plugin_distribution_name"],
+            model_revision=identity_values["model_revision"],
+            input_cost_microusd_per_million_tokens=_require_int(
+                raw_descriptor,
+                "input_cost_microusd_per_million_tokens",
+                f"analyze.models.{selector}",
+                minimum=0,
+            ),
+            output_cost_microusd_per_million_tokens=_require_int(
+                raw_descriptor,
+                "output_cost_microusd_per_million_tokens",
+                f"analyze.models.{selector}",
+                minimum=0,
+            ),
+            input_token_overhead=_require_int(
+                raw_descriptor,
+                "input_token_overhead",
+                f"analyze.models.{selector}",
+                minimum=0,
+            ),
+            cost_rate_source=identity_values["cost_rate_source"],
+        )
+    return catalog
 
 
 def settings_to_json(settings: BackstitchSettings) -> str:
@@ -872,6 +1507,7 @@ def settings_to_json(settings: BackstitchSettings) -> str:
         ),
         "profile": settings.profile,
         "allow_unknown_keys": settings.allow_unknown_keys,
+        "default_command": settings.default_command,
         "exclude": list(settings.exclude),
         "profile_overrides": asdict(settings.profile_overrides),
         "lint": {
@@ -901,6 +1537,7 @@ def settings_to_json(settings: BackstitchSettings) -> str:
         },
         "check": asdict(settings.check),
         "packets": asdict(settings.packets),
+        "coverage": asdict(settings.coverage),
         "analyze": asdict(settings.analyze),
         "verify": asdict(settings.verify),
         "obligations": asdict(settings.obligations),
@@ -914,6 +1551,9 @@ def settings_to_json(settings: BackstitchSettings) -> str:
         ],
         "policy_rule_origins": [
             asdict(origin) for origin in settings.policy_rule_origins
+        ],
+        "ratchet_policy_provenance": [
+            asdict(item) for item in settings.ratchet_policy_provenance
         ],
     }
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
@@ -1056,6 +1696,7 @@ def _merge_config_layers(
     overlay: dict[str, Any],
     *,
     path: tuple[str, ...] = (),
+    file_layer: bool = False,
 ) -> dict[str, Any]:
     merged = dict(base)
     for key, value in overlay.items():
@@ -1078,7 +1719,37 @@ def _merge_config_layers(
                 merged[key],
                 profile_overlay,
                 path=current_path,
+                file_layer=file_layer,
             )
+        elif (
+            file_layer
+            and current_path == ("analyze",)
+            and isinstance(merged.get(key), dict)
+            and isinstance(value, dict)
+            and _ANALYZE_FLAT_DESCRIPTOR_KEYS.intersection(value)
+        ):
+            # [CFG-6.5]: file layers replace the flat descriptor as one unit.
+            # Environment and CLI overlays still select only analyze.model.
+            analyze_base = {
+                child_key: child_value
+                for child_key, child_value in merged[key].items()
+                if child_key not in _ANALYZE_FLAT_DESCRIPTOR_KEYS
+            }
+            merged[key] = _merge_config_layers(
+                analyze_base,
+                value,
+                path=current_path,
+                file_layer=file_layer,
+            )
+        elif (
+            file_layer
+            and current_path == ("analyze", "models")
+            and isinstance(merged.get(key), dict)
+            and isinstance(value, dict)
+        ):
+            # Catalog children are immutable descriptor units. A later selector
+            # replaces the earlier child instead of inheriting omitted fields.
+            merged[key] = {**merged[key], **value}
         elif (
             key in merged and isinstance(merged[key], dict) and isinstance(value, dict)
         ):
@@ -1086,10 +1757,201 @@ def _merge_config_layers(
                 merged[key],
                 value,
                 path=current_path,
+                file_layer=file_layer,
             )
         else:
             merged[key] = value
     return merged
+
+
+def _ratchet_policy_provenance(
+    layers: Sequence[tuple[dict[str, Any], str, ConfigSourceKind]],
+) -> tuple[ConfigValueProvenance, ...]:
+    """Retain the effective source of each gate-affecting config value.
+
+    This mirrors the relevant merge rules instead of recording every historical
+    author. Replaced values disappear; ordered diagnostic rules retain every
+    contributing layer. Git later upgrades ``repository_candidate`` to trusted
+    repository ownership against the accepted current and baseline snapshots.
+    """
+
+    effective: dict[str, list[ConfigValueProvenance]] = {}
+
+    def set_origin(
+        key: str,
+        source: str,
+        source_kind: ConfigSourceKind,
+        *,
+        append: bool = False,
+    ) -> None:
+        if key.startswith("coverage.floors."):
+            effective.pop("coverage.floors", None)
+        item = ConfigValueProvenance(
+            key=key,
+            source=source,
+            source_kind=source_kind,
+        )
+        if append:
+            effective.setdefault(key, []).append(item)
+        else:
+            effective[key] = [item]
+
+    for body, source, source_kind in layers:
+        profile = body.get("profile")
+        if (
+            isinstance(profile, dict)
+            and "code_roots" in profile
+            and "test_roots" not in profile
+        ):
+            set_origin(
+                "profile.test_roots",
+                source,
+                source_kind,
+            )
+        for key in _flatten_ratchet_policy_layer(body):
+            if key == "extend_exclude":
+                set_origin("exclude", source, source_kind, append=True)
+            elif key == "diagnostics.levels":
+                set_origin(key, source, source_kind, append=True)
+            else:
+                set_origin(key, source, source_kind)
+
+    # These empty collections are semantic packaged defaults even when their
+    # TOML table spelling is absent. Naming them closes provenance for the
+    # canonical policy rather than making an empty value source-less.
+    for key in (
+        "coverage.exemptions",
+        "coverage.floors",
+        "lint.per_file_ignores",
+        "lint.per_section_ignores",
+    ):
+        if key == "coverage.floors" and any(
+            item.startswith("coverage.floors.") for item in effective
+        ):
+            continue
+        effective.setdefault(
+            key,
+            [
+                ConfigValueProvenance(
+                    key=key,
+                    source=PACKAGED_DEFAULTS_LAYER,
+                    source_kind="packaged",
+                )
+            ],
+        )
+
+    return tuple(item for key in sorted(effective) for item in effective[key])
+
+
+def _flatten_ratchet_policy_layer(
+    body: Mapping[str, Any],
+) -> tuple[str, ...]:
+    keys: list[str] = []
+
+    def walk(prefix: str, value: Any) -> None:
+        if isinstance(value, dict) and value:
+            for child_key, child_value in value.items():
+                walk(f"{prefix}.{child_key}", child_value)
+            return
+        keys.append(prefix)
+
+    for top_level in ("profile", "coverage", "diagnostics", "lint"):
+        table = body.get(top_level)
+        if not isinstance(table, dict):
+            continue
+        for key, value in table.items():
+            if top_level == "profile" and key == "plan_roots":
+                continue
+            if top_level == "diagnostics" and key == "registry":
+                continue
+            if top_level == "coverage" and key in {"format", "output"}:
+                continue
+            if top_level == "coverage" and key == "floors" and isinstance(value, dict):
+                if not value:
+                    keys.append("coverage.floors")
+                    continue
+                for raw_scope, raw_floor in value.items():
+                    candidate = (
+                        raw_scope[:-1]
+                        if isinstance(raw_scope, str) and raw_scope.endswith("/")
+                        else raw_scope
+                    )
+                    canonical_scope = (
+                        canonical_repository_path(candidate)
+                        if isinstance(candidate, str)
+                        else None
+                    )
+                    scope = (
+                        canonical_scope.canonical
+                        if canonical_scope is not None
+                        else candidate
+                    )
+                    walk(f"coverage.floors.{scope}", raw_floor)
+                continue
+            canonical_key = key.replace("-", "_") if top_level == "lint" else key
+            walk(f"{top_level}.{canonical_key}", value)
+    if "exclude" in body:
+        keys.append("exclude")
+    if "extend_exclude" in body:
+        keys.append("extend_exclude")
+    return tuple(keys)
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_ratchet_invocation_sources(
+    settings: BackstitchSettings,
+    *,
+    root: Path,
+    explicit: Path | None,
+    use_repo_config: bool,
+    cli_options: Sequence[tuple[str, str]],
+    cli_overrides: Mapping[str, Any],
+) -> None:
+    """Reject untrusted ratchet inputs before the Git baseline phase."""
+
+    if explicit is not None:
+        raise ConfigLoadError(
+            "coverage ratchet mode rejects explicit --config selection"
+        )
+    if not use_repo_config:
+        raise ConfigLoadError(
+            "coverage ratchet mode requires ordinary repository config discovery"
+        )
+    if cli_options:
+        raise ConfigLoadError("coverage ratchet mode rejects every --option")
+    disallowed_overrides = sorted(set(cli_overrides) - _COVERAGE_PRESENTATION_KEYS)
+    if disallowed_overrides:
+        raise ConfigLoadError(
+            "coverage ratchet mode rejects gate-affecting CLI override "
+            f"{disallowed_overrides[0]!r}"
+        )
+    outside = [
+        identity.path
+        for identity in settings.config_layer_identities
+        if not _path_is_within(Path(identity.path), root)
+    ]
+    if outside:
+        raise ConfigLoadError(
+            f"coverage ratchet config layer is outside the repository root: {outside[0]}"
+        )
+    untrusted = [
+        item
+        for item in settings.ratchet_policy_provenance
+        if item.source_kind not in {"packaged", "repository_candidate"}
+    ]
+    if untrusted:
+        first = untrusted[0]
+        raise ConfigLoadError(
+            "coverage ratchet policy has an external contribution at "
+            f"{first.key!r} from {first.source}"
+        )
 
 
 def _expand_raw_paths(body: dict[str, Any], base_dir: Path) -> None:
@@ -1104,6 +1966,7 @@ def _expand_raw_paths(body: dict[str, Any], base_dir: Path) -> None:
     for table_name, key in (
         ("check", "output"),
         ("packets", "output"),
+        ("coverage", "output"),
         ("analyze", "cache_path"),
         ("verify", "cache_path"),
     ):
@@ -1114,6 +1977,23 @@ def _expand_raw_paths(body: dict[str, Any], base_dir: Path) -> None:
             and table[key].strip()
         ):
             table[key] = expand_path_value(table[key], base_dir=base_dir)
+    coverage = body.get("coverage")
+    if isinstance(coverage, dict):
+        floors = coverage.get("floors")
+        if isinstance(floors, dict):
+            canonical_floors: dict[str, Any] = {}
+            for raw_scope, floor in floors.items():
+                scope = _canonical_coverage_selector(
+                    raw_scope,
+                    label=f"coverage.floors.{raw_scope}",
+                    allow_trailing_slash=True,
+                )
+                if scope in canonical_floors:
+                    raise ConfigLoadError(
+                        f"coverage.floors contains duplicate canonical scope {scope!r}"
+                    )
+                canonical_floors[scope] = floor
+            coverage["floors"] = canonical_floors
     roots = body.get("target_roots")
     if isinstance(roots, dict):
         for name, value in roots.items():
@@ -1210,7 +2090,7 @@ def _load_config_chain(
         preloaded,
     )
     warnings.extend(parent_warnings)
-    merged = _merge_config_layers(parent_body, body)
+    merged = _merge_config_layers(parent_body, body, file_layer=True)
     merged.pop("extend", None)
     return (
         merged,
@@ -1231,6 +2111,9 @@ def _parse_settings(
     analyze_model_source: str,
     explicit_analyze_keys: frozenset[str],
     validate_unknown_keys: bool,
+    default_command: Literal["check", "analyze"] | None,
+    available_models: tuple[str, ...],
+    ratchet_policy_provenance: tuple[ConfigValueProvenance, ...],
 ) -> BackstitchSettings:
     allow_unknown = raw.get("allow_unknown_keys", False)
     if not isinstance(allow_unknown, bool):
@@ -1277,6 +2160,7 @@ def _parse_settings(
 
     check_table = _expect_table(raw.get("check"), "check")
     packets_table = _expect_table(raw.get("packets"), "packets")
+    coverage_table = _expect_table(raw.get("coverage"), "coverage")
     analyze_table = _expect_table(raw.get("analyze"), "analyze")
     verify_table = _expect_table(raw.get("verify"), "verify")
     obligations_table = _expect_table(raw.get("obligations"), "obligations")
@@ -1321,6 +2205,11 @@ def _parse_settings(
             "profile.process_spec_globs",
         ),
     )
+    coverage_settings = _parse_coverage_settings(
+        coverage_table,
+        source_path=source_path,
+        code_roots=profile_settings.code_roots or (),
+    )
 
     lint_settings = _parse_lint_settings(
         lint_table,
@@ -1342,6 +2231,7 @@ def _parse_settings(
         analyze_table,
         source_path=source_path,
         explicit_analyze_keys=explicit_analyze_keys,
+        available_models=available_models,
     )
     verify_settings = _parse_verify_settings(
         verify_table,
@@ -1382,6 +2272,7 @@ def _parse_settings(
     return BackstitchSettings(
         profile=profile_name,
         allow_unknown_keys=allow_unknown,
+        default_command=default_command,
         packets=PacketsSettings(output=packets_output),
         exclude=excludes,
         profile_overrides=profile_settings,
@@ -1391,6 +2282,7 @@ def _parse_settings(
             warnings_as_errors=warnings_as_errors,
             output=check_output,
         ),
+        coverage=coverage_settings,
         analyze=analyze_settings,
         verify=verify_settings,
         obligations=obligation_settings,
@@ -1401,8 +2293,291 @@ def _parse_settings(
         config_layers=config_layers,
         config_layer_identities=config_layer_identities,
         policy_rule_origins=policy_rule_origins,
+        ratchet_policy_provenance=ratchet_policy_provenance,
         analyze_model_source=analyze_model_source,
     )
+
+
+def _parse_default_command(
+    raw: Mapping[str, Any],
+    *,
+    source_path: Path,
+) -> Literal["check", "analyze"] | None:
+    raw_default_command = raw.get("default_command", False)
+    if raw_default_command is False:
+        return None
+    if isinstance(raw_default_command, str) and raw_default_command in {
+        "check",
+        "analyze",
+    }:
+        return cast(Literal["check", "analyze"], raw_default_command)
+    raise ConfigLoadError(
+        f"default_command must be false, 'check', or 'analyze' in {source_path}"
+    )
+
+
+def _parse_coverage_settings(
+    table: dict[str, Any],
+    *,
+    source_path: Path,
+    code_roots: tuple[str, ...],
+) -> CoverageSettings:
+    """Parse the closed deterministic coverage table ([COV-4], [COV-5])."""
+
+    mode_value = table.get("mode", "report")
+    if mode_value not in {"report", "ratchet"}:
+        raise ConfigLoadError("coverage.mode must be 'report' or 'ratchet'")
+    mode = cast(Literal["report", "ratchet"], mode_value)
+
+    format_value = table.get("format", "text")
+    if format_value not in {"text", "json"}:
+        raise ConfigLoadError("coverage.format must be 'text' or 'json'")
+    output = table.get("output")
+    if output is not None and (not isinstance(output, str) or not output.strip()):
+        raise ConfigLoadError("coverage.output must be a nonblank string when set")
+
+    granularity_value = table.get("granularity", "definition")
+    if granularity_value != "definition":
+        raise ConfigLoadError("coverage.granularity must be 'definition'")
+    inherited_counts = table.get("inherited_counts", False)
+    if not isinstance(inherited_counts, bool):
+        raise ConfigLoadError("coverage.inherited_counts must be a boolean")
+
+    ratchet_base = table.get("ratchet_base", "")
+    if (
+        not isinstance(ratchet_base, str)
+        or ratchet_base != ratchet_base.strip()
+        or any(character in ratchet_base for character in "\x00\r\n")
+    ):
+        raise ConfigLoadError(
+            "coverage.ratchet_base must be a trimmed single-line string"
+        )
+    if mode == "ratchet" and not ratchet_base:
+        raise ConfigLoadError(
+            "coverage.ratchet_base must be nonblank when coverage.mode is 'ratchet'"
+        )
+
+    exemptions = _parse_coverage_exemptions(table.get("exemptions"))
+    floors = _parse_coverage_floors(
+        table.get("floors"),
+        code_roots=code_roots,
+    )
+
+    maximum_git_command_seconds = _coverage_positive_number(
+        table,
+        "maximum_git_command_seconds",
+        default=10.0,
+    )
+    maximum_runtime_seconds = _coverage_positive_number(
+        table,
+        "maximum_runtime_seconds",
+        default=60.0,
+    )
+    parsed_output = (
+        None
+        if output is None
+        else expand_path_value(output, base_dir=source_path.parent)
+    )
+    return CoverageSettings(
+        mode=mode,
+        format=cast(Literal["text", "json"], format_value),
+        output=parsed_output,
+        granularity="definition",
+        inherited_counts=inherited_counts,
+        ratchet_base=ratchet_base,
+        exemptions=exemptions,
+        floors=floors,
+        maximum_baseline_files=_coverage_positive_int(
+            table, "maximum_baseline_files", default=20_000
+        ),
+        maximum_file_bytes=_coverage_positive_int(
+            table, "maximum_file_bytes", default=5_000_000
+        ),
+        maximum_baseline_bytes=_coverage_positive_int(
+            table, "maximum_baseline_bytes", default=100_000_000
+        ),
+        maximum_history_commits=_coverage_positive_int(
+            table, "maximum_history_commits", default=1_000
+        ),
+        maximum_git_command_seconds=maximum_git_command_seconds,
+        maximum_git_commands=_coverage_positive_int(
+            table, "maximum_git_commands", default=64
+        ),
+        maximum_git_output_bytes=_coverage_positive_int(
+            table, "maximum_git_output_bytes", default=100_000_000
+        ),
+        maximum_commit_message_bytes=_coverage_positive_int(
+            table, "maximum_commit_message_bytes", default=1_000_000
+        ),
+        maximum_runtime_seconds=maximum_runtime_seconds,
+    )
+
+
+def _parse_coverage_exemptions(value: Any) -> tuple[CoverageExemption, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ConfigLoadError("coverage.exemptions must be an array of tables")
+    exemptions: list[CoverageExemption] = []
+    for position, raw in enumerate(value):
+        label = f"coverage.exemptions[{position}]"
+        if not isinstance(raw, dict):
+            raise ConfigLoadError(f"{label} must be a table")
+        unknown = sorted(set(raw) - _COVERAGE_EXEMPTION_KEYS)
+        if unknown:
+            raise ConfigLoadError(f"{label} has unknown keys: {', '.join(unknown)}")
+        selector_keys = {"path", "glob"}.intersection(raw)
+        if len(selector_keys) != 1:
+            raise ConfigLoadError(f"{label} requires exactly one of path or glob")
+        kind = cast(Literal["path", "glob"], next(iter(selector_keys)))
+        selector = _canonical_coverage_selector(
+            raw[kind],
+            label=f"{label}.{kind}",
+        )
+        if kind == "path" and any(character in selector for character in "*?[]"):
+            raise ConfigLoadError(f"{label}.path must not contain glob syntax")
+        exemptions.append(
+            CoverageExemption(
+                kind=kind,
+                selector=selector,
+                reason=_normalize_coverage_reason(
+                    raw.get("reason"),
+                    label=f"{label}.reason",
+                ),
+            )
+        )
+    return tuple(exemptions)
+
+
+def _parse_coverage_floors(
+    value: Any,
+    *,
+    code_roots: tuple[str, ...],
+) -> tuple[CoverageFloor, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, dict):
+        raise ConfigLoadError("coverage.floors must be a table")
+    roots = tuple(
+        canonical.canonical
+        for root in code_roots
+        if (canonical := canonical_repository_path(root)) is not None
+    )
+    floors: list[CoverageFloor] = []
+    seen: set[str] = set()
+    for raw_scope, raw_floor in value.items():
+        if not isinstance(raw_scope, str):
+            raise ConfigLoadError("coverage.floors keys must be strings")
+        scope = _canonical_coverage_selector(
+            raw_scope,
+            label=f"coverage.floors.{raw_scope}",
+            allow_trailing_slash=True,
+        )
+        if scope in seen:
+            raise ConfigLoadError(
+                f"coverage.floors contains duplicate canonical scope {scope!r}"
+            )
+        seen.add(scope)
+        if not any(
+            root == "." or scope == root or scope.startswith(f"{root}/")
+            for root in roots
+        ):
+            raise ConfigLoadError(
+                f"coverage floor scope {scope!r} must equal or be nested within"
+                " a final effective code root"
+            )
+        if not isinstance(raw_floor, dict):
+            raise ConfigLoadError(f"coverage.floors.{scope} must be a table")
+        unknown = sorted(set(raw_floor) - _COVERAGE_FLOOR_KEYS)
+        if unknown:
+            raise ConfigLoadError(
+                f"coverage.floors.{scope} has unknown keys: {', '.join(unknown)}"
+            )
+        if not _COVERAGE_FLOOR_KEYS.intersection(raw_floor):
+            raise ConfigLoadError(
+                f"coverage.floors.{scope} requires at least one of direct or accounted"
+            )
+        direct = (
+            _require_rate(raw_floor, "direct", f"coverage.floors.{scope}")
+            if "direct" in raw_floor
+            else None
+        )
+        accounted = (
+            _require_rate(raw_floor, "accounted", f"coverage.floors.{scope}")
+            if "accounted" in raw_floor
+            else None
+        )
+        floors.append(CoverageFloor(scope=scope, direct=direct, accounted=accounted))
+    return tuple(sorted(floors, key=lambda floor: floor.scope))
+
+
+def _canonical_coverage_selector(
+    value: Any,
+    *,
+    label: str,
+    allow_trailing_slash: bool = False,
+) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or any(character in value for character in "\x00\r\n\t")
+    ):
+        raise ConfigLoadError(f"{label} must be a nonblank repo-relative POSIX path")
+    if not allow_trailing_slash and value.endswith("/"):
+        raise ConfigLoadError(f"{label} must be a nonblank repo-relative POSIX path")
+    candidate = value[:-1] if allow_trailing_slash and value.endswith("/") else value
+    if any(part in {"", ".", ".."} for part in candidate.split("/")):
+        raise ConfigLoadError(f"{label} must be a nonblank repo-relative POSIX path")
+    canonical = canonical_repository_path(candidate)
+    if canonical is None:
+        raise ConfigLoadError(f"{label} must be a nonblank repo-relative POSIX path")
+    return canonical.canonical
+
+
+def _normalize_coverage_reason(value: Any, *, label: str) -> str:
+    if not isinstance(value, str):
+        raise ConfigLoadError(f"{label} must be a nonblank string")
+    if any(character in value for character in "\x00\r\n"):
+        raise ConfigLoadError(f"{label} must be a single-line string")
+    normalized = unicodedata.normalize("NFC", value.strip())
+    if not normalized:
+        raise ConfigLoadError(f"{label} must be a nonblank string")
+    try:
+        encoded = normalized.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ConfigLoadError(f"{label} must be valid Unicode") from exc
+    if len(encoded) > 4096:
+        raise ConfigLoadError(f"{label} must encode to at most 4096 UTF-8 bytes")
+    return normalized
+
+
+def _coverage_positive_int(
+    table: dict[str, Any],
+    key: str,
+    *,
+    default: int,
+) -> int:
+    value = table.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ConfigLoadError(f"coverage.{key} must be an integer at least 1")
+    return value
+
+
+def _coverage_positive_number(
+    table: dict[str, Any],
+    key: str,
+    *,
+    default: float,
+) -> float:
+    value = table.get(key, default)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) <= 0.0
+    ):
+        raise ConfigLoadError(f"coverage.{key} must be a finite positive number")
+    return float(value)
 
 
 def _parse_analyze_settings(
@@ -1410,6 +2585,7 @@ def _parse_analyze_settings(
     *,
     source_path: Path,
     explicit_analyze_keys: frozenset[str],
+    available_models: tuple[str, ...],
 ) -> AnalyzeSettings:
     """Parse the exact semantic inference, cache, and budget surface."""
 
@@ -1419,6 +2595,7 @@ def _parse_analyze_settings(
         table, "plugin_distribution_name", "analyze"
     )
     model = _require_string(table, "model", "analyze")
+    adapter_model_id = _require_string(table, "adapter_model_id", "analyze")
     model_revision = _require_string(table, "model_revision", "analyze")
     concurrency = _require_int(table, "concurrency", "analyze", minimum=1)
     json_mode = _require_enum(
@@ -1439,6 +2616,12 @@ def _parse_analyze_settings(
     cache_path = expand_path_value(cache_path, base_dir=source_path.parent)
     cache_mode = _require_enum(
         table, "cache_mode", "analyze", {"off", "read-write", "require"}
+    )
+    result_reuse = _require_enum(
+        table,
+        "result_reuse",
+        "analyze",
+        {"evidence-stable", "exact-inference"},
     )
     search_epoch = _require_string(table, "search_epoch", "analyze")
     if not search_epoch.strip():
@@ -1541,6 +2724,7 @@ def _parse_analyze_settings(
         plugin_id=plugin_id,
         plugin_distribution_name=plugin_distribution_name,
         model=model,
+        adapter_model_id=adapter_model_id,
         model_revision=model_revision,
         concurrency=concurrency,
         json_mode=json_mode,
@@ -1549,6 +2733,7 @@ def _parse_analyze_settings(
         max_tokens=max_tokens,
         cache_path=cache_path,
         cache_mode=cache_mode,
+        result_reuse=result_reuse,
         search_epoch=search_epoch,
         require_complete=require_complete,
         required_kinds=required_kinds,
@@ -1565,6 +2750,7 @@ def _parse_analyze_settings(
         input_token_overhead=input_token_overhead,
         cost_rate_source=cost_rate_source,
         dispositions=dispositions,
+        available_models=available_models,
     )
 
 
@@ -2213,10 +3399,55 @@ def _validate_config_layers(
             f"allow_unknown_keys must be a boolean in {effective_path}"
         )
     for layer in layers:
+        _validate_analyze_descriptor_file_layer(layer.body, layer.path)
         for message in _unknown_key_messages(layer.body, layer.path):
             if not allow_unknown:
                 raise ConfigLoadError(message)
             print(f"warning: {message}", file=sys.stderr)
+
+
+def _validate_analyze_descriptor_file_layer(
+    raw: dict[str, Any],
+    path: Path,
+) -> None:
+    """Reject descriptor inheritance before merged values can hide it."""
+
+    analyze = raw.get("analyze")
+    if not isinstance(analyze, dict):
+        return
+    supplied = _ANALYZE_FLAT_DESCRIPTOR_KEYS.intersection(analyze)
+    required_supplied = _ANALYZE_REQUIRED_FLAT_DESCRIPTOR_KEYS.intersection(analyze)
+    if supplied and required_supplied != _ANALYZE_REQUIRED_FLAT_DESCRIPTOR_KEYS:
+        missing = sorted(_ANALYZE_REQUIRED_FLAT_DESCRIPTOR_KEYS - required_supplied)
+        raise ConfigLoadError(
+            f"analyze flat descriptor in {path} must be complete in one file "
+            f"layer; missing: {', '.join(missing)}"
+        )
+    if supplied:
+        for key in (
+            "model",
+            "backend_id",
+            "plugin_id",
+            "plugin_distribution_name",
+            "model_revision",
+            "cost_rate_source",
+        ):
+            value = analyze.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigLoadError(
+                    f"analyze flat descriptor {key} in {path} must be nonblank"
+                )
+        adapter_model_id = analyze.get("adapter_model_id")
+        if adapter_model_id is not None and (
+            not isinstance(adapter_model_id, str) or not adapter_model_id.strip()
+        ):
+            raise ConfigLoadError(
+                f"analyze flat descriptor adapter_model_id in {path} "
+                "must be nonblank when supplied"
+            )
+    # Parse each layer independently so a later catalog child cannot inherit
+    # omitted fields from an earlier descriptor with the same selector.
+    _parse_analyze_model_catalog(analyze.get("models"))
 
 
 def _unknown_key_messages(raw: dict[str, Any], config_path: Path) -> list[str]:
@@ -2244,6 +3475,19 @@ def _unknown_key_messages(raw: dict[str, Any], config_path: Path) -> list[str]:
                                     disposition, _DISPOSITION_KEYS
                                 )
                             )
+                    models = value.get("models")
+                    if isinstance(models, dict):
+                        for selector, descriptor in models.items():
+                            if isinstance(descriptor, dict):
+                                messages.extend(
+                                    "unknown config key "
+                                    f"`analyze.models.{selector}.{sub}` in "
+                                    f"{config_path}"
+                                    for sub in _unused_table_keys(
+                                        descriptor,
+                                        _ANALYZE_CATALOG_DESCRIPTOR_KEYS,
+                                    )
+                                )
                 if key == "lint":
                     suppressions = value.get("suppressions")
                     if isinstance(suppressions, list):
@@ -2255,6 +3499,32 @@ def _unknown_key_messages(raw: dict[str, Any], config_path: Path) -> list[str]:
                                     suppression, _SUPPRESSION_KEYS
                                 )
                             )
+                if key == "coverage":
+                    exemptions = value.get("exemptions")
+                    if isinstance(exemptions, list):
+                        for index, exemption in enumerate(exemptions):
+                            if isinstance(exemption, dict):
+                                messages.extend(
+                                    "unknown config key "
+                                    f"`coverage.exemptions[{index}].{sub}` in "
+                                    f"{config_path}"
+                                    for sub in _unused_table_keys(
+                                        exemption,
+                                        _COVERAGE_EXEMPTION_KEYS,
+                                    )
+                                )
+                    floors = value.get("floors")
+                    if isinstance(floors, dict):
+                        for scope, floor in floors.items():
+                            if isinstance(floor, dict):
+                                messages.extend(
+                                    "unknown config key "
+                                    f"`coverage.floors.{scope}.{sub}` in {config_path}"
+                                    for sub in _unused_table_keys(
+                                        floor,
+                                        _COVERAGE_FLOOR_KEYS,
+                                    )
+                                )
                 if key == "verify":
                     provider = value.get("provider")
                     if isinstance(provider, dict):
@@ -2301,6 +3571,8 @@ def _table_key_names(table_name: str) -> frozenset[str]:
         return _CHECK_KEYS
     if table_name == "packets":
         return _PACKETS_KEYS
+    if table_name == "coverage":
+        return _COVERAGE_KEYS
     if table_name == "analyze":
         return _ANALYZE_KEYS
     if table_name == "verify":

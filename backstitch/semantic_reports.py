@@ -157,6 +157,96 @@ _ANALYSIS_REPORT_V3_FIELDS = frozenset(
 _ANALYSIS_REPORT_V4_FIELDS = _ANALYSIS_REPORT_V3_FIELDS | frozenset(
     {"packet_schema_versions", "kind_counts"}
 )
+_ANALYSIS_REPORT_V5_FIELDS = _ANALYSIS_REPORT_V4_FIELDS | frozenset(
+    {
+        "result_reuse",
+        "selected_inference",
+        "exact_cache_hits",
+        "carried_results",
+        "result_sources",
+        "result_providers",
+    }
+)
+_ANALYSIS_PROVIDER_FIELDS = frozenset(
+    {
+        "backend_id",
+        "plugin_id",
+        "model_id",
+        "model_revision",
+        "adapter_id",
+        "adapter_version",
+        "llm_distribution_version",
+        "plugin_distribution_name",
+        "plugin_distribution_version",
+    }
+)
+_ANALYSIS_REQUEST_FIELDS = frozenset({"json_mode", "temperature", "seed", "max_tokens"})
+_ANALYSIS_PROMPT_FIELDS = frozenset({"id", "version", "sha256"})
+_SELECTED_INFERENCE_FIELDS = frozenset(
+    {
+        "provider",
+        "request",
+        "analysis_contract_version",
+        "search_epoch",
+        "prompts",
+    }
+)
+_SELECTED_PROMPT_FIELDS = _ANALYSIS_PROMPT_FIELDS | frozenset({"kind"})
+_RESULT_SOURCE_FIELDS = frozenset(
+    {
+        "packet_id",
+        "packet_hash",
+        "analysis_key",
+        "review_key",
+        "result_object_sha256",
+        "inference_contract",
+        "provenance",
+        "selection",
+    }
+)
+_SELECTION_EVENT_FIELDS = frozenset(
+    {"packet_id", "packet_hash", "result_object_sha256", "selection"}
+)
+_RESULT_PROVIDER_FIELDS = frozenset(
+    {"provider", "observed_model", "result_count", "carried_result_count"}
+)
+_OBSERVED_MODEL_FIELDS = frozenset(
+    {"model_class", "provider_model_id", "provider_model_revision"}
+)
+_RESULT_OBJECT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "object_type",
+        "inference_contract",
+        "analysis_key",
+        "result",
+        "provenance",
+        "raw_response_sha256",
+    }
+)
+_INFERENCE_CONTRACT_FIELDS = frozenset(
+    {
+        "analysis_contract_version",
+        "packet_hash",
+        "prompt",
+        "provider",
+        "request",
+        "search_epoch",
+    }
+)
+_RESULT_PROVENANCE_FIELDS = frozenset(
+    {
+        "adapter_id",
+        "adapter_version",
+        "plugin_version",
+        "model_class",
+        "provider_model_id",
+        "provider_model_revision",
+        "response_id",
+        "input_tokens",
+        "output_tokens",
+    }
+)
 _PROBLEM_V1_FIELDS = frozenset({"packet_id", "stage", "code", "message"})
 _PROBLEM_V3_FIELDS = frozenset(
     {"packet_id", "obligation_id", "stage", "code", "message", "details"}
@@ -542,9 +632,9 @@ class AnalysisReport:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> AnalysisReport:
-        if value.get("schema_version") in {3, 4}:
+        if value.get("schema_version") in {3, 4, 5}:
             raise AnalysisReportError(
-                "analysis report schema 3 or 4 must be created through "
+                "analysis report schema 3, 4, or 5 must be created through "
                 "validate_analysis_report with its paired packet report"
             )
         return cls._from_shape(value)
@@ -636,14 +726,43 @@ def _absolute_path(value: object, name: str) -> str:
     return result
 
 
+_QUALIFICATION_DERIVATION_FIELDS = frozenset(
+    {
+        "snapshot_algorithm_version",
+        "obligation_algorithm_version",
+        "discovery_algorithm_version",
+        "packet_contract_version",
+        "normalization_version",
+    }
+)
+_QUALIFICATION_IDENTITY_FIELDS = frozenset(
+    {"corpus_sha256", "mode", "trials", "eval_config"}
+)
+
+
+def _validate_optional_closed_identity(
+    value: object,
+    fields: frozenset[str],
+    name: str,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    return _exact_record(value, fields, name)
+
+
 def _validate_qualification_details(value: object, name: str) -> None:
     fields = frozenset(
         {
             "selectors",
             "reason",
-            "qualification_report_sha256",
+            "qualification_report_raw_sha256",
+            "expected_derivation_identity",
+            "current_derivation_identity",
+            "expected_qualification_identity",
+            "current_qualification_identity",
             "expected_composition_sha256",
             "current_composition_sha256",
+            "unqualified_analyzer_providers",
         }
     )
     row = _exact_record(value, fields, name)
@@ -674,22 +793,92 @@ def _validate_qualification_details(value: object, name: str) -> None:
     reason = row["reason"]
     if reason not in {"missing", "corrupt", "failed", "identity_mismatch"}:
         raise AnalysisReportError(f"{name}.reason is invalid")
-    report_hash = row["qualification_report_sha256"]
+    report_hash = row["qualification_report_raw_sha256"]
     expected_hash = row["expected_composition_sha256"]
     current_hash = row["current_composition_sha256"]
     if report_hash is not None:
-        _analysis_digest(report_hash, f"{name}.qualification_report_sha256")
+        _analysis_digest(report_hash, f"{name}.qualification_report_raw_sha256")
     if expected_hash is not None:
         _analysis_digest(expected_hash, f"{name}.expected_composition_sha256")
-    _analysis_digest(current_hash, f"{name}.current_composition_sha256")
+    if current_hash is not None:
+        _analysis_digest(current_hash, f"{name}.current_composition_sha256")
+
+    expected_derivation = _validate_optional_closed_identity(
+        row["expected_derivation_identity"],
+        _QUALIFICATION_DERIVATION_FIELDS,
+        f"{name}.expected_derivation_identity",
+    )
+    current_derivation = _exact_record(
+        row["current_derivation_identity"],
+        _QUALIFICATION_DERIVATION_FIELDS,
+        f"{name}.current_derivation_identity",
+    )
+    for field in _QUALIFICATION_DERIVATION_FIELDS:
+        _positive_analysis_int(
+            current_derivation[field],
+            f"{name}.current_derivation_identity.{field}",
+        )
+        if expected_derivation is not None:
+            _positive_analysis_int(
+                expected_derivation[field],
+                f"{name}.expected_derivation_identity.{field}",
+            )
+
+    for field in (
+        "expected_qualification_identity",
+        "current_qualification_identity",
+    ):
+        identity = _validate_optional_closed_identity(
+            row[field],
+            _QUALIFICATION_IDENTITY_FIELDS,
+            f"{name}.{field}",
+        )
+        if identity is not None:
+            _analysis_digest(identity["corpus_sha256"], f"{name}.{field}.corpus_sha256")
+            if identity["mode"] != "enforce":
+                raise AnalysisReportError(f"{name}.{field}.mode must be enforce")
+            _positive_analysis_int(identity["trials"], f"{name}.{field}.trials")
+            if not isinstance(identity["eval_config"], dict):
+                raise AnalysisReportError(
+                    f"{name}.{field}.eval_config must be an object"
+                )
+
+    raw_providers = row["unqualified_analyzer_providers"]
+    if not isinstance(raw_providers, list):
+        raise AnalysisReportError(
+            f"{name}.unqualified_analyzer_providers must be an array"
+        )
+    providers = [
+        _validate_analysis_provider(
+            provider,
+            f"{name}.unqualified_analyzer_providers[{index}]",
+        )
+        for index, provider in enumerate(raw_providers)
+    ]
+    provider_bytes = [canonical_json_bytes(provider) for provider in providers]
+    if len(set(provider_bytes)) != len(provider_bytes) or provider_bytes != sorted(
+        provider_bytes
+    ):
+        raise AnalysisReportError(
+            f"{name}.unqualified_analyzer_providers must be unique and canonical-sorted"
+        )
+    if providers and reason != "identity_mismatch":
+        raise AnalysisReportError(
+            f"{name}.unqualified_analyzer_providers requires identity_mismatch"
+        )
     if reason == "missing" and (report_hash is not None or expected_hash is not None):
         raise AnalysisReportError(f"{name} missing reason has invalid hashes")
-    if reason == "corrupt" and (report_hash is None or expected_hash is not None):
+    if reason == "corrupt" and expected_hash is not None:
         raise AnalysisReportError(f"{name} corrupt reason has invalid hashes")
     if reason in {"failed", "identity_mismatch"} and (
-        report_hash is None or expected_hash is None
+        report_hash is None
+        or expected_hash is None
+        or expected_derivation is None
+        or row["expected_qualification_identity"] is None
     ):
-        raise AnalysisReportError(f"{name} qualified reason requires both hashes")
+        raise AnalysisReportError(
+            f"{name} qualified reason requires expected identities and hashes"
+        )
 
 
 def _validate_problem_v3(value: object, index: int) -> str:
@@ -1688,20 +1877,222 @@ def _validate_verification(
         raise AnalysisReportError("complete verification work does not recompute")
 
 
+def _validate_analysis_provider(value: object, name: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != _ANALYSIS_PROVIDER_FIELDS:
+        raise AnalysisReportError(f"{name} has invalid closed provider shape")
+    for field in _ANALYSIS_PROVIDER_FIELDS - {"adapter_version"}:
+        if not isinstance(value[field], str):
+            raise AnalysisReportError(f"{name}.{field} must be a string")
+    for field in ("adapter_id", "llm_distribution_version"):
+        _nonblank_string(value[field], f"{name}.{field}")
+    adapter_version = value["adapter_version"]
+    if (
+        isinstance(adapter_version, bool)
+        or not isinstance(adapter_version, int)
+        or adapter_version < 1
+    ):
+        raise AnalysisReportError(f"{name}.adapter_version must be positive")
+    return value
+
+
+def _validate_analysis_request(value: object, name: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != _ANALYSIS_REQUEST_FIELDS:
+        raise AnalysisReportError(f"{name} has invalid closed request shape")
+    if value["json_mode"] not in {"require", "off"}:
+        raise AnalysisReportError(f"{name}.json_mode is invalid")
+    temperature = value["temperature"]
+    if (
+        isinstance(temperature, bool)
+        or not isinstance(temperature, (int, float))
+        or not math.isfinite(temperature)
+        or not 0 <= temperature <= 2
+    ):
+        raise AnalysisReportError(f"{name}.temperature is invalid")
+    seed = value["seed"]
+    max_tokens = value["max_tokens"]
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        raise AnalysisReportError(f"{name}.seed is invalid")
+    if (
+        isinstance(max_tokens, bool)
+        or not isinstance(max_tokens, int)
+        or max_tokens < 1
+    ):
+        raise AnalysisReportError(f"{name}.max_tokens is invalid")
+    return value
+
+
+def _validate_analysis_prompt(value: object, name: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != _ANALYSIS_PROMPT_FIELDS:
+        raise AnalysisReportError(f"{name} has invalid closed prompt shape")
+    _nonblank_string(value["id"], f"{name}.id")
+    version = value["version"]
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise AnalysisReportError(f"{name}.version must be positive")
+    _analysis_digest(value["sha256"], f"{name}.sha256")
+    return value
+
+
+def _validate_result_provenance(value: object, name: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != _RESULT_PROVENANCE_FIELDS:
+        raise AnalysisReportError(f"{name} has invalid closed provenance shape")
+    _nonblank_string(value["adapter_id"], f"{name}.adapter_id")
+    adapter_version = value["adapter_version"]
+    if (
+        isinstance(adapter_version, bool)
+        or not isinstance(adapter_version, int)
+        or adapter_version < 1
+    ):
+        raise AnalysisReportError(f"{name}.adapter_version must be positive")
+    for field in (
+        "plugin_version",
+        "model_class",
+        "provider_model_id",
+        "provider_model_revision",
+        "response_id",
+    ):
+        item = value[field]
+        if item is not None:
+            _nonblank_string(item, f"{name}.{field}")
+    for field in ("input_tokens", "output_tokens"):
+        item = value[field]
+        if item is not None:
+            _analysis_nonnegative_int(item, f"{name}.{field}")
+    return value
+
+
+def _validate_analysis_report_v5_shape(
+    value: Mapping[str, Any],
+    *,
+    analysis_counts: Mapping[str, int],
+) -> None:
+    result_reuse = value.get("result_reuse")
+    if result_reuse not in {"evidence-stable", "exact-inference"}:
+        raise AnalysisReportError("result_reuse is invalid")
+    exact_hits = _analysis_nonnegative_int(
+        value.get("exact_cache_hits"), "exact_cache_hits"
+    )
+    carried = _analysis_nonnegative_int(value.get("carried_results"), "carried_results")
+    if exact_hits + carried != analysis_counts["cache_hits"]:
+        raise AnalysisReportError(
+            "exact_cache_hits and carried_results do not equal cache_hits"
+        )
+
+    selected = value.get("selected_inference")
+    if not isinstance(selected, dict) or set(selected) != _SELECTED_INFERENCE_FIELDS:
+        raise AnalysisReportError("selected_inference has invalid closed shape")
+    _validate_analysis_provider(selected["provider"], "selected_inference.provider")
+    _validate_analysis_request(selected["request"], "selected_inference.request")
+    version = selected["analysis_contract_version"]
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise AnalysisReportError(
+            "selected_inference.analysis_contract_version must be positive"
+        )
+    _nonblank_string(selected["search_epoch"], "selected_inference.search_epoch")
+    prompts = selected["prompts"]
+    if not isinstance(prompts, list):
+        raise AnalysisReportError("selected_inference.prompts must be a list")
+    prompt_kinds: list[str] = []
+    kind_order = {"section": 0, "invariant": 1, "suppression": 2}
+    for index, prompt_row in enumerate(prompts):
+        if (
+            not isinstance(prompt_row, dict)
+            or set(prompt_row) != _SELECTED_PROMPT_FIELDS
+        ):
+            raise AnalysisReportError(
+                f"selected_inference.prompts[{index}] has invalid closed shape"
+            )
+        kind = prompt_row["kind"]
+        if kind not in kind_order:
+            raise AnalysisReportError(
+                f"selected_inference.prompts[{index}].kind is invalid"
+            )
+        prompt_kinds.append(cast(str, kind))
+        _validate_analysis_prompt(
+            {key: prompt_row[key] for key in _ANALYSIS_PROMPT_FIELDS},
+            f"selected_inference.prompts[{index}]",
+        )
+    if len(prompt_kinds) != len(set(prompt_kinds)) or prompt_kinds != sorted(
+        prompt_kinds, key=kind_order.__getitem__
+    ):
+        raise AnalysisReportError(
+            "selected_inference.prompts must be unique and canonically ordered"
+        )
+
+    sources = value.get("result_sources")
+    if not isinstance(sources, list):
+        raise AnalysisReportError("result_sources must be a list")
+    if len(sources) != analysis_counts["result_count"]:
+        raise AnalysisReportError("result_sources count does not equal result_count")
+    for index, source in enumerate(sources):
+        if not isinstance(source, dict) or set(source) != _RESULT_SOURCE_FIELDS:
+            raise AnalysisReportError(
+                f"result_sources[{index}] has invalid closed shape"
+            )
+        _nonblank_string(source["packet_id"], f"result_sources[{index}].packet_id")
+        for field in (
+            "packet_hash",
+            "analysis_key",
+            "review_key",
+            "result_object_sha256",
+        ):
+            _analysis_digest(source[field], f"result_sources[{index}].{field}")
+        if source["selection"] not in {"live", "exact-cache", "carried"}:
+            raise AnalysisReportError(f"result_sources[{index}].selection is invalid")
+        _validate_result_provenance(
+            source["provenance"], f"result_sources[{index}].provenance"
+        )
+
+    providers = value.get("result_providers")
+    if not isinstance(providers, list):
+        raise AnalysisReportError("result_providers must be a list")
+    for index, row in enumerate(providers):
+        if not isinstance(row, dict) or set(row) != _RESULT_PROVIDER_FIELDS:
+            raise AnalysisReportError(
+                f"result_providers[{index}] has invalid closed shape"
+            )
+        _validate_analysis_provider(
+            row["provider"], f"result_providers[{index}].provider"
+        )
+        observed = row["observed_model"]
+        if not isinstance(observed, dict) or set(observed) != _OBSERVED_MODEL_FIELDS:
+            raise AnalysisReportError(
+                f"result_providers[{index}].observed_model has invalid closed shape"
+            )
+        for field in _OBSERVED_MODEL_FIELDS:
+            item = observed[field]
+            if item is not None:
+                _nonblank_string(
+                    item, f"result_providers[{index}].observed_model.{field}"
+                )
+        result_count = _analysis_nonnegative_int(
+            row["result_count"], f"result_providers[{index}].result_count"
+        )
+        carried_count = _analysis_nonnegative_int(
+            row["carried_result_count"],
+            f"result_providers[{index}].carried_result_count",
+        )
+        if carried_count > result_count:
+            raise AnalysisReportError(
+                f"result_providers[{index}] carried count exceeds result count"
+            )
+
+
 def _validate_analysis_report_source_shape(
     value: Mapping[str, Any],
 ) -> dict[str, Any]:
     schema_version = value.get("schema_version")
-    current = schema_version == 4 and not isinstance(schema_version, bool)
-    expected_fields = (
-        _ANALYSIS_REPORT_V4_FIELDS if current else _ANALYSIS_REPORT_V3_FIELDS
-    )
+    current = schema_version in {4, 5} and not isinstance(schema_version, bool)
+    expected_fields = {
+        3: _ANALYSIS_REPORT_V3_FIELDS,
+        4: _ANALYSIS_REPORT_V4_FIELDS,
+        5: _ANALYSIS_REPORT_V5_FIELDS,
+    }.get(cast(int, schema_version), frozenset())
     if set(value) != expected_fields:
         raise AnalysisReportError(
             f"analysis report schema {schema_version} does not match closed shape"
         )
-    if isinstance(schema_version, bool) or schema_version not in {3, 4}:
-        raise AnalysisReportError("analysis report schema_version must be 3 or 4")
+    if isinstance(schema_version, bool) or schema_version not in {3, 4, 5}:
+        raise AnalysisReportError("analysis report schema_version must be 3, 4, or 5")
     if value.get("artifact") != "backstitch-analysis-report":
         raise AnalysisReportError("analysis report artifact is invalid")
     scope = value.get("scope")
@@ -1764,6 +2155,11 @@ def _validate_analysis_report_source_shape(
     analysis_counts = {
         name: _analysis_nonnegative_int(value.get(name), name) for name in count_names
     }
+    if schema_version == 5:
+        _validate_analysis_report_v5_shape(
+            value,
+            analysis_counts=analysis_counts,
+        )
     normalized_kind_counts: dict[str, dict[str, int]] | None = None
     if current:
         packet_schema_versions = value.get("packet_schema_versions")
@@ -2021,7 +2417,7 @@ def _validate_analysis_report_source_shape(
 
 
 def _validate_analysis_report_shape(value: Mapping[str, Any]) -> dict[str, Any]:
-    if value.get("schema_version") in {3, 4} and not isinstance(
+    if value.get("schema_version") in {3, 4, 5} and not isinstance(
         value.get("schema_version"), bool
     ):
         return _validate_analysis_report_source_shape(value)
@@ -3190,6 +3586,211 @@ def load_packet_report(path: Path, *, maximum_bytes: int | None = None) -> Packe
     return load_packet_report_bytes(content, source=path, maximum_bytes=maximum_bytes)
 
 
+def _validate_v5_authoritative_facts(
+    value: Mapping[str, Any],
+    *,
+    results: tuple[dict[str, Any], ...],
+    selected_result_objects: Iterable[Mapping[str, Any]],
+    selection_events: Iterable[Mapping[str, Any]],
+) -> None:
+    objects = tuple(selected_result_objects)
+    events = tuple(selection_events)
+    sources = cast(list[dict[str, Any]], value["result_sources"])
+    if len(objects) != len(results) or len(events) != len(results):
+        raise AnalysisReportError(
+            "schema 5 selected result objects and selection events must match results"
+        )
+    selected = cast(dict[str, Any], value["selected_inference"])
+    prompt_by_kind = {
+        cast(str, row["kind"]): {key: row[key] for key in _ANALYSIS_PROMPT_FIELDS}
+        for row in cast(list[dict[str, Any]], selected["prompts"])
+    }
+    expected_provider_groups: dict[bytes, dict[str, Any]] = {}
+    exact_hits = 0
+    carried_results = 0
+    for index, (result, result_object, event, source) in enumerate(
+        zip(results, objects, events, sources, strict=True)
+    ):
+        if set(result_object) != _RESULT_OBJECT_FIELDS:
+            raise AnalysisReportError(
+                f"selected_result_objects[{index}] has invalid closed shape"
+            )
+        if (
+            result_object.get("schema_version") != 1
+            or isinstance(result_object.get("schema_version"), bool)
+            or result_object.get("object_type") != "semantic-result"
+        ):
+            raise AnalysisReportError(
+                f"selected_result_objects[{index}] has invalid type or version"
+            )
+        object_hash = hashlib.sha256(canonical_json_bytes(result_object)).hexdigest()
+        if source["result_object_sha256"] != object_hash:
+            raise AnalysisReportError(
+                f"result_sources[{index}] result object hash mismatch"
+            )
+        if not isinstance(event, Mapping) or set(event) != _SELECTION_EVENT_FIELDS:
+            raise AnalysisReportError(
+                f"selection_events[{index}] has invalid closed shape"
+            )
+        expected_event = {
+            "packet_id": source["packet_id"],
+            "packet_hash": source["packet_hash"],
+            "result_object_sha256": object_hash,
+            "selection": source["selection"],
+        }
+        if canonical_json_bytes(event) != canonical_json_bytes(expected_event):
+            raise AnalysisReportError(
+                f"result_sources[{index}] does not match selection event"
+            )
+        if canonical_json_bytes(result_object["result"]) != canonical_json_bytes(
+            result
+        ):
+            raise AnalysisReportError(
+                f"selected_result_objects[{index}] result does not match result JSONL"
+            )
+        contract = result_object["inference_contract"]
+        if (
+            not isinstance(contract, dict)
+            or set(contract) != _INFERENCE_CONTRACT_FIELDS
+        ):
+            raise AnalysisReportError(
+                f"selected_result_objects[{index}] inference contract is invalid"
+            )
+        provider = _validate_analysis_provider(
+            contract["provider"],
+            f"selected_result_objects[{index}].inference_contract.provider",
+        )
+        _validate_analysis_request(
+            contract["request"],
+            f"selected_result_objects[{index}].inference_contract.request",
+        )
+        _validate_analysis_prompt(
+            contract["prompt"],
+            f"selected_result_objects[{index}].inference_contract.prompt",
+        )
+        contract_version = contract["analysis_contract_version"]
+        if (
+            isinstance(contract_version, bool)
+            or not isinstance(contract_version, int)
+            or contract_version < 1
+        ):
+            raise AnalysisReportError(
+                f"selected_result_objects[{index}] contract version is invalid"
+            )
+        _analysis_digest(
+            contract["packet_hash"],
+            f"selected_result_objects[{index}].inference_contract.packet_hash",
+        )
+        _nonblank_string(
+            contract["search_epoch"],
+            f"selected_result_objects[{index}].inference_contract.search_epoch",
+        )
+        analysis_key = hashlib.sha256(canonical_json_bytes(contract)).hexdigest()
+        if (
+            result_object["analysis_key"] != analysis_key
+            or source["analysis_key"] != analysis_key
+            or result["analysis_key"] != analysis_key
+        ):
+            raise AnalysisReportError(
+                f"result_sources[{index}] analysis key does not recompute"
+            )
+        review_contract = {key: contract[key] for key in contract if key != "provider"}
+        review_key = hashlib.sha256(canonical_json_bytes(review_contract)).hexdigest()
+        if source["review_key"] != review_key:
+            raise AnalysisReportError(
+                f"result_sources[{index}] review key does not recompute"
+            )
+        if (
+            source["packet_id"] != result["packet_id"]
+            or source["packet_hash"] != result["packet_hash"]
+            or contract["packet_hash"] != result["packet_hash"]
+        ):
+            raise AnalysisReportError(
+                f"result_sources[{index}] packet identity does not match result"
+            )
+        provenance = _validate_result_provenance(
+            result_object["provenance"],
+            f"selected_result_objects[{index}].provenance",
+        )
+        if canonical_json_bytes(source["inference_contract"]) != canonical_json_bytes(
+            contract
+        ) or canonical_json_bytes(source["provenance"]) != canonical_json_bytes(
+            provenance
+        ):
+            raise AnalysisReportError(
+                f"result_sources[{index}] producer facts do not match result object"
+            )
+        _analysis_digest(
+            result_object["raw_response_sha256"],
+            f"selected_result_objects[{index}].raw_response_sha256",
+        )
+        packet_kind = cast(str, result["kind"])
+        selected_prompt = prompt_by_kind.get(packet_kind)
+        if selected_prompt is None:
+            raise AnalysisReportError(
+                f"selected_inference has no prompt for result kind {packet_kind}"
+            )
+        selected_contract = {
+            "analysis_contract_version": selected["analysis_contract_version"],
+            "packet_hash": result["packet_hash"],
+            "prompt": selected_prompt,
+            "provider": selected["provider"],
+            "request": selected["request"],
+            "search_epoch": selected["search_epoch"],
+        }
+        selected_key = hashlib.sha256(
+            canonical_json_bytes(selected_contract)
+        ).hexdigest()
+        selection = source["selection"]
+        if selection == "carried":
+            carried_results += 1
+            if analysis_key == selected_key:
+                raise AnalysisReportError(
+                    f"result_sources[{index}] falsely marks selected-key result carried"
+                )
+        else:
+            if analysis_key != selected_key:
+                raise AnalysisReportError(
+                    f"result_sources[{index}] foreign result is not marked carried"
+                )
+            if selection == "exact-cache":
+                exact_hits += 1
+
+        observed = {field: provenance[field] for field in _OBSERVED_MODEL_FIELDS}
+        group_key = canonical_json_bytes(
+            {"provider": provider, "observed_model": observed}
+        )
+        group = expected_provider_groups.setdefault(
+            group_key,
+            {
+                "provider": provider,
+                "observed_model": observed,
+                "result_count": 0,
+                "carried_result_count": 0,
+            },
+        )
+        group["result_count"] += 1
+        group["carried_result_count"] += int(selection == "carried")
+
+    if value["result_reuse"] == "exact-inference" and carried_results:
+        raise AnalysisReportError(
+            "exact-inference report cannot contain carried results"
+        )
+    if value["exact_cache_hits"] != exact_hits:
+        raise AnalysisReportError("exact_cache_hits does not match selection events")
+    if value["carried_results"] != carried_results:
+        raise AnalysisReportError("carried_results does not match selection events")
+    expected_groups = [
+        expected_provider_groups[key] for key in sorted(expected_provider_groups)
+    ]
+    if canonical_json_bytes(value["result_providers"]) != canonical_json_bytes(
+        expected_groups
+    ):
+        raise AnalysisReportError(
+            "result_providers does not recompute from selected result objects"
+        )
+
+
 def validate_analysis_report(
     report: AnalysisReport | Mapping[str, Any],
     *,
@@ -3197,6 +3798,8 @@ def validate_analysis_report(
     packet_jsonl_sha256: str | None = None,
     packet_report: PacketReport | Mapping[str, Any] | None = None,
     packets: Iterable[ValidatedSemanticPacket] | None = None,
+    selected_result_objects: Iterable[Mapping[str, Any]] | None = None,
+    selection_events: Iterable[Mapping[str, Any]] | None = None,
     expected_scope: str | None = None,
     expected_semantic_status: str | None = None,
     expected_artifact_currentness: str | None = None,
@@ -3204,9 +3807,11 @@ def validate_analysis_report(
 ) -> AnalysisReport:
     """Validate a closed report against independently known operation facts.
 
-    Schemas 3 and 4 are paired contracts: callers must supply the validated
+    Schemas 3 through 5 are paired contracts: callers must supply the validated
     immediately corresponding packet report so copied source/alignment fields
     cannot self-attest. The expected operation fields bind runtime authority.
+    Schema 5 additionally requires selected result objects and non-report
+    operational selection events.
     Schema 1 remains a bounded historical reader only.
     """
 
@@ -3227,7 +3832,7 @@ def validate_analysis_report(
         "artifact_currentness": expected_artifact_currentness,
         "source_provenance": expected_source_provenance,
     }
-    if schema_version in {3, 4}:
+    if schema_version in {3, 4, 5}:
         if packet_report is None:
             raise AnalysisReportError(
                 f"analysis report schema {schema_version} requires its paired "
@@ -3264,7 +3869,7 @@ def validate_analysis_report(
             packets=packet_values,
         )
         packet_value = validated_packet_report.to_dict()
-        required_packet_report_schema = 3 if schema_version == 4 else 2
+        required_packet_report_schema = 3 if schema_version in {4, 5} else 2
         if packet_value["schema_version"] != required_packet_report_schema:
             raise AnalysisReportError(
                 f"analysis report schema {schema_version} requires packet report "
@@ -3286,7 +3891,7 @@ def validate_analysis_report(
                 raise AnalysisReportError(
                     f"analysis report {analysis_field} does not match packet report"
                 )
-        if schema_version == 4:
+        if schema_version in {4, 5}:
             if (
                 value["packet_schema_versions"]
                 != packet_value["packet_schema_versions"]
@@ -3319,7 +3924,7 @@ def validate_analysis_report(
             raise AnalysisReportError(
                 "analysis report result_count does not match validated results"
             )
-        if schema_version == 4:
+        if schema_version in {4, 5}:
             result_kind_counts = {
                 packet_kind: sum(row["kind"] == packet_kind for row in results)
                 for packet_kind in ("section", "invariant", "suppression")
@@ -3328,6 +3933,22 @@ def validate_analysis_report(
                 raise AnalysisReportError(
                     "analysis report result kind counts do not match validated results"
                 )
+        if schema_version == 5:
+            if selected_result_objects is None or selection_events is None:
+                raise AnalysisReportError(
+                    "analysis report schema 5 requires selected result objects and "
+                    "selection events"
+                )
+            _validate_v5_authoritative_facts(
+                value,
+                results=results,
+                selected_result_objects=selected_result_objects,
+                selection_events=selection_events,
+            )
+        elif selected_result_objects is not None or selection_events is not None:
+            raise AnalysisReportError(
+                "selected result objects and selection events require schema 5"
+            )
         verification_expectations = _bind_diagnostics_to_results(
             value, results, packet_values
         )
@@ -3351,6 +3972,8 @@ def validate_analysis_report(
     elif (
         packet_report is not None
         or packets is not None
+        or selected_result_objects is not None
+        or selection_events is not None
         or any(expected is not None for expected in expected_fields.values())
     ):
         raise AnalysisReportError(
@@ -3391,6 +4014,8 @@ def load_analysis_report(
     packet_jsonl_sha256: str | None = None,
     packet_report: PacketReport | Mapping[str, Any] | None = None,
     packets: Iterable[ValidatedSemanticPacket] | None = None,
+    selected_result_objects: Iterable[Mapping[str, Any]] | None = None,
+    selection_events: Iterable[Mapping[str, Any]] | None = None,
     expected_scope: str | None = None,
     expected_semantic_status: str | None = None,
     expected_artifact_currentness: str | None = None,
@@ -3412,6 +4037,8 @@ def load_analysis_report(
         packet_jsonl_sha256=packet_jsonl_sha256,
         packet_report=packet_report,
         packets=packets,
+        selected_result_objects=selected_result_objects,
+        selection_events=selection_events,
         expected_scope=expected_scope,
         expected_semantic_status=expected_semantic_status,
         expected_artifact_currentness=expected_artifact_currentness,

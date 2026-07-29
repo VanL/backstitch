@@ -63,14 +63,18 @@ class CaseInput:
     require_fallback_counterevidence: bool = False
     clean_plan_note: str = "Fixture-only plan context."
     misaligned_plan_note: str = "Fixture-only plan context."
+    misaligned_requirement: str | None = None
+    include_historical_unit: bool = True
 
     @property
     def case_id(self) -> str:
-        return f"historical-{self.number:02d}-{self.slug}"
+        lane = "historical" if self.include_historical_unit else "spec-contract"
+        return f"{lane}-{self.number:02d}-{self.slug}"
 
     @property
     def code(self) -> str:
-        return f"HIST-{self.number:02d}"
+        prefix = "HIST" if self.include_historical_unit else "SPEC"
+        return f"{prefix}-{self.number:02d}"
 
     @property
     def function(self) -> str:
@@ -249,6 +253,63 @@ CASES = (
         "        return None",
         critical=True,
     ),
+    CaseInput(
+        21,
+        "vacuous-restatement",
+        "removes surrounding whitespace and applies Unicode `casefold()`.",
+        "    return text.strip().casefold()",
+        "    return text.strip().casefold()",
+        classification="missing_trace",
+        critical=True,
+        misaligned_requirement="processes text and returns the processed result.",
+        include_historical_unit=False,
+    ),
+    CaseInput(
+        22,
+        "overbroad-guarantee",
+        "clamps integers below `0` to `0`, above `100` to `100`, and preserves values inside that inclusive range.",
+        "    return max(0, min(score, 100))",
+        "    return max(0, min(score, 100))",
+        classification="missing_trace",
+        critical=True,
+        misaligned_requirement="returns a valid score between `0` and `100`.",
+        include_historical_unit=False,
+    ),
+    CaseInput(
+        23,
+        "tautology",
+        "returns true exactly when the supplied value is not `None`.",
+        "    return value is not None",
+        "    return value is not None",
+        classification="missing_trace",
+        critical=True,
+        misaligned_requirement="returns either true or false depending on the input.",
+        include_historical_unit=False,
+    ),
+    CaseInput(
+        24,
+        "implementation-narration",
+        "returns the `status` value when present and the literal `unknown` when absent.",
+        '    return payload.get("status", "unknown")',
+        '    return payload.get("status", "unknown")',
+        classification="missing_trace",
+        critical=True,
+        misaligned_requirement=(
+            'uses `payload.get("status", "unknown")` in a return statement.'
+        ),
+        include_historical_unit=False,
+    ),
+    CaseInput(
+        25,
+        "nondiscriminating-prose",
+        "returns `allow` exactly for the state `ready` and returns `deny` for every other state.",
+        '    return "allow" if state == "ready" else "deny"',
+        '    return "allow" if state == "ready" else "deny"',
+        classification="missing_trace",
+        critical=True,
+        misaligned_requirement="maps the supplied state to an access decision.",
+        include_historical_unit=False,
+    ),
 )
 
 
@@ -300,6 +361,16 @@ def _arguments(function: str) -> str:
         return "state: str, mapping: dict[str, str]"
     if "exception_propagation" in function:
         return "payload: str, parser: Callable[[str], object]"
+    if "vacuous_restatement" in function:
+        return "text: str"
+    if "overbroad_guarantee" in function:
+        return "score: int"
+    if "tautology" in function:
+        return "value: object | None"
+    if "implementation_narration" in function:
+        return "payload: dict[str, str]"
+    if "nondiscriminating_prose" in function:
+        return "state: str"
     return ""
 
 
@@ -349,11 +420,21 @@ def _source(case: CaseInput, body: str) -> bytes:
     return text.encode("utf-8")
 
 
-def _spec(case: CaseInput) -> bytes:
+def _spec(case: CaseInput, *, misaligned: bool) -> bytes:
+    requirement = (
+        case.misaligned_requirement
+        if misaligned and case.misaligned_requirement is not None
+        else case.requirement
+    )
+    title = (
+        "Historical semantic control"
+        if case.include_historical_unit
+        else "Spec contract semantic control"
+    )
     return (
-        f"# Historical semantic control {case.number:02d}\n\n"
+        f"# {title} {case.number:02d}\n\n"
         f"## {case.slug.replace('-', ' ').title()} [{case.code}]\n\n"
-        f"`{case.function}()` {case.requirement}\n\n"
+        f"`{case.function}()` {requirement}\n\n"
         "_Implementation mapping_:\n\n"
         f"- `src/feature.py::{case.function}`\n"
     ).encode()
@@ -362,9 +443,15 @@ def _spec(case: CaseInput) -> bytes:
 def _fixture_files(case: CaseInput, *, misaligned: bool) -> dict[str, bytes]:
     note = case.misaligned_plan_note if misaligned else case.clean_plan_note
     body = case.misaligned_body if misaligned else case.clean_body
+    if case.misaligned_requirement is not None and (
+        case.clean_body != case.misaligned_body
+    ):
+        raise RuntimeError(
+            f"{case.case_id}: spec-side mutation changed implementation bytes"
+        )
     return {
         "docs/plans/note.md": (note + "\n").encode("utf-8"),
-        "docs/specs/01-contract.md": _spec(case),
+        "docs/specs/01-contract.md": _spec(case, misaligned=misaligned),
         "src/feature.py": _source(case, body),
     }
 
@@ -442,7 +529,13 @@ def _base_case(root: Path, case: CaseInput) -> dict[str, Any]:
             "transform": (
                 None
                 if not misaligned
-                else "Apply the preregistered semantic fault while preserving reciprocal trace declarations."
+                else (
+                    "Replace the informative governing contract with the "
+                    "preregistered non-informative prose while preserving "
+                    "implementation and reciprocal trace bytes."
+                    if case.misaligned_requirement is not None
+                    else "Apply the preregistered semantic fault while preserving reciprocal trace declarations."
+                )
             ),
             # Control tags are added with the independently defined expected
             # finding after production source facts have been derived.
@@ -500,13 +593,18 @@ def _populate_gold(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         (facts.case_id, facts.variant_id): facts for facts in observed.variants
     }
     inputs = {case.case_id: case for case in CASES}
-    manifest["critical_vacuous_trace_case_ids"] = [CASES[16].case_id]
+    manifest["critical_vacuous_trace_case_ids"] = [
+        case.case_id for case in CASES if "valid_vacuous_trace" in case.misaligned_tags
+    ]
     for case_row in manifest["cases"]:
         case_id = case_row["case_id"]
         case = inputs[case_id]
         case_row["clean"]["control_tags"] = _ordered_tags(case.clean_tags)
+        historical_tag = (
+            ("historical_misalignment",) if case.include_historical_unit else ()
+        )
         case_row["mutations"][0]["control_tags"] = _ordered_tags(
-            ("historical_misalignment",), case.misaligned_tags
+            historical_tag, case.misaligned_tags
         )
         for variant_id in ("clean", "misaligned"):
             facts = facts_by_key[(case_id, variant_id)]
@@ -597,6 +695,7 @@ def _populate_gold(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             ),
         }
         for case in CASES
+        if case.include_historical_unit
     ]
     return manifest
 

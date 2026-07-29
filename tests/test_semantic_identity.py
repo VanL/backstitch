@@ -15,7 +15,9 @@ import pytest
 from backstitch.semantic_identity import (
     ProviderIdentity,
     RequestIdentity,
+    build_analysis_identities,
     build_inference_identity,
+    build_review_identity,
 )
 from backstitch.semantic_packets import semantic_packet_hash
 
@@ -251,3 +253,68 @@ def test_every_inference_contract_field_changes_analysis_key(
         build_inference_identity(packet, provider, request).analysis_key
         != baseline.analysis_key
     )
+
+
+def test_review_identity_is_the_exact_provider_independent_contract() -> None:
+    provider = ProviderIdentity(
+        "llm", "plugin", "model", "revision", "adapter", 1, "0.31", "dist", "1"
+    )
+    request = RequestIdentity("require", 0.0, 42, 512)
+    inference, review = build_analysis_identities(_packet(), provider, request)
+
+    expected = (
+        b'{"analysis_contract_version":1,"packet_hash":"'
+        + str(_packet()["packet_hash"]).encode("ascii")
+        + b'","prompt":{"id":"backstitch.section-analysis","sha256":'
+        b'"1f0b6fc15b35f12d036bba49bb870c5a5b0f0654241f16c99e1503b102e7aede",'
+        b'"version":3},"request":{"json_mode":"require","max_tokens":512,'
+        b'"seed":42,"temperature":0.0},"search_epoch":"1"}'
+    )
+
+    assert review.contract_bytes == expected
+    assert review.contract == json.loads(expected)
+    assert review.review_key == hashlib.sha256(expected).hexdigest()
+    assert inference.review_identity == review
+    assert build_review_identity(_packet(), request) == review
+
+
+def test_every_review_contract_field_changes_review_key_but_provider_does_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ProviderIdentity(
+        "llm", "plugin", "model", "revision", "adapter", 1, "0.31", "dist", "1"
+    )
+    request = RequestIdentity("require", 0.0, 42, 512)
+    packet = _packet()
+    baseline = build_analysis_identities(packet, provider, request)
+
+    changed_provider = replace(provider, model_revision="other-revision")
+    changed_inference, changed_review = build_analysis_identities(
+        packet, changed_provider, request
+    )
+    assert changed_inference.analysis_key != baseline[0].analysis_key
+    assert changed_review.review_key == baseline[1].review_key
+
+    changed_packet = dict(packet, packet_hash="f" * 64)
+    assert (
+        build_review_identity(changed_packet, request).review_key
+        != baseline[1].review_key
+    )
+    assert (
+        build_review_identity(packet, replace(request, seed=43)).review_key
+        != baseline[1].review_key
+    )
+    assert (
+        build_review_identity(packet, request, analysis_contract_version=2).review_key
+        != baseline[1].review_key
+    )
+    assert (
+        build_review_identity(packet, request, search_epoch="2").review_key
+        != baseline[1].review_key
+    )
+
+    monkeypatch.setattr(
+        "backstitch.semantic_identity.prompt_instruction_bytes",
+        lambda kind: b"changed review prompt\n",
+    )
+    assert build_review_identity(packet, request).review_key != baseline[1].review_key

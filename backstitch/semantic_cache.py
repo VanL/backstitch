@@ -22,7 +22,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,6 +41,7 @@ from backstitch.semantic_identity import (
     InferenceIdentity,
     ProviderIdentity,
     RequestIdentity,
+    ReviewIdentity,
     build_inference_identity,
 )
 from backstitch.semantic_packets import (
@@ -62,6 +63,8 @@ from backstitch.semantic_verification import (
 
 CacheMode = Literal["off", "read-write", "require"]
 CacheSource = Literal["off", "hit", "miss"]
+SemanticSelectionSource = Literal["exact-cache", "carried", "live"]
+_LockKind = Literal["analysis", "review", "verify"]
 SemanticPacketKind = Literal["section", "invariant", "suppression"]
 ProblemStage = Literal[
     "config",
@@ -154,6 +157,36 @@ _PROVIDER_FIELDS = frozenset(
 )
 _REQUEST_FIELDS = frozenset({"json_mode", "temperature", "seed", "max_tokens"})
 _GUARD_FIELDS = frozenset({"schema_version", "object_type", "analysis_key"})
+_REVIEW_CONTRACT_FIELDS = frozenset(
+    {
+        "analysis_contract_version",
+        "packet_hash",
+        "prompt",
+        "request",
+        "search_epoch",
+    }
+)
+_BASELINE_OBJECT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "object_type",
+        "review_contract",
+        "review_key",
+        "analysis_key",
+    }
+)
+_REVIEW_LOCK_FIELDS = frozenset(
+    {
+        "schema_version",
+        "object_type",
+        "review_key",
+        "owner_token",
+        "pid",
+        "host",
+        "created_at_utc",
+    }
+)
+_REVIEW_GUARD_FIELDS = frozenset({"schema_version", "object_type", "review_key"})
 _PROCESS_GUARDS: dict[str, threading.Lock] = {}
 _PROCESS_GUARDS_LOCK = threading.Lock()
 _PENDING_OWNED_CLEANUPS: dict[str, _PendingOwnedCleanup] = {}
@@ -192,7 +225,7 @@ class _PendingOwnedCleanup:
     cache_path: Path
     key: str
     expected_lock: bytes
-    verifier: bool
+    lock_kind: _LockKind
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +270,133 @@ class SemanticProvenance:
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticResultEnvelope:
+    """One fully validated immutable result object and its producer identity."""
+
+    _canonical_object: bytes
+    result_object_sha256: str
+
+    @property
+    def object(self) -> dict[str, Any]:
+        value = json.loads(self._canonical_object)
+        assert isinstance(value, dict)
+        return value
+
+    @property
+    def result(self) -> dict[str, Any]:
+        value = self.object["result"]
+        assert isinstance(value, dict)
+        return value
+
+    @property
+    def inference_contract(self) -> dict[str, Any]:
+        value = self.object["inference_contract"]
+        assert isinstance(value, dict)
+        return value
+
+    @property
+    def analysis_key(self) -> str:
+        value = self.object["analysis_key"]
+        assert isinstance(value, str)
+        return value
+
+    @property
+    def provenance(self) -> SemanticProvenance:
+        value = self.object["provenance"]
+        assert isinstance(value, dict)
+        return SemanticProvenance(**value)
+
+    @property
+    def provider_identity(self) -> ProviderIdentity:
+        value = self.inference_contract["provider"]
+        assert isinstance(value, dict)
+        return ProviderIdentity(**value)
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticSelectionEvent:
+    """One runtime cache-selection fact consumed by schema-5 reporting."""
+
+    envelope: SemanticResultEnvelope
+    review_key: str
+    source: SemanticSelectionSource
+
+
+@dataclass(slots=True)
+class _ReviewLockLease:
+    cache_path: Path
+    review_key: str
+    expected_lock: bytes
+    timeout_seconds: float
+    poll_interval_seconds: float
+    released: bool = False
+
+
+@dataclass(slots=True)
+class _PreparationState:
+    active: bool = True
+    events: list[SemanticSelectionEvent | None] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedSemanticResult:
+    """A provider-free evidence-stable decision held under review locks."""
+
+    _canonical_packet: bytes
+    identity: InferenceIdentity
+    provider_identity: ProviderIdentity
+    selection: SemanticSelectionEvent | None
+    _index: int
+    _lease: _ReviewLockLease | None
+    _state: _PreparationState
+
+    @property
+    def packet(self) -> dict[str, Any]:
+        value = json.loads(self._canonical_packet)
+        assert isinstance(value, dict)
+        return value
+
+    @property
+    def review_identity(self) -> ReviewIdentity:
+        return self.identity.review_identity
+
+    @property
+    def is_genuine_miss(self) -> bool:
+        return self.selection is None
+
+    @property
+    def producing_provider_identity(self) -> ProviderIdentity:
+        if self.selection is not None:
+            return self.selection.envelope.provider_identity
+        return self.provider_identity
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceStablePreparation:
+    """Ordered prepared items while lexical review-key leases remain held."""
+
+    items: tuple[PreparedSemanticResult, ...]
+    _leases: tuple[_ReviewLockLease, ...]
+    _state: _PreparationState
+
+    @property
+    def owned_review_keys(self) -> tuple[str, ...]:
+        return tuple(lease.review_key for lease in self._leases if not lease.released)
+
+    @property
+    def selection_events(self) -> tuple[SemanticSelectionEvent, ...]:
+        if any(event is None for event in self._state.events):
+            raise RuntimeError(
+                "evidence-stable preparation still has unresolved misses"
+            )
+        return cast(tuple[SemanticSelectionEvent, ...], tuple(self._state.events))
+
+    @property
+    def result_envelopes(self) -> tuple[SemanticResultEnvelope, ...]:
+        return tuple(event.envelope for event in self.selection_events)
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +451,7 @@ class SemanticProblem:
     stage: ProblemStage
     code: ProblemCode
     message: str
+    details: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +462,8 @@ class SemanticCacheRun:
     cache_hits: int
     cache_misses: int
     provider_calls: int
+    result_envelopes: tuple[SemanticResultEnvelope, ...] = ()
+    selection_events: tuple[SemanticSelectionEvent, ...] = ()
     kind_counts: dict[str, dict[str, int]] = field(
         default_factory=lambda: _empty_analyzer_kind_counts()
     )
@@ -361,6 +524,7 @@ class VerificationCacheInspection:
 class _Resolution:
     row: dict[str, Any]
     source: CacheSource
+    envelope: SemanticResultEnvelope | None = None
 
 
 def _empty_packet_kind_counts() -> dict[str, int]:
@@ -375,7 +539,9 @@ def _empty_analyzer_kind_counts() -> dict[str, dict[str, int]]:
     }
 
 
-class _AnalysisFailure(Exception):
+class SemanticCacheFailure(Exception):
+    """Structured operational failure raised by low-level cache primitives."""
+
     def __init__(
         self,
         stage: ProblemStage,
@@ -386,6 +552,9 @@ class _AnalysisFailure(Exception):
         self.stage = stage
         self.code = code
         self.message = message
+
+
+_AnalysisFailure = SemanticCacheFailure
 
 
 def _utc_now() -> datetime:
@@ -447,6 +616,10 @@ def _freeze_inference_identities(
             or contract.get("provider") != expected_provider
             or contract.get("request") != expected_request
             or contract.get("search_epoch") != search_epoch
+            or _review_contract_from_inference(contract)
+            != identity.review_identity.contract
+            or hashlib.sha256(identity.review_identity.contract_bytes).hexdigest()
+            != identity.review_identity.review_key
         ):
             raise ValueError("frozen inference identity does not match packet request")
     return frozen
@@ -670,12 +843,83 @@ def _validate_inference_contract_shape(value: object) -> dict[str, Any]:
     return value
 
 
+def _validate_review_contract_shape(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != _REVIEW_CONTRACT_FIELDS:
+        raise CacheProtocolError("cached review contract has invalid closed shape")
+    version = value.get("analysis_contract_version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise CacheProtocolError("cached review contract version is invalid")
+    if not is_sha256_hex(value.get("packet_hash")):
+        raise CacheProtocolError("cached review packet hash is invalid")
+    search_epoch = value.get("search_epoch")
+    if not isinstance(search_epoch, str) or not search_epoch.strip():
+        raise CacheProtocolError("cached review search epoch is invalid")
+    prompt = value.get("prompt")
+    if not isinstance(prompt, dict) or set(prompt) != _PROMPT_FIELDS:
+        raise CacheProtocolError("cached review prompt has invalid closed shape")
+    prompt_version = prompt.get("version")
+    if (
+        not isinstance(prompt.get("id"), str)
+        or not prompt["id"].strip()
+        or isinstance(prompt_version, bool)
+        or not isinstance(prompt_version, int)
+        or prompt_version < 1
+        or not is_sha256_hex(prompt.get("sha256"))
+    ):
+        raise CacheProtocolError("cached review prompt is invalid")
+    request = value.get("request")
+    if not isinstance(request, dict) or set(request) != _REQUEST_FIELDS:
+        raise CacheProtocolError("cached review request has invalid closed shape")
+    try:
+        RequestIdentity(**request)
+    except (TypeError, ValueError) as exc:
+        raise CacheProtocolError(f"cached review request is invalid: {exc}") from exc
+    return value
+
+
+def _review_contract_from_inference(
+    inference_contract: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        key: inference_contract[key]
+        for key in (
+            "analysis_contract_version",
+            "packet_hash",
+            "prompt",
+            "request",
+            "search_epoch",
+        )
+    }
+
+
 def _packet_path(cache_path: Path, packet_hash: str) -> Path:
     return _safe_cache_child(cache_path, ("packets",), f"{packet_hash}.json")
 
 
 def _result_path(cache_path: Path, analysis_key: str) -> Path:
     return _safe_cache_child(cache_path, ("results",), f"{analysis_key}.json")
+
+
+def _baseline_path(cache_path: Path, review_key: str) -> Path:
+    return _safe_cache_child(cache_path, ("baselines",), f"{review_key}.json")
+
+
+def _review_lock_path(cache_path: Path, review_key: str) -> Path:
+    return _safe_cache_child(cache_path, ("review-locks",), f"{review_key}.lock")
+
+
+def _review_guard_path(cache_path: Path, review_key: str) -> Path:
+    return _safe_cache_child(cache_path, ("review-guards",), f"{review_key}.guard")
+
+
+def _review_guard_bytes(review_key: str) -> bytes:
+    return canonical_json_bytes(
+        {
+            "schema_version": 1,
+            "object_type": "semantic-review-lock-guard",
+            "review_key": review_key,
+        }
+    )
 
 
 def _lock_path(cache_path: Path, analysis_key: str) -> Path:
@@ -783,14 +1027,17 @@ def _drain_owned_cleanup_under_guard(guard_path: Path) -> None:
         cleanup = _PENDING_OWNED_CLEANUPS.get(str(guard_path))
     if cleanup is None:
         return
-    lock_path = (
-        _verify_lock_path(cleanup.cache_path, cleanup.key)
-        if cleanup.verifier
-        else _lock_path(cleanup.cache_path, cleanup.key)
-    )
+    if cleanup.lock_kind == "verify":
+        lock_path = _verify_lock_path(cleanup.cache_path, cleanup.key)
+    elif cleanup.lock_kind == "review":
+        lock_path = _review_lock_path(cleanup.cache_path, cleanup.key)
+    else:
+        lock_path = _lock_path(cleanup.cache_path, cleanup.key)
     try:
-        if cleanup.verifier:
+        if cleanup.lock_kind == "verify":
             current = _read_verify_lock(lock_path, cleanup.key)
+        elif cleanup.lock_kind == "review":
+            current = _read_review_lock(lock_path, cleanup.key)
         else:
             _, current = _read_valid_lock(lock_path, cleanup.key)
     except FileNotFoundError:
@@ -805,8 +1052,10 @@ def _drain_owned_cleanup_under_guard(guard_path: Path) -> None:
         _forget_owned_cleanup(guard_path)
         return
     try:
-        if cleanup.verifier:
+        if cleanup.lock_kind == "verify":
             _remove_verify_lock(lock_path, cleanup.key, cleanup.expected_lock)
+        elif cleanup.lock_kind == "review":
+            _remove_review_lock(lock_path, cleanup.key, cleanup.expected_lock)
         else:
             _remove_owned_lock(lock_path, cleanup.key, cleanup.expected_lock)
     except CacheProtocolError:
@@ -878,6 +1127,70 @@ def _semantic_guard(
         process_guard.release()
 
 
+@contextmanager
+def _review_guard(
+    cache_path: Path,
+    review_key: str,
+    *,
+    timeout_seconds: float | None,
+    poll_interval_seconds: float,
+    drain_owned_cleanup: bool = True,
+) -> Iterator[None]:
+    path = _review_guard_path(cache_path, review_key)
+    expected = _review_guard_bytes(review_key)
+    _publish_immutable(path, expected)
+    value, actual = _read_canonical_object(path)
+    if set(value) != _REVIEW_GUARD_FIELDS or actual != expected:
+        raise CacheProtocolError("semantic review guard has invalid closed shape")
+
+    process_guard = _process_guard(path)
+    deadline = (
+        time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+    )
+    acquired_process = False
+    while not acquired_process:
+        acquired_process = process_guard.acquire(blocking=False)
+        if acquired_process:
+            break
+        if deadline is None:
+            raise _guard_wait_failure(timeout_seconds)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _guard_wait_failure(timeout_seconds)
+        time.sleep(min(poll_interval_seconds, remaining))
+
+    try:
+        try:
+            handle = path.open("r+b", buffering=0)
+        except OSError as exc:
+            raise CacheProtocolError(
+                f"cannot open semantic review guard: {exc}"
+            ) from exc
+        acquired_os = False
+        try:
+            while not acquired_os:
+                acquired_os = _try_lock_guard(handle)
+                if acquired_os:
+                    break
+                if deadline is None:
+                    raise _guard_wait_failure(timeout_seconds)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise _guard_wait_failure(timeout_seconds)
+                time.sleep(min(poll_interval_seconds, remaining))
+            if drain_owned_cleanup:
+                _drain_owned_cleanup_under_guard(path)
+            yield
+        finally:
+            try:
+                if acquired_os:
+                    _unlock_guard(handle)
+            finally:
+                handle.close()
+    finally:
+        process_guard.release()
+
+
 def _validate_packet_object(path: Path, packet: dict[str, Any]) -> None:
     expected = canonical_json_bytes(_packet_object(packet))
     _, actual = _read_canonical_object(path)
@@ -908,18 +1221,18 @@ def _validate_provenance(
     return provenance
 
 
-def _load_hit(
+def _load_result_envelope(
     cache_path: Path,
     packet: dict[str, Any],
     identity: InferenceIdentity,
     provider: ProviderIdentity,
-) -> dict[str, Any]:
+) -> SemanticResultEnvelope:
     packet_path = _packet_path(cache_path, packet["packet_hash"])
     result_path = _result_path(cache_path, identity.analysis_key)
     if not _path_exists(packet_path):
         raise CacheProtocolError("cached result exists without its packet object")
     _validate_packet_object(packet_path, packet)
-    value, _ = _read_canonical_object(result_path)
+    value, raw = _read_canonical_object(result_path)
     if set(value) != _RESULT_OBJECT_FIELDS:
         raise CacheProtocolError("cached result object has unknown or missing fields")
     schema_version = value.get("schema_version")
@@ -951,7 +1264,137 @@ def _load_hit(
         )
     except SemanticResultError as exc:
         raise CacheProtocolError(f"cached canonical result is invalid: {exc}") from exc
-    return result.to_row()
+    if result.to_row() != value["result"]:
+        raise CacheProtocolError(
+            "cached canonical result is not stable on revalidation"
+        )
+    return SemanticResultEnvelope(
+        _canonical_object=raw,
+        result_object_sha256=hashlib.sha256(raw).hexdigest(),
+    )
+
+
+def _load_hit(
+    cache_path: Path,
+    packet: dict[str, Any],
+    identity: InferenceIdentity,
+    provider: ProviderIdentity,
+) -> dict[str, Any]:
+    return _load_result_envelope(cache_path, packet, identity, provider).result
+
+
+def load_exact_semantic_result(
+    cache_path: Path,
+    packet: dict[str, Any],
+    identity: InferenceIdentity,
+    provider: ProviderIdentity,
+) -> SemanticResultEnvelope | None:
+    """Load one exact immutable result, returning ``None`` only for absence."""
+
+    path = _result_path(cache_path, identity.analysis_key)
+    if not _path_exists(path):
+        return None
+    return _load_result_envelope(cache_path, packet, identity, provider)
+
+
+def load_semantic_baseline(
+    cache_path: Path,
+    packet: dict[str, Any],
+    review_identity: ReviewIdentity,
+) -> SemanticResultEnvelope | None:
+    """Load and fully validate the immutable first-writer baseline."""
+
+    path = _baseline_path(cache_path, review_identity.review_key)
+    if not _path_exists(path):
+        return None
+    value, _ = _read_canonical_object(path)
+    if set(value) != _BASELINE_OBJECT_FIELDS:
+        raise CacheProtocolError("semantic baseline has invalid closed shape")
+    schema_version = value.get("schema_version")
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version != 1
+        or value.get("object_type") != "semantic-result-baseline"
+    ):
+        raise CacheProtocolError("semantic baseline has invalid type or version")
+    stored_review_key = value.get("review_key")
+    if not is_sha256_hex(stored_review_key):
+        raise CacheProtocolError("semantic baseline review key is invalid")
+    if stored_review_key != review_identity.review_key:
+        raise CacheProtocolError("semantic baseline review key does not match its path")
+    review_contract = _validate_review_contract_shape(value.get("review_contract"))
+    recomputed_review_key = hashlib.sha256(
+        canonical_json_bytes(review_contract)
+    ).hexdigest()
+    if (
+        recomputed_review_key != stored_review_key
+        or canonical_json_bytes(review_contract) != review_identity.contract_bytes
+    ):
+        raise CacheProtocolError("semantic baseline review contract is stale")
+    analysis_key = value.get("analysis_key")
+    if not is_sha256_hex(analysis_key):
+        raise CacheProtocolError("semantic baseline analysis key is invalid")
+    result_path = _result_path(cache_path, analysis_key)
+    if not _path_exists(result_path):
+        raise CacheProtocolError("semantic baseline exists without its result object")
+
+    result_object, _ = _read_canonical_object(result_path)
+    if set(result_object) != _RESULT_OBJECT_FIELDS:
+        raise CacheProtocolError("cached result object has unknown or missing fields")
+    inference_contract = _validate_inference_contract_shape(
+        result_object.get("inference_contract")
+    )
+    if result_object.get("analysis_key") != analysis_key:
+        raise CacheProtocolError(
+            "semantic baseline target analysis key does not match its path"
+        )
+    target_review_contract = _review_contract_from_inference(inference_contract)
+    if target_review_contract != review_contract:
+        raise CacheProtocolError(
+            "semantic baseline target does not derive its review contract"
+        )
+    try:
+        provider = ProviderIdentity(**inference_contract["provider"])
+        request = RequestIdentity(**inference_contract["request"])
+        target_identity = build_inference_identity(
+            packet,
+            provider,
+            request,
+            analysis_contract_version=inference_contract["analysis_contract_version"],
+            search_epoch=inference_contract["search_epoch"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CacheProtocolError(
+            f"semantic baseline target inference identity is invalid: {exc}"
+        ) from exc
+    if (
+        target_identity.analysis_key != analysis_key
+        or target_identity.contract != inference_contract
+        or target_identity.review_identity != review_identity
+    ):
+        raise CacheProtocolError("semantic baseline target inference identity is stale")
+    return _load_result_envelope(cache_path, packet, target_identity, provider)
+
+
+def _selection_event(
+    envelope: SemanticResultEnvelope,
+    identity: InferenceIdentity,
+    *,
+    live: bool = False,
+) -> SemanticSelectionEvent:
+    source: SemanticSelectionSource
+    if live:
+        source = "live"
+    elif envelope.analysis_key == identity.analysis_key:
+        source = "exact-cache"
+    else:
+        source = "carried"
+    return SemanticSelectionEvent(
+        envelope=envelope,
+        review_key=identity.review_identity.review_key,
+        source=source,
+    )
 
 
 def _validate_lock(value: object, analysis_key: str) -> None:
@@ -1018,31 +1461,99 @@ def _new_lock(analysis_key: str) -> tuple[dict[str, Any], bytes]:
     return value, canonical_json_bytes(value)
 
 
+def _validate_review_lock(value: object, review_key: str) -> None:
+    if not isinstance(value, dict) or set(value) != _REVIEW_LOCK_FIELDS:
+        raise CacheProtocolError("semantic review lock has invalid closed shape")
+    schema_version = value.get("schema_version")
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version != 1
+        or value.get("object_type") != "semantic-review-lock"
+    ):
+        raise CacheProtocolError("semantic review lock has invalid type or version")
+    stored_key = value.get("review_key")
+    if not is_sha256_hex(stored_key):
+        raise CacheProtocolError("semantic review lock key is invalid")
+    if stored_key != review_key:
+        raise CacheProtocolError("semantic review lock key does not match its path")
+    if not is_sha256_hex(value.get("owner_token")):
+        raise CacheProtocolError("semantic review lock owner token is invalid")
+    pid = value.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid < 1:
+        raise CacheProtocolError("semantic review lock pid is invalid")
+    host = value.get("host")
+    if not isinstance(host, str) or not host.strip():
+        raise CacheProtocolError("semantic review lock host is invalid")
+    try:
+        _parse_canonical_utc(value.get("created_at_utc"))
+    except ValueError as exc:
+        raise CacheProtocolError(
+            f"semantic review lock timestamp is invalid: {exc}"
+        ) from exc
+
+
+def _read_review_lock(path: Path, review_key: str) -> bytes:
+    value, raw = _read_canonical_object(path)
+    _validate_review_lock(value, review_key)
+    return raw
+
+
+def _new_review_lock(review_key: str) -> bytes:
+    value = {
+        "schema_version": 1,
+        "object_type": "semantic-review-lock",
+        "review_key": review_key,
+        "owner_token": secrets.token_hex(32),
+        "pid": os.getpid(),
+        "host": socket.gethostname().strip() or "unknown-host",
+        "created_at_utc": _format_utc(_utc_now()),
+    }
+    return canonical_json_bytes(value)
+
+
+def _remove_review_lock(path: Path, review_key: str, expected: bytes) -> None:
+    try:
+        current = _read_review_lock(path, review_key)
+    except FileNotFoundError as exc:
+        raise CacheProtocolError("owned semantic review lock disappeared") from exc
+    if current != expected:
+        raise CacheProtocolError("semantic review lock ownership changed")
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise CacheProtocolError(
+            f"cannot remove owned semantic review lock: {exc}"
+        ) from exc
+    _fsync_directory(path.parent)
+
+
 def _retry_owned_failure_cleanup(
     *,
     cache_path: Path,
     key: str,
     expected_lock: bytes,
-    verifier: bool,
+    lock_kind: _LockKind,
     poll_interval_seconds: float,
 ) -> bool:
     """Try a fixed number of guarded cleanups, then defer to the next guard."""
 
-    guard_path = (
-        _verify_guard_path(cache_path, key)
-        if verifier
-        else _guard_path(cache_path, key)
-    )
+    if lock_kind == "verify":
+        guard_path = _verify_guard_path(cache_path, key)
+    elif lock_kind == "review":
+        guard_path = _review_guard_path(cache_path, key)
+    else:
+        guard_path = _guard_path(cache_path, key)
     _remember_owned_cleanup(
         guard_path,
-        _PendingOwnedCleanup(cache_path, key, expected_lock, verifier),
+        _PendingOwnedCleanup(cache_path, key, expected_lock, lock_kind),
     )
-    guard = _verify_guard if verifier else _semantic_guard
     for _ in range(_OWNED_FAILURE_CLEANUP_RETRY_LIMIT):
         try:
-            with guard(
-                cache_path,
-                key,
+            with _owned_guard_context(
+                cache_path=cache_path,
+                key=key,
+                lock_kind=lock_kind,
                 timeout_seconds=poll_interval_seconds,
                 poll_interval_seconds=poll_interval_seconds,
             ):
@@ -1054,11 +1565,49 @@ def _retry_owned_failure_cleanup(
     return False
 
 
-def _log_cleanup_guidance(*, key: str, verifier: bool) -> None:
+def _owned_guard_context(
+    *,
+    cache_path: Path,
+    key: str,
+    lock_kind: _LockKind,
+    timeout_seconds: float | None,
+    poll_interval_seconds: float,
+    drain_owned_cleanup: bool = True,
+) -> AbstractContextManager[None]:
+    if lock_kind == "verify":
+        return _verify_guard(
+            cache_path,
+            key,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            drain_owned_cleanup=drain_owned_cleanup,
+        )
+    if lock_kind == "review":
+        return _review_guard(
+            cache_path,
+            key,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            drain_owned_cleanup=drain_owned_cleanup,
+        )
+    return _semantic_guard(
+        cache_path,
+        key,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        drain_owned_cleanup=drain_owned_cleanup,
+    )
+
+
+def _log_cleanup_guidance(*, key: str, lock_kind: _LockKind) -> None:
     _LOGGER.warning(
         "owned %s cache lock %s was preserved after %d guarded cleanup "
         "attempts; run backstitch cache cleanup-lock when the lock is stale",
-        "verifier" if verifier else "analyzer",
+        {
+            "analysis": "analyzer",
+            "review": "review",
+            "verify": "verifier",
+        }[lock_kind],
         key,
         _OWNED_FAILURE_CLEANUP_RETRY_LIMIT,
     )
@@ -1167,7 +1716,20 @@ def _resolve_cached_result(
     call_provider: Callable[[], ProviderCallResult],
     timeout_seconds: float,
     poll_interval_seconds: float,
+    runtime_deadline: float | None = None,
 ) -> _Resolution:
+    def remaining_timeout() -> float:
+        if runtime_deadline is None:
+            return timeout_seconds
+        remaining = runtime_deadline - time.monotonic()
+        if remaining <= 0:
+            raise _AnalysisFailure(
+                "budget",
+                "budget_exceeded",
+                "maximum semantic analysis runtime exceeded",
+            )
+        return min(timeout_seconds, remaining)
+
     result_path = _result_path(cache_path, identity.analysis_key)
     if _path_exists(result_path):
         return _Resolution(_load_hit(cache_path, packet, identity, provider), "hit")
@@ -1186,7 +1748,7 @@ def _resolve_cached_result(
         with _semantic_guard(
             cache_path,
             identity.analysis_key,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=remaining_timeout(),
             poll_interval_seconds=poll_interval_seconds,
         ):
             if _path_exists(result_path):
@@ -1215,16 +1777,17 @@ def _resolve_cached_result(
             packet=packet,
             identity=identity,
             provider=provider,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=remaining_timeout(),
             poll_interval_seconds=poll_interval_seconds,
         )
+        remaining_timeout()
         return _Resolution(row, "hit")
 
     try:
         with _semantic_guard(
             cache_path,
             identity.analysis_key,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=remaining_timeout(),
             poll_interval_seconds=poll_interval_seconds,
         ):
             try:
@@ -1246,13 +1809,14 @@ def _resolve_cached_result(
                     "semantic lock ownership changed before provider call"
                 )
         response = call_provider()
+        remaining_timeout()
         row, result_object = _normalize_provider_result(
             packet, identity, response, provider
         )
         with _semantic_guard(
             cache_path,
             identity.analysis_key,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=remaining_timeout(),
             poll_interval_seconds=poll_interval_seconds,
         ):
             try:
@@ -1281,12 +1845,475 @@ def _resolve_cached_result(
             cache_path=cache_path,
             key=identity.analysis_key,
             expected_lock=owned_lock,
-            verifier=False,
+            lock_kind="analysis",
             poll_interval_seconds=poll_interval_seconds,
         )
         if not cleaned:
-            _log_cleanup_guidance(key=identity.analysis_key, verifier=False)
+            _log_cleanup_guidance(key=identity.analysis_key, lock_kind="analysis")
         raise
+
+
+def load_required_evidence_stable_result(
+    cache_path: Path,
+    packet: dict[str, Any],
+    identity: InferenceIdentity,
+    provider: ProviderIdentity,
+) -> SemanticSelectionEvent | None:
+    """Perform the lock-free baseline/exact/baseline require-mode snapshot."""
+
+    first = load_semantic_baseline(cache_path, packet, identity.review_identity)
+    if first is not None:
+        return _selection_event(first, identity)
+    exact = load_exact_semantic_result(cache_path, packet, identity, provider)
+    second = load_semantic_baseline(cache_path, packet, identity.review_identity)
+    if second is not None:
+        return _selection_event(second, identity)
+    if exact is None:
+        return None
+    return _selection_event(exact, identity)
+
+
+def _validate_preparation_identity(
+    packet: dict[str, Any],
+    identity: InferenceIdentity,
+    provider: ProviderIdentity,
+) -> None:
+    contract = identity.contract
+    if (
+        contract.get("packet_hash") != packet.get("packet_hash")
+        or contract.get("provider") != asdict(provider)
+        or _review_contract_from_inference(contract)
+        != identity.review_identity.contract
+        or hashlib.sha256(identity.contract_bytes).hexdigest() != identity.analysis_key
+        or hashlib.sha256(identity.review_identity.contract_bytes).hexdigest()
+        != identity.review_identity.review_key
+    ):
+        raise ValueError("prepared inference identity does not match packet provider")
+
+
+def _acquire_review_lease(
+    *,
+    cache_path: Path,
+    packet: dict[str, Any],
+    identity: InferenceIdentity,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+) -> tuple[_ReviewLockLease | None, SemanticResultEnvelope | None]:
+    review = identity.review_identity
+    baseline_path = _baseline_path(cache_path, review.review_key)
+    lock_path = _review_lock_path(cache_path, review.review_key)
+    owned = _new_review_lock(review.review_key)
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        baseline = load_semantic_baseline(cache_path, packet, review)
+        if baseline is not None:
+            return None, baseline
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _AnalysisFailure(
+                "lock",
+                "lock_timeout",
+                "timed out waiting for semantic review cache owner",
+            )
+        try:
+            with _review_guard(
+                cache_path,
+                review.review_key,
+                timeout_seconds=remaining,
+                poll_interval_seconds=poll_interval_seconds,
+            ):
+                baseline = load_semantic_baseline(cache_path, packet, review)
+                if baseline is not None:
+                    return None, baseline
+                acquired = _link_candidate(lock_path, owned)
+                if acquired:
+                    return (
+                        _ReviewLockLease(
+                            cache_path=cache_path,
+                            review_key=review.review_key,
+                            expected_lock=owned,
+                            timeout_seconds=timeout_seconds,
+                            poll_interval_seconds=poll_interval_seconds,
+                        ),
+                        None,
+                    )
+                if _path_exists(baseline_path):
+                    baseline = load_semantic_baseline(cache_path, packet, review)
+                    if baseline is not None:
+                        return None, baseline
+                _read_review_lock(lock_path, review.review_key)
+        except _AnalysisFailure as exc:
+            if exc.stage == "lock" and exc.code == "lock_timeout":
+                baseline = load_semantic_baseline(cache_path, packet, review)
+                if baseline is not None:
+                    return None, baseline
+            raise
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _AnalysisFailure(
+                "lock",
+                "lock_timeout",
+                "timed out waiting for semantic review cache owner",
+            )
+        time.sleep(min(poll_interval_seconds, remaining))
+
+
+def _release_review_lease(lease: _ReviewLockLease) -> None:
+    if lease.released:
+        return
+    lock_path = _review_lock_path(lease.cache_path, lease.review_key)
+    with _review_guard(
+        lease.cache_path,
+        lease.review_key,
+        timeout_seconds=lease.timeout_seconds,
+        poll_interval_seconds=lease.poll_interval_seconds,
+    ):
+        _remove_review_lock(lock_path, lease.review_key, lease.expected_lock)
+    lease.released = True
+
+
+def _release_review_lease_after_failure(lease: _ReviewLockLease) -> None:
+    if lease.released:
+        return
+    try:
+        cleaned = _retry_owned_failure_cleanup(
+            cache_path=lease.cache_path,
+            key=lease.review_key,
+            expected_lock=lease.expected_lock,
+            lock_kind="review",
+            poll_interval_seconds=lease.poll_interval_seconds,
+        )
+    except Exception:  # noqa: BLE001 - cleanup never displaces primary failure
+        cleaned = False
+    if cleaned:
+        lease.released = True
+    else:
+        _log_cleanup_guidance(key=lease.review_key, lock_kind="review")
+
+
+def _runtime_bounded_timeout(
+    timeout_seconds: float,
+    runtime_deadline: float | None,
+) -> float:
+    if runtime_deadline is None:
+        return timeout_seconds
+    remaining = runtime_deadline - time.monotonic()
+    if remaining <= 0:
+        raise SemanticCacheFailure(
+            "budget",
+            "budget_exceeded",
+            "maximum semantic analysis runtime exceeded",
+        )
+    return min(timeout_seconds, remaining)
+
+
+def _recheck_owned_review_lease(
+    lease: _ReviewLockLease,
+    packet: dict[str, Any],
+    review: ReviewIdentity,
+    *,
+    runtime_deadline: float | None,
+) -> SemanticResultEnvelope | None:
+    lock_path = _review_lock_path(lease.cache_path, lease.review_key)
+    with _review_guard(
+        lease.cache_path,
+        lease.review_key,
+        timeout_seconds=_runtime_bounded_timeout(
+            lease.timeout_seconds, runtime_deadline
+        ),
+        poll_interval_seconds=lease.poll_interval_seconds,
+    ):
+        current = _read_review_lock(lock_path, lease.review_key)
+        if current != lease.expected_lock:
+            raise CacheProtocolError("semantic review lock ownership changed")
+        baseline = load_semantic_baseline(lease.cache_path, packet, review)
+        if baseline is None:
+            return None
+        _remove_review_lock(lock_path, lease.review_key, lease.expected_lock)
+        lease.released = True
+        return baseline
+
+
+@contextmanager
+def prepare_evidence_stable_cache(
+    *,
+    packets: Iterable[ValidatedSemanticPacket],
+    cache_path: Path,
+    cache_mode: Literal["read-write", "require"],
+    provider_identity: ProviderIdentity,
+    identities: Iterable[InferenceIdentity],
+    lock_wait_timeout_seconds: float,
+    poll_interval_seconds: float = 0.1,
+    runtime_deadline: float | None = None,
+) -> Iterator[EvidenceStablePreparation]:
+    """Select all existing producers before traffic and hold sorted miss locks."""
+
+    if cache_mode not in ("read-write", "require"):
+        raise ValueError("evidence-stable preparation requires read-write or require")
+    if (
+        isinstance(lock_wait_timeout_seconds, bool)
+        or not isinstance(lock_wait_timeout_seconds, (int, float))
+        or lock_wait_timeout_seconds <= 0
+    ):
+        raise ValueError("lock wait timeout must be positive")
+    if (
+        isinstance(poll_interval_seconds, bool)
+        or not isinstance(poll_interval_seconds, (int, float))
+        or not 0 < poll_interval_seconds <= _POLL_INTERVAL_MAX_SECONDS
+    ):
+        raise ValueError(
+            "poll interval must be greater than zero and no more than one second"
+        )
+    packet_list = tuple(packets)
+    identity_list = tuple(identities)
+    if len(packet_list) != len(identity_list):
+        raise ValueError("prepared inference identity count does not match packets")
+    rows = tuple(packet.to_dict() for packet in packet_list)
+    for packet, identity in zip(rows, identity_list, strict=True):
+        _validate_preparation_identity(packet, identity, provider_identity)
+    try:
+        resolved_cache_path = cache_path.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise CacheProtocolError(f"cannot resolve semantic cache path: {exc}") from exc
+
+    state = _PreparationState()
+    leases: list[_ReviewLockLease] = []
+    selections: list[SemanticSelectionEvent | None] = [None] * len(rows)
+    leases_by_key: dict[str, _ReviewLockLease] = {}
+    try:
+        if cache_mode == "require":
+            for index, (packet, identity) in enumerate(
+                zip(rows, identity_list, strict=True)
+            ):
+                _runtime_bounded_timeout(
+                    float(lock_wait_timeout_seconds), runtime_deadline
+                )
+                selections[index] = load_required_evidence_stable_result(
+                    resolved_cache_path, packet, identity, provider_identity
+                )
+        else:
+            work_by_key: dict[str, tuple[dict[str, Any], InferenceIdentity]] = {}
+            for index, (packet, identity) in enumerate(
+                zip(rows, identity_list, strict=True)
+            ):
+                baseline = load_semantic_baseline(
+                    resolved_cache_path, packet, identity.review_identity
+                )
+                if baseline is not None:
+                    selections[index] = _selection_event(baseline, identity)
+                    continue
+                key = identity.review_identity.review_key
+                existing = work_by_key.get(key)
+                if existing is not None and (
+                    existing[0] != packet
+                    or existing[1].review_identity != identity.review_identity
+                ):
+                    raise CacheProtocolError(
+                        "one review key resolves to different prepared packets"
+                    )
+                work_by_key[key] = (packet, identity)
+
+            won_baselines: dict[str, SemanticResultEnvelope] = {}
+            for key in sorted(work_by_key):
+                packet, identity = work_by_key[key]
+                lease, baseline = _acquire_review_lease(
+                    cache_path=resolved_cache_path,
+                    packet=packet,
+                    identity=identity,
+                    timeout_seconds=_runtime_bounded_timeout(
+                        float(lock_wait_timeout_seconds), runtime_deadline
+                    ),
+                    poll_interval_seconds=float(poll_interval_seconds),
+                )
+                if baseline is not None:
+                    won_baselines[key] = baseline
+                else:
+                    assert lease is not None
+                    leases.append(lease)
+                    leases_by_key[key] = lease
+
+            for key in sorted(leases_by_key):
+                packet, identity = work_by_key[key]
+                lease = leases_by_key[key]
+                baseline = _recheck_owned_review_lease(
+                    lease,
+                    packet,
+                    identity.review_identity,
+                    runtime_deadline=runtime_deadline,
+                )
+                if baseline is not None:
+                    won_baselines[key] = baseline
+                    leases_by_key.pop(key)
+
+            for index, (packet, identity) in enumerate(
+                zip(rows, identity_list, strict=True)
+            ):
+                if selections[index] is not None:
+                    continue
+                key = identity.review_identity.review_key
+                baseline = won_baselines.get(key)
+                if baseline is not None:
+                    selections[index] = _selection_event(baseline, identity)
+                    continue
+                exact = load_exact_semantic_result(
+                    resolved_cache_path, packet, identity, provider_identity
+                )
+                if exact is not None:
+                    selections[index] = _selection_event(exact, identity)
+
+        state.events = list(selections)
+        items = tuple(
+            PreparedSemanticResult(
+                _canonical_packet=canonical_json_bytes(packet),
+                identity=identity,
+                provider_identity=provider_identity,
+                selection=selection,
+                _index=index,
+                _lease=leases_by_key.get(identity.review_identity.review_key),
+                _state=state,
+            )
+            for index, (packet, identity, selection) in enumerate(
+                zip(rows, identity_list, selections, strict=True)
+            )
+        )
+        preparation = EvidenceStablePreparation(items, tuple(leases), state)
+        try:
+            yield preparation
+        except BaseException:
+            state.active = False
+            for lease in reversed(leases):
+                _release_review_lease_after_failure(lease)
+            raise
+        else:
+            state.active = False
+            for lease in reversed(leases):
+                _release_review_lease(lease)
+    except BaseException as exc:
+        state.active = False
+        for lease in reversed(leases):
+            _release_review_lease_after_failure(lease)
+        if (
+            isinstance(exc, _AnalysisFailure)
+            and runtime_deadline is not None
+            and time.monotonic() >= runtime_deadline
+        ):
+            raise SemanticCacheFailure(
+                "budget",
+                "budget_exceeded",
+                "maximum semantic analysis runtime exceeded during cache preparation",
+            ) from exc
+        raise
+
+
+def _publish_owned_semantic_baseline(
+    item: PreparedSemanticResult,
+    envelope: SemanticResultEnvelope,
+    *,
+    runtime_deadline: float | None,
+) -> SemanticResultEnvelope:
+    lease = item._lease
+    if lease is None or lease.released:
+        raise CacheProtocolError("prepared result does not own a review lock")
+    review = item.review_identity
+    inference_contract = _validate_inference_contract_shape(envelope.inference_contract)
+    if _review_contract_from_inference(inference_contract) != review.contract:
+        raise CacheProtocolError("baseline candidate has a different review contract")
+    baseline = {
+        "schema_version": 1,
+        "object_type": "semantic-result-baseline",
+        "review_contract": review.contract,
+        "review_key": review.review_key,
+        "analysis_key": envelope.analysis_key,
+    }
+    lock_path = _review_lock_path(lease.cache_path, lease.review_key)
+    with _review_guard(
+        lease.cache_path,
+        lease.review_key,
+        timeout_seconds=_runtime_bounded_timeout(
+            lease.timeout_seconds, runtime_deadline
+        ),
+        poll_interval_seconds=lease.poll_interval_seconds,
+    ):
+        current = _read_review_lock(lock_path, lease.review_key)
+        if current != lease.expected_lock:
+            raise CacheProtocolError("semantic review lock ownership changed")
+        _link_candidate(
+            _baseline_path(lease.cache_path, review.review_key),
+            canonical_json_bytes(baseline),
+        )
+        selected = load_semantic_baseline(
+            lease.cache_path, item.packet, item.review_identity
+        )
+        assert selected is not None
+        _remove_review_lock(lock_path, lease.review_key, lease.expected_lock)
+        lease.released = True
+    return selected
+
+
+def resolve_prepared_evidence_stable_result(
+    item: PreparedSemanticResult,
+    *,
+    call_provider: Callable[[], ProviderCallResult],
+    runtime_deadline: float | None = None,
+) -> SemanticSelectionEvent:
+    """Execute one prepared miss after caller-owned qualification and preflight."""
+
+    if not item._state.active:
+        raise RuntimeError("evidence-stable preparation is no longer active")
+    if item._lease is None:
+        if item.selection is None:
+            raise CacheProtocolError("required evidence-stable result is missing")
+        return item.selection
+    if item._lease.released:
+        raise CacheProtocolError("prepared review lock is already released")
+
+    resolution_source: CacheSource = "hit"
+    if item.selection is None:
+        try:
+            resolution = _resolve_cached_result(
+                cache_path=item._lease.cache_path,
+                packet=item.packet,
+                identity=item.identity,
+                provider=item.provider_identity,
+                call_provider=call_provider,
+                timeout_seconds=item._lease.timeout_seconds,
+                poll_interval_seconds=item._lease.poll_interval_seconds,
+                runtime_deadline=runtime_deadline,
+            )
+        except _AnalysisFailure as exc:
+            if runtime_deadline is not None and time.monotonic() >= runtime_deadline:
+                raise SemanticCacheFailure(
+                    "budget",
+                    "budget_exceeded",
+                    "maximum semantic analysis runtime exceeded "
+                    "during analysis-lock wait",
+                ) from exc
+            raise SemanticCacheFailure(exc.stage, exc.code, exc.message) from exc
+        resolution_source = resolution.source
+        envelope = load_exact_semantic_result(
+            item._lease.cache_path,
+            item.packet,
+            item.identity,
+            item.provider_identity,
+        )
+        if envelope is None:
+            raise CacheProtocolError("resolved exact semantic result was not published")
+    else:
+        envelope = item.selection.envelope
+
+    selected = _publish_owned_semantic_baseline(
+        item, envelope, runtime_deadline=runtime_deadline
+    )
+    event = _selection_event(
+        selected,
+        item.identity,
+        live=(
+            resolution_source == "miss"
+            and selected.analysis_key == item.identity.analysis_key
+        ),
+    )
+    item._state.events[item._index] = event
+    return event
 
 
 def analyze_with_cache(
@@ -1294,6 +2321,7 @@ def analyze_with_cache(
     packets: Iterable[ValidatedSemanticPacket],
     cache_path: Path,
     cache_mode: str,
+    result_reuse: str = "exact-inference",
     provider_identity: ProviderIdentity,
     request_identity: RequestIdentity,
     adapter_factory: AdapterFactory | None,
@@ -1310,11 +2338,22 @@ def analyze_with_cache(
     packet_list = tuple(packets)
     problems: list[SemanticProblem] = []
     canonical_results: list[bytes] = []
+    result_envelopes: list[SemanticResultEnvelope] = []
+    selection_events: list[SemanticSelectionEvent] = []
     cache_hits = 0
     cache_misses = 0
     provider_calls = 0
     kind_counts = _empty_analyzer_kind_counts()
     runtime_exceeded = False
+    if result_reuse != "exact-inference":
+        problems.append(
+            SemanticProblem(
+                None,
+                "config",
+                "invalid_config",
+                "analyze_with_cache supports exact-inference result reuse only",
+            )
+        )
     if cache_mode not in ("off", "read-write", "require"):
         problems.append(
             SemanticProblem(None, "config", "invalid_config", "invalid cache mode")
@@ -1524,10 +2563,18 @@ def analyze_with_cache(
         try:
             if cache_mode == "off":
                 response = call(row, identity)
-                normalized, _ = _normalize_provider_result(
+                normalized, result_object = _normalize_provider_result(
                     row, identity, response, provider_identity
                 )
-                resolution = _Resolution(normalized, "off")
+                object_bytes = canonical_json_bytes(result_object)
+                resolution = _Resolution(
+                    normalized,
+                    "off",
+                    SemanticResultEnvelope(
+                        _canonical_object=object_bytes,
+                        result_object_sha256=hashlib.sha256(object_bytes).hexdigest(),
+                    ),
+                )
             elif cache_mode == "require":
                 result_path = _result_path(cache_path, identity.analysis_key)
                 if not _path_exists(result_path):
@@ -1565,6 +2612,7 @@ def analyze_with_cache(
                     call_provider=call_current,
                     timeout_seconds=float(lock_wait_timeout_seconds),
                     poll_interval_seconds=float(poll_interval_seconds),
+                    runtime_deadline=runtime_deadline,
                 )
                 if not initial_result and resolution.source == "hit":
                     cache_misses -= 1
@@ -1574,6 +2622,24 @@ def analyze_with_cache(
                 cache_hits += 1
                 packet_kind = cast(SemanticPacketKind, row["kind"])
                 kind_counts["cache_hits"][packet_kind] += 1
+            envelope = resolution.envelope
+            if envelope is None:
+                envelope = load_exact_semantic_result(
+                    cache_path, row, identity, provider_identity
+                )
+            if envelope is None:
+                raise CacheProtocolError(
+                    "resolved semantic result has no authoritative result object"
+                )
+            event = SemanticSelectionEvent(
+                envelope=envelope,
+                review_key=identity.review_identity.review_key,
+                source=(
+                    "live" if resolution.source in {"off", "miss"} else "exact-cache"
+                ),
+            )
+            result_envelopes.append(envelope)
+            selection_events.append(event)
             canonical_results.append(canonical_json_bytes(resolution.row))
         except _AnalysisFailure as exc:
             problems.append(
@@ -1612,6 +2678,8 @@ def analyze_with_cache(
         cache_hits,
         cache_misses,
         provider_calls,
+        tuple(result_envelopes),
+        tuple(selection_events),
         kind_counts,
     )
 
@@ -2218,11 +3286,11 @@ def _resolve_cached_verify_result(
             cache_path=cache_path,
             key=work.identity.verify_key,
             expected_lock=owned,
-            verifier=True,
+            lock_kind="verify",
             poll_interval_seconds=poll_interval_seconds,
         )
         if not cleaned:
-            _log_cleanup_guidance(key=work.identity.verify_key, verifier=True)
+            _log_cleanup_guidance(key=work.identity.verify_key, lock_kind="verify")
         raise
 
 
@@ -2625,19 +3693,28 @@ def cleanup_lock(
     *,
     cache_path: Path,
     analysis_key: str | None = None,
+    review_key: str | None = None,
     verify_key: str | None = None,
     lock_stale_seconds: int,
     reason: str,
 ) -> CleanupResult:
     """Audit then remove one explicitly named abandoned semantic lock."""
 
-    if (analysis_key is None) == (verify_key is None):
-        raise CacheProtocolError(
-            "exactly one of analysis key or verify key must be supplied"
+    supplied = tuple(
+        (kind, key)
+        for kind, key in (
+            ("analysis", analysis_key),
+            ("review", review_key),
+            ("verify", verify_key),
         )
-    key = analysis_key if analysis_key is not None else verify_key
-    key_name = "analysis key" if analysis_key is not None else "verify key"
-    assert key is not None
+        if key is not None
+    )
+    if len(supplied) != 1:
+        raise CacheProtocolError(
+            "exactly one of analysis key, review key, or verify key must be supplied"
+        )
+    lock_kind, key = cast(tuple[_LockKind, str], supplied[0])
+    key_name = f"{lock_kind} key"
     if not is_sha256_hex(key):
         raise CacheProtocolError(f"{key_name} must be 64 lowercase hex characters")
     if (
@@ -2652,7 +3729,11 @@ def cleanup_lock(
         cache_path = cache_path.resolve(strict=False)
     except (OSError, RuntimeError) as exc:
         raise CacheProtocolError(f"cannot resolve semantic cache path: {exc}") from exc
-    guard = _semantic_guard if analysis_key is not None else _verify_guard
+    guard = {
+        "analysis": _semantic_guard,
+        "review": _review_guard,
+        "verify": _verify_guard,
+    }[lock_kind]
     with guard(
         cache_path,
         key,
@@ -2663,7 +3744,7 @@ def cleanup_lock(
         return _cleanup_lock_held(
             cache_path=cache_path,
             key=key,
-            verifier=verify_key is not None,
+            lock_kind=lock_kind,
             lock_stale_seconds=lock_stale_seconds,
             reason=reason,
         )
@@ -2673,13 +3754,15 @@ def _cleanup_lock_held(
     *,
     cache_path: Path,
     key: str,
-    verifier: bool,
+    lock_kind: _LockKind,
     lock_stale_seconds: int,
     reason: str,
 ) -> CleanupResult:
-    path = (
-        _verify_lock_path(cache_path, key) if verifier else _lock_path(cache_path, key)
-    )
+    path = {
+        "analysis": _lock_path,
+        "review": _review_lock_path,
+        "verify": _verify_lock_path,
+    }[lock_kind](cache_path, key)
     if not _path_exists(path):
         raise CacheProtocolError("semantic lock does not exist")
     raw, before = _read_regular_bytes(path)
@@ -2688,8 +3771,10 @@ def _cleanup_lock_held(
         value = json.loads(raw)
         if canonical_json_bytes(value) != raw:
             raise ValueError
-        if verifier:
+        if lock_kind == "verify":
             _validate_verify_lock(value, key)
+        elif lock_kind == "review":
+            _validate_review_lock(value, key)
         else:
             _validate_lock(value, key)
         created_at = _parse_canonical_utc(value["created_at_utc"])
@@ -2705,8 +3790,16 @@ def _cleanup_lock_held(
         raise CacheProtocolError("semantic lock is not stale")
     audit = {
         "schema_version": 1,
-        "object_type": "semantic-lock-cleanup",
-        ("verify_key" if verifier else "analysis_key"): key,
+        "object_type": (
+            "semantic-review-lock-cleanup"
+            if lock_kind == "review"
+            else "semantic-lock-cleanup"
+        ),
+        {
+            "analysis": "analysis_key",
+            "review": "review_key",
+            "verify": "verify_key",
+        }[lock_kind]: key,
         "lock_sha256": hashlib.sha256(raw).hexdigest(),
         "lock_bytes": base64.b64encode(raw).decode("ascii"),
         "lock_lstat": {
@@ -2721,7 +3814,14 @@ def _cleanup_lock_held(
     audit_sha = hashlib.sha256(audit_bytes).hexdigest()
     audit_path = _safe_cache_child(
         cache_path,
-        ("audit", "verify-locks" if verifier else "locks"),
+        (
+            "audit",
+            {
+                "analysis": "locks",
+                "review": "review-locks",
+                "verify": "verify-locks",
+            }[lock_kind],
+        ),
         f"{key}.{audit_sha}.json",
     )
     _publish_immutable(audit_path, audit_bytes)

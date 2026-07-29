@@ -123,9 +123,9 @@ The default profile deliberately keeps `tests` in `code_roots`: test-to-spec
 edges are part of the trace graph. Repositories whose test roots contain
 fixture corpora (intentionally broken projects used by the test suite) must
 exclude them through configuration ([CFG-6] `exclude`), and the repository's
-committed configuration must make the advertised default invocation clean
-([SC-10]). A default invocation that fails on the tool's own repository is a
-shipped defect, not an accepted quirk.
+committed configuration must make the advertised hermetic self-check,
+`backstitch check --repo-root .`, clean ([SC-10]). A self-check that fails on
+the tool's own repository is a shipped defect, not an accepted quirk.
 
 Test roots classify paths already traversed through code roots. A layer that
 explicitly replaces `code_roots` and omits `test_roots` resets test roots to
@@ -304,12 +304,66 @@ _Implementation mapping_:
 
 `backstitch` must expose a console script named `backstitch`.
 
+A repository may configure one bare-invocation default through [CFG-6]
+`default_command`. After argparse handles `--help` and `--version`, an
+invocation with no explicit subcommand resolves configuration exactly once
+with the current working directory as its discovery anchor. Effective
+`"check"` dispatches the existing `check` command with that directory as
+`--repo-root`; effective `"analyze"` dispatches current-repository `analyze`
+with that directory as `--repo-root`. Effective `false` is the packaged
+default and returns exit `2` with a line-safe missing-command error.
+
+An explicit subcommand always wins selection and never redirects through
+`default_command`; ordinary strict config validation still rejects an invalid
+known `default_command` value. Bare dispatch delegates stdout, stderr, exit
+codes, configuration, snapshot,
+cache, budget, and provider behavior to the selected existing handler.
+In particular, current-repository `analyze` retains its deterministic
+preflight and performs no provider work when effective deterministic policy
+fails.
+
+`default_command` is a closed command name, not command-line syntax. V1
+accepts only `"check"` and `"analyze"`; the configuration value itself accepts
+no arguments, separators, external executables, multiple steps, or recursive
+dispatch. Arguments supplied in the invocation are parsed against the selected
+existing command. A leading path is shorthand for that command's
+`--repo-root`; otherwise current-repository input is implicit unless the
+invocation already supplies `--repo-root` or analyze `--packets`. Thus
+`backstitch .` delegates to the selected command over `.`, and bare analyze
+accepts ordinary arguments such as `--model`. An argument invalid for the
+selected default remains a CLI usage error. Other commands require an explicit
+invocation.
+
+For local use, invoking bare `backstitch` explicitly delegates command
+selection and the selected command's documented side effects to the effective
+repository configuration. A configured check output may write its report;
+configured analyze may read credentials, write cache state, make bounded
+provider calls, and incur bounded cost under its existing contract. Bare
+dispatch is forbidden in secret-bearing hostile-target automation: those
+workflows continue to name the semantic command, select trusted tool
+configuration explicitly, and use only workflow-owned static overrides under
+[SEM-9] and [EVC-11].
+The CLI does not infer whether an invocation is local or automated; the
+hostile-target prohibition is a workflow contract enforced by trusted
+workflow source and its firing tests.
+
 Required deterministic command:
 
 ```bash
 backstitch check --repo-root . --profile backstitch-style-v1 --format text
 backstitch check --repo-root . --profile backstitch-style-v1 --format json --output spec-trace.json
+backstitch coverage [PATH] [--repo-root PATH] [--format text|json] [--output PATH] [--profile NAME] [--config PATH|--no-config] [--option KEY VALUE]... [--require-ratchet REF]
 ```
+
+`coverage` is the deterministic [COV-*] command. Positional `PATH` and
+`--repo-root` are mutually exclusive aliases; absent either, the current
+working directory is the root anchor. Report mode accepts the common
+configuration controls. Ratchet mode rejects explicit config/profile/option
+selection and accepts only repository discovery plus format/output, the root
+alias, and the exact `--require-ratchet REF` assertion defined by [COV-9].
+The command returns `0` when no issue meets `fail_on`, `1` for selected target
+findings, and `2` for invocation, configuration, Git, budget, validation, or
+publication failure. It never changes `check` behavior or report bytes.
 
 Required obligation, packet, and result commands:
 
@@ -328,7 +382,7 @@ backstitch guide alignment --format text
 backstitch analyze --repo-root . --output analysis.jsonl --report analysis-report.json
 backstitch analyze --packets packets.jsonl --packet-report packet-report.json --output analysis.jsonl --report analysis-report.json
 backstitch eval --corpus tests/semantic_eval/v3/manifest.json --output semantic-eval-report.json
-backstitch cache cleanup-lock --cache-path PATH (--analysis-key HASH | --verify-key HASH) --lock-stale-seconds SECONDS --reason TEXT
+backstitch cache cleanup-lock --cache-path PATH (--analysis-key HASH | --review-key HASH | --verify-key HASH) --lock-stale-seconds SECONDS --reason TEXT
 ```
 
 The exact option grammar, selector exclusivity, pagination, source-snapshot
@@ -340,9 +394,10 @@ interface. No obligation, guide, packet, or implemented MCP operation writes
 repository source.
 
 `cache cleanup-lock` requires exactly one key flag. `--analysis-key` addresses
-the analyzer lock/guard/audit contract; `--verify-key` addresses the disjoint
-verifier contract in [SEM-4]. Both require the explicit stale interval because
-the cleanup command performs no configuration discovery.
+the analyzer lock/guard/audit contract; `--review-key` addresses the disjoint
+evidence-stable baseline-election contract; `--verify-key` addresses the
+disjoint verifier contract in [SEM-4]. All require the explicit stale interval
+because the cleanup command performs no configuration discovery.
 
 Every requested semantic output is distinct from every other input and output
 as [EVC-5.1] requires. Equality or semantic-root overlap is invalid before
@@ -499,6 +554,11 @@ The deterministic JSON report must contain at least:
   "issues": []
 }
 ```
+
+`coverage --format json` emits the separate closed
+`backstitch-intent-coverage-report` schema 1 artifact in [COV-3]. It reuses the
+accepted immutable snapshot and raw trace graph but does not extend, replace,
+or conditionally alter this section's deterministic check-report schema.
 
 Issue records must include stable diagnostic identity and locator fields:
 canonical `code`, stable `short_code`, optional `context`, effective
@@ -680,9 +740,9 @@ The first implementation must not include:
 
 `llm` must be imported lazily and only inside the `analyze` and `doctor`
 execution paths.
-`check`, `packets`, `obligation`, and `guide` must be structurally incapable of
-importing it. The boundary is enforced by import placement, not convention,
-and [SC-10]/[EVC-12] prove it with subprocess tests.
+`check`, `coverage`, `packets`, `obligation`, and `guide` must be structurally
+incapable of importing it. The boundary is enforced by import placement, not
+convention, and [SC-10]/[EVC-12] prove it with subprocess tests.
 
 If durable Weft-backed analysis becomes desirable later, it requires a separate
 spec or spec revision because it changes the dependency and execution boundary.
@@ -755,6 +815,19 @@ Required proof surfaces:
   f-strings
 - resolver tests for clean and broken graphs
 - CLI subprocess tests for text, JSON, output file, and exit-code behavior
+- black-box bare-invocation tests proving configured `check` and `analyze`
+  use the current repository, preserve their explicit-command exit/output
+  contracts, and dispatch through one configuration resolution
+- a no-default probe proving bare invocation exits `2` without importing
+  `llm`, scanning source, touching cache state, or reaching a provider
+- help/version and explicit-command probes proving they do not execute or
+  redirect through the configured default
+- one firing test for each `default_command` value, the disabling `false`
+  value, every invalid type/value family, and `extend` override/disable
+  behavior
+- explicit-versus-bare environment tests proving `LLM_MODEL` applies to bare
+  analyze but remains irrelevant to bare check, with one file/config
+  resolution and one immutable settings snapshot
 - a subprocess proof that deterministic commands (`check`, `packets`) never
   import `llm`
 - default diagnostic registry validation: every implemented diagnostic code in
@@ -814,6 +887,12 @@ Required proof surfaces:
       exits `1`, and cache/provider/completeness failure exits `2`
   16. a second required-cache replay makes zero provider calls and emits
       byte-identical canonical result JSONL
+  17. coverage hostile-input probes prove marker-like strings in comments,
+      literals, examples, wrong syntax-tree locations, and near-miss spellings
+      do not become exemptions; exact malformed markers produce BSN004
+  18. coverage config/Git probes prove unknown keys and missing ratchet bases
+      exit `2`, untracked Python definitions participate in patch coverage,
+      and two serial runs over one accepted state produce byte-identical output
 - invariant probes cover marker isolation, paired root overrides, every BSI
   firing case, report, packet, and result self-acceptance and legacy
   normalization, `--kind` filtering and mixed-order byte stability, targetless
@@ -828,7 +907,7 @@ Required proof surfaces:
   ordinary suppressions until promoted to `implemented`.
 - self-corpus smoke check against this repository's specs, plans, docs, and
   `backstitch`, using the repository's committed configuration and the
-  advertised default invocation. Success criteria: exit `0`, zero
+  explicit `backstitch check --repo-root .` invocation. Success criteria: exit `0`, zero
   error-severity and zero warning-severity findings in the default output,
   and every suppression recoverable via `--show-suppressions` and documented
   in implementation notes — a clean report produced by unauditable hiding is
@@ -950,6 +1029,15 @@ row is emittable.
 | `INVARIANT_DUPLICATE` | `BSI003` | error | none | Invariant ID is duplicate or collides with a section ID |
 | `INVARIANT_BINDING_NOT_TEST` | `BSI004` | warning | none | Well-formed binding marker is outside valid test-definition scope |
 | `INVARIANT_MARKER_INVALID` | `BSI005` | error | none | Reserved invariant marker syntax or owner is invalid |
+| `INTENT_UNCOVERED_DEFINITION` | `BSN001` | info/error | `repository`, `patch` | Definition has no intent edge and no exemption |
+| `INTENT_INHERITED_ONLY` | `BSN002` | info/error | `repository`, `patch` | Definition is covered only by a file-level blanket |
+| `INTENT_EXEMPTION_UNUSED` | `BSN003` | warning | none | Intent exemption matches no definition |
+| `INTENT_EXEMPTION_UNREASONED` | `BSN004` | error | none | Intent exemption has no valid nonblank reason |
+| `INTENT_REQUIREMENT_UNIMPLEMENTED` | `BSN005` | info | none | Declared requirement mappings resolve to no live owner |
+| `INTENT_DRIFT_SUSPECT` | `BSN006` | info | none | Mapped implementation changed without governing contract or connected test movement |
+| `INTENT_COVERAGE_FLOOR_REGRESSION` | `BSN007` | error | none | Intent coverage is below a configured floor |
+| `INTENT_COVERAGE_INCOMPLETE` | `BSN008` | info/error | `repository`, `patch` | A definition could not be classified for intent coverage |
+| `INTENT_COVERAGE_POLICY_REGRESSION` | `BSN009` | error | none | Gate policy weakened without an exact acknowledgment |
 
 The BSI rows are the normative implemented defaults for [INV-*]. The
 deterministic invariant slice promoted each code together with its first
@@ -977,6 +1065,13 @@ Every issue record carries at least one non-empty locator (`path`,
 citing file and line, so a human or agent can always navigate to the problem.
 
 Invariant-traceability diagnostics follow [INV-8].
+
+Intent-coverage diagnostics are the closed [COV-9] registry. `BSN001`,
+`BSN002`, and `BSN008` each have exact `repository` and `patch` contexts;
+their `info/error` row is an enumerable aggregate for this section's code
+inventory, not a third severity value. [COV-9] is the sole context-row
+authority: repository is info and patch is error. `BSN003` through `BSN007`
+and `BSN009` have no context.
 
 An unparseable code file is a coverage warning. It is suppressible by
 config/exclusion per-file rules, but not by inline noqa inside that same
@@ -1262,6 +1357,15 @@ The initial suppression-hygiene and reserved diagnostic allocation is:
 | `SEMANTIC_WEAK_BINDING` | `BSA004` | implemented | Semantic projection (all [SEM-5]/[EVC-6] contexts) |
 | `SEMANTIC_AMBIGUOUS` | `BSA005` | implemented | Semantic projection (all [SEM-5]/[EVC-6] contexts) |
 | `OBLIGATION_SKIPPED` | `BSE001` | implemented | Auditable valid obligation skip ([EVC-6]) |
+| `INTENT_UNCOVERED_DEFINITION` | `BSN001` | implemented | Intent coverage (`repository`, `patch` contexts; [COV-9]) |
+| `INTENT_INHERITED_ONLY` | `BSN002` | implemented | Intent coverage (`repository`, `patch` contexts; [COV-9]) |
+| `INTENT_EXEMPTION_UNUSED` | `BSN003` | implemented | Intent-coverage exemption audit ([COV-9]) |
+| `INTENT_EXEMPTION_UNREASONED` | `BSN004` | implemented | Intent-coverage exemption audit ([COV-9]) |
+| `INTENT_REQUIREMENT_UNIMPLEMENTED` | `BSN005` | implemented | Intent reverse complement ([COV-9]) |
+| `INTENT_DRIFT_SUSPECT` | `BSN006` | implemented | Intent drift coverage ([COV-9]) |
+| `INTENT_COVERAGE_FLOOR_REGRESSION` | `BSN007` | implemented | Intent-coverage ratchet ([COV-9]) |
+| `INTENT_COVERAGE_INCOMPLETE` | `BSN008` | implemented | Intent coverage (`repository`, `patch` contexts; [COV-9]) |
+| `INTENT_COVERAGE_POLICY_REGRESSION` | `BSN009` | implemented | Intent-coverage policy ratchet ([COV-9]) |
 
 The BSI allocations remained reserved through contract alignment, then all
 five became `implemented` together with their first emissions and firing
@@ -1371,6 +1475,11 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-07-28-intent-coverage-implementation-plan.md`
+  (active implementation plan; [SC-5], [SC-6], [SC-8], [SC-10], [SC-11],
+  and [SC-15] coverage registrations)
+- `docs/plans/2026-07-28-configured-default-command-plan.md`
+  (implemented and independently reviewed; uncommitted)
 - `docs/plans/2026-07-28-documented-suppression-governance-plan.md`
   (implemented and independently reviewed)
 - `docs/plans/2026-07-11-deterministic-semantic-gate-plan.md`

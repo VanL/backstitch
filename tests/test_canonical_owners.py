@@ -380,6 +380,56 @@ def _sites(kind: str) -> frozenset[Site]:
     return frozenset(item for item in _production_sites() if item.kind == kind)
 
 
+def test_python_structural_locator_has_one_production_formatter_owner() -> None:
+    """Tests-invariant: [INV.IDENTITY.1]
+
+    Locator consumers may inspect prefixes, but only one owner formats them.
+    """
+
+    formatters: set[Site] = set()
+    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+        tree = ast.parse(path.read_bytes(), filename=path.as_posix())
+        module = _module_name(path)
+        parents: dict[ast.AST, ast.AST] = {
+            child: parent
+            for parent in ast.walk(tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.JoinedStr):
+                continue
+            literal = "".join(
+                part.value
+                for part in node.values
+                if isinstance(part, ast.Constant) and isinstance(part.value, str)
+            )
+            if not any(
+                prefix in literal
+                for prefix in (
+                    "python-module:",
+                    "python-module-path:",
+                    "python-definition:",
+                )
+            ):
+                continue
+            owner = "<module>"
+            current: ast.AST | None = node
+            while current is not None:
+                current = parents.get(current)
+                if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    owner = current.name
+                    break
+            formatters.add(Site(module, owner, "python_structural_locator"))
+
+    assert formatters == {
+        Site(
+            "backstitch.python_refs",
+            "python_structural_locator",
+            "python_structural_locator",
+        )
+    }
+
+
 CANONICAL_JSON_DISPLAY_EXEMPTION_REASONS = {
     Site("backstitch.cli", "_cmd_packets", "canonical_json"): (
         "renders bounded error details into a failure message, never an identity"

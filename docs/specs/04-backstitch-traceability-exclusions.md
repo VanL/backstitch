@@ -10,6 +10,7 @@ Related specs:
 
 - `docs/specs/02-backstitch-core.md` [SC-4], [SC-9], [SC-11]
 - `docs/specs/03-backstitch-configuration.md` [CFG-6]
+- `docs/specs/08-intent-coverage.md` [COV-4], [COV-5], [COV-8], [COV-9]
 
 ## 1. Purpose And Scope [EXC-1]
 
@@ -60,6 +61,13 @@ Think in three layers, mirroring common Python tooling:
 preferred. Stable short codes are accepted as aliases and canonicalized.
 Examples: `SPEC_SECTION_UNMAPPED`, `BSS007`,
 `SPEC_MAPPING_RECIPROCAL_MISSING`, `BSC003`.
+
+Intent-coverage exemptions are a separate accounting mechanism governed by
+[COV-4], not ordinary issue suppressions. The exact
+`backstitch: no-spec -- <reason>` marker and configured coverage exemption
+tables classify a definition as deliberately outside intent coverage. They do
+not hide a resolver issue, do not use diagnostic-code scope, and never enter
+the ordinary suppression stack.
 
 **Scope** is where a suppression applies:
 
@@ -272,6 +280,12 @@ Python `noqa` and `ignore` directives accept the same terminal
 next-statement scope. Under required-declaration mode a clause-free
 directive emits `SUPPRESSION_REASON_MISSING` and does not suppress.
 
+`backstitch: no-spec` is not a `noqa`/`ignore` alias. Its exact comment and
+docstring placement, token grammar, mandatory reason, ownership, and inert
+near-miss behavior are [COV-4]. The coverage parser owns that marker and its
+separate exemption ledger; this section does not widen ordinary inline
+suppression syntax.
+
 _Implementation mapping_:
 
 - `backstitch/python_refs.py`
@@ -453,6 +467,12 @@ ID, decoded reason, source path and line, and effective `BSE001` policy. The
 skip remains visible even when BSE001 is off; it is an audit record, not proof
 that ordinary trace findings were suppressed.
 
+Coverage exemptions and drift/policy acknowledgments use the separate closed
+audit ledgers in [COV-3], [COV-5], and [COV-8]. They are not projected into
+`suppressed_issues` and cannot gain ordinary suppression authority. Coverage
+reports must preserve every used, overlap-only, unused, malformed, and
+acknowledged record required by [COV-4]/[COV-9].
+
 Each governed suppressed issue retains the existing `reason` provenance
 field and adds `declaration` and `rationale`. These fields are always present
 in JSON; each is `null` only for a legacy suppression accepted while
@@ -603,7 +623,7 @@ _Traceability: suppression-declaration [SUP-EVC-PROCESS] "The EVC purpose and co
 
 _Traceability: suppression-declaration [SUP-EVC-DEFERRED-MCP] "The optional local MCP adapter is explicitly deferred and has no implementation mapping until that product phase is promoted."_
 
-_Traceability: suppression-declaration [SUP-COV-PLANNED] "Intent coverage remains a planned specification; its sections stay visible without claiming implemented owners until its implementation plan is activated."_
+_Traceability: suppression-declaration [SUP-COV-INFLIGHT] "Intent coverage is active while its implementation lands section by section; exact unmapped sections remain visible and temporarily non-failing until each production owner, mapping, and reciprocal backlink lands together."_
 
 _Traceability: suppression-declaration [SUP-TEST-CITATIONS] "Tests cite contracts as verification evidence but are not general implementation owners; test-only unmapped backlinks and reciprocal-mapping findings are retained as audited noise."_
 
@@ -613,6 +633,8 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-07-28-intent-coverage-implementation-plan.md`
+  (active implementation plan; [COV-*] promotion and temporary inflight debt)
 - `docs/plans/2026-07-28-documented-suppression-governance-plan.md`
   (implemented and independently reviewed)
 

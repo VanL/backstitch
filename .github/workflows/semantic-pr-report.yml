@@ -90,6 +90,7 @@ jobs:
           path: |
             ${{ env.BACKSTITCH_CACHE_ROOT }}/packets
             ${{ env.BACKSTITCH_CACHE_ROOT }}/results
+            ${{ env.BACKSTITCH_CACHE_ROOT }}/baselines
             ${{ env.BACKSTITCH_CACHE_ROOT }}/verify-results
           key: semantic-pr-report-v1-cache-v1-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: semantic-pr-report-v1-cache-v1-
@@ -103,6 +104,7 @@ jobs:
           mkdir -p \
             "${BACKSTITCH_CACHE_ROOT}/packets" \
             "${BACKSTITCH_CACHE_ROOT}/results" \
+            "${BACKSTITCH_CACHE_ROOT}/baselines" \
             "${BACKSTITCH_CACHE_ROOT}/verify-results"
       - name: Revalidate pull request identity
         id: revalidate
@@ -140,6 +142,7 @@ jobs:
           path: |
             ${{ env.BACKSTITCH_CACHE_ROOT }}/packets
             ${{ env.BACKSTITCH_CACHE_ROOT }}/results
+            ${{ env.BACKSTITCH_CACHE_ROOT }}/baselines
             ${{ env.BACKSTITCH_CACHE_ROOT }}/verify-results
           key: semantic-pr-report-v1-cache-v1-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Upload semantic PR report

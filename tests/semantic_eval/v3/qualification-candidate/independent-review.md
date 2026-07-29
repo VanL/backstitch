@@ -7,8 +7,8 @@ Provider calls: zero
 
 ## Disposition
 
-**FAIL for policy authority. PASS for structural enforce-loadability and
-internal source integrity.**
+**FAIL for policy authority. BLOCKED for Slice 8 qualification. PASS for
+structural enforce-loadability and source/tree byte integrity.**
 
 All 20 clean/misaligned pairs have defensible semantic labels after review
 corrections. Every row source-derives one executable, completely aligned
@@ -85,3 +85,48 @@ generator drift check passed; pytest reported `4 passed`; Ruff reported all 41
 generated Python files formatted; direct manifest/tree comparison found zero
 source-reference hash mismatches. The disposition remained unchanged after the
 format-only regeneration.
+
+## 2026-07-28: COV-7 anti-Goodhart source review
+
+Scope: the five provider-free `spec-contract-21` through
+`spec-contract-25` source pairs, generated source facts, and authority
+boundaries only. Provider calls: zero.
+
+**Disposition: BLOCKED for Slice 8 qualification. PASS for source-pair,
+byte-integrity, schema, provenance, and authority-boundary review.**
+
+Each clean contract is behaviorally informative. The five mutations are,
+respectively, a vacuous restatement, an overbroad guarantee, a tautology,
+implementation narration, and non-discriminating prose. In every pair only
+the governing spec prose changes. Implementation bytes, plan-note bytes, and
+the complete reciprocal implementation-mapping suffix remain identical.
+Generated tree manifests exactly inventory the fixture bytes. The manifest
+remains schema 3. The five new cases are synthetic controls: none appears in
+`reviewed_historical_units`, none carries `historical_misalignment`, and the
+reviewed-historical count remains 20. No semantic report exists and this
+review grants no provider, report, or policy authority.
+
+The expected semantic labels are not compatible with the current analyzer
+prompt. All five cases preregister `SEMANTIC_MISSING_TRACE`, while the prompt
+defines `missing_trace` as behavior with no corresponding owner, or code that
+appears to need a spec owner, and explicitly assigns spec text that is too
+vague to compare with code to `ambiguous`. Cases 21, 23, and 25 therefore
+point to `ambiguous`. Case 22 can plausibly be judged `ok` or `ambiguous`
+because the implementation satisfies its weakened range claim. Case 24 is
+the clearest contradiction: the mutated requirement says the function uses
+`payload.get("status", "unknown")`, and the declared owner does exactly that,
+so the prompt points to `ok`, not `missing_trace`.
+
+The active plan's Slice 8 stop condition therefore fires: the current prompt
+cannot distinguish these cases using the preregistered labels. Do not silently
+relabel the fixtures. Resolve the prompt/spec classification contract through
+a separate reviewed revision and qualification plan before any provider-backed
+run or authority refresh.
+
+Provider-free verification observed:
+
+- generator drift check: PASS
+- exact fixture/tree and implementation/mapping byte inspection: PASS
+- focused source-derivation and anti-Goodhart tests: PASS
+- Ruff: PASS
+- full corpus test: PASS after the review-record and frozen-identity refresh

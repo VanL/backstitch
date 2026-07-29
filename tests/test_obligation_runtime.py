@@ -257,9 +257,9 @@ def test_capture_binds_every_extended_config_layer_to_settings_bytes(
     (tmp_path / "docs/specs").mkdir(parents=True)
     (tmp_path / "pkg").mkdir()
     parent = tmp_path / "parent.toml"
-    parent.write_bytes(b'[analyze]\nmodel = "parent"\n')
+    parent.write_bytes(b'[check]\nformat = "text"\n')
     child = tmp_path / ".backstitch.toml"
-    child.write_bytes(b'extend = "parent.toml"\n[analyze]\nmodel = "child"\n')
+    child.write_bytes(b'extend = "parent.toml"\n[check]\nformat = "json"\n')
     settings = resolve_config(tmp_path, explicit=child)
 
     snapshot = capture_obligation_snapshot(tmp_path, _profile(), settings)
@@ -301,13 +301,13 @@ def test_stale_config_identity_consumes_the_shared_attempt_ceiling(
     (tmp_path / "docs/specs").mkdir(parents=True)
     (tmp_path / "pkg").mkdir()
     config = tmp_path / ".backstitch.toml"
-    config.write_bytes(b'[analyze]\nmodel = "settings-bytes"\n')
+    config.write_bytes(b'[check]\nformat = "text"\n')
     settings = resolve_config(tmp_path, explicit=config)
     settings = replace(
         settings,
         obligations=replace(settings.obligations, snapshot_capture_attempts=2),
     )
-    config.write_bytes(b'[analyze]\nmodel = "captured-bytes"\n')
+    config.write_bytes(b'[check]\nformat = "json"\n')
     real_capture = obligation_runtime.capture_repository_snapshot
     calls = 0
 
@@ -339,10 +339,10 @@ def test_config_identity_change_cannot_recover_by_rewriting_the_same_bytes(
     (tmp_path / "docs/specs").mkdir(parents=True)
     (tmp_path / "pkg").mkdir()
     config = tmp_path / ".backstitch.toml"
-    settings_bytes = b'[analyze]\nmodel = "settings-bytes"\n'
+    settings_bytes = b'[check]\nformat = "text"\n'
     config.write_bytes(settings_bytes)
     settings = resolve_config(tmp_path, explicit=config)
-    config.write_bytes(b'[analyze]\nmodel = "first-attempt"\n')
+    config.write_bytes(b'[check]\nformat = "json"\n')
     config.write_bytes(settings_bytes)
 
     with pytest.raises(SnapshotCaptureError) as raised:
@@ -357,7 +357,7 @@ def test_contained_config_replaced_by_equal_byte_symlink_is_never_readdressed(
     (tmp_path / "docs/specs").mkdir(parents=True)
     (tmp_path / "pkg").mkdir()
     config = tmp_path / ".backstitch.toml"
-    raw = b'[analyze]\nmodel = "same-bytes"\n'
+    raw = b'[check]\nformat = "json"\n'
     config.write_bytes(raw)
     settings = resolve_config(tmp_path, explicit=config)
     outside = tmp_path.parent / f"{tmp_path.name}-outside.toml"

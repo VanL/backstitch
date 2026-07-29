@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import http.client
+import re
 import runpy
 import subprocess
 import tomllib
@@ -253,6 +254,7 @@ def test_trusted_semantic_refresh_separates_reports_from_disposable_cache() -> N
     allowed_cache_paths = (
         "${{ env.BACKSTITCH_CACHE_ROOT }}/packets",
         "${{ env.BACKSTITCH_CACHE_ROOT }}/results",
+        "${{ env.BACKSTITCH_CACHE_ROOT }}/baselines",
         "${{ env.BACKSTITCH_CACHE_ROOT }}/verify-results",
     )
     for step_name in (
@@ -310,6 +312,25 @@ def test_trusted_semantic_refresh_separates_reports_from_disposable_cache() -> N
     assert "git commit" not in active
     assert "git push" not in active
     assert "gh pr" not in active
+
+
+@pytest.mark.parametrize(
+    "workflow_name",
+    ("semantic-refresh.yml", "semantic-pr-report.yml"),
+)
+def test_secret_bearing_semantic_workflows_never_use_bare_backstitch(
+    workflow_name: str,
+) -> None:
+    active = _active_workflow_text(workflow_name)
+    invocation_lines = [
+        line.strip()
+        for line in active.splitlines()
+        if "uv run" in line and "backstitch" in line
+    ]
+
+    assert invocation_lines
+    for line in invocation_lines:
+        assert re.search(r"\bbackstitch\s+[a-z][a-z-]*\b", line), line
 
 
 def test_trusted_semantic_pr_report_has_closed_hostile_target_boundary() -> None:
@@ -410,6 +431,7 @@ def test_trusted_semantic_pr_report_has_closed_hostile_target_boundary() -> None
     allowed_cache_paths = {
         "${{ env.BACKSTITCH_CACHE_ROOT }}/packets",
         "${{ env.BACKSTITCH_CACHE_ROOT }}/results",
+        "${{ env.BACKSTITCH_CACHE_ROOT }}/baselines",
         "${{ env.BACKSTITCH_CACHE_ROOT }}/verify-results",
     }
     for step_name in (

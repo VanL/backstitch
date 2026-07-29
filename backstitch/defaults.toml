@@ -10,6 +10,7 @@ exclude = [
   "build",
   ".worktrees",
 ]
+default_command = false
 
 [defaults]
 schema_version = 1
@@ -28,6 +29,25 @@ process_spec_globs = []
 [check]
 format = "text"
 warnings_as_errors = false
+
+[coverage]
+mode = "report"
+format = "text"
+granularity = "definition"
+inherited_counts = false
+ratchet_base = ""
+exemptions = []
+maximum_baseline_files = 20000
+maximum_file_bytes = 5000000
+maximum_baseline_bytes = 100000000
+maximum_history_commits = 1000
+maximum_git_command_seconds = 10.0
+maximum_git_commands = 64
+maximum_git_output_bytes = 100000000
+maximum_commit_message_bytes = 1000000
+maximum_runtime_seconds = 60.0
+
+[coverage.floors]
 
 [obligations]
 section_required_roles = ["implementation"]
@@ -60,6 +80,7 @@ seed = 42
 max_tokens = 512
 cache_path = ".backstitch/semantic-cache"
 cache_mode = "off"
+result_reuse = "evidence-stable"
 search_epoch = "1"
 require_complete = false
 required_kinds = []
@@ -356,6 +377,31 @@ level = "info"
 select = ["OBLIGATION_SKIPPED:source_skip"]
 level = "info"
 
+[[diagnostics.levels]]
+select = [
+  "INTENT_UNCOVERED_DEFINITION:repository",
+  "INTENT_INHERITED_ONLY:repository",
+  "INTENT_REQUIREMENT_UNIMPLEMENTED",
+  "INTENT_DRIFT_SUSPECT",
+  "INTENT_COVERAGE_INCOMPLETE:repository",
+]
+level = "info"
+
+[[diagnostics.levels]]
+select = ["INTENT_EXEMPTION_UNUSED"]
+level = "warning"
+
+[[diagnostics.levels]]
+select = [
+  "INTENT_UNCOVERED_DEFINITION:patch",
+  "INTENT_INHERITED_ONLY:patch",
+  "INTENT_EXEMPTION_UNREASONED",
+  "INTENT_COVERAGE_FLOOR_REGRESSION",
+  "INTENT_COVERAGE_INCOMPLETE:patch",
+  "INTENT_COVERAGE_POLICY_REGRESSION",
+]
+level = "error"
+
 [diagnostics.registry.SCAN_ROOT_MISSING]
 short = "BST001"
 status = "implemented"
@@ -616,6 +662,63 @@ short = "BSI005"
 status = "implemented"
 family = "deterministic"
 summary = "Reserved invariant marker syntax or owner is invalid"
+
+[diagnostics.registry.INTENT_UNCOVERED_DEFINITION]
+short = "BSN001"
+status = "implemented"
+family = "deterministic"
+summary = "Definition has no intent edge and no exemption"
+contexts = ["repository", "patch"]
+
+[diagnostics.registry.INTENT_INHERITED_ONLY]
+short = "BSN002"
+status = "implemented"
+family = "deterministic"
+summary = "Definition is covered only by a file-level blanket"
+contexts = ["repository", "patch"]
+
+[diagnostics.registry.INTENT_EXEMPTION_UNUSED]
+short = "BSN003"
+status = "implemented"
+family = "deterministic"
+summary = "Configured intent exemption matches no definition"
+
+[diagnostics.registry.INTENT_EXEMPTION_UNREASONED]
+short = "BSN004"
+status = "implemented"
+family = "deterministic"
+summary = "Inline intent exemption lacks a valid reason"
+
+[diagnostics.registry.INTENT_REQUIREMENT_UNIMPLEMENTED]
+short = "BSN005"
+status = "implemented"
+family = "deterministic"
+summary = "Requirement declarations resolve to no live implementation owner"
+
+[diagnostics.registry.INTENT_DRIFT_SUSPECT]
+short = "BSN006"
+status = "implemented"
+family = "deterministic"
+summary = "Implementation changed without its governing section changing"
+
+[diagnostics.registry.INTENT_COVERAGE_FLOOR_REGRESSION]
+short = "BSN007"
+status = "implemented"
+family = "deterministic"
+summary = "Intent coverage is below a configured floor"
+
+[diagnostics.registry.INTENT_COVERAGE_INCOMPLETE]
+short = "BSN008"
+status = "implemented"
+family = "deterministic"
+summary = "A definition could not be classified for intent coverage"
+contexts = ["repository", "patch"]
+
+[diagnostics.registry.INTENT_COVERAGE_POLICY_REGRESSION]
+short = "BSN009"
+status = "implemented"
+family = "deterministic"
+summary = "Intent coverage gate policy was weakened without acknowledgment"
 
 [diagnostics.registry.SUPPRESSION_UNUSED]
 short = "BSX001"

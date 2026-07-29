@@ -28,6 +28,7 @@ from backstitch.evidence_discovery import (
     get_candidate_neighbors,
     get_candidate_source,
     prepare_evidence_catalog,
+    resolved_python_module_names,
 )
 from backstitch.models import (
     CodeRef,
@@ -988,7 +989,7 @@ def test_irrelevant_issues_and_invariant_edges_each_charge_one_work_unit(
     }
 
 
-def test_ambiguous_module_derivation_does_not_guess_import_targets(
+def test_longest_module_root_wins_without_guessing_import_targets(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "docs/specs").mkdir(parents=True)
@@ -1010,6 +1011,11 @@ def test_ambiguous_module_derivation_does_not_guess_import_targets(
         code_roots=profile.code_roots,
     )
     snapshot = capture_repository_snapshot(tmp_path, config, ALGORITHMS)
+    assert resolved_python_module_names(
+        ("src/pkg/mod.py",),
+        profile,
+        snapshot,
+    ) == {"src/pkg/mod.py": "pkg.mod"}
 
     candidates = discover_evidence_candidates(
         snapshot,
@@ -1024,6 +1030,72 @@ def test_ambiguous_module_derivation_does_not_guess_import_targets(
         not item.structural_locator.startswith("python-module:") for item in mod_rows
     )
     assert all(item.candidate_kind != "static_reference" for item in mod_rows)
+
+
+def test_fallback_module_identity_is_seeded_without_changing_named_identity(
+    tmp_path: Path,
+) -> None:
+    _write_repository(tmp_path)
+    (tmp_path / "src/bad-name.py").write_text("value = 1\n", encoding="utf-8")
+    snapshot = _capture(tmp_path)
+    assert resolved_python_module_names(
+        ("src/__init__.py", "src/bad-name.py", "src/worker.py"),
+        PROFILE,
+        snapshot,
+    ) == {
+        "src/__init__.py": None,
+        "src/bad-name.py": None,
+        "src/worker.py": "src.worker",
+    }
+    section = _section_report().spec_sections[0]
+    report = replace(
+        _section_report(),
+        spec_mappings=(
+            SpecMapping(
+                section.path,
+                section.section_id,
+                3,
+                "src/bad-name.py",
+                "path",
+                "src/bad-name.py",
+                None,
+            ),
+        ),
+        edges=(),
+    )
+
+    candidates = discover_evidence_candidates(
+        snapshot,
+        report,
+        PROFILE,
+        _obligation(),
+        SETTINGS,
+    )
+
+    fallback = next(
+        item
+        for item in candidates
+        if item.path == "src/bad-name.py"
+        and item.structural_locator.startswith("python-module-path:")
+    )
+    assert fallback.structural_locator == "python-module-path:src/bad-name.py"
+    named = next(
+        item
+        for item in discover_evidence_candidates(
+            snapshot,
+            _section_report(),
+            PROFILE,
+            _obligation(),
+            SETTINGS,
+        )
+        if item.path == "src/worker.py"
+        and item.structural_locator == "python-module:src.worker"
+    )
+    assert named.candidate_id == evidence_discovery._candidate_id(
+        "implementation_definition",
+        "src/worker.py",
+        "python-module:src.worker",
+    )
 
 
 def test_final_frontier_relations_do_not_reference_unselected_candidates(

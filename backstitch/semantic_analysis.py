@@ -16,23 +16,30 @@ import hashlib
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
 from backstitch.artifact_contracts import ValidatedSemanticPacket
+from backstitch.canonical import canonical_json_bytes
 from backstitch.grammar import is_sha256_hex
 from backstitch.semantic_cache import (
     AdapterFactory,
+    EvidenceStablePreparation,
     ProviderAdapter,
     ProviderCallBudget,
+    SemanticCacheFailure,
     SemanticCacheRun,
     SemanticProblem,
+    SemanticResultEnvelope,
+    SemanticSelectionEvent,
     VerificationCacheRun,
     VerificationWork,
     analyze_with_cache,
     inspect_semantic_cache,
     inspect_verification_cache,
+    prepare_evidence_stable_cache,
+    resolve_prepared_evidence_stable_result,
     verify_with_cache,
 )
 from backstitch.semantic_identity import (
@@ -144,6 +151,15 @@ class SemanticAnalysisProblem:
 
 
 @dataclass(frozen=True, slots=True)
+class IndependentQualificationAuthority:
+    """One authoritatively validated qualification bound to one analyzer."""
+
+    selectors: tuple[str, ...]
+    analyzer_provider: ProviderIdentity
+    problem_details: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
 class ResolvedSemanticSettings:
     """All non-policy inputs needed after config and provider resolution."""
 
@@ -168,6 +184,7 @@ class ResolvedSemanticSettings:
     input_token_overhead: int
     cost_rate_source: str
     dispositions: tuple[SemanticDisposition, ...]
+    result_reuse: str = "evidence-stable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +249,8 @@ class SemanticAnalysisRun:
     report_json: bytes
     stderr_lines: tuple[str, ...]
     exit_code: int
+    selected_result_objects: tuple[dict[str, Any], ...] = ()
+    selection_events: tuple[dict[str, object], ...] = ()
 
 
 def resolve_semantic_settings(settings: AnalyzeSettings) -> ResolvedSemanticSettings:
@@ -271,6 +290,7 @@ def resolve_semantic_settings(settings: AnalyzeSettings) -> ResolvedSemanticSett
         concurrency=settings.concurrency,
         cache_path=Path(settings.cache_path),
         cache_mode=settings.cache_mode,
+        result_reuse=settings.result_reuse,
         search_epoch=settings.search_epoch,
         require_complete=settings.require_complete,
         required_kinds=settings.required_kinds,
@@ -395,6 +415,7 @@ def _cache_problem(problem: SemanticProblem) -> SemanticAnalysisProblem:
         problem.stage,
         problem.code,
         problem.message,
+        details=problem.details,
     )
 
 
@@ -652,6 +673,8 @@ def _execute_cache(
     int,
     int,
     dict[str, dict[str, int]],
+    tuple[SemanticResultEnvelope, ...],
+    tuple[SemanticSelectionEvent, ...],
 ]:
     provider_call_budget = ProviderCallBudget(request.settings.maximum_provider_calls)
     adapter_factory = request.adapter_factory
@@ -687,6 +710,7 @@ def _execute_cache(
             packets=packets,
             cache_path=request.settings.cache_path,
             cache_mode=request.settings.cache_mode,
+            result_reuse="exact-inference",
             provider_identity=request.settings.provider_identity,
             request_identity=request.settings.request_identity,
             adapter_factory=effective_adapter_factory,
@@ -708,6 +732,8 @@ def _execute_cache(
             run.cache_misses,
             run.provider_calls,
             run.kind_counts,
+            run.result_envelopes,
+            run.selection_events,
         )
 
     def analyze_one(
@@ -736,6 +762,319 @@ def _execute_cache(
         sum(run.cache_misses for run in runs),
         sum(run.provider_calls for run in runs),
         kind_counts,
+        tuple(envelope for run in runs for envelope in run.result_envelopes),
+        tuple(event for run in runs for event in run.selection_events),
+    )
+
+
+def _execute_evidence_stable_preparation(
+    request: SemanticAnalysisRequest,
+    preparation: EvidenceStablePreparation,
+    *,
+    runtime_deadline: float,
+    provider_call_packet_ids: frozenset[str] | None,
+) -> tuple[
+    tuple[dict[str, Any], ...],
+    bytes,
+    tuple[SemanticProblem, ...],
+    int,
+    int,
+    int,
+    dict[str, dict[str, int]],
+    tuple[SemanticResultEnvelope, ...],
+    tuple[SemanticSelectionEvent, ...],
+]:
+    """Resolve a held run-wide evidence-stable selection after preflight."""
+
+    provider_call_budget = ProviderCallBudget(request.settings.maximum_provider_calls)
+    adapter: ProviderAdapter | None = None
+    adapter_error: Exception | None = None
+    adapter_lock = threading.Lock()
+    counter_lock = threading.Lock()
+    provider_calls = 0
+    provider_calls_by_kind = {
+        "section": 0,
+        "invariant": 0,
+        "suppression": 0,
+    }
+
+    def get_adapter() -> ProviderAdapter:
+        nonlocal adapter, adapter_error
+        with adapter_lock:
+            if adapter_error is not None:
+                raise RuntimeError("semantic adapter construction failed") from (
+                    adapter_error
+                )
+            if adapter is None:
+                if request.adapter_factory is None:
+                    raise RuntimeError("no provider adapter is available")
+                try:
+                    adapter = request.adapter_factory()
+                except Exception as exc:
+                    adapter_error = exc
+                    raise
+            return adapter
+
+    def resolve_item(item: Any) -> SemanticSelectionEvent | SemanticProblem:
+        packet = item.packet
+        if request.settings.cache_mode == "require" and item.selection is None:
+            return SemanticProblem(
+                packet["packet_id"],
+                "completeness",
+                "incomplete_result",
+                "required semantic cache result is missing",
+            )
+
+        def call_provider() -> Any:
+            nonlocal provider_calls
+            if time.monotonic() >= runtime_deadline:
+                raise SemanticCacheFailure(
+                    "budget",
+                    "budget_exceeded",
+                    "maximum semantic analysis runtime exceeded before provider call",
+                )
+            if (
+                provider_call_packet_ids is not None
+                and packet["packet_id"] not in provider_call_packet_ids
+            ):
+                raise SemanticCacheFailure(
+                    "budget",
+                    "budget_exceeded",
+                    "unplanned provider call is outside the conservative cost preflight",
+                )
+            if not provider_call_budget.reserve():
+                raise SemanticCacheFailure(
+                    "budget",
+                    "budget_exceeded",
+                    "maximum semantic provider calls exceeded during execution",
+                )
+            try:
+                selected_adapter = get_adapter()
+            except Exception as exc:
+                provider_call_budget.release()
+                detail = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+                raise SemanticCacheFailure(
+                    "provider",
+                    "provider_failure",
+                    f"adapter construction failed: {detail}",
+                ) from exc
+            with counter_lock:
+                provider_calls += 1
+                provider_calls_by_kind[cast(str, packet["kind"])] += 1
+            try:
+                response = selected_adapter(
+                    model_request_bytes(
+                        packet, instruction_bytes=item.identity.prompt_bytes
+                    ).decode("utf-8")
+                )
+                if time.monotonic() >= runtime_deadline:
+                    raise SemanticCacheFailure(
+                        "budget",
+                        "budget_exceeded",
+                        "maximum semantic analysis runtime exceeded "
+                        "during provider call",
+                    )
+                return response
+            except SemanticCacheFailure:
+                raise
+            except Exception as exc:
+                raise SemanticCacheFailure(
+                    "provider", "provider_failure", f"model call failed: {exc}"
+                ) from exc
+
+        try:
+            return resolve_prepared_evidence_stable_result(
+                item,
+                call_provider=call_provider,
+                runtime_deadline=runtime_deadline,
+            )
+        except SemanticCacheFailure as exc:
+            return SemanticProblem(
+                packet["packet_id"], exc.stage, exc.code, exc.message
+            )
+        except Exception as exc:  # noqa: BLE001 - contain one packet boundary
+            return SemanticProblem(
+                packet["packet_id"],
+                "cache",
+                "corrupt_cache",
+                f"unexpected cache failure: {exc}",
+            )
+
+    if request.settings.concurrency <= 1 or len(preparation.items) <= 1:
+        outcomes = tuple(resolve_item(item) for item in preparation.items)
+    else:
+        with ThreadPoolExecutor(max_workers=request.settings.concurrency) as executor:
+            outcomes = tuple(executor.map(resolve_item, preparation.items))
+
+    problems = tuple(
+        outcome for outcome in outcomes if isinstance(outcome, SemanticProblem)
+    )
+    events = tuple(
+        outcome for outcome in outcomes if isinstance(outcome, SemanticSelectionEvent)
+    )
+    envelopes = tuple(event.envelope for event in events)
+    results = tuple(envelope.result for envelope in envelopes)
+    result_jsonl = b"".join(canonical_json_bytes(result) + b"\n" for result in results)
+    kind_counts = _empty_analyzer_kind_counts()
+    cache_hits = 0
+    cache_misses = 0
+    for item, outcome in zip(preparation.items, outcomes, strict=True):
+        packet_kind = cast(str, item.packet["kind"])
+        if item.is_genuine_miss and (
+            not isinstance(outcome, SemanticSelectionEvent) or outcome.source == "live"
+        ):
+            cache_misses += 1
+            kind_counts["cache_misses"][packet_kind] += 1
+        elif isinstance(outcome, SemanticSelectionEvent):
+            cache_hits += 1
+            kind_counts["cache_hits"][packet_kind] += 1
+    kind_counts["provider_calls"].update(provider_calls_by_kind)
+    return (
+        results,
+        result_jsonl,
+        problems,
+        cache_hits,
+        cache_misses,
+        provider_calls,
+        kind_counts,
+        envelopes,
+        events,
+    )
+
+
+def _run_evidence_stable_cache(
+    request: SemanticAnalysisRequest,
+    rows: tuple[dict[str, Any], ...],
+    identities: tuple[InferenceIdentity, ...],
+    authority: IndependentQualificationAuthority | None,
+    *,
+    runtime_deadline: float,
+) -> tuple[
+    tuple[dict[str, Any], ...],
+    bytes,
+    tuple[SemanticProblem, ...],
+    int,
+    int,
+    int,
+    dict[str, dict[str, int]],
+    tuple[SemanticResultEnvelope, ...],
+    tuple[SemanticSelectionEvent, ...],
+    int | None,
+]:
+    """Hold the run-wide review cohort through qualification and preflight."""
+
+    problems: list[SemanticProblem] = []
+    estimated_cost: int | None = None
+    try:
+        with prepare_evidence_stable_cache(
+            packets=request.packets,
+            cache_path=request.settings.cache_path,
+            cache_mode=cast(Any, request.settings.cache_mode),
+            provider_identity=request.settings.provider_identity,
+            identities=identities,
+            lock_wait_timeout_seconds=request.settings.lock_wait_timeout_seconds,
+            runtime_deadline=runtime_deadline,
+        ) as preparation:
+            producer_identities = tuple(
+                item.producing_provider_identity for item in preparation.items
+            )
+            qualification_problem = _unqualified_selected_provider_problem(
+                authority, producer_identities
+            )
+            if qualification_problem is not None:
+                problems.append(
+                    SemanticProblem(
+                        qualification_problem.packet_id,
+                        cast(Any, qualification_problem.stage),
+                        cast(Any, qualification_problem.code),
+                        qualification_problem.message,
+                        qualification_problem.details,
+                    )
+                )
+            planned_miss_ids = tuple(
+                item.packet["packet_id"]
+                for item in preparation.items
+                if item.is_genuine_miss
+            )
+            planned_provider_calls = (
+                len(planned_miss_ids)
+                if request.settings.cache_mode == "read-write"
+                else 0
+            )
+            if (
+                not problems
+                and planned_provider_calls > request.settings.maximum_provider_calls
+            ):
+                problems.append(
+                    SemanticProblem(
+                        None,
+                        "budget",
+                        "budget_exceeded",
+                        "planned provider calls exceed analyze.maximum_provider_calls",
+                    )
+                )
+            provider_call_packet_ids: frozenset[str] | None = None
+            if request.settings.maximum_estimated_cost_microusd > 0:
+                cost_miss_ids = (
+                    planned_miss_ids
+                    if request.settings.cache_mode == "read-write"
+                    else ()
+                )
+                estimated_cost = _estimate_cost(
+                    rows, identities, cost_miss_ids, request.settings
+                )
+                provider_call_packet_ids = frozenset(cost_miss_ids)
+                if estimated_cost > request.settings.maximum_estimated_cost_microusd:
+                    problems.append(
+                        SemanticProblem(
+                            None,
+                            "budget",
+                            "budget_exceeded",
+                            "planned provider cost exceeds configured ceiling",
+                        )
+                    )
+            if problems:
+                return (
+                    (),
+                    b"",
+                    tuple(problems),
+                    0,
+                    0,
+                    0,
+                    _empty_analyzer_kind_counts(),
+                    (),
+                    (),
+                    estimated_cost,
+                )
+            execution = _execute_evidence_stable_preparation(
+                request,
+                preparation,
+                runtime_deadline=runtime_deadline,
+                provider_call_packet_ids=provider_call_packet_ids,
+            )
+            return (*execution, estimated_cost)
+    except SemanticCacheFailure as exc:
+        problems.append(SemanticProblem(None, exc.stage, exc.code, exc.message))
+    except Exception as exc:  # noqa: BLE001 - untrusted filesystem boundary
+        problems.append(
+            SemanticProblem(
+                None,
+                "cache",
+                "corrupt_cache",
+                f"unexpected cache preparation failure: {exc}",
+            )
+        )
+    return (
+        (),
+        b"",
+        tuple(problems),
+        0,
+        0,
+        0,
+        _empty_analyzer_kind_counts(),
+        (),
+        (),
+        estimated_cost,
     )
 
 
@@ -1091,11 +1430,11 @@ def _disposition_row(disposition: Any) -> dict[str, object]:
     }
 
 
-def required_independent_qualification_problem(
+def _resolve_independent_qualification(
     policy: SemanticPolicy,
     verification_settings: ResolvedVerificationSettings | None,
     evaluation_settings: VerifyEvalSettings | None = None,
-) -> SemanticAnalysisProblem | None:
+) -> tuple[SemanticAnalysisProblem | None, IndependentQualificationAuthority | None]:
     """Resolve requested verifier failure authority before repository work."""
 
     selectors = list(
@@ -1107,7 +1446,7 @@ def required_independent_qualification_problem(
         )
     )
     if not selectors:
-        return None
+        return None, None
     current_composition: str | None = (
         verification_settings.composition_identity.composition_sha256
         if verification_settings is not None
@@ -1169,6 +1508,17 @@ def required_independent_qualification_problem(
         "and inference contracts or remove the failure-authority selector."
     )
 
+    def qualification_details(
+        identity: dict[str, object] | None,
+    ) -> dict[str, object] | None:
+        if identity is None:
+            return None
+        normalized = dict(identity)
+        corpus_sha256 = normalized.get("corpus_sha256")
+        if isinstance(corpus_sha256, str):
+            normalized["corpus_sha256"] = corpus_sha256.removeprefix("sha256:")
+        return normalized
+
     def unavailable(
         reason: str,
         *,
@@ -1187,10 +1537,15 @@ def required_independent_qualification_problem(
                 "qualification_report_raw_sha256": raw_report_sha256,
                 "expected_derivation_identity": expected_derivation,
                 "current_derivation_identity": current_derivation,
-                "expected_qualification_identity": expected_qualification,
-                "current_qualification_identity": current_qualification,
+                "expected_qualification_identity": qualification_details(
+                    expected_qualification
+                ),
+                "current_qualification_identity": qualification_details(
+                    current_qualification
+                ),
                 "expected_composition_sha256": expected_composition,
                 "current_composition_sha256": current_composition,
+                "unqualified_analyzer_providers": [],
             },
         )
 
@@ -1203,7 +1558,7 @@ def required_independent_qualification_problem(
         or not evaluation_settings.qualification_report.strip()
         or not evaluation_settings.qualification_report_sha256
     ):
-        return unavailable("missing")
+        return unavailable("missing"), None
 
     corpus_path = Path(evaluation_settings.qualification_corpus)
     report_path = Path(evaluation_settings.qualification_report)
@@ -1223,14 +1578,20 @@ def required_independent_qualification_problem(
         raw_report_sha256 = hashlib.sha256(raw_report).hexdigest()
         corpus = load_semantic_eval_corpus(corpus_path, mode="enforce")
         if corpus.corpus_sha256 != evaluation_settings.qualification_corpus_sha256:
-            return unavailable("identity_mismatch", raw_report_sha256=raw_report_sha256)
+            return (
+                unavailable("identity_mismatch", raw_report_sha256=raw_report_sha256),
+                None,
+            )
         report = load_semantic_eval_report_bytes(
             raw_report,
             path=resolved_report_path,
             corpus=corpus,
         )
         if report.report_sha256 != evaluation_settings.qualification_report_sha256:
-            return unavailable("identity_mismatch", raw_report_sha256=raw_report_sha256)
+            return (
+                unavailable("identity_mismatch", raw_report_sha256=raw_report_sha256),
+                None,
+            )
         observed = derive_semantic_eval_observed_facts(corpus)
         report = validate_semantic_eval_report_authoritatively(
             report,
@@ -1239,9 +1600,9 @@ def required_independent_qualification_problem(
             path=resolved_report_path,
         )
     except FileNotFoundError:
-        return unavailable("missing", raw_report_sha256=raw_report_sha256)
+        return unavailable("missing", raw_report_sha256=raw_report_sha256), None
     except (OSError, ValueError):
-        return unavailable("corrupt", raw_report_sha256=raw_report_sha256)
+        return unavailable("corrupt", raw_report_sha256=raw_report_sha256), None
 
     report_value = report.to_dict()
     report_identity = cast(dict[str, Any], report_value["identity"])
@@ -1262,12 +1623,15 @@ def required_independent_qualification_problem(
         and expected_composition == current_composition
     )
     if not identity_matches:
-        return unavailable(
-            "identity_mismatch",
-            raw_report_sha256=raw_report_sha256,
-            expected_derivation=expected_derivation,
-            expected_qualification=expected_qualification,
-            expected_composition=expected_composition,
+        return (
+            unavailable(
+                "identity_mismatch",
+                raw_report_sha256=raw_report_sha256,
+                expected_derivation=expected_derivation,
+                expected_qualification=expected_qualification,
+                expected_composition=expected_composition,
+            ),
+            None,
         )
     qualified_codes = {
         cast(str, item["code"])
@@ -1275,14 +1639,87 @@ def required_independent_qualification_problem(
     }
     selected_codes = {selector.rsplit(":", 1)[0] for selector in selectors}
     if not report.passed or not selected_codes <= qualified_codes:
-        return unavailable(
-            "failed",
-            raw_report_sha256=raw_report_sha256,
-            expected_derivation=expected_derivation,
-            expected_qualification=expected_qualification,
-            expected_composition=expected_composition,
+        return (
+            unavailable(
+                "failed",
+                raw_report_sha256=raw_report_sha256,
+                expected_derivation=expected_derivation,
+                expected_qualification=expected_qualification,
+                expected_composition=expected_composition,
+            ),
+            None,
         )
-    return None
+    assert verification_settings is not None
+    details: dict[str, object] = {
+        "selectors": selectors,
+        "reason": "identity_mismatch",
+        "qualification_report_raw_sha256": raw_report_sha256,
+        "expected_derivation_identity": expected_derivation,
+        "current_derivation_identity": current_derivation,
+        "expected_qualification_identity": qualification_details(
+            expected_qualification
+        ),
+        "current_qualification_identity": qualification_details(current_qualification),
+        "expected_composition_sha256": expected_composition,
+        "current_composition_sha256": current_composition,
+        "unqualified_analyzer_providers": [],
+    }
+    return (
+        None,
+        IndependentQualificationAuthority(
+            selectors=tuple(selectors),
+            analyzer_provider=ProviderIdentity(
+                **cast(
+                    dict[str, Any],
+                    verification_settings.composition_identity.analysis_composition[
+                        "provider"
+                    ],
+                )
+            ),
+            problem_details=details,
+        ),
+    )
+
+
+def required_independent_qualification_problem(
+    policy: SemanticPolicy,
+    verification_settings: ResolvedVerificationSettings | None,
+    evaluation_settings: VerifyEvalSettings | None = None,
+) -> SemanticAnalysisProblem | None:
+    """Resolve requested verifier failure authority before repository work."""
+
+    problem, _authority = _resolve_independent_qualification(
+        policy,
+        verification_settings,
+        evaluation_settings,
+    )
+    return problem
+
+
+def _unqualified_selected_provider_problem(
+    authority: IndependentQualificationAuthority | None,
+    providers: tuple[ProviderIdentity, ...],
+) -> SemanticAnalysisProblem | None:
+    if authority is None:
+        return None
+    foreign = {
+        canonical_json_bytes(asdict(provider)): asdict(provider)
+        for provider in providers
+        if provider != authority.analyzer_provider
+    }
+    if not foreign:
+        return None
+    details = dict(authority.problem_details)
+    details["unqualified_analyzer_providers"] = [
+        foreign[key] for key in sorted(foreign)
+    ]
+    return _problem(
+        "qualification",
+        "required_qualification_unavailable",
+        "Re-run qualification for the current source-derivation, qualification, "
+        "and inference contracts or remove the failure-authority selector.",
+        details=details,
+    )
 
 
 def _build_report(
@@ -1303,6 +1740,9 @@ def _build_report(
     estimated_cost_microusd: int | None,
     cost_rate_source: str | None,
     verification: dict[str, Any],
+    identities: tuple[InferenceIdentity, ...],
+    result_envelopes: tuple[SemanticResultEnvelope, ...],
+    selection_events: tuple[SemanticSelectionEvent, ...],
 ) -> dict[str, Any]:
     if request.packet_report is None:
         raise ValueError("current analysis report requires a packet report")
@@ -1310,7 +1750,7 @@ def _build_report(
     packet_report_schema = packet_report.get("schema_version")
     if packet_report_schema not in {2, 3}:
         raise ValueError("analysis report requires packet report schema 2 or 3")
-    schema_version = 4 if packet_report_schema == 3 else 3
+    schema_version = 5 if packet_report_schema == 3 else 3
     report = {
         "schema_version": schema_version,
         "artifact": "backstitch-analysis-report",
@@ -1352,7 +1792,7 @@ def _build_report(
         "verification": verification,
         "problems": [problem.to_row() for problem in problems],
     }
-    if schema_version == 4:
+    if schema_version == 5:
         # [SEM-7] blast radius: these aggregate counters and the per-kind
         # projection must be derived from the same actual cache/provider events.
         operational_totals = {
@@ -1373,7 +1813,99 @@ def _build_report(
                 for event in ("cache_hits", "cache_misses", "provider_calls")
             },
         }
+        prompts_by_kind: dict[str, dict[str, object]] = {}
+        for packet_row, identity in zip(rows, identities, strict=True):
+            prompt = cast(dict[str, object], identity.contract["prompt"])
+            prompts_by_kind.setdefault(
+                cast(str, packet_row["kind"]),
+                {"kind": packet_row["kind"], **prompt},
+            )
+        source_rows: list[dict[str, object]] = []
+        provider_groups: dict[bytes, dict[str, object]] = {}
+        for envelope, event in zip(result_envelopes, selection_events, strict=True):
+            result = envelope.result
+            provenance = asdict(envelope.provenance)
+            source_rows.append(
+                {
+                    "packet_id": result["packet_id"],
+                    "packet_hash": result["packet_hash"],
+                    "analysis_key": envelope.analysis_key,
+                    "review_key": event.review_key,
+                    "result_object_sha256": envelope.result_object_sha256,
+                    "inference_contract": envelope.inference_contract,
+                    "provenance": provenance,
+                    "selection": event.source,
+                }
+            )
+            observed_model = {
+                key: provenance[key]
+                for key in (
+                    "model_class",
+                    "provider_model_id",
+                    "provider_model_revision",
+                )
+            }
+            provider = asdict(envelope.provider_identity)
+            group_key = canonical_json_bytes(
+                {"provider": provider, "observed_model": observed_model}
+            )
+            group = provider_groups.setdefault(
+                group_key,
+                {
+                    "provider": provider,
+                    "observed_model": observed_model,
+                    "result_count": 0,
+                    "carried_result_count": 0,
+                },
+            )
+            group["result_count"] = cast(int, group["result_count"]) + 1
+            group["carried_result_count"] = cast(
+                int, group["carried_result_count"]
+            ) + int(event.source == "carried")
+        report.update(
+            {
+                "result_reuse": request.settings.result_reuse,
+                "selected_inference": {
+                    "provider": asdict(request.settings.provider_identity),
+                    "request": asdict(request.settings.request_identity),
+                    "analysis_contract_version": 1,
+                    "search_epoch": request.settings.search_epoch,
+                    "prompts": [
+                        prompts_by_kind[kind]
+                        for kind in ("section", "invariant", "suppression")
+                        if kind in prompts_by_kind
+                    ],
+                },
+                "exact_cache_hits": sum(
+                    event.source == "exact-cache" for event in selection_events
+                ),
+                "carried_results": sum(
+                    event.source == "carried" for event in selection_events
+                ),
+                "result_sources": source_rows,
+                "result_providers": [
+                    provider_groups[key] for key in sorted(provider_groups)
+                ],
+            }
+        )
     return report
+
+
+def _analysis_validation_facts(
+    envelopes: tuple[SemanticResultEnvelope, ...],
+    events: tuple[SemanticSelectionEvent, ...],
+) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, object], ...]]:
+    objects = tuple(envelope.object for envelope in envelopes)
+    event_rows = tuple(
+        {
+            "packet_id": event.envelope.result["packet_id"],
+            "packet_hash": event.envelope.result["packet_hash"],
+            "result_object_sha256": event.envelope.result_object_sha256,
+            "selection": event.source,
+        }
+        for event in events
+    )
+    return objects, event_rows
 
 
 def _stderr_lines(
@@ -1431,6 +1963,8 @@ def _run_semantic_analysis(
     problems: list[SemanticAnalysisProblem] = []
     results: tuple[dict[str, Any], ...] = ()
     result_jsonl = b""
+    result_envelopes: tuple[SemanticResultEnvelope, ...] = ()
+    selection_events: tuple[SemanticSelectionEvent, ...] = ()
     cache_hits = 0
     cache_misses = 0
     provider_calls = 0
@@ -1547,7 +2081,18 @@ def _run_semantic_analysis(
                 "semantic analysis concurrency must be at least one",
             )
         )
-    qualification_problem = required_independent_qualification_problem(
+    if request.settings.result_reuse not in {
+        "evidence-stable",
+        "exact-inference",
+    }:
+        problems.append(
+            _problem(
+                "config",
+                "invalid_config",
+                "semantic result reuse must be evidence-stable or exact-inference",
+            )
+        )
+    qualification_problem, qualification_authority = _resolve_independent_qualification(
         request.policy,
         request.verification_settings,
         request.evaluation_settings,
@@ -1556,7 +2101,22 @@ def _run_semantic_analysis(
         problems.append(qualification_problem)
 
     projection = _empty_projection(request)
-    if not problems:
+    configured_runtime = request.settings.maximum_runtime_seconds
+    if request.verification_settings is not None:
+        configured_runtime = min(
+            configured_runtime,
+            request.verification_settings.maximum_runtime_seconds,
+        )
+    deadline = (
+        runtime_deadline
+        if runtime_deadline is not None
+        else started + configured_runtime
+    )
+    evidence_stable_cached = (
+        request.settings.result_reuse == "evidence-stable"
+        and request.settings.cache_mode in {"read-write", "require"}
+    )
+    if not problems and not evidence_stable_cached:
         inspection = inspect_semantic_cache(
             packets=request.packets,
             cache_path=request.settings.cache_path,
@@ -1602,35 +2162,48 @@ def _run_semantic_analysis(
                 )
 
     if not problems:
-        configured_runtime = request.settings.maximum_runtime_seconds
-        if request.verification_settings is not None:
-            configured_runtime = min(
-                configured_runtime,
-                request.verification_settings.maximum_runtime_seconds,
+        if evidence_stable_cached:
+            (
+                results,
+                result_jsonl,
+                cache_problems,
+                cache_hits,
+                cache_misses,
+                provider_calls,
+                analyzer_kind_counts,
+                result_envelopes,
+                selection_events,
+                stable_estimated_cost,
+            ) = _run_evidence_stable_cache(
+                request,
+                rows,
+                identities,
+                qualification_authority,
+                runtime_deadline=deadline,
             )
-        deadline = (
-            runtime_deadline
-            if runtime_deadline is not None
-            else started + configured_runtime
-        )
-        (
-            results,
-            result_jsonl,
-            cache_problems,
-            cache_hits,
-            cache_misses,
-            provider_calls,
-            analyzer_kind_counts,
-        ) = _execute_cache(
-            request,
-            identities,
-            runtime_deadline=deadline,
-            provider_call_packet_ids=(
-                frozenset(planned_miss_packet_ids)
-                if request.settings.maximum_estimated_cost_microusd > 0
-                else None
-            ),
-        )
+            if stable_estimated_cost is not None:
+                estimated_cost = stable_estimated_cost
+        else:
+            (
+                results,
+                result_jsonl,
+                cache_problems,
+                cache_hits,
+                cache_misses,
+                provider_calls,
+                analyzer_kind_counts,
+                result_envelopes,
+                selection_events,
+            ) = _execute_cache(
+                request,
+                identities,
+                runtime_deadline=deadline,
+                provider_call_packet_ids=(
+                    frozenset(planned_miss_packet_ids)
+                    if request.settings.maximum_estimated_cost_microusd > 0
+                    else None
+                ),
+            )
         problems.extend(_cache_problem(problem) for problem in cache_problems)
         verification_aggregates: dict[str, VerificationAggregate] = {}
         if not problems:
@@ -1689,6 +2262,10 @@ def _run_semantic_analysis(
             cost_rate_source = f"analyze: {cost_rate_source}; verify: {verify_source}"
         estimated_cost = (estimated_cost or 0) + verification_cost
     elapsed = max(0, int((time.monotonic() - started) * 1000))
+    selected_result_objects, selection_event_rows = _analysis_validation_facts(
+        result_envelopes,
+        selection_events,
+    )
     if validated_report is None:
         return SemanticAnalysisRun(
             results=results,
@@ -1704,6 +2281,8 @@ def _run_semantic_analysis(
                 verification_report,
             ),
             exit_code=2,
+            selected_result_objects=selected_result_objects,
+            selection_events=selection_event_rows,
         )
     report = _build_report(
         request=request,
@@ -1722,6 +2301,19 @@ def _run_semantic_analysis(
         estimated_cost_microusd=estimated_cost,
         cost_rate_source=cost_rate_source,
         verification=verification_report,
+        identities=identities,
+        result_envelopes=result_envelopes,
+        selection_events=selection_events,
+    )
+    schema5_result_objects = (
+        selected_result_objects
+        if validated_report.to_dict()["schema_version"] == 3
+        else None
+    )
+    schema5_selection_events = (
+        selection_event_rows
+        if validated_report.to_dict()["schema_version"] == 3
+        else None
     )
     validated_analysis_report = validate_analysis_report(
         report,
@@ -1729,6 +2321,8 @@ def _run_semantic_analysis(
         packet_jsonl_sha256=request.packet_jsonl_sha256,
         packet_report=validated_report,
         packets=request.packets,
+        selected_result_objects=schema5_result_objects,
+        selection_events=schema5_selection_events,
         expected_scope=request.scope,
         expected_semantic_status=request.semantic_status,
         expected_artifact_currentness=request.artifact_currentness,
@@ -1768,6 +2362,9 @@ def _run_semantic_analysis(
                     estimated_cost_microusd=estimated_cost,
                     cost_rate_source=cost_rate_source,
                     verification=verification_report,
+                    identities=identities,
+                    result_envelopes=result_envelopes,
+                    selection_events=selection_events,
                 )
                 validated_analysis_report = validate_analysis_report(
                     report,
@@ -1775,6 +2372,8 @@ def _run_semantic_analysis(
                     packet_jsonl_sha256=request.packet_jsonl_sha256,
                     packet_report=validated_report,
                     packets=request.packets,
+                    selected_result_objects=schema5_result_objects,
+                    selection_events=schema5_selection_events,
                     expected_scope=request.scope,
                     expected_semantic_status=request.semantic_status,
                     expected_artifact_currentness=request.artifact_currentness,
@@ -1811,6 +2410,9 @@ def _run_semantic_analysis(
                     estimated_cost_microusd=estimated_cost,
                     cost_rate_source=cost_rate_source,
                     verification=verification_report,
+                    identities=identities,
+                    result_envelopes=result_envelopes,
+                    selection_events=selection_events,
                 )
                 validated_analysis_report = validate_analysis_report(
                     report,
@@ -1818,6 +2420,8 @@ def _run_semantic_analysis(
                     packet_jsonl_sha256=request.packet_jsonl_sha256,
                     packet_report=validated_report,
                     packets=request.packets,
+                    selected_result_objects=schema5_result_objects,
+                    selection_events=schema5_selection_events,
                     expected_scope=request.scope,
                     expected_semantic_status=request.semantic_status,
                     expected_artifact_currentness=request.artifact_currentness,
@@ -1840,4 +2444,6 @@ def _run_semantic_analysis(
             verification_report,
         ),
         exit_code=final_exit_code,
+        selected_result_objects=selected_result_objects,
+        selection_events=selection_event_rows,
     )
