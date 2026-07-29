@@ -55,7 +55,7 @@ LESSON_LEADING_DATE = re.compile(r"^## 20[0-9]{2}-[0-9]{2}-[0-9]{2}", re.M)
 LESSON_TRAILING_DATE = re.compile(r"^## .*\(20[0-9]{2}-[0-9]{2}-[0-9]{2}\)\s*$", re.M)
 
 # This repo's cues cite the guidance hub as well as sibling consumers.
-SIBLINGS = ["agent-guidance", "mm", "weft", "taut", "engram", "simplebroker"]
+SIBLINGS = ["agent-theory", "mm", "weft", "taut", "engram", "simplebroker"]
 SIBLING_ROOT = REPO_ROOT.parent
 
 
