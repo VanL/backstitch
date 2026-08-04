@@ -12,11 +12,15 @@ import json
 import math
 from dataclasses import asdict, dataclass
 from importlib.metadata import PackageNotFoundError, version
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from backstitch.canonical import canonical_json_bytes
 from backstitch.grammar import is_sha256_hex
 from backstitch.semantic_packets import prompt_descriptor, prompt_instruction_bytes
+from backstitch.semantic_verification_contract import (
+    VERIFY_CONTRACT_VERSION,
+    verification_prompt_descriptor,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,34 +74,324 @@ class ProviderIdentity:
 
 @dataclass(frozen=True, slots=True)
 class RequestIdentity:
-    json_mode: Literal["require", "off"]
-    temperature: float
-    seed: int
-    max_tokens: int
+    """Closed identity projection of the exact provider request.
+
+    ``None`` means that the trusted capability descriptor resolved the field
+    as absent.  The projection helper below omits absent fields rather than
+    relying on an adapter or provider default.
+    """
+
+    json_mode: Literal["require", "off"] | None = None
+    temperature: float | None = None
+    seed: int | None = None
+    max_tokens: int | None = None
 
     def __post_init__(self) -> None:
-        if self.json_mode not in ("require", "off"):
+        if self.json_mode is not None and self.json_mode not in ("require", "off"):
             raise ValueError("json_mode must be require or off")
-        if (
+        if self.temperature is not None and (
             isinstance(self.temperature, bool)
             or not isinstance(self.temperature, (int, float))
             or not math.isfinite(self.temperature)
             or not 0 <= self.temperature <= 2
         ):
             raise ValueError("temperature must be a finite number from 0 through 2")
-        object.__setattr__(self, "temperature", float(self.temperature))
-        if (
+        if self.temperature is not None:
+            object.__setattr__(self, "temperature", float(self.temperature))
+        if self.seed is not None and (
             isinstance(self.seed, bool)
             or not isinstance(self.seed, int)
             or self.seed < 0
         ):
             raise ValueError("seed must be a nonnegative integer")
-        if (
+        if self.max_tokens is not None and (
             isinstance(self.max_tokens, bool)
             or not isinstance(self.max_tokens, int)
             or self.max_tokens < 1
         ):
             raise ValueError("max_tokens must be a positive integer")
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the exact closed projection, omitting resolved-absent fields."""
+
+        return {
+            name: value
+            for name, value in (
+                ("json_mode", self.json_mode),
+                ("temperature", self.temperature),
+                ("seed", self.seed),
+                ("max_tokens", self.max_tokens),
+            )
+            if value is not None
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class EffectiveRequest:
+    """One immutable provider request before identity is derived."""
+
+    json_mode: Literal["require", "off"] | None = None
+    temperature: float | None = None
+    seed: int | None = None
+    max_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        # Reuse the identity validator so request and identity cannot drift.
+        RequestIdentity(
+            self.json_mode,
+            self.temperature,
+            self.seed,
+            self.max_tokens,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            name: value
+            for name, value in (
+                ("json_mode", self.json_mode),
+                ("temperature", self.temperature),
+                ("seed", self.seed),
+                ("max_tokens", self.max_tokens),
+            )
+            if value is not None
+        }
+
+    def identity(self) -> RequestIdentity:
+        return RequestIdentity(
+            self.json_mode,
+            self.temperature,
+            self.seed,
+            self.max_tokens,
+        )
+
+
+RequestPresence = Literal["required", "optional", "forbidden"]
+
+
+@dataclass(frozen=True, slots=True)
+class RequestFieldConstraint:
+    """Trusted presence and value contract for one request field."""
+
+    presence: RequestPresence
+    allowed_values: tuple[object, ...] | None
+    minimum: int | float | None
+    maximum: int | float | None
+
+    def __post_init__(self) -> None:
+        if self.presence not in {"required", "optional", "forbidden"}:
+            raise ValueError("request field presence is invalid")
+        if self.presence == "forbidden":
+            if (
+                self.allowed_values is not None
+                or self.minimum is not None
+                or self.maximum is not None
+            ):
+                raise ValueError("forbidden request fields cannot have value limits")
+            return
+        if self.allowed_values is not None:
+            if (
+                not self.allowed_values
+                or self.minimum is not None
+                or self.maximum is not None
+            ):
+                raise ValueError(
+                    "allowed request values must be nonempty and cannot have bounds"
+                )
+            if any(
+                value == earlier
+                for index, value in enumerate(self.allowed_values)
+                for earlier in self.allowed_values[:index]
+            ):
+                raise ValueError("allowed request values must not contain duplicates")
+            return
+        if (self.minimum is None) != (self.maximum is None):
+            raise ValueError("request field bounds must be both present or both absent")
+        if self.minimum is not None and self.maximum is not None:
+            if (
+                isinstance(self.minimum, bool)
+                or isinstance(self.maximum, bool)
+                or not isinstance(self.minimum, (int, float))
+                or not isinstance(self.maximum, (int, float))
+                or not math.isfinite(float(self.minimum))
+                or not math.isfinite(float(self.maximum))
+                or self.minimum > self.maximum
+            ):
+                raise ValueError("request field bounds are invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class RequestConstraints:
+    json_mode: RequestFieldConstraint
+    temperature: RequestFieldConstraint
+    seed: RequestFieldConstraint
+    max_tokens: RequestFieldConstraint
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityDescriptor:
+    """Committed authority for one stable model/request combination."""
+
+    capability_schema_version: Literal[1]
+    capability_revision: str
+    model_id: str
+    model_revision: str
+    request_constraints: RequestConstraints
+    maximum_input_bytes: int
+
+    def __post_init__(self) -> None:
+        if self.capability_schema_version != 1:
+            raise ValueError("capability_schema_version must equal 1")
+        if (
+            not isinstance(self.capability_revision, str)
+            or not self.capability_revision.strip()
+        ):
+            raise ValueError("capability_revision must be nonblank")
+        if not isinstance(self.model_id, str) or not isinstance(
+            self.model_revision, str
+        ):
+            raise ValueError("capability provider identity must be strings")
+        if bool(self.model_id.strip()) != bool(self.model_revision.strip()):
+            raise ValueError(
+                "capability model_id and model_revision must be both blank or nonblank"
+            )
+        if (
+            isinstance(self.maximum_input_bytes, bool)
+            or not isinstance(self.maximum_input_bytes, int)
+            or self.maximum_input_bytes < 1
+        ):
+            raise ValueError("maximum_input_bytes must be a positive integer")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "capability_schema_version": self.capability_schema_version,
+            "capability_revision": self.capability_revision,
+            "provider": {
+                "model_id": self.model_id,
+                "model_revision": self.model_revision,
+            },
+            "request_constraints": {
+                name: asdict(getattr(self.request_constraints, name))
+                for name in ("json_mode", "temperature", "seed", "max_tokens")
+            },
+            "maximum_input_bytes": self.maximum_input_bytes,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityProvenance:
+    source: str
+    source_sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, str) or not self.source.strip():
+            raise ValueError("capability provenance source must be nonblank")
+        if not is_sha256_hex(self.source_sha256):
+            raise ValueError("capability provenance hash must be lowercase SHA-256")
+
+
+def build_capability_provenance(
+    capability: CapabilityDescriptor,
+    *,
+    source: str,
+) -> CapabilityProvenance:
+    return CapabilityProvenance(
+        source,
+        hashlib.sha256(canonical_json_bytes(capability.to_dict())).hexdigest(),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedInference:
+    """Stable identity, raw transport, and frozen request with one owner."""
+
+    provider_identity: ProviderIdentity
+    adapter_model_id: str
+    effective_request: EffectiveRequest
+    request_identity: RequestIdentity
+    capability: CapabilityDescriptor
+    capability_provenance: CapabilityProvenance
+
+    def __post_init__(self) -> None:
+        if not self.adapter_model_id.strip():
+            raise ValueError("adapter_model_id must be nonblank")
+        if self.provider_identity.model_id != self.capability.model_id:
+            raise ValueError(
+                "capability model_id does not match stable provider identity"
+            )
+        if self.provider_identity.model_revision != self.capability.model_revision:
+            raise ValueError(
+                "capability model_revision does not match stable provider identity"
+            )
+        if self.request_identity.to_dict() != self.effective_request.to_dict():
+            raise ValueError("request identity does not match the effective request")
+        if self.capability_provenance != build_capability_provenance(
+            self.capability,
+            source=self.capability_provenance.source,
+        ):
+            raise ValueError("capability provenance does not match descriptor bytes")
+
+
+def request_identity_dict(request: RequestIdentity) -> dict[str, object]:
+    """Centralize the optional-field projection for identity/cache callers."""
+
+    return request.to_dict()
+
+
+def _validate_request_constraint(
+    field_name: str,
+    value: object | None,
+    constraint: RequestFieldConstraint,
+    *,
+    key_prefix: str,
+) -> None:
+    key = f"{key_prefix}.{field_name}"
+    if value is None:
+        if constraint.presence == "required":
+            raise ValueError(f"{key} is required by the selected model capability")
+        return
+    if constraint.presence == "forbidden":
+        raise ValueError(f"{key} is forbidden by the selected model capability")
+    if constraint.allowed_values is not None and value not in constraint.allowed_values:
+        allowed = ", ".join(repr(item) for item in constraint.allowed_values)
+        raise ValueError(f"{key} must be one of: {allowed}")
+    if constraint.minimum is not None and (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or value < constraint.minimum
+        or value > cast(int | float, constraint.maximum)
+    ):
+        raise ValueError(
+            f"{key} must be from {constraint.minimum} through {constraint.maximum}"
+        )
+
+
+def resolve_inference(
+    *,
+    provider_identity: ProviderIdentity,
+    adapter_model_id: str,
+    requested: EffectiveRequest,
+    capability: CapabilityDescriptor,
+    capability_provenance: CapabilityProvenance,
+    key_prefix: str,
+) -> ResolvedInference:
+    """Validate capability, then freeze the exact request and its identity."""
+
+    constraints = capability.request_constraints
+    for field_name in ("json_mode", "temperature", "seed", "max_tokens"):
+        _validate_request_constraint(
+            field_name,
+            getattr(requested, field_name),
+            getattr(constraints, field_name),
+            key_prefix=key_prefix,
+        )
+    return ResolvedInference(
+        provider_identity=provider_identity,
+        adapter_model_id=adapter_model_id,
+        effective_request=requested,
+        request_identity=requested.identity(),
+        capability=capability,
+        capability_provenance=capability_provenance,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,11 +470,6 @@ def build_composition_identity(
 ) -> CompositionIdentity:
     """Build the configuration-level analyzer/verifier qualification selector."""
 
-    from backstitch.semantic_verification import (
-        VERIFY_CONTRACT_VERSION,
-        verification_prompt_descriptor,
-    )
-
     if (
         isinstance(analysis_contract_version, bool)
         or not isinstance(analysis_contract_version, int)
@@ -220,7 +509,7 @@ def build_composition_identity(
     analysis = {
         "analysis_contract_version": analysis_contract_version,
         "provider": asdict(analysis_provider),
-        "request": asdict(analysis_request),
+        "request": analysis_request.to_dict(),
         "prompts": prompts,
         "base_search_epoch": analysis_search_epoch,
     }
@@ -228,7 +517,7 @@ def build_composition_identity(
         "verify_contract_version": VERIFY_CONTRACT_VERSION,
         "prompt": asdict(verification_prompt_descriptor()),
         "provider": asdict(verify_provider),
-        "request": asdict(verify_request),
+        "request": verify_request.to_dict(),
         "search_epochs": list(verify_search_epochs),
         "required_verdicts": required_verdicts,
         "minimum_support_score": float(minimum_support_score),
@@ -283,7 +572,7 @@ def _build_review_contract(
             "analysis_contract_version": analysis_contract_version,
             "packet_hash": packet["packet_hash"],
             "prompt": asdict(prompt),
-            "request": asdict(request),
+            "request": request.to_dict(),
             "search_epoch": search_epoch,
         },
         prompt_bytes,

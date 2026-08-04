@@ -20,9 +20,15 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from backstitch.analysis_packets import PacketPlan
 from backstitch.artifact_contracts import ValidatedSemanticPacket
+from backstitch.artifact_publication import atomic_replace_bytes
 from backstitch.canonical import canonical_json_bytes
 from backstitch.grammar import is_sha256_hex
+from backstitch.semantic_budget import (
+    estimate_cost_microusd,
+    validate_cost_contract,
+)
 from backstitch.semantic_cache import (
     AdapterFactory,
     EvidenceStablePreparation,
@@ -34,7 +40,6 @@ from backstitch.semantic_cache import (
     SemanticResultEnvelope,
     SemanticSelectionEvent,
     VerificationCacheRun,
-    VerificationWork,
     analyze_with_cache,
     inspect_semantic_cache,
     inspect_verification_cache,
@@ -43,12 +48,18 @@ from backstitch.semantic_cache import (
     verify_with_cache,
 )
 from backstitch.semantic_identity import (
+    CapabilityDescriptor,
     CompositionIdentity,
+    EffectiveRequest,
     InferenceIdentity,
     ProviderIdentity,
     RequestIdentity,
+    ResolvedInference,
+    build_capability_provenance,
     build_composition_identity,
     build_inference_identity,
+    request_identity_dict,
+    resolve_inference,
     resolve_provider_identity,
 )
 from backstitch.semantic_packets import model_request_bytes
@@ -56,24 +67,21 @@ from backstitch.semantic_policy import (
     SemanticDiagnostic,
     SemanticPolicy,
     SemanticProjectionRun,
-    finding_hash,
     project_semantic_results,
 )
 from backstitch.semantic_reports import (
     PacketReport,
     PacketReportError,
-    atomic_replace_bytes,
     validate_analysis_report,
     validate_packet_report,
 )
 from backstitch.semantic_verification import (
     VerificationAggregate,
     aggregate_verification_results,
-    build_verification_request,
-    build_verify_identity,
-    derive_verification_claim,
+    build_verification_work,
     verifier_request_bytes,
 )
+from backstitch.semantic_verification_contract import VerificationWork
 from backstitch.settings import (
     AnalyzeSettings,
     DisabledVerifySettings,
@@ -123,11 +131,6 @@ _FAILED_STAGES = frozenset(
         "qualification",
     }
 )
-_COST_FRAMING_TOKEN_BOUNDS: dict[tuple[str, str], int] = {
-    # The built-in llm/OpenAI adapter is the first reviewed positive-cost
-    # contract. Other backend/plugin pairs remain disabled until reviewed.
-    ("llm", "openai"): 256,
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +188,16 @@ class ResolvedSemanticSettings:
     cost_rate_source: str
     dispositions: tuple[SemanticDisposition, ...]
     result_reuse: str = "evidence-stable"
+    inference: ResolvedInference | None = None
+
+    def __post_init__(self) -> None:
+        if self.inference is not None and (
+            self.provider_identity != self.inference.provider_identity
+            or self.request_identity != self.inference.request_identity
+        ):
+            raise ValueError(
+                "resolved semantic compatibility fields do not match inference owner"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +224,16 @@ class ResolvedVerificationSettings:
     input_token_overhead: int
     cost_rate_source: str
     effective_search_epochs: tuple[str, ...] | None = None
+    inference: ResolvedInference | None = None
+
+    def __post_init__(self) -> None:
+        if self.inference is not None and (
+            self.provider_identity != self.inference.provider_identity
+            or self.request_identity != self.inference.request_identity
+        ):
+            raise ValueError(
+                "resolved verifier compatibility fields do not match inference owner"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +246,7 @@ class SemanticAnalysisRequest:
     adapter_factory: AdapterFactory | None
     result_path: Path | None
     report_path: Path | None
+    packet_plan: PacketPlan | None = None
     verification_settings: ResolvedVerificationSettings | None = None
     evaluation_settings: VerifyEvalSettings | None = None
     verification_adapter_factory: AdapterFactory | None = None
@@ -271,18 +295,50 @@ def resolve_semantic_settings(settings: AnalyzeSettings) -> ResolvedSemanticSett
                 + ", ".join(blank)
             )
     resolved_json_mode = "off" if settings.json_mode == "prefer" else settings.json_mode
-    request_identity = RequestIdentity(
-        json_mode=resolved_json_mode,  # type: ignore[arg-type]
-        temperature=settings.temperature,
-        seed=settings.seed,
-        max_tokens=settings.max_tokens,
-    )
     provider_identity = resolve_provider_identity(
         backend_id=settings.backend_id,
         plugin_id=settings.plugin_id,
         model_id=settings.model,
         model_revision=settings.model_revision,
         plugin_distribution_name=settings.plugin_distribution_name,
+    )
+    requested = EffectiveRequest(
+        json_mode=resolved_json_mode,  # type: ignore[arg-type]
+        temperature=settings.temperature,
+        seed=settings.seed,
+        max_tokens=settings.max_tokens,
+    )
+    inference = None
+    if (
+        settings.adapter_model_id.strip()
+        and provider_identity.model_id.strip()
+        and provider_identity.model_revision.strip()
+    ):
+        capability = CapabilityDescriptor(
+            capability_schema_version=settings.capability_schema_version,
+            capability_revision=settings.capability_revision,
+            model_id=provider_identity.model_id,
+            model_revision=provider_identity.model_revision,
+            request_constraints=settings.request_constraints,
+            maximum_input_bytes=settings.maximum_input_bytes,
+        )
+        inference = resolve_inference(
+            provider_identity=provider_identity,
+            adapter_model_id=settings.adapter_model_id,
+            requested=requested,
+            capability=capability,
+            capability_provenance=build_capability_provenance(
+                capability,
+                source=(
+                    f"packaged:resolved-capability/{provider_identity.model_id}"
+                    if provider_identity.model_id
+                    else "packaged:resolved-capability/default"
+                ),
+            ),
+            key_prefix="analyze",
+        )
+    request_identity = (
+        inference.request_identity if inference is not None else requested.identity()
     )
     return ResolvedSemanticSettings(
         provider_identity=provider_identity,
@@ -311,6 +367,7 @@ def resolve_semantic_settings(settings: AnalyzeSettings) -> ResolvedSemanticSett
         input_token_overhead=settings.input_token_overhead,
         cost_rate_source=settings.cost_rate_source,
         dispositions=settings.dispositions,
+        inference=inference,
     )
 
 
@@ -335,6 +392,23 @@ def resolve_verification_settings(
         output_cost = analyze.output_cost_microusd_per_million_tokens
         input_overhead = analyze.input_token_overhead
         cost_source = analyze.cost_rate_source
+        verify_inference = (
+            resolve_inference(
+                provider_identity=provider_identity,
+                adapter_model_id=analyze.inference.adapter_model_id,
+                requested=EffectiveRequest(
+                    json_mode=resolved_json_mode,  # type: ignore[arg-type]
+                    temperature=settings.temperature,
+                    seed=settings.seed,
+                    max_tokens=settings.max_tokens,
+                ),
+                capability=analyze.inference.capability,
+                capability_provenance=analyze.inference.capability_provenance,
+                key_prefix="verify",
+            )
+            if analyze.inference is not None
+            else None
+        )
     else:
         provider = settings.provider
         if provider is None:
@@ -350,6 +424,32 @@ def resolve_verification_settings(
         output_cost = provider.output_cost_microusd_per_million_tokens
         input_overhead = provider.input_token_overhead
         cost_source = provider.cost_rate_source
+        capability = CapabilityDescriptor(
+            capability_schema_version=provider.capability_schema_version,
+            capability_revision=provider.capability_revision,
+            model_id=provider_identity.model_id,
+            model_revision=provider_identity.model_revision,
+            request_constraints=provider.request_constraints,
+            maximum_input_bytes=provider.maximum_input_bytes,
+        )
+        verify_inference = resolve_inference(
+            provider_identity=provider_identity,
+            adapter_model_id=provider.adapter_model_id,
+            requested=EffectiveRequest(
+                json_mode=resolved_json_mode,  # type: ignore[arg-type]
+                temperature=settings.temperature,
+                seed=settings.seed,
+                max_tokens=settings.max_tokens,
+            ),
+            capability=capability,
+            capability_provenance=build_capability_provenance(
+                capability,
+                source=f"packaged:resolved-capability/{provider_identity.model_id}",
+            ),
+            key_prefix="verify",
+        )
+    if verify_inference is not None:
+        request_identity = verify_inference.request_identity
     composition = build_composition_identity(
         analyze.provider_identity,
         analyze.request_identity,
@@ -381,6 +481,7 @@ def resolve_verification_settings(
         output_cost_microusd_per_million_tokens=output_cost,
         input_token_overhead=input_overhead,
         cost_rate_source=cost_source,
+        inference=verify_inference,
     )
 
 
@@ -432,10 +533,70 @@ def _path_alias_problem(request: SemanticAnalysisRequest) -> str | None:
     return None
 
 
+def _resolve_request_bytes(
+    request: SemanticAnalysisRequest,
+    rows: tuple[dict[str, Any], ...],
+    identities: tuple[InferenceIdentity, ...],
+) -> tuple[bytes, ...]:
+    """Resolve the one request-byte sequence counted and sent by this run."""
+
+    if len(identities) != len(rows):
+        return ()
+    if request.scope == "historical_snapshot":
+        if request.packet_plan is not None:
+            raise ValueError(
+                "historical semantic analysis forbids a current packet plan"
+            )
+        return tuple(
+            model_request_bytes(row, instruction_bytes=identity.prompt_bytes)
+            for row, identity in zip(rows, identities, strict=True)
+        )
+
+    plan = request.packet_plan
+    if plan is None:
+        raise ValueError("current semantic analysis requires its prepared packet plan")
+    if not plan.complete:
+        raise ValueError("current semantic analysis requires a complete packet plan")
+    if len(plan.contributions) != len(rows):
+        raise ValueError("prepared packet plan count does not match semantic packets")
+    if hashlib.sha256(plan.packet_jsonl).hexdigest() != request.packet_jsonl_sha256:
+        raise ValueError("prepared packet plan digest does not match semantic packets")
+
+    resolved: list[bytes] = []
+    for row, identity, contribution in zip(
+        rows, identities, plan.contributions, strict=True
+    ):
+        if (
+            contribution.packet_id != row["packet_id"]
+            or contribution.kind != row["kind"]
+            or contribution.packet != row
+        ):
+            raise ValueError(
+                "prepared packet plan does not match semantic packet order"
+            )
+        retained = contribution.model_request_bytes
+        if contribution.request_byte_count != len(retained):
+            raise ValueError("prepared packet plan request byte count does not match")
+        if not retained.startswith(identity.prompt_bytes + b"\n\n"):
+            raise ValueError(
+                "prepared model request does not match semantic inference identity"
+            )
+        resolved.append(retained)
+    if (
+        plan.measured_packet_count != len(resolved)
+        or plan.measured_prompt_bytes != sum(len(value) for value in resolved)
+        or plan.maximum_request_bytes
+        != max((len(value) for value in resolved), default=0)
+    ):
+        raise ValueError("prepared packet plan aggregate request facts do not match")
+    return tuple(resolved)
+
+
 def _packet_report_preflight(
     request: SemanticAnalysisRequest,
     rows: tuple[dict[str, Any], ...],
     identities: tuple[InferenceIdentity, ...],
+    request_bytes: tuple[bytes, ...],
 ) -> tuple[list[SemanticAnalysisProblem], PacketReport | None]:
     problems: list[SemanticAnalysisProblem] = []
     if packet_report_required(request.settings) and request.packet_report is None:
@@ -485,14 +646,8 @@ def _packet_report_preflight(
         "invariant": sum(row["kind"] == "invariant" for row in rows),
         "suppression": sum(row["kind"] == "suppression" for row in rows),
     }
-    prompt_byte_count = (
-        sum(
-            len(model_request_bytes(row, instruction_bytes=identity.prompt_bytes))
-            for row, identity in zip(rows, identities, strict=True)
-        )
-        if len(identities) == len(rows)
-        else 0
-    )
+    request_byte_counts = tuple(len(value) for value in request_bytes)
+    prompt_byte_count = sum(request_byte_counts)
     for kind in request.settings.required_kinds:
         if kind == "suppression":
             # Current packet-report validation has already proved that every
@@ -537,115 +692,65 @@ def _packet_report_preflight(
                 "prompt bytes exceed analyze.maximum_prompt_bytes",
             )
         )
+    inference = request.settings.inference
+    if inference is not None:
+        maximum_input_bytes = inference.capability.maximum_input_bytes
+        for row, byte_count in zip(rows, request_byte_counts, strict=True):
+            if byte_count > maximum_input_bytes:
+                problems.append(
+                    _problem(
+                        "budget",
+                        "budget_exceeded",
+                        "provider request exceeds selected capability "
+                        "maximum_input_bytes",
+                        packet_id=cast(str, row["packet_id"]),
+                        details={
+                            "request_byte_count": byte_count,
+                            "maximum_input_bytes": maximum_input_bytes,
+                        },
+                    )
+                )
+                break
     return problems, report
 
 
 def _validate_cost_contract(
     settings: ResolvedSemanticSettings,
 ) -> SemanticAnalysisProblem | None:
-    if settings.maximum_estimated_cost_microusd == 0:
-        return None
-    pair = (
-        settings.provider_identity.backend_id,
-        settings.provider_identity.plugin_id,
+    violation = validate_cost_contract(settings, lane="analyze")
+    return (
+        None
+        if violation is None
+        else _problem("config", "invalid_config", violation.message)
     )
-    minimum_overhead = _COST_FRAMING_TOKEN_BOUNDS.get(pair)
-    if minimum_overhead is None:
-        return _problem(
-            "config",
-            "invalid_config",
-            "positive cost ceiling has no reviewed backend/plugin cost contract",
-        )
-    if settings.input_token_overhead < minimum_overhead:
-        return _problem(
-            "config",
-            "invalid_config",
-            "input token overhead is below the adapter's code-owned framing bound",
-        )
-    if not settings.cost_rate_source.strip():
-        return _problem(
-            "config",
-            "invalid_config",
-            "positive cost ceiling requires a nonblank cost rate source",
-        )
-    if (
-        pair == ("llm", "openai")
-        and settings.input_cost_microusd_per_million_tokens == 0
-        and settings.output_cost_microusd_per_million_tokens == 0
-    ):
-        return _problem(
-            "config",
-            "invalid_config",
-            "positive cost ceiling cannot use zero rates for both cloud directions",
-        )
-    return None
 
 
 def _validate_verification_cost_contract(
     settings: ResolvedVerificationSettings | None,
 ) -> SemanticAnalysisProblem | None:
-    if settings is None or settings.maximum_estimated_cost_microusd == 0:
+    if settings is None:
         return None
-    pair = (settings.provider_identity.backend_id, settings.provider_identity.plugin_id)
-    minimum_overhead = _COST_FRAMING_TOKEN_BOUNDS.get(pair)
-    if minimum_overhead is None:
-        return _problem(
-            "config",
-            "invalid_config",
-            "positive verifier cost ceiling has no reviewed backend/plugin contract",
-        )
-    if settings.input_token_overhead < minimum_overhead:
-        return _problem(
-            "config",
-            "invalid_config",
-            "verifier input token overhead is below the adapter framing bound",
-        )
-    if not settings.cost_rate_source.strip():
-        return _problem(
-            "config",
-            "invalid_config",
-            "positive verifier cost ceiling requires a nonblank rate source",
-        )
-    if (
-        pair == ("llm", "openai")
-        and settings.input_cost_microusd_per_million_tokens == 0
-        and settings.output_cost_microusd_per_million_tokens == 0
-    ):
-        return _problem(
-            "config",
-            "invalid_config",
-            "positive verifier cost ceiling cannot use two zero cloud rates",
-        )
-    return None
+    violation = validate_cost_contract(settings, lane="verify")
+    return (
+        None
+        if violation is None
+        else _problem("config", "invalid_config", violation.message)
+    )
 
 
 def _estimate_cost(
     rows: tuple[dict[str, Any], ...],
-    identities: tuple[InferenceIdentity, ...],
+    request_bytes: tuple[bytes, ...],
     miss_packet_ids: tuple[str, ...],
     settings: ResolvedSemanticSettings,
 ) -> int:
     misses = set(miss_packet_ids)
-    total = 0
-    for row, identity in zip(rows, identities, strict=True):
-        if row["packet_id"] not in misses:
-            continue
-        input_tokens = (
-            len(model_request_bytes(row, instruction_bytes=identity.prompt_bytes))
-            + settings.input_token_overhead
-        )
-        total += _ceil_million(
-            input_tokens * settings.input_cost_microusd_per_million_tokens
-        )
-        total += _ceil_million(
-            settings.request_identity.max_tokens
-            * settings.output_cost_microusd_per_million_tokens
-        )
-    return total
-
-
-def _ceil_million(value: int) -> int:
-    return (value + 999_999) // 1_000_000
+    request_byte_counts = [
+        len(value)
+        for row, value in zip(rows, request_bytes, strict=True)
+        if row["packet_id"] in misses
+    ]
+    return estimate_cost_microusd(tuple(request_byte_counts), settings)
 
 
 def _empty_projection(
@@ -662,6 +767,7 @@ def _empty_projection(
 def _execute_cache(
     request: SemanticAnalysisRequest,
     identities: tuple[InferenceIdentity, ...],
+    request_bytes: tuple[bytes, ...],
     *,
     runtime_deadline: float,
     provider_call_packet_ids: frozenset[str] | None,
@@ -705,6 +811,7 @@ def _execute_cache(
     def analyze_packets(
         packets: tuple[ValidatedSemanticPacket, ...],
         packet_identities: tuple[InferenceIdentity, ...],
+        packet_requests: tuple[bytes, ...],
     ) -> SemanticCacheRun:
         return analyze_with_cache(
             packets=packets,
@@ -720,10 +827,11 @@ def _execute_cache(
             provider_call_budget=provider_call_budget,
             provider_call_packet_ids=provider_call_packet_ids,
             identities=packet_identities,
+            request_bytes=packet_requests,
         )
 
     if request.settings.concurrency <= 1 or len(request.packets) <= 1:
-        run = analyze_packets(request.packets, identities)
+        run = analyze_packets(request.packets, identities, request_bytes)
         return (
             run.results,
             run.result_jsonl,
@@ -737,16 +845,16 @@ def _execute_cache(
         )
 
     def analyze_one(
-        pair: tuple[ValidatedSemanticPacket, InferenceIdentity],
+        item: tuple[ValidatedSemanticPacket, InferenceIdentity, bytes],
     ) -> SemanticCacheRun:
-        packet, identity = pair
-        return analyze_packets((packet,), (identity,))
+        packet, identity, packet_request = item
+        return analyze_packets((packet,), (identity,), (packet_request,))
 
     with ThreadPoolExecutor(max_workers=request.settings.concurrency) as executor:
         runs = tuple(
             executor.map(
                 analyze_one,
-                zip(request.packets, identities, strict=True),
+                zip(request.packets, identities, request_bytes, strict=True),
             )
         )
     kind_counts = _empty_analyzer_kind_counts()
@@ -770,6 +878,7 @@ def _execute_cache(
 def _execute_evidence_stable_preparation(
     request: SemanticAnalysisRequest,
     preparation: EvidenceStablePreparation,
+    request_bytes: tuple[bytes, ...],
     *,
     runtime_deadline: float,
     provider_call_packet_ids: frozenset[str] | None,
@@ -815,7 +924,10 @@ def _execute_evidence_stable_preparation(
                     raise
             return adapter
 
-    def resolve_item(item: Any) -> SemanticSelectionEvent | SemanticProblem:
+    def resolve_item(
+        prepared: tuple[Any, bytes],
+    ) -> SemanticSelectionEvent | SemanticProblem:
+        item, packet_request = prepared
         packet = item.packet
         if request.settings.cache_mode == "require" and item.selection is None:
             return SemanticProblem(
@@ -862,11 +974,7 @@ def _execute_evidence_stable_preparation(
                 provider_calls += 1
                 provider_calls_by_kind[cast(str, packet["kind"])] += 1
             try:
-                response = selected_adapter(
-                    model_request_bytes(
-                        packet, instruction_bytes=item.identity.prompt_bytes
-                    ).decode("utf-8")
-                )
+                response = selected_adapter(packet_request.decode("utf-8"))
                 if time.monotonic() >= runtime_deadline:
                     raise SemanticCacheFailure(
                         "budget",
@@ -900,11 +1008,12 @@ def _execute_evidence_stable_preparation(
                 f"unexpected cache failure: {exc}",
             )
 
+    prepared_requests = tuple(zip(preparation.items, request_bytes, strict=True))
     if request.settings.concurrency <= 1 or len(preparation.items) <= 1:
-        outcomes = tuple(resolve_item(item) for item in preparation.items)
+        outcomes = tuple(resolve_item(item) for item in prepared_requests)
     else:
         with ThreadPoolExecutor(max_workers=request.settings.concurrency) as executor:
-            outcomes = tuple(executor.map(resolve_item, preparation.items))
+            outcomes = tuple(executor.map(resolve_item, prepared_requests))
 
     problems = tuple(
         outcome for outcome in outcomes if isinstance(outcome, SemanticProblem)
@@ -946,6 +1055,7 @@ def _run_evidence_stable_cache(
     request: SemanticAnalysisRequest,
     rows: tuple[dict[str, Any], ...],
     identities: tuple[InferenceIdentity, ...],
+    request_bytes: tuple[bytes, ...],
     authority: IndependentQualificationAuthority | None,
     *,
     runtime_deadline: float,
@@ -1021,7 +1131,7 @@ def _run_evidence_stable_cache(
                     else ()
                 )
                 estimated_cost = _estimate_cost(
-                    rows, identities, cost_miss_ids, request.settings
+                    rows, request_bytes, cost_miss_ids, request.settings
                 )
                 provider_call_packet_ids = frozenset(cost_miss_ids)
                 if estimated_cost > request.settings.maximum_estimated_cost_microusd:
@@ -1049,6 +1159,7 @@ def _run_evidence_stable_cache(
             execution = _execute_evidence_stable_preparation(
                 request,
                 preparation,
+                request_bytes,
                 runtime_deadline=runtime_deadline,
                 provider_call_packet_ids=provider_call_packet_ids,
             )
@@ -1124,91 +1235,24 @@ def _enabled_verification_report(
     }
 
 
-def _build_verification_work(
-    rows: tuple[dict[str, Any], ...],
-    results: tuple[dict[str, Any], ...],
-    settings: ResolvedVerificationSettings,
-) -> tuple[
-    tuple[VerificationWork, ...],
-    tuple[tuple[str, dict[str, Any], Any, Any, tuple[Any, ...]], ...],
-]:
-    packets = {row["packet_id"]: row for row in rows}
-    effective_epochs = settings.effective_search_epochs or settings.search_epochs
-    if (
-        len(effective_epochs) != len(settings.search_epochs)
-        or len(set(effective_epochs)) != len(effective_epochs)
-        or any(not epoch.strip() for epoch in effective_epochs)
-    ):
-        raise ValueError(
-            "effective verifier search epochs must be unique nonblank values "
-            "matching verify.search_epochs cardinality"
-        )
-    work: list[VerificationWork] = []
-    groups: list[tuple[str, dict[str, Any], Any, Any, tuple[Any, ...]]] = []
-    for result in results:
-        if result["classification"] == "ok":
-            continue
-        packet = packets[result["packet_id"]]
-        claim = derive_verification_claim(packet, result)
-        verifier_request = build_verification_request(packet, claim)
-        identities = tuple(
-            build_verify_identity(
-                verifier_request,
-                claim,
-                settings.provider_identity,
-                settings.request_identity,
-                base_search_epoch=base_epoch,
-                effective_search_epoch=effective_epoch,
-            )
-            for base_epoch, effective_epoch in zip(
-                settings.search_epochs, effective_epochs, strict=True
-            )
-        )
-        for base_epoch, effective_epoch, identity in zip(
-            settings.search_epochs, effective_epochs, identities, strict=True
-        ):
-            work.append(
-                VerificationWork(
-                    packet,
-                    claim,
-                    verifier_request,
-                    identity,
-                    base_epoch,
-                    effective_epoch,
-                )
-            )
-        groups.append(
-            (finding_hash(result), packet, claim, verifier_request, identities)
-        )
-    return tuple(work), tuple(groups)
-
-
 def _estimate_verification_cost(
     work: tuple[VerificationWork, ...],
     miss_keys: tuple[str, ...],
     settings: ResolvedVerificationSettings,
 ) -> int:
     misses = set(miss_keys)
-    total = 0
+    request_byte_counts: list[int] = []
     for item in work:
         if item.identity.verify_key not in misses:
             continue
-        input_tokens = (
+        request_byte_counts.append(
             len(
                 verifier_request_bytes(
                     item.request, prompt_bytes=item.identity.prompt_bytes
                 )
             )
-            + settings.input_token_overhead
         )
-        total += _ceil_million(
-            input_tokens * settings.input_cost_microusd_per_million_tokens
-        )
-        total += _ceil_million(
-            settings.request_identity.max_tokens
-            * settings.output_cost_microusd_per_million_tokens
-        )
-    return total
+    return estimate_cost_microusd(tuple(request_byte_counts), settings)
 
 
 def _execute_verification_cache(
@@ -1285,7 +1329,7 @@ def _execute_verification(
     settings = request.verification_settings
     if settings is None:
         return {}, _disabled_verification_report(), (), None
-    work, groups = _build_verification_work(rows, results, settings)
+    work, groups = build_verification_work(rows, results, settings)
     empty_run = VerificationCacheRun((), (), 0, 0, 0)
     if not work:
         return {}, _enabled_verification_report(settings, (), empty_run), (), None
@@ -1564,7 +1608,7 @@ def _resolve_independent_qualification(
     report_path = Path(evaluation_settings.qualification_report)
     raw_report_sha256: str | None = None
     try:
-        from backstitch.semantic_eval import (
+        from backstitch.semantic_eval_observation import (
             derive_semantic_eval_observed_facts,
         )
         from backstitch.semantic_eval_reports import (
@@ -1867,7 +1911,7 @@ def _build_report(
                 "result_reuse": request.settings.result_reuse,
                 "selected_inference": {
                     "provider": asdict(request.settings.provider_identity),
-                    "request": asdict(request.settings.request_identity),
+                    "request": request_identity_dict(request.settings.request_identity),
                     "analysis_contract_version": 1,
                     "search_epoch": request.settings.search_epoch,
                     "prompts": [
@@ -2001,14 +2045,12 @@ def _run_semantic_analysis(
                 f"cannot freeze semantic inference identity: {exc}",
             )
         )
-    prompt_byte_count = (
-        sum(
-            len(model_request_bytes(row, instruction_bytes=identity.prompt_bytes))
-            for row, identity in zip(rows, identities, strict=True)
-        )
-        if len(identities) == len(rows)
-        else 0
-    )
+    try:
+        request_bytes = _resolve_request_bytes(request, rows, identities)
+    except ValueError as exc:
+        request_bytes = ()
+        problems.append(_problem("input", "invalid_input", str(exc)))
+    prompt_byte_count = sum(len(value) for value in request_bytes)
 
     alias_problem = _path_alias_problem(request)
     skip_publication = alias_problem is not None
@@ -2031,7 +2073,7 @@ def _run_semantic_analysis(
     validated_report: PacketReport | None = None
     if not problems:
         report_problems, validated_report = _packet_report_preflight(
-            request, rows, identities
+            request, rows, identities, request_bytes
         )
         problems.extend(report_problems)
     cost_problem = _validate_cost_contract(request.settings)
@@ -2144,7 +2186,7 @@ def _run_semantic_analysis(
         if request.settings.maximum_estimated_cost_microusd > 0:
             estimated_cost = _estimate_cost(
                 rows,
-                identities,
+                request_bytes,
                 (
                     ()
                     if request.settings.cache_mode == "require"
@@ -2178,6 +2220,7 @@ def _run_semantic_analysis(
                 request,
                 rows,
                 identities,
+                request_bytes,
                 qualification_authority,
                 runtime_deadline=deadline,
             )
@@ -2197,6 +2240,7 @@ def _run_semantic_analysis(
             ) = _execute_cache(
                 request,
                 identities,
+                request_bytes,
                 runtime_deadline=deadline,
                 provider_call_packet_ids=(
                     frozenset(planned_miss_packet_ids)

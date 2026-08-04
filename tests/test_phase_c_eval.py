@@ -474,9 +474,13 @@ def test_phase_c_current_generation_outcomes_are_source_derived(
             assert report["semantic_status"] == generation["outcome"]
             assert generation["blocking_codes"] == []
         elif generation["outcome"] == "alignment_debt":
-            assert captured.out == ""
+            assert captured.err == ""
             assert generation["blocking_codes"] == ["ALIGNMENT_DEBT"]
-            assert "ALIGNMENT_DEBT" in captured.err
+            preflight = json.loads(captured.out)
+            assert preflight["operation"] == "analysis.preflight"
+            assert [problem["code"] for problem in preflight["problems"]] == [
+                "ALIGNMENT_DEBT"
+            ]
         else:
             assert generation["outcome"] == "deterministic_failure"
             assert captured.err == ""

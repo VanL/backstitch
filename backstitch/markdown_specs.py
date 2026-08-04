@@ -1,6 +1,6 @@
 """Markdown spec parsing for the backstitch-style-v1 grammar.
 
-Spec: docs/specs/02-backstitch-core.md [SC-4]
+Spec: docs/specs/02-backstitch-core.md [SC-4], [SC-17]
 Spec: docs/specs/05-backstitch-invariants.md [INV-3]
 Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-2.1], [EVC-4.2],
 [EVC-7], [EVC-8.3.2]
@@ -17,8 +17,9 @@ import hashlib
 import json
 import re
 from collections.abc import MutableMapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
@@ -844,115 +845,72 @@ def parse_markdown_spec(
     )
 
 
-def parse_markdown_spec_bytes(
-    source: bytes,
-    rel_path: str,
-    *,
-    allow_unknown_codes: bool = False,
-    parse_memo: MarkdownParseMemo | None = None,
-) -> ParsedSpec:
-    """Parse one captured Markdown source without reopening the repository.
+@dataclass(slots=True)
+class _TraceabilityReducer:
+    """Reduce CommonMark tokens through Backstitch's cross-block state machine."""
 
-    Spec: docs/specs/08-intent-coverage.md [COV-8]
-    """
-
-    text = source.decode("utf-8")
-    lines = list(lf_split(text))
-    memo_key = (hashlib.sha256(source).hexdigest(), allow_unknown_codes)
-    cached_product = None if parse_memo is None else parse_memo.get(memo_key)
-    if cached_product is not None:
-        cached_result = cached_product.parsed_by_path.get(rel_path)
-        if cached_result is not None:
-            return cached_result
-    else:
-        cached_product = _MarkdownParseProduct(
-            tuple(_MARKDOWN.parse(text)),
-            _parser_line_source_map(text),
-            {},
-        )
-        if parse_memo is not None:
-            parse_memo[memo_key] = cached_product
-    tokens = cached_product.tokens
-    parser_line_to_source_line = cached_product.parser_line_to_source_line
-
-    sections: list[SpecSection] = []
-    mappings: list[SpecMapping] = []
-    invariants: list[InvariantDeclaration] = []
-    anchors: list[str] = []
-    issues: list[Issue] = []
-    anchor_seen: dict[str, int] = {}
-    file_meta = False
-    file_ignores: set[str] = set()
-    section_markers: dict[str, tuple[bool, set[str]]] = {}
-    skip_candidates: list[_SkipCandidate] = []
-    suppression_declarations: list[SuppressionDeclaration] = []
-    suppression_rules: list[SuppressionRule] = []
-    marker_diagnostics: list[SuppressionDiagnostic] = []
-    nonsemantic_lines: set[int] = set()
-    declaration_candidate_lines = {
-        line_no
-        for line_no, source_line in enumerate(lines, start=1)
-        if "suppression-declaration" in source_line.lower()
-        and (
-            source_line.strip().lower().startswith("_traceability:")
-            or (
-                source_line.strip().startswith(("<!--", "#"))
-                and "_traceability:" in source_line.lower()
-            )
-        )
-    }
-    processed_declaration_lines: set[int] = set()
-
+    rel_path: str
+    lines: list[str]
+    tokens: tuple[Token, ...]
+    parser_line_to_source_line: tuple[int, ...]
+    allow_unknown_codes: bool
+    sections: list[SpecSection] = field(default_factory=list)
+    mappings: list[SpecMapping] = field(default_factory=list)
+    invariants: list[InvariantDeclaration] = field(default_factory=list)
+    anchors: list[str] = field(default_factory=list)
+    issues: list[Issue] = field(default_factory=list)
+    anchor_seen: dict[str, int] = field(default_factory=dict)
+    file_meta: bool = False
+    file_ignores: set[str] = field(default_factory=set)
+    section_markers: dict[str, tuple[bool, set[str]]] = field(default_factory=dict)
+    skip_candidates: list[_SkipCandidate] = field(default_factory=list)
+    suppression_declarations: list[SuppressionDeclaration] = field(default_factory=list)
+    suppression_rules: list[SuppressionRule] = field(default_factory=list)
+    marker_diagnostics: list[SuppressionDiagnostic] = field(default_factory=list)
+    nonsemantic_lines: set[int] = field(default_factory=set)
+    processed_declaration_lines: set[int] = field(default_factory=set)
     # Mapping blocks attach to the nearest preceding heading section.
-    # Invariant bullets define sections but never own mapping blocks: a
-    # mapping after a bullet group documents the heading's ownership, not
-    # the last bullet's.
+    # Invariant bullets define sections but never own mapping blocks.
     current_heading_section: SpecSection | None = None
-    current_heading_level = 0
+    current_heading_level: int = 0
     mapping_section: SpecSection | None = None
-    last_non_marker_block = "other"
-    mapping_block_spans: list[tuple[str, int, int]] = []
+    last_non_marker_block: str = "other"
+    mapping_block_spans: list[tuple[str, int, int]] = field(default_factory=list)
     active_mapping_block_index: int | None = None
-
-    # [EXC-4] §4.2 placement window: True from a section-defining heading
-    # or invariant bullet until the first body block; only markers inside
-    # the window attach to the section.
-    marker_window_open = False
+    # [EXC-4] §4.2: this window opens on a section definition and closes on
+    # its first body block. Only directives in the window attach to a section.
+    marker_window_open: bool = False
     current_directive_owner: SpecSection | None = None
-    ordinary_marker_count = 0
-    block_skip_candidates: list[_SkipCandidate] = []
+    ordinary_marker_count: int = 0
+    block_skip_candidates: list[_SkipCandidate] = field(default_factory=list)
 
-    def begin_directive_block(owner: SpecSection | None) -> None:
-        nonlocal current_directive_owner
-        nonlocal ordinary_marker_count
-        nonlocal block_skip_candidates
+    def begin_directive_block(self, owner: SpecSection | None) -> None:
+        self.current_directive_owner = owner
+        self.ordinary_marker_count = 0
+        self.block_skip_candidates = []
 
-        current_directive_owner = owner
-        ordinary_marker_count = 0
-        block_skip_candidates = []
-
-    def invalidate_block_skips(line_no: int, message: str) -> None:
-        active = [item for item in block_skip_candidates if not item.invalid]
+    def invalidate_block_skips(self, line_no: int, message: str) -> None:
+        active = [item for item in self.block_skip_candidates if not item.invalid]
         if not active:
             return
         for item in active:
             item.invalid = True
-        marker_diagnostics.append(
+        self.marker_diagnostics.append(
             _skip_diagnostic(
                 "SUPPRESSION_INVALID_SYNTAX",
-                path=rel_path,
+                path=self.rel_path,
                 line=line_no,
                 message=message,
             )
         )
 
-    def record_skip(candidate: _SkipCandidate) -> None:
-        if not marker_window_open or current_directive_owner is None:
+    def record_skip(self, candidate: _SkipCandidate) -> None:
+        if not self.marker_window_open or self.current_directive_owner is None:
             candidate.invalid = True
-            marker_diagnostics.append(
+            self.marker_diagnostics.append(
                 _skip_diagnostic(
                     "SUPPRESSION_INVALID_SYNTAX",
-                    path=rel_path,
+                    path=self.rel_path,
                     line=candidate.line,
                     message=(
                         "skip-obligation is outside the owning section's"
@@ -961,13 +919,13 @@ def parse_markdown_spec_bytes(
                 )
             )
         else:
-            candidate.owner_section_id = current_directive_owner.section_id
-            if ordinary_marker_count > 1:
+            candidate.owner_section_id = self.current_directive_owner.section_id
+            if self.ordinary_marker_count > 1:
                 candidate.invalid = True
-                marker_diagnostics.append(
+                self.marker_diagnostics.append(
                     _skip_diagnostic(
                         "SUPPRESSION_INVALID_SYNTAX",
-                        path=rel_path,
+                        path=self.rel_path,
                         line=candidate.line,
                         message=(
                             "skip-obligation cannot coexist with more than one"
@@ -975,120 +933,115 @@ def parse_markdown_spec_bytes(
                         ),
                     )
                 )
-        skip_candidates.append(candidate)
-        block_skip_candidates.append(candidate)
+        self.skip_candidates.append(candidate)
+        self.block_skip_candidates.append(candidate)
 
     def record_marker(
+        self,
         is_meta: bool,
         marker_codes: frozenset[str],
         line_no: int,
         declaration: str | None = None,
     ) -> None:
-        nonlocal file_meta
-        nonlocal ordinary_marker_count
-
-        if not sections:
-            file_meta = file_meta or is_meta
-            file_ignores.update(marker_codes if not is_meta else ())
-            suppression_rules.append(
+        if not self.sections:
+            self.file_meta = self.file_meta or is_meta
+            self.file_ignores.update(marker_codes if not is_meta else ())
+            self.suppression_rules.append(
                 SuppressionRule(
                     mechanism="meta" if is_meta else "ignore",
                     provenance="inline_spec",
-                    path=rel_path,
+                    path=self.rel_path,
                     sections=(),
                     codes=() if is_meta else tuple(sorted(marker_codes)),
                     declaration=declaration,
-                    origin=SuppressionOrigin(source=rel_path, line=line_no),
+                    origin=SuppressionOrigin(source=self.rel_path, line=line_no),
                 )
             )
             return
-        # [EXC-4] §4.2: a section marker goes IMMEDIATELY after the heading
-        # or invariant bullet, before body text. A misplaced marker never
-        # applies -- and silently not applying is fake protection, so warn.
-        if not marker_window_open:
-            marker_diagnostics.append(
+        if not self.marker_window_open:
+            self.marker_diagnostics.append(
                 SuppressionDiagnostic(
                     code="SUPPRESSION_INVALID_SYNTAX",
-                    path=rel_path,
+                    path=self.rel_path,
                     line=line_no,
                     message=(
-                        f"{rel_path}:{line_no}: traceability marker after body text"
-                        " is ignored ([EXC-4]: markers go immediately after the"
-                        " heading)"
+                        f"{self.rel_path}:{line_no}: traceability marker after body"
+                        " text is ignored ([EXC-4]: markers go immediately after"
+                        " the heading)"
                     ),
                 )
             )
-            invalidate_block_skips(
+            self.invalidate_block_skips(
                 line_no,
                 "body text cannot interleave an obligation skip and an ordinary"
                 " traceability directive",
             )
             return
-        ordinary_marker_count += 1
-        if ordinary_marker_count > 1:
-            invalidate_block_skips(
+        self.ordinary_marker_count += 1
+        if self.ordinary_marker_count > 1:
+            self.invalidate_block_skips(
                 line_no,
                 "skip-obligation cannot coexist with more than one ordinary"
                 " traceability directive",
             )
-        elif any(item.form != "heading_html" for item in block_skip_candidates):
-            invalidate_block_skips(
+        elif any(item.form != "heading_html" for item in self.block_skip_candidates):
+            self.invalidate_block_skips(
                 line_no,
                 "a standalone skip-obligation must follow the ordinary"
                 " traceability directive",
             )
         target = (
-            current_directive_owner.section_id
-            if current_directive_owner is not None
-            else sections[-1].section_id
+            self.current_directive_owner.section_id
+            if self.current_directive_owner is not None
+            else self.sections[-1].section_id
         )
-        meta_flag, codes = section_markers.setdefault(target, (False, set()))
-        section_markers[target] = (
+        meta_flag, codes = self.section_markers.setdefault(target, (False, set()))
+        self.section_markers[target] = (
             meta_flag or is_meta,
             codes | (marker_codes if not is_meta else set()),
         )
-        suppression_rules.append(
+        self.suppression_rules.append(
             SuppressionRule(
                 mechanism="meta" if is_meta else "ignore",
                 provenance="inline_spec",
-                path=rel_path,
+                path=self.rel_path,
                 sections=(target,),
                 codes=() if is_meta else tuple(sorted(marker_codes)),
                 declaration=declaration,
-                origin=SuppressionOrigin(source=rel_path, line=line_no),
+                origin=SuppressionOrigin(source=self.rel_path, line=line_no),
             )
         )
 
-    def parse_marker_text(text: str, line_no: int) -> bool:
+    def parse_marker_text(self, text: str, line_no: int) -> bool:
         directive, warnings = parse_traceability_directive_line(
             text,
-            allow_unknown=allow_unknown_codes,
-            location=f"{rel_path}:{line_no}",
-            path=rel_path,
+            allow_unknown=self.allow_unknown_codes,
+            location=f"{self.rel_path}:{line_no}",
+            path=self.rel_path,
             line=line_no,
         )
-        marker_diagnostics.extend(warnings)
-        if directive is not None:
-            record_marker(
-                directive.mechanism == "meta",
-                directive.codes,
-                line_no,
-                directive.declaration,
-            )
-            nonsemantic_lines.add(line_no)
-            return True
-        return False
+        self.marker_diagnostics.extend(warnings)
+        if directive is None:
+            return False
+        self.record_marker(
+            directive.mechanism == "meta",
+            directive.codes,
+            line_no,
+            directive.declaration,
+        )
+        self.nonsemantic_lines.add(line_no)
+        return True
 
-    def process_suppression_declaration(inline: Token, line_no: int) -> bool:
+    def process_suppression_declaration(self, inline: Token, line_no: int) -> bool:
         """Parse one declaration paragraph without treating it as an ignore."""
 
         stripped = inline.content.strip()
         if _SUPPRESSION_DECLARATION_PREFIX_RE.match(stripped) is None:
             return False
-        processed_declaration_lines.add(line_no)
+        self.processed_declaration_lines.add(line_no)
         physical = _token_physical_content_lines(
             inline,
-            parser_line_to_source_line,
+            self.parser_line_to_source_line,
         )
         match = (
             _SUPPRESSION_DECLARATION_RE.fullmatch(stripped)
@@ -1096,20 +1049,20 @@ def parse_markdown_spec_bytes(
             else None
         )
         if match is None:
-            marker_diagnostics.append(
+            self.marker_diagnostics.append(
                 _skip_diagnostic(
                     "SUPPRESSION_INVALID_SYNTAX",
-                    path=rel_path,
+                    path=self.rel_path,
                     line=line_no,
                     message="malformed suppression-declaration marker",
                 )
             )
             return True
-        if current_heading_section is None:
-            marker_diagnostics.append(
+        if self.current_heading_section is None:
+            self.marker_diagnostics.append(
                 _skip_diagnostic(
                     "SUPPRESSION_INVALID_SYNTAX",
-                    path=rel_path,
+                    path=self.rel_path,
                     line=line_no,
                     message=(
                         "suppression-declaration must be under an ID-bearing section"
@@ -1119,14 +1072,14 @@ def parse_markdown_spec_bytes(
             return True
         rationale, reason_error = _decode_strict_reason(match.group("reason"))
         if reason_error is not None:
-            marker_diagnostics.append(
+            self.marker_diagnostics.append(
                 _skip_diagnostic(
                     (
                         "SUPPRESSION_REASON_MISSING"
                         if reason_error == "missing"
                         else "SUPPRESSION_INVALID_SYNTAX"
                     ),
-                    path=rel_path,
+                    path=self.rel_path,
                     line=line_no,
                     message=(
                         "suppression-declaration reason is blank"
@@ -1141,30 +1094,26 @@ def parse_markdown_spec_bytes(
             return True
         assert rationale is not None
         declaration_id = match.group("id")
-        suppression_declarations.append(
+        self.suppression_declarations.append(
             SuppressionDeclaration(
                 declaration_id=declaration_id,
-                reference=f"{rel_path}#{declaration_id}",
+                reference=f"{self.rel_path}#{declaration_id}",
                 rationale=rationale,
-                path=rel_path,
-                owner_section_id=current_heading_section.section_id,
-                owner_title=current_heading_section.title,
+                path=self.rel_path,
+                owner_section_id=self.current_heading_section.section_id,
+                owner_title=self.current_heading_section.title,
                 start_line=line_no,
                 end_line=line_no,
             )
         )
-        nonsemantic_lines.add(line_no)
+        self.nonsemantic_lines.add(line_no)
         return True
 
     def process_reserved_skip_lines(
+        self,
         source_lines: Sequence[tuple[int, str]],
     ) -> tuple[bool, bool]:
-        """Process one CommonMark block containing reserved skip syntax.
-
-        Ordinary markers on adjacent physical lines still go through their
-        existing parser and state.  The booleans are ``recognized`` and
-        ``contains_body``.
-        """
+        """Return whether a skip block was recognized and whether it had body."""
 
         if not any(_is_skip_marker(line) for _line_no, line in source_lines):
             return False, False
@@ -1180,66 +1129,66 @@ def parse_markdown_spec_bytes(
                 )
                 candidate, diagnostic = _parse_skip_marker(
                     stripped,
-                    path=rel_path,
+                    path=self.rel_path,
                     line=line_no,
                     form=form,
                 )
                 if diagnostic is not None:
-                    marker_diagnostics.append(diagnostic)
+                    self.marker_diagnostics.append(diagnostic)
                 if candidate is not None:
-                    record_skip(candidate)
+                    self.record_skip(candidate)
                     local_candidates.append(candidate)
                 continue
             if stripped.lower().startswith("_traceability:") or (
                 stripped.startswith("<!--") and "backstitch:" in stripped.lower()
             ):
-                if parse_marker_text(stripped, line_no):
+                if self.parse_marker_text(stripped, line_no):
                     continue
             contains_body = True
         active = [item for item in local_candidates if not item.invalid]
         if contains_body and active:
             for item in active:
                 item.invalid = True
-            marker_diagnostics.append(
+            self.marker_diagnostics.append(
                 _skip_diagnostic(
                     "SUPPRESSION_INVALID_SYNTAX",
-                    path=rel_path,
+                    path=self.rel_path,
                     line=active[0].line,
                     message="body text interleaves the skip-obligation directive block",
                 )
             )
         return True, contains_body
 
-    def emit_mapping_tokens(token: Token, owner: SpecSection | None) -> None:
+    def emit_mapping_tokens(self, token: Token, owner: SpecSection | None) -> None:
         if owner is None:
             return
         values = _source_inline_code_values(
             token,
-            lines,
-            parser_line_to_source_line,
+            self.lines,
+            self.parser_line_to_source_line,
         )
         line_numbers = _line_numbers_for_code_values(
             token,
             values,
-            lines,
-            parser_line_to_source_line,
+            self.lines,
+            self.parser_line_to_source_line,
         )
-        start_line = _token_start_line(token, parser_line_to_source_line)
+        start_line = _token_start_line(token, self.parser_line_to_source_line)
         end_line = _token_end_line(
             token,
-            parser_line_to_source_line,
+            self.parser_line_to_source_line,
             start_line,
         )
-        nonsemantic_lines.update(range(start_line, end_line + 1))
+        self.nonsemantic_lines.update(range(start_line, end_line + 1))
         for value, line_no in zip(values, line_numbers, strict=True):
             kind, target_path, target_symbol = classify_mapping_token(value)
             if target_path is not None:
                 canonical_target = canonical_repository_path(target_path)
                 if canonical_target is not None:
                     target_path = canonical_target.canonical
-            mappings.append(
+            self.mappings.append(
                 SpecMapping(
-                    spec_path=rel_path,
+                    spec_path=self.rel_path,
                     section_id=owner.section_id,
                     line=line_no,
                     target=value,
@@ -1249,12 +1198,12 @@ def parse_markdown_spec_bytes(
                 )
             )
 
-    def report_ownerless_mapping(line_no: int) -> None:
-        issues.append(
+    def report_ownerless_mapping(self, line_no: int) -> None:
+        self.issues.append(
             Issue(
                 code="MAPPING_BLOCK_OWNERLESS",
                 severity="warning",
-                path=rel_path,
+                path=self.rel_path,
                 line=line_no,
                 message=(
                     "implementation mapping block has no preceding"
@@ -1263,16 +1212,15 @@ def parse_markdown_spec_bytes(
             )
         )
 
-    def process_invariant_paragraph(inline: Token) -> bool:
+    def process_invariant_paragraph(self, inline: Token) -> bool:
         source_lines = _token_physical_content_lines(
             inline,
-            parser_line_to_source_line,
+            self.parser_line_to_source_line,
         )
         if not source_lines or not source_lines[0][1].lstrip().startswith(
             _RESERVED_INVARIANT_PREFIXES
         ):
             return False
-
         cursor = 0
         while cursor < len(source_lines):
             marker_line, source_text = source_lines[cursor]
@@ -1284,505 +1232,609 @@ def parse_markdown_spec_bytes(
                 1
             ].lstrip().startswith(_RESERVED_INVARIANT_PREFIXES):
                 next_marker += 1
-
-            declaration = _INVARIANT_DECLARATION_RE.fullmatch(marker_text)
-            parsed_id = None
-            bracket = re.search(r"\[([^\[\]]+)\]", marker_text)
-            if bracket is not None and re.fullmatch(
-                SECTION_ID, bracket.group(1).strip()
-            ):
-                parsed_id = bracket.group(1).strip()
-            if declaration is None or current_heading_section is None:
-                issues.append(
-                    Issue(
-                        code="INVARIANT_MARKER_INVALID",
-                        severity="error",
-                        path=rel_path,
-                        line=marker_line,
-                        message=(
-                            "Markdown invariant declaration requires one valid ID"
-                            " and statement under an ID-bearing heading"
-                        ),
-                        invariant_id=parsed_id,
-                    )
-                )
-                cursor = next_marker
-                continue
-
-            statement_lines = [declaration.group("statement").strip()]
-            statement_lines.extend(
-                line.strip()
-                for _physical_line, line in source_lines[cursor + 1 : next_marker]
-            )
-            invariants.append(
-                InvariantDeclaration(
-                    invariant_id=declaration.group("id"),
-                    statement="\n".join(statement_lines),
-                    tier=(
-                        "draft"
-                        if declaration.group("prefix") == "Invariant (draft)"
-                        else "required"
-                    ),
-                    declaration_kind="spec",
-                    path=rel_path,
-                    line=marker_line,
-                    owner_symbol=None,
-                    section_id=current_heading_section.section_id,
-                )
+            self.record_invariant_declaration(
+                marker_text,
+                marker_line,
+                source_lines[cursor + 1 : next_marker],
             )
             cursor = next_marker
         return True
 
-    def define_mapping_bullet_section(token: Token) -> SpecSection | None:
+    def record_invariant_declaration(
+        self,
+        marker_text: str,
+        marker_line: int,
+        continuation_lines: Sequence[tuple[int, str]],
+    ) -> None:
+        declaration = _INVARIANT_DECLARATION_RE.fullmatch(marker_text)
+        parsed_id = None
+        bracket = re.search(r"\[([^\[\]]+)\]", marker_text)
+        if bracket is not None and re.fullmatch(SECTION_ID, bracket.group(1).strip()):
+            parsed_id = bracket.group(1).strip()
+        if declaration is None or self.current_heading_section is None:
+            self.issues.append(
+                Issue(
+                    code="INVARIANT_MARKER_INVALID",
+                    severity="error",
+                    path=self.rel_path,
+                    line=marker_line,
+                    message=(
+                        "Markdown invariant declaration requires one valid ID"
+                        " and statement under an ID-bearing heading"
+                    ),
+                    invariant_id=parsed_id,
+                )
+            )
+            return
+        statement_lines = [declaration.group("statement").strip()]
+        statement_lines.extend(line.strip() for _line_no, line in continuation_lines)
+        self.invariants.append(
+            InvariantDeclaration(
+                invariant_id=declaration.group("id"),
+                statement="\n".join(statement_lines),
+                tier=(
+                    "draft"
+                    if declaration.group("prefix") == "Invariant (draft)"
+                    else "required"
+                ),
+                declaration_kind="spec",
+                path=self.rel_path,
+                line=marker_line,
+                owner_symbol=None,
+                section_id=self.current_heading_section.section_id,
+            )
+        )
+
+    def define_mapping_bullet_section(self, token: Token) -> SpecSection | None:
         bullet_def = _BULLET_DEF_TEXT_RE.match(_first_inline_line(token))
         if bullet_def is None:
             return None
-        title = _mapping_bullet_title(bullet_def.group("title"))
         section = SpecSection(
-            path=rel_path,
+            path=self.rel_path,
             section_id=bullet_def.group("id"),
-            title=title,
-            line=_token_start_line(token, parser_line_to_source_line),
+            title=_mapping_bullet_title(bullet_def.group("title")),
+            line=_token_start_line(token, self.parser_line_to_source_line),
             anchor=None,
             kind="bullet",
         )
-        sections.append(section)
-        begin_directive_block(section)
+        self.sections.append(section)
+        self.begin_directive_block(section)
         return section
 
-    def process_heading(index: int) -> None:
-        nonlocal current_heading_level
-        nonlocal current_heading_section
-        nonlocal last_non_marker_block
-        nonlocal mapping_section
-        nonlocal marker_window_open
-
-        heading_open = tokens[index]
-        inline = _next_inline(tokens, index)
+    def process_heading(self, index: int) -> None:
+        heading_open = self.tokens[index]
+        inline = _next_inline(self.tokens, index)
         if inline is None:
             return
-        line_no = _token_start_line(heading_open, parser_line_to_source_line)
+        line_no = _token_start_line(heading_open, self.parser_line_to_source_line)
         level = _heading_level(heading_open)
         without_skip, heading_skips, skip_diagnostics = _extract_heading_skips(
             inline.content,
-            path=rel_path,
+            path=self.rel_path,
             line=line_no,
         )
-        marker_diagnostics.extend(skip_diagnostics)
+        self.marker_diagnostics.extend(skip_diagnostics)
         heading_text, trailing_directive, warnings = (
             _strip_recognized_trailing_html_marker(
                 without_skip,
-                allow_unknown_codes=allow_unknown_codes,
-                location=f"{rel_path}:{line_no}",
-                path=rel_path,
+                allow_unknown_codes=self.allow_unknown_codes,
+                location=f"{self.rel_path}:{line_no}",
+                path=self.rel_path,
                 line=line_no,
             )
         )
-        marker_diagnostics.extend(warnings)
-
-        mapping_section = None
-        last_non_marker_block = "other"
-        anchors.append(github_anchor(heading_text, anchor_seen))
+        self.marker_diagnostics.extend(warnings)
+        self.mapping_section = None
+        self.last_non_marker_block = "other"
+        self.anchors.append(github_anchor(heading_text, self.anchor_seen))
         with_id = _HEADING_ID_RE.match(heading_text)
         if with_id:
-            section = SpecSection(
-                path=rel_path,
-                section_id=with_id.group("id"),
-                title=with_id.group("title"),
-                line=line_no,
-                anchor=anchors[-1],
-                kind="heading",
+            self.open_heading(
+                with_id.group("id"),
+                with_id.group("title"),
+                line_no,
+                level,
+                heading_skips,
+                trailing_directive,
             )
-            sections.append(section)
-            current_heading_section = section
-            current_heading_level = level
-            marker_window_open = True
-            begin_directive_block(section)
-            for candidate in heading_skips:
-                record_skip(candidate)
-            if trailing_directive is not None:
-                record_marker(
-                    trailing_directive.mechanism == "meta",
-                    trailing_directive.codes,
-                    line_no,
-                    trailing_directive.declaration,
-                )
-                if heading_skips:
-                    invalidate_block_skips(
-                        line_no,
-                        "an inline heading skip must be followed by an ordinary"
-                        " directive on the next source line",
-                    )
-        elif invalid_heading := _HEADING_ID_CANDIDATE_RE.match(heading_text):
-            candidate_id = invalid_heading.group("id")
-            candidate_title = invalid_heading.group("title")
-            if candidate_id and re.fullmatch(SECTION_ID, candidate_id):
-                message = "ID-bearing Markdown heading is missing a section title"
-            elif candidate_title and candidate_title.strip():
-                message = (
-                    "ID-bearing Markdown heading has an invalid or missing section ID"
-                )
-            else:
-                message = (
-                    "ID-bearing Markdown heading is missing a title and section ID"
-                )
-            issues.append(
-                Issue(
-                    code="SPEC_SECTION_HEADING_INVALID",
-                    severity="error",
-                    path=rel_path,
-                    line=line_no,
-                    message=message,
-                )
+            return
+        invalid_heading = _HEADING_ID_CANDIDATE_RE.match(heading_text)
+        if invalid_heading is not None:
+            self.reject_heading(
+                invalid_heading.group("id"),
+                invalid_heading.group("title"),
+                line_no,
+                level,
+                heading_skips,
             )
-            if level <= current_heading_level:
-                current_heading_section = None
-                marker_window_open = False
-                begin_directive_block(None)
+            return
+        if level <= self.current_heading_level:
+            self.current_heading_section = None
+            self.marker_window_open = False
+            self.begin_directive_block(None)
             for candidate in heading_skips:
-                candidate.invalid = True
-                skip_candidates.append(candidate)
-        elif level <= current_heading_level:
-            # A same-or-shallower ID-less heading starts a region no section
-            # owns. Deeper ID-less subheadings stay inside the owner so local
-            # prose structure does not detach the next mapping block.
-            current_heading_section = None
-            marker_window_open = False
-            begin_directive_block(None)
-            for candidate in heading_skips:
-                record_skip(candidate)
+                self.record_skip(candidate)
         elif heading_skips:
             for candidate in heading_skips:
                 candidate.invalid = True
-                skip_candidates.append(candidate)
-            marker_diagnostics.append(
+                self.skip_candidates.append(candidate)
+            self.marker_diagnostics.append(
                 _skip_diagnostic(
                     "SUPPRESSION_INVALID_SYNTAX",
-                    path=rel_path,
+                    path=self.rel_path,
                     line=line_no,
                     message="inline skip-obligation heading has no obligation owner",
                 )
             )
 
-    def process_paragraph(index: int) -> None:
-        nonlocal active_mapping_block_index
-        nonlocal last_non_marker_block
-        nonlocal mapping_section
-        nonlocal marker_window_open
+    def open_heading(
+        self,
+        section_id: str,
+        title: str,
+        line_no: int,
+        level: int,
+        heading_skips: Sequence[_SkipCandidate],
+        trailing_directive: ParsedSuppressionDirective | None,
+    ) -> None:
+        section = SpecSection(
+            path=self.rel_path,
+            section_id=section_id,
+            title=title,
+            line=line_no,
+            anchor=self.anchors[-1],
+            kind="heading",
+        )
+        self.sections.append(section)
+        self.current_heading_section = section
+        self.current_heading_level = level
+        self.marker_window_open = True
+        self.begin_directive_block(section)
+        for candidate in heading_skips:
+            self.record_skip(candidate)
+        if trailing_directive is None:
+            return
+        self.record_marker(
+            trailing_directive.mechanism == "meta",
+            trailing_directive.codes,
+            line_no,
+            trailing_directive.declaration,
+        )
+        if heading_skips:
+            self.invalidate_block_skips(
+                line_no,
+                "an inline heading skip must be followed by an ordinary"
+                " directive on the next source line",
+            )
 
-        paragraph_open = tokens[index]
-        inline = _next_inline(tokens, index)
+    def reject_heading(
+        self,
+        candidate_id: str,
+        candidate_title: str | None,
+        line_no: int,
+        level: int,
+        heading_skips: Sequence[_SkipCandidate],
+    ) -> None:
+        if candidate_id and re.fullmatch(SECTION_ID, candidate_id):
+            message = "ID-bearing Markdown heading is missing a section title"
+        elif candidate_title and candidate_title.strip():
+            message = "ID-bearing Markdown heading has an invalid or missing section ID"
+        else:
+            message = "ID-bearing Markdown heading is missing a title and section ID"
+        self.issues.append(
+            Issue(
+                code="SPEC_SECTION_HEADING_INVALID",
+                severity="error",
+                path=self.rel_path,
+                line=line_no,
+                message=message,
+            )
+        )
+        if level <= self.current_heading_level:
+            self.current_heading_section = None
+            self.marker_window_open = False
+            self.begin_directive_block(None)
+        for candidate in heading_skips:
+            candidate.invalid = True
+            self.skip_candidates.append(candidate)
+
+    def process_paragraph(self, index: int) -> None:
+        paragraph_open = self.tokens[index]
+        inline = _next_inline(self.tokens, index)
         if inline is None:
             return
         line_no = _token_start_line(
             inline,
-            parser_line_to_source_line,
-            _token_start_line(paragraph_open, parser_line_to_source_line),
+            self.parser_line_to_source_line,
+            _token_start_line(paragraph_open, self.parser_line_to_source_line),
         )
         source_start = _token_start_line(
             paragraph_open,
-            parser_line_to_source_line,
+            self.parser_line_to_source_line,
             line_no,
         )
         source_end = _token_end_line(
             paragraph_open,
-            parser_line_to_source_line,
+            self.parser_line_to_source_line,
             source_start,
         )
-        recognized_skip, contains_body = process_reserved_skip_lines(
-            _token_physical_content_lines(inline, parser_line_to_source_line)
+        recognized_skip, contains_body = self.process_reserved_skip_lines(
+            _token_physical_content_lines(inline, self.parser_line_to_source_line)
         )
         if recognized_skip:
             if contains_body:
-                marker_window_open = False
-                mapping_section = None
-                last_non_marker_block = "other"
+                self.close_marker_window()
             return
         stripped = inline.content.strip()
-        if process_suppression_declaration(inline, line_no):
+        if self.process_suppression_declaration(inline, line_no):
             return
-        if stripped.lower().startswith("_traceability:") and parse_marker_text(
+        if stripped.lower().startswith("_traceability:") and self.parse_marker_text(
             stripped, line_no
         ):
             return
-        if process_invariant_paragraph(inline):
-            marker_window_open = False
-            mapping_section = None
-            last_non_marker_block = "other"
+        if self.process_invariant_paragraph(inline):
+            self.close_marker_window()
             return
         if _MAPPING_MARKER_TEXT_RE.match(inline.content):
-            nonsemantic_lines.update(range(source_start, source_end + 1))
-            marker_window_open = False
-            mapping_section = current_heading_section
-            if mapping_section is None:
-                report_ownerless_mapping(line_no)
-                active_mapping_block_index = None
-            else:
-                mapping_block_spans.append(
-                    (mapping_section.section_id, source_start, source_end)
-                )
-                active_mapping_block_index = len(mapping_block_spans) - 1
-            emit_mapping_tokens(inline, mapping_section)
-            last_non_marker_block = "mapping_marker"
+            self.open_mapping_block(inline, line_no, source_start, source_end)
             return
-        if inline.content.strip():
-            active_mapping_block_index = None
-            marker_window_open = False
-            mapping_section = None
-            last_non_marker_block = "other"
+        if stripped:
+            self.active_mapping_block_index = None
+            self.close_marker_window()
 
-    def process_mapping_list(start: int, end: int) -> None:
-        nonlocal active_mapping_block_index
-        nonlocal last_non_marker_block
-        nonlocal mapping_section
-        nonlocal marker_window_open
+    def close_marker_window(self) -> None:
+        self.marker_window_open = False
+        self.mapping_section = None
+        self.last_non_marker_block = "other"
 
-        marker_window_open = False
-        if active_mapping_block_index is not None:
-            section_id, start_line, _ = mapping_block_spans[active_mapping_block_index]
-            list_end_line = _token_end_line(
-                tokens[start],
-                parser_line_to_source_line,
-                start_line,
+    def open_mapping_block(
+        self,
+        inline: Token,
+        line_no: int,
+        source_start: int,
+        source_end: int,
+    ) -> None:
+        self.nonsemantic_lines.update(range(source_start, source_end + 1))
+        self.marker_window_open = False
+        self.mapping_section = self.current_heading_section
+        if self.mapping_section is None:
+            self.report_ownerless_mapping(line_no)
+            self.active_mapping_block_index = None
+        else:
+            self.mapping_block_spans.append(
+                (self.mapping_section.section_id, source_start, source_end)
             )
-            mapping_block_spans[active_mapping_block_index] = (
-                section_id,
-                start_line,
-                list_end_line,
-            )
-        for inline in _iter_list_item_first_inlines(tokens, start, end):
+            self.active_mapping_block_index = len(self.mapping_block_spans) - 1
+        self.emit_mapping_tokens(inline, self.mapping_section)
+        self.last_non_marker_block = "mapping_marker"
+
+    def process_mapping_list(self, start: int, end: int) -> None:
+        self.marker_window_open = False
+        self.extend_active_mapping_span(start)
+        for inline in _iter_list_item_first_inlines(self.tokens, start, end):
             invariant = _invariant_from_inline(inline)
             if invariant is not None:
                 section_id, title = invariant
-                section = SpecSection(
-                    path=rel_path,
-                    section_id=section_id,
-                    title=title,
-                    line=_token_start_line(inline, parser_line_to_source_line),
-                    anchor=None,
-                    kind="invariant",
+                section = self.append_list_section(
+                    inline, section_id, title, "invariant"
                 )
-                sections.append(section)
-                begin_directive_block(section)
-                marker_window_open = True
+                self.begin_directive_block(section)
+                self.marker_window_open = True
                 continue
-            mapping_bullet = define_mapping_bullet_section(inline)
+            mapping_bullet = self.define_mapping_bullet_section(inline)
             if mapping_bullet is not None:
-                mapping_section = mapping_bullet
-            if (
-                mapping_section is not None
-                and mapping_section is not current_heading_section
-                and _inline_code_values(inline)
-            ):
-                mapping_line_start = _token_start_line(
+                self.mapping_section = mapping_bullet
+            self.record_mapping_bullet_span(inline)
+            self.emit_mapping_tokens(inline, self.mapping_section)
+        self.last_non_marker_block = "mapping_list"
+
+    def extend_active_mapping_span(self, start: int) -> None:
+        if self.active_mapping_block_index is None:
+            return
+        section_id, start_line, _ = self.mapping_block_spans[
+            self.active_mapping_block_index
+        ]
+        list_end_line = _token_end_line(
+            self.tokens[start],
+            self.parser_line_to_source_line,
+            start_line,
+        )
+        self.mapping_block_spans[self.active_mapping_block_index] = (
+            section_id,
+            start_line,
+            list_end_line,
+        )
+
+    def append_list_section(
+        self,
+        inline: Token,
+        section_id: str,
+        title: str,
+        kind: Literal["invariant", "bullet"],
+    ) -> SpecSection:
+        section = SpecSection(
+            path=self.rel_path,
+            section_id=section_id,
+            title=title,
+            line=_token_start_line(inline, self.parser_line_to_source_line),
+            anchor=None,
+            kind=kind,
+        )
+        self.sections.append(section)
+        return section
+
+    def record_mapping_bullet_span(self, inline: Token) -> None:
+        if (
+            self.mapping_section is None
+            or self.mapping_section is self.current_heading_section
+            or not _inline_code_values(inline)
+        ):
+            return
+        mapping_line_start = _token_start_line(
+            inline,
+            self.parser_line_to_source_line,
+        )
+        self.mapping_block_spans.append(
+            (
+                self.mapping_section.section_id,
+                mapping_line_start,
+                _token_end_line(
                     inline,
-                    parser_line_to_source_line,
-                )
-                mapping_block_spans.append(
-                    (
-                        mapping_section.section_id,
-                        mapping_line_start,
-                        _token_end_line(
-                            inline,
-                            parser_line_to_source_line,
-                            mapping_line_start,
-                        ),
-                    )
-                )
-            emit_mapping_tokens(inline, mapping_section)
-        last_non_marker_block = "mapping_list"
+                    self.parser_line_to_source_line,
+                    mapping_line_start,
+                ),
+            )
+        )
 
-    def process_regular_list(start: int, end: int) -> None:
-        nonlocal last_non_marker_block
-        nonlocal mapping_section
-        nonlocal marker_window_open
-
-        mapping_section = None
-        last_non_marker_block = "other"
-        for inline in _iter_list_item_first_inlines(tokens, start, end):
+    def process_regular_list(self, start: int, end: int) -> None:
+        self.mapping_section = None
+        self.last_non_marker_block = "other"
+        for inline in _iter_list_item_first_inlines(self.tokens, start, end):
             invariant = _invariant_from_inline(inline)
             if invariant is not None:
                 section_id, title = invariant
-                section = SpecSection(
-                    path=rel_path,
-                    section_id=section_id,
-                    title=title,
-                    line=_token_start_line(inline, parser_line_to_source_line),
-                    anchor=None,
-                    kind="invariant",
+                section = self.append_list_section(
+                    inline, section_id, title, "invariant"
                 )
-                sections.append(section)
-                begin_directive_block(section)
-                marker_window_open = True
+                self.begin_directive_block(section)
+                self.marker_window_open = True
             elif inline.content.strip():
-                marker_window_open = False
+                self.marker_window_open = False
 
-    def process_html_block(token: Token) -> None:
-        nonlocal last_non_marker_block
-        nonlocal mapping_section
-        nonlocal marker_window_open
-
-        line_no = _token_start_line(token, parser_line_to_source_line)
-        recognized_skip, contains_body = process_reserved_skip_lines(
-            _token_physical_content_lines(token, parser_line_to_source_line)
+    def process_html_block(self, token: Token) -> None:
+        line_no = _token_start_line(token, self.parser_line_to_source_line)
+        recognized_skip, contains_body = self.process_reserved_skip_lines(
+            _token_physical_content_lines(token, self.parser_line_to_source_line)
         )
         if recognized_skip:
             if contains_body:
-                marker_window_open = False
-                mapping_section = None
-                last_non_marker_block = "other"
+                self.close_marker_window()
             return
         stripped = token.content.strip()
-        if stripped.startswith("<!--") and parse_marker_text(stripped, line_no):
+        if stripped.startswith("<!--") and self.parse_marker_text(stripped, line_no):
             return
         if stripped:
-            marker_window_open = False
-            mapping_section = None
-            last_non_marker_block = "other"
+            self.close_marker_window()
 
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
+    def walk_tokens(self) -> None:
+        index = 0
+        while index < len(self.tokens):
+            index = self.advance(index)
+
+    def advance(self, index: int) -> int:
+        """Apply one CommonMark block-token transition and return the next index."""
+
+        token = self.tokens[index]
         if token.type == "heading_open":
-            process_heading(index)
-            index += 3
-            continue
+            self.process_heading(index)
+            return index + 3
         if token.type == "paragraph_open":
-            process_paragraph(index)
-            index += 3
-            continue
+            self.process_paragraph(index)
+            return index + 3
         if token.type == "bullet_list_open":
-            end = _list_close_index(tokens, index)
-            if last_non_marker_block in {
-                "mapping_marker",
-                "mapping_list",
-            } and _list_can_continue_mapping(tokens, index, end):
-                process_mapping_list(index, end)
-            else:
-                process_regular_list(index, end)
-            index = end + 1
-            continue
+            return self.process_list(index)
         if token.type == "ordered_list_open":
-            end = _container_close_index(
-                tokens, index, "ordered_list_open", "ordered_list_close"
-            )
-            marker_window_open = False
-            mapping_section = None
-            last_non_marker_block = "other"
-            index = end + 1
-            continue
+            return self.skip_container(index, "ordered_list_open", "ordered_list_close")
         if token.type == "blockquote_open":
-            end = _container_close_index(
-                tokens, index, "blockquote_open", "blockquote_close"
-            )
-            marker_window_open = False
-            mapping_section = None
-            last_non_marker_block = "other"
-            index = end + 1
-            continue
+            return self.skip_container(index, "blockquote_open", "blockquote_close")
         if token.type == "html_block":
-            process_html_block(token)
-            index += 1
-            continue
-        if token.type in {"fence", "code_block"}:
-            marker_window_open = False
-            mapping_section = None
-            last_non_marker_block = "other"
-        index += 1
+            self.process_html_block(token)
+        elif token.type in {"fence", "code_block"}:
+            self.close_marker_window()
+        return index + 1
 
-    obligation_skips = _resolve_skip_candidates(
-        path=rel_path,
-        candidates=skip_candidates,
-        sections=sections,
-        invariants=invariants,
-        diagnostics=marker_diagnostics,
-    )
-    for line_no in sorted(declaration_candidate_lines - processed_declaration_lines):
-        marker_diagnostics.append(
-            _skip_diagnostic(
-                "SUPPRESSION_INVALID_SYNTAX",
-                path=rel_path,
-                line=line_no,
-                message=(
-                    "suppression-declaration must be ordinary paragraph content "
-                    "under an ID-bearing section"
-                ),
-            )
-        )
-
-    heading_boundaries = [
-        (
-            _token_start_line(token, parser_line_to_source_line),
-            _heading_level(token),
-        )
-        for token in tokens
-        if token.type == "heading_open"
-    ]
-    inline_ends: dict[int, int] = {}
-    for token in tokens:
-        if token.type != "inline":
-            continue
-        start = _token_start_line(token, parser_line_to_source_line)
-        inline_ends[start] = max(
-            inline_ends.get(start, start),
-            _token_end_line(token, parser_line_to_source_line, start),
-        )
-
-    section_spans: list[tuple[str, int, int]] = []
-    file_end_line = max(1, len(lines))
-    for section in sections:
-        if section.kind == "heading":
-            level = next(
-                (
-                    heading_level
-                    for heading_line, heading_level in heading_boundaries
-                    if heading_line == section.line
-                ),
-                0,
-            )
-            end_line = file_end_line
-            for heading_line, heading_level in heading_boundaries:
-                if heading_line > section.line and heading_level <= level:
-                    end_line = heading_line - 1
-                    break
+    def process_list(self, index: int) -> int:
+        end = _list_close_index(self.tokens, index)
+        if self.last_non_marker_block in {
+            "mapping_marker",
+            "mapping_list",
+        } and _list_can_continue_mapping(self.tokens, index, end):
+            self.process_mapping_list(index, end)
         else:
-            end_line = inline_ends.get(section.line, section.line)
-        section_spans.append((section.section_id, section.line, end_line))
+            self.process_regular_list(index, end)
+        return end + 1
 
-    nonsemantic_lines.update(item.line for item in obligation_skips)
-    section_search_text = tuple(
-        (
-            section_id,
-            "\n".join(
-                lines[line_no - 1]
-                for line_no in range(start_line, end_line + 1)
-                if line_no not in nonsemantic_lines
-            ),
+    def skip_container(self, index: int, open_type: str, close_type: str) -> int:
+        end = _container_close_index(self.tokens, index, open_type, close_type)
+        self.close_marker_window()
+        return end + 1
+
+    def declaration_candidate_lines(self) -> set[int]:
+        return {
+            line_no
+            for line_no, source_line in enumerate(self.lines, start=1)
+            if "suppression-declaration" in source_line.lower()
+            and (
+                source_line.strip().lower().startswith("_traceability:")
+                or (
+                    source_line.strip().startswith(("<!--", "#"))
+                    and "_traceability:" in source_line.lower()
+                )
+            )
+        }
+
+    def finish(self) -> ParsedSpec:
+        obligation_skips = _resolve_skip_candidates(
+            path=self.rel_path,
+            candidates=self.skip_candidates,
+            sections=self.sections,
+            invariants=self.invariants,
+            diagnostics=self.marker_diagnostics,
         )
-        for section_id, start_line, end_line in section_spans
-    )
+        self.report_unprocessed_declarations()
+        section_spans = self.build_section_spans()
+        self.nonsemantic_lines.update(item.line for item in obligation_skips)
+        section_search_text = self.build_section_search_text(section_spans)
+        return ParsedSpec(
+            path=self.rel_path,
+            sections=tuple(self.sections),
+            mappings=tuple(self.mappings),
+            anchors=tuple(self.anchors),
+            issues=tuple(self.issues),
+            invariants=tuple(self.invariants),
+            file_meta=self.file_meta,
+            file_ignores=frozenset(self.file_ignores),
+            section_markers=tuple(
+                (section_id, meta_flag, frozenset(codes))
+                for section_id, (meta_flag, codes) in sorted(
+                    self.section_markers.items()
+                )
+            ),
+            obligation_skips=obligation_skips,
+            suppression_declarations=tuple(self.suppression_declarations),
+            suppression_rules=tuple(self.suppression_rules),
+            marker_diagnostics=tuple(self.marker_diagnostics),
+            section_spans=tuple(section_spans),
+            section_search_text=section_search_text,
+            mapping_block_spans=tuple(self.mapping_block_spans),
+        )
 
-    result = ParsedSpec(
-        path=rel_path,
-        sections=tuple(sections),
-        mappings=tuple(mappings),
-        anchors=tuple(anchors),
-        issues=tuple(issues),
-        invariants=tuple(invariants),
-        file_meta=file_meta,
-        file_ignores=frozenset(file_ignores),
-        section_markers=tuple(
-            (section_id, meta_flag, frozenset(codes))
-            for section_id, (meta_flag, codes) in sorted(section_markers.items())
-        ),
-        obligation_skips=obligation_skips,
-        suppression_declarations=tuple(suppression_declarations),
-        suppression_rules=tuple(suppression_rules),
-        marker_diagnostics=tuple(marker_diagnostics),
-        section_spans=tuple(section_spans),
-        section_search_text=section_search_text,
-        mapping_block_spans=tuple(mapping_block_spans),
+    def report_unprocessed_declarations(self) -> None:
+        unprocessed = (
+            self.declaration_candidate_lines() - self.processed_declaration_lines
+        )
+        for line_no in sorted(unprocessed):
+            self.marker_diagnostics.append(
+                _skip_diagnostic(
+                    "SUPPRESSION_INVALID_SYNTAX",
+                    path=self.rel_path,
+                    line=line_no,
+                    message=(
+                        "suppression-declaration must be ordinary paragraph content "
+                        "under an ID-bearing section"
+                    ),
+                )
+            )
+
+    def build_section_spans(self) -> list[tuple[str, int, int]]:
+        heading_boundaries = [
+            (
+                _token_start_line(token, self.parser_line_to_source_line),
+                _heading_level(token),
+            )
+            for token in self.tokens
+            if token.type == "heading_open"
+        ]
+        inline_ends = self.inline_end_lines()
+        file_end_line = max(1, len(self.lines))
+        return [
+            (
+                section.section_id,
+                section.line,
+                self.section_end_line(
+                    section, heading_boundaries, inline_ends, file_end_line
+                ),
+            )
+            for section in self.sections
+        ]
+
+    def inline_end_lines(self) -> dict[int, int]:
+        inline_ends: dict[int, int] = {}
+        for token in self.tokens:
+            if token.type != "inline":
+                continue
+            start = _token_start_line(token, self.parser_line_to_source_line)
+            inline_ends[start] = max(
+                inline_ends.get(start, start),
+                _token_end_line(token, self.parser_line_to_source_line, start),
+            )
+        return inline_ends
+
+    @staticmethod
+    def section_end_line(
+        section: SpecSection,
+        heading_boundaries: Sequence[tuple[int, int]],
+        inline_ends: dict[int, int],
+        file_end_line: int,
+    ) -> int:
+        if section.kind != "heading":
+            return inline_ends.get(section.line, section.line)
+        level = next(
+            (
+                heading_level
+                for heading_line, heading_level in heading_boundaries
+                if heading_line == section.line
+            ),
+            0,
+        )
+        for heading_line, heading_level in heading_boundaries:
+            if heading_line > section.line and heading_level <= level:
+                return heading_line - 1
+        return file_end_line
+
+    def build_section_search_text(
+        self,
+        section_spans: Sequence[tuple[str, int, int]],
+    ) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (
+                section_id,
+                "\n".join(
+                    self.lines[line_no - 1]
+                    for line_no in range(start_line, end_line + 1)
+                    if line_no not in self.nonsemantic_lines
+                ),
+            )
+            for section_id, start_line, end_line in section_spans
+        )
+
+
+def parse_markdown_spec_bytes(
+    source: bytes,
+    rel_path: str,
+    *,
+    allow_unknown_codes: bool = False,
+    parse_memo: MarkdownParseMemo | None = None,
+) -> ParsedSpec:
+    """Parse one captured Markdown source without reopening the repository.
+
+    Spec: docs/specs/08-intent-coverage.md [COV-8]
+    """
+
+    text = source.decode("utf-8")
+    memo_key = (hashlib.sha256(source).hexdigest(), allow_unknown_codes)
+    product = None if parse_memo is None else parse_memo.get(memo_key)
+    if product is not None:
+        cached_result = product.parsed_by_path.get(rel_path)
+        if cached_result is not None:
+            return cached_result
+    else:
+        product = _MarkdownParseProduct(
+            tuple(_MARKDOWN.parse(text)),
+            _parser_line_source_map(text),
+            {},
+        )
+        if parse_memo is not None:
+            parse_memo[memo_key] = product
+
+    reducer = _TraceabilityReducer(
+        rel_path=rel_path,
+        lines=list(lf_split(text)),
+        tokens=product.tokens,
+        parser_line_to_source_line=product.parser_line_to_source_line,
+        allow_unknown_codes=allow_unknown_codes,
     )
+    reducer.walk_tokens()
+    result = reducer.finish()
     if parse_memo is not None:
-        cached_product.parsed_by_path[rel_path] = result
+        product.parsed_by_path[rel_path] = result
     return result

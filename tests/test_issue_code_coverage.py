@@ -1,12 +1,11 @@
-"""[SC-10] contract-coverage gate: every [SC-11] code has a firing proof.
+"""[SC-10] diagnostic firing and registry-consistency gates.
 
 Spec: docs/specs/02-backstitch-core.md [SC-10], [SC-11]
 
-One corpus exercises every deterministic issue code; the parametrized test
-fails for any code in ``ISSUE_CODES`` that never fires here, and asserts the
-default severity for always-error codes. A declared code with no firing
-test is an untested contract and a verification failure (engineering
-principle 12).
+One corpus exercises every deterministic trace issue code. A separate
+registry-consistency test checks the declared intent-code contexts and default
+severities without claiming to fire their producers; intent producer firing is
+covered by the coverage-domain matrix.
 """
 
 from __future__ import annotations
@@ -19,7 +18,13 @@ from typing import Any, cast
 
 import pytest
 
-from backstitch.models import ERROR_SEVERITY_CODES, ISSUE_CODES, Issue, Report
+from backstitch.coverage_application import INTENT_DIAGNOSTIC_CONTEXTS
+from backstitch.models import (
+    ERROR_SEVERITY_CODES,
+    ISSUE_CODES,
+    Issue,
+    Report,
+)
 from backstitch.obligation_runtime import build_obligation_runtime
 from backstitch.profiles import get_profile
 from backstitch.settings import BackstitchSettings
@@ -42,7 +47,9 @@ _FILES: dict[str, str | bytes] = {
         "## NoSym [AA-7]\n\n_Implementation mapping_:\n\n"
         "- `pkg/impl.py::not_there`\n\n"
         "## BareSym [AA-8]\n\n_Implementation mapping_:\n\n- `Runtime.save`\n\n"
-        "## MappedElse [AA-9]\n\n_Implementation mapping_:\n\n- `pkg/other.py`\n"
+        "## MappedElse [AA-9]\n\n_Implementation mapping_:\n\n- `pkg/other.py`\n\n"
+        "## TestOnly [AA-10]\n\n_Implementation mapping_:\n\n"
+        "- `pkg/tests/test_only.py`\n"
     ),
     "docs/specs/02-planned-p.md": "# P\n\n## Planned [PP-1]\n",
     "docs/specs/03-exploratory-x.md": "# X\n\n## Expl [XX-1]\n",
@@ -102,6 +109,9 @@ _FILES: dict[str, str | bytes] = {
         '    """Tests-invariant: [INV.UNKNOWN.1]"""\n'
         "    pass\n"
     ),
+    "pkg/tests/test_only.py": (
+        '"""Spec: docs/specs/01-a.md [AA-10]"""\n\ndef test_only() -> None:\n    pass\n'
+    ),
     "docs/plans/.keep": "",
 }
 
@@ -120,26 +130,6 @@ TRACE_DIAGNOSTIC_CODES = frozenset(
 SUPPRESSION_DIAGNOSTIC_CODES = frozenset(
     code for code in ISSUE_CODES if code.startswith("SUPPRESSION_")
 )
-INTENT_DIAGNOSTIC_CONTEXTS = {
-    "INTENT_UNCOVERED_DEFINITION": {
-        "repository": "info",
-        "patch": "error",
-    },
-    "INTENT_INHERITED_ONLY": {
-        "repository": "info",
-        "patch": "error",
-    },
-    "INTENT_EXEMPTION_UNUSED": {None: "warning"},
-    "INTENT_EXEMPTION_UNREASONED": {None: "error"},
-    "INTENT_REQUIREMENT_UNIMPLEMENTED": {None: "info"},
-    "INTENT_DRIFT_SUSPECT": {None: "info"},
-    "INTENT_COVERAGE_FLOOR_REGRESSION": {None: "error"},
-    "INTENT_COVERAGE_INCOMPLETE": {
-        "repository": "info",
-        "patch": "error",
-    },
-    "INTENT_COVERAGE_POLICY_REGRESSION": {None: "error"},
-}
 
 
 @pytest.fixture(scope="module")
@@ -202,7 +192,9 @@ def test_context_dependent_severities_fire_both_ways(
     }
 
 
-def test_intent_coverage_registry_rows_and_contexts_all_fire() -> None:
+def test_intent_coverage_registry_contexts_are_consistent() -> None:
+    """Check registry projection only; constructing an Issue is not firing proof."""
+
     assert {code for code in ISSUE_CODES if code.startswith("INTENT_")} == set(
         INTENT_DIAGNOSTIC_CONTEXTS
     )

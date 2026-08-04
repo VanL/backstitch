@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -736,7 +736,21 @@ def _packet_v3_has_contained_regions(
     return False
 
 
-def _packet_v3_shape_error(row: dict[str, Any]) -> str | None:
+@dataclass(slots=True)
+class _PacketV3ValidationState:
+    row: dict[str, Any]
+    snapshot: dict[str, Any] | None = None
+    readiness: dict[str, Any] | None = None
+    required_roles: list[Any] = field(default_factory=list)
+    requirement: dict[str, Any] | None = None
+    declared: list[dict[str, Any]] = field(default_factory=list)
+    declared_sources: dict[bytes, dict[str, Any]] = field(default_factory=dict)
+    counter: list[dict[str, Any]] = field(default_factory=list)
+    summary: dict[str, Any] | None = None
+
+
+def _packet_v3_header_error(state: _PacketV3ValidationState) -> str | None:
+    row = state.row
     if set(row) != _PACKET_V3_FIELDS or row.get("schema_version") != 3:
         return "packet schema 3 does not match its closed top-level shape"
     if row.get("kind") not in {"section", "invariant"}:
@@ -759,6 +773,7 @@ def _packet_v3_shape_error(row: dict[str, Any]) -> str | None:
         or not all(is_sha256_hex(value) for value in snapshot.values())
     ):
         return "packet schema 3 has an invalid source snapshot"
+    state.snapshot = snapshot
     readiness = row.get("readiness")
     if not isinstance(readiness, dict) or set(readiness) != {
         "intent_state",
@@ -788,6 +803,8 @@ def _packet_v3_shape_error(row: dict[str, Any]) -> str | None:
         )
     ):
         return "packet schema 3 must describe one executable obligation"
+    state.readiness = readiness
+    state.required_roles = required_roles
     requirement = row.get("requirement")
     if (
         not isinstance(requirement, dict)
@@ -804,6 +821,7 @@ def _packet_v3_shape_error(row: dict[str, Any]) -> str | None:
         or not requirement["text"].strip()
     ):
         return "packet schema 3 has an invalid requirement"
+    state.requirement = requirement
     if row["kind"] == "section":
         spec_path, separator, section_id = row["packet_id"].rpartition("#")
         if (
@@ -828,7 +846,12 @@ def _packet_v3_shape_error(row: dict[str, Any]) -> str | None:
             or required_roles != ["implementation", "binding_test"]
         ):
             return "packet schema 3 invariant identity/readiness is inconsistent"
+    return None
 
+
+def _packet_v3_declared_error(state: _PacketV3ValidationState) -> str | None:
+    row = state.row
+    required_roles = state.required_roles
     declared = row.get("declared_evidence")
     if not isinstance(declared, list):
         return "packet schema 3 declared_evidence must be an array"
@@ -916,7 +939,13 @@ def _packet_v3_shape_error(row: dict[str, Any]) -> str | None:
             for source in declared_sources.values()
         ):
             return "packet schema 3 executable readiness lacks required evidence"
+    state.declared = declared
+    state.declared_sources = declared_sources
+    return None
 
+
+def _packet_v3_counter_error(state: _PacketV3ValidationState) -> str | None:
+    row = state.row
     counter = row.get("counterevidence")
     if not isinstance(counter, list):
         return "packet schema 3 counterevidence must be an array"
@@ -973,7 +1002,13 @@ def _packet_v3_shape_error(row: dict[str, Any]) -> str | None:
         return "packet schema 3 counterevidence regions are not ordered and unique"
     if _packet_v3_has_contained_regions(counter):
         return "packet schema 3 counterevidence regions were not maximally merged"
+    state.counter = counter
+    return None
 
+
+def _packet_v3_summary_error(state: _PacketV3ValidationState) -> str | None:
+    row = state.row
+    declared_sources = state.declared_sources
     summary = row.get("trace_summary")
     if not isinstance(summary, dict) or set(summary) != {
         "declared_counts",
@@ -1046,8 +1081,25 @@ def _packet_v3_shape_error(row: dict[str, Any]) -> str | None:
         )
     if summary["declared_counts"] != expected_declared_counts:
         return "packet schema 3 declared trace counts do not recompute"
+    state.summary = summary
+    return None
 
-    state = {
+
+def _packet_v3_integrity_error(state: _PacketV3ValidationState) -> str | None:
+    row = state.row
+    snapshot = state.snapshot
+    readiness = state.readiness
+    requirement = state.requirement
+    summary = state.summary
+    assert snapshot is not None
+    assert readiness is not None
+    assert requirement is not None
+    assert summary is not None
+    required_roles = state.required_roles
+    declared = state.declared
+    declared_sources = state.declared_sources
+    counter = state.counter
+    obligation_state = {
         "obligation_state_version": 1,
         "obligation_id": row["obligation_id"],
         "kind": row["kind"],
@@ -1069,7 +1121,9 @@ def _packet_v3_shape_error(row: dict[str, Any]) -> str | None:
             ),
         ),
     }
-    expected_state_hash = hashlib.sha256(canonical_json_bytes(state)).hexdigest()
+    expected_state_hash = hashlib.sha256(
+        canonical_json_bytes(obligation_state)
+    ).hexdigest()
     if snapshot["obligation_state_hash"] != expected_state_hash:
         return "packet schema 3 obligation_state_hash does not recompute"
 
@@ -1137,6 +1191,21 @@ def _packet_v3_shape_error(row: dict[str, Any]) -> str | None:
         return "packet schema 3 projection is invalid"
     if row["packet_hash"] != expected_hash:
         return "packet schema 3 packet_hash does not recompute"
+    return None
+
+
+def _packet_v3_shape_error(row: dict[str, Any]) -> str | None:
+    state = _PacketV3ValidationState(row)
+    for validate in (
+        _packet_v3_header_error,
+        _packet_v3_declared_error,
+        _packet_v3_counter_error,
+        _packet_v3_summary_error,
+        _packet_v3_integrity_error,
+    ):
+        problem = validate(state)
+        if problem is not None:
+            return problem
     return None
 
 
@@ -1264,9 +1333,16 @@ def _packet_v4_shape_error(row: dict[str, Any]) -> str | None:
             or not isinstance(codes, list)
             or any(not isinstance(value, str) or not value.strip() for value in codes)
             or codes != sorted(set(codes))
-            or (rule["mechanism"] == "meta" and (sections or codes))
+            or (rule["mechanism"] == "meta" and codes)
             or (rule["mechanism"] == "ignore" and not codes)
-            or (rule["provenance"] == "meta") != (rule["mechanism"] == "meta")
+            or (
+                rule["provenance"] == "meta"
+                and (rule["mechanism"] != "meta" or sections)
+            )
+            or (
+                rule["provenance"] in {"config_file", "config_section"}
+                and rule["mechanism"] != "ignore"
+            )
         ):
             return "packet schema 4 has invalid normalized suppression scope"
         origin = rule.get("origin")
@@ -1453,7 +1529,7 @@ def load_packets(path: Path) -> tuple[ValidatedSemanticPacket, ...]:
 
     A malformed packets file is an invocation error ([SC-5] exit 2), never
     a model-analysis result: invalid packets must be rejected here, before
-    any of them can reach analyze_packets.
+    any of them can reach the provider adapter.
     """
 
     return load_packets_bytes(path.read_bytes(), source=path)

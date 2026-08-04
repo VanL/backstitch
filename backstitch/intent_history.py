@@ -41,9 +41,9 @@ from backstitch.repository_snapshot import (
     SnapshotFile,
     SnapshotPath,
 )
+from backstitch.scan_exclusions import is_excluded
 from backstitch.settings import (
     BackstitchSettings,
-    is_excluded,
     resolve_repository_config_from_blobs,
 )
 

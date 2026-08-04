@@ -61,6 +61,9 @@ Risky plans are blocked if they do not make explicit:
 | 2026-07-28-evidence-stable-semantic-result-reuse-plan.md | implemented and verified; final independent review PASS; included in the owner-authorized landing commit |
 | 2026-07-28-intent-coverage-implementation-plan.md | deterministic report, Git ratchet, stale-history, and closed-report slices implemented and reviewed; semantic mapping-quality qualification and rollout gates remain open |
 | 2026-07-28-agent-guidance-delta-wave-propagation-plan.md | active — landing the hub delta `b248e1c..e42762c` (source `e42762c`) |
+| 2026-07-29-architecture-quality-remediation-plan.md | completed — implementation, verification, independent review, and owner-authorized landing |
+| 2026-07-29-usability-remediation-plan.md | completed — implementation, exact-state dogfood, independent review, and owner-authorized landing |
+| 2026-08-04-semantic-preparation-performance-plan.md | completed — implementation, verification, and final independent review PASS |
 
 (Existing plans carry status via each spec's `## Related Plans` tags;
 rows are added here as plans open or the coalescing sweep needs them.)

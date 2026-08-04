@@ -558,49 +558,105 @@ def _issue_rows(issues: tuple[Issue, ...]) -> list[dict[str, Any]]:
     return [dataclasses.asdict(item) for item in sorted(issues, key=issue_sort_key)]
 
 
-def validate_coverage_report(
-    payload: dict[str, Any],
-    *,
-    source_result: IntentCoverageResult,
-    inherited_counts: bool,
-    floors: tuple[CoverageFloorResult, ...] = (),
-    unscannable_files: tuple[CoverageUnscannableFile, ...] = (),
-    issues: tuple[Issue, ...] = (),
-    baseline: GitBaselineMetadata | None = None,
-    changed_definition_ids: frozenset[str] = frozenset(),
-    policy_events: tuple[PolicyEvent, ...] = (),
-    drift_events: tuple[DriftEvent, ...] = (),
-    stale_doc_trends: tuple[StaleDocTrend, ...] = (),
-    spec_growth: dict[str, Any] | None = None,
-) -> None:
-    """Reject closed-schema drift, forged aggregates, and dangling joins."""
+class _CoverageReportValidator:
+    """Validate schema sections in their contractually ordered error sequence."""
 
-    policy_events = tuple(sorted(policy_events, key=lambda item: item.event_id))
-    drift_events = tuple(sorted(drift_events, key=lambda item: item.event_id))
-    if not isinstance(payload, dict) or tuple(payload) != _TOP_LEVEL_FIELDS:
-        raise CoverageReportError(
-            "coverage report has unknown, missing, or unordered keys"
+    def __init__(
+        self,
+        payload: dict[str, Any],
+        *,
+        source_result: IntentCoverageResult,
+        inherited_counts: bool,
+        floors: tuple[CoverageFloorResult, ...],
+        unscannable_files: tuple[CoverageUnscannableFile, ...],
+        issues: tuple[Issue, ...],
+        baseline: GitBaselineMetadata | None,
+        changed_definition_ids: frozenset[str],
+        policy_events: tuple[PolicyEvent, ...],
+        drift_events: tuple[DriftEvent, ...],
+        stale_doc_trends: tuple[StaleDocTrend, ...],
+        spec_growth: dict[str, Any] | None,
+    ) -> None:
+        self.payload = payload
+        self.source_result = source_result
+        self.inherited_counts = inherited_counts
+        self.floors = floors
+        self.unscannable_files = unscannable_files
+        self.issues = issues
+        self.baseline = baseline
+        self.changed_definition_ids = changed_definition_ids
+        self.policy_events = policy_events
+        self.drift_events = drift_events
+        self.stale_doc_trends = stale_doc_trends
+        self.spec_growth = spec_growth
+        self.oid_length: int | None = None
+        self.event_oid_length = 40
+        self.definitions: list[dict[str, Any]] = []
+        self.definition_ids: set[str] = set()
+        self.definition_by_id: dict[str, dict[str, Any]] = {}
+        self.worklist: list[str] = []
+        self.summary: dict[str, Any] = {}
+        self.exemptions: list[dict[str, Any]] = []
+        self.exemption_ids: set[str] = set()
+        self.requirements: list[dict[str, Any]] = []
+        self.requirement_ids: set[str] = set()
+        self.issue_rows: list[dict[str, Any]] = []
+        self.unscannable_rows: list[dict[str, Any]] = []
+        self.policy_rows: list[dict[str, Any]] = []
+        self.drift_rows: list[dict[str, Any]] = []
+        self.trend_rows: list[dict[str, Any]] = []
+
+    def validate(self) -> None:
+        self.policy_events = tuple(
+            sorted(self.policy_events, key=lambda item: item.event_id)
         )
-    if (
-        payload.get("artifact") != _ARTIFACT
-        or type(payload.get("schema_version")) is not int
-        or payload.get("schema_version") != 1
-    ):
-        raise CoverageReportError("coverage report identity is invalid")
-    _require_string(payload["profile"], "profile", nonblank=True)
-    _require_string(payload["repo_root"], "repo_root", nonblank=True)
-    if not isinstance(payload.get("mode"), str) or payload["mode"] not in {
-        "report",
-        "ratchet",
-    }:
-        raise CoverageReportError("coverage report mode is invalid")
-    if payload["mode"] == "report" and payload.get("baseline") is not None:
-        raise CoverageReportError("report mode baseline must be null")
-    if payload["mode"] == "ratchet" and payload.get("baseline") is None:
-        raise CoverageReportError("ratchet mode baseline must be non-null")
-    oid_length: int | None = None
-    if payload["baseline"] is not None:
-        baseline_row = payload["baseline"]
+        self.drift_events = tuple(
+            sorted(self.drift_events, key=lambda item: item.event_id)
+        )
+        self.validate_envelope()
+        self.validate_metric_identity()
+        self.validate_definitions()
+        self.validate_worklist()
+        self.validate_summary()
+        self.validate_exemptions()
+        self.validate_requirements()
+        self.validate_issues()
+        self.validate_trees()
+        self.validate_floors()
+        self.validate_unscannable_files()
+        self.validate_git_events()
+        self.validate_aggregates_and_growth()
+        self.validate_source_facts()
+        self.validate_report_hash()
+
+    def validate_envelope(self) -> None:
+        payload = self.payload
+        if not isinstance(payload, dict) or tuple(payload) != _TOP_LEVEL_FIELDS:
+            raise CoverageReportError(
+                "coverage report has unknown, missing, or unordered keys"
+            )
+        if (
+            payload.get("artifact") != _ARTIFACT
+            or type(payload.get("schema_version")) is not int
+            or payload.get("schema_version") != 1
+        ):
+            raise CoverageReportError("coverage report identity is invalid")
+        _require_string(payload["profile"], "profile", nonblank=True)
+        _require_string(payload["repo_root"], "repo_root", nonblank=True)
+        if not isinstance(payload.get("mode"), str) or payload["mode"] not in {
+            "report",
+            "ratchet",
+        }:
+            raise CoverageReportError("coverage report mode is invalid")
+        if payload["mode"] == "report" and payload.get("baseline") is not None:
+            raise CoverageReportError("report mode baseline must be null")
+        if payload["mode"] == "ratchet" and payload.get("baseline") is None:
+            raise CoverageReportError("ratchet mode baseline must be non-null")
+        if payload["baseline"] is not None:
+            self.oid_length = self.validate_baseline(payload["baseline"])
+
+    @staticmethod
+    def validate_baseline(baseline_row: dict[str, Any]) -> int:
         _require_fields(baseline_row, _BASELINE_FIELDS, "baseline")
         _require_string(
             baseline_row["configured_ref"],
@@ -633,25 +689,44 @@ def validate_coverage_report(
             "baseline history_commits_inspected",
             minimum=0,
         )
-    metric_identity = payload["metric_identity"]
-    _require_fields(metric_identity, _METRIC_FIELDS, "metric_identity")
-    if type(metric_identity["algorithm_version"]) is not int or metric_identity != {
-        "id": "intent-coverage-definition-v1",
-        "algorithm_version": 1,
-        "direct_numerator": "direct",
-        "direct_denominator": "total",
-        "accounted_numerator": "direct+exempt+inherited_when_enabled",
-        "accounted_denominator": "total",
-    }:
-        raise CoverageReportError("coverage metric_identity is invalid")
+        return oid_length
 
-    definitions = payload["definitions"]
-    if not isinstance(definitions, list):
-        raise CoverageReportError("coverage definitions must be an array")
-    definition_ids: set[str] = set()
-    definition_by_id: dict[str, dict[str, Any]] = {}
-    previous_definition_key: tuple[str, str] | None = None
-    for row in definitions:
+    def validate_metric_identity(self) -> None:
+        metric_identity = self.payload["metric_identity"]
+        _require_fields(metric_identity, _METRIC_FIELDS, "metric_identity")
+        if type(metric_identity["algorithm_version"]) is not int or metric_identity != {
+            "id": "intent-coverage-definition-v1",
+            "algorithm_version": 1,
+            "direct_numerator": "direct",
+            "direct_denominator": "total",
+            "accounted_numerator": "direct+exempt+inherited_when_enabled",
+            "accounted_denominator": "total",
+        }:
+            raise CoverageReportError("coverage metric_identity is invalid")
+
+    def validate_definitions(self) -> None:
+        definitions = self.payload["definitions"]
+        if not isinstance(definitions, list):
+            raise CoverageReportError("coverage definitions must be an array")
+        self.definitions = definitions
+        previous_key: tuple[str, str] | None = None
+        for row in definitions:
+            path, locator = self.validate_definition_row(row)
+            definition_key = (path, locator)
+            if previous_key is not None and definition_key < previous_key:
+                raise CoverageReportError("coverage definitions are not canonical")
+            previous_key = definition_key
+            expected_id = _stable_id(["intent-definition-v1", path, locator])
+            if row["definition_id"] != expected_id:
+                raise CoverageReportError("coverage definition_id is invalid")
+            if row["definition_id"] in self.definition_ids:
+                raise CoverageReportError("coverage definition_id is duplicate")
+            self.definition_ids.add(row["definition_id"])
+            self.definition_by_id[row["definition_id"]] = row
+            self.validate_definition_classification(row)
+
+    @staticmethod
+    def validate_definition_row(row: dict[str, Any]) -> tuple[str, str]:
         _require_fields(row, _DEFINITION_FIELDS, "definition")
         path = _require_canonical_path(row["path"], "definition path")
         locator = _require_string(
@@ -675,11 +750,7 @@ def validate_coverage_report(
                 raise CoverageReportError("coverage definition qualname is invalid")
         else:
             _require_string(qualname, "definition qualname", nonblank=True)
-        _require_canonical_path(
-            row["tree"],
-            "definition tree",
-            allow_dot=True,
-        )
+        _require_canonical_path(row["tree"], "definition tree", allow_dot=True)
         _require_sha256(
             row["source_projection_sha256"],
             "definition source_projection_sha256",
@@ -692,20 +763,10 @@ def validate_coverage_report(
                 f"definition {key_name}",
                 sha256=True,
             )
-        definition_key = (path, locator)
-        if (
-            previous_definition_key is not None
-            and definition_key < previous_definition_key
-        ):
-            raise CoverageReportError("coverage definitions are not canonical")
-        previous_definition_key = definition_key
-        expected_id = _stable_id(["intent-definition-v1", path, locator])
-        if row["definition_id"] != expected_id:
-            raise CoverageReportError("coverage definition_id is invalid")
-        if row["definition_id"] in definition_ids:
-            raise CoverageReportError("coverage definition_id is duplicate")
-        definition_ids.add(row["definition_id"])
-        definition_by_id[row["definition_id"]] = row
+        return path, locator
+
+    @staticmethod
+    def validate_definition_classification(row: dict[str, Any]) -> None:
         if not isinstance(row["classification"], str) or row["classification"] not in {
             "direct",
             "inherited",
@@ -728,74 +789,107 @@ def validate_coverage_report(
         ):
             raise CoverageReportError("coverage definition coordinates are invalid")
 
-    worklist = payload["worklist"]
-    _require_string_array(
-        worklist,
-        "worklist",
-        sha256=True,
-        sorted_unique=False,
-    )
-    expected_worklist = [
-        row["definition_id"]
-        for row in sorted(
-            (item for item in definitions if item["classification"] == "uncovered"),
-            key=lambda item: (
-                0 if item["role"] == "production" else 1,
-                item["path"],
-                item["structural_locator"],
-            ),
+    def validate_worklist(self) -> None:
+        self.worklist = _require_string_array(
+            self.payload["worklist"],
+            "worklist",
+            sha256=True,
+            sorted_unique=False,
         )
-    ]
-    if worklist != expected_worklist:
-        raise CoverageReportError(
-            "coverage worklist does not match uncovered definitions"
+        expected_worklist = [
+            row["definition_id"]
+            for row in sorted(
+                (
+                    item
+                    for item in self.definitions
+                    if item["classification"] == "uncovered"
+                ),
+                key=lambda item: (
+                    0 if item["role"] == "production" else 1,
+                    item["path"],
+                    item["structural_locator"],
+                ),
+            )
+        ]
+        if self.worklist != expected_worklist:
+            raise CoverageReportError(
+                "coverage worklist does not match uncovered definitions"
+            )
+
+    def validate_summary(self) -> None:
+        summary = self.payload["summary"]
+        _require_fields(summary, _SUMMARY_FIELDS, "summary")
+        self.summary = summary
+        _require_boolean(summary["complete"], "summary complete")
+        for name in (
+            "unscannable",
+            "direct",
+            "inherited",
+            "exempt",
+            "uncovered",
+            "total",
+            "unimplemented_requirements",
+            "policy_events",
+            "acknowledged_policy_events",
+            "drift_events",
+            "acknowledged_drift_events",
+            "stale_doc_trends",
+        ):
+            _require_integer(summary[name], f"summary {name}", minimum=0)
+        _require_rate(summary["direct_rate"], "summary direct_rate")
+        _require_rate(summary["accounted_rate"], "summary accounted_rate")
+        counts = {
+            name: sum(row["classification"] == name for row in self.definitions)
+            for name in ("direct", "inherited", "exempt", "uncovered")
+        }
+        for name, value in (*counts.items(), ("total", len(self.definitions))):
+            if summary[name] != value:
+                raise CoverageReportError(f"coverage summary {name} is invalid")
+        if summary["direct_rate"] != _rate(counts["direct"], len(self.definitions)):
+            raise CoverageReportError("coverage summary direct_rate is invalid")
+        expected_accounted = (
+            counts["direct"]
+            + counts["exempt"]
+            + (counts["inherited"] if self.inherited_counts else 0)
         )
+        if summary["accounted_rate"] != _rate(
+            expected_accounted,
+            len(self.definitions),
+        ):
+            raise CoverageReportError("coverage summary accounted_rate is invalid")
 
-    summary = payload["summary"]
-    _require_fields(summary, _SUMMARY_FIELDS, "summary")
-    _require_boolean(summary["complete"], "summary complete")
-    for name in (
-        "unscannable",
-        "direct",
-        "inherited",
-        "exempt",
-        "uncovered",
-        "total",
-        "unimplemented_requirements",
-        "policy_events",
-        "acknowledged_policy_events",
-        "drift_events",
-        "acknowledged_drift_events",
-        "stale_doc_trends",
-    ):
-        _require_integer(summary[name], f"summary {name}", minimum=0)
-    _require_rate(summary["direct_rate"], "summary direct_rate")
-    _require_rate(summary["accounted_rate"], "summary accounted_rate")
-    counts = {
-        name: sum(row["classification"] == name for row in definitions)
-        for name in ("direct", "inherited", "exempt", "uncovered")
-    }
-    for name, value in (*counts.items(), ("total", len(definitions))):
-        if summary[name] != value:
-            raise CoverageReportError(f"coverage summary {name} is invalid")
-    if summary["direct_rate"] != _rate(counts["direct"], len(definitions)):
-        raise CoverageReportError("coverage summary direct_rate is invalid")
-    expected_accounted = (
-        counts["direct"]
-        + counts["exempt"]
-        + (counts["inherited"] if inherited_counts else 0)
-    )
-    if summary["accounted_rate"] != _rate(
-        expected_accounted,
-        len(definitions),
-    ):
-        raise CoverageReportError("coverage summary accounted_rate is invalid")
+    def validate_exemptions(self) -> None:
+        exemptions = self.payload["exemptions"]
+        if not isinstance(exemptions, list):
+            raise CoverageReportError("coverage exemptions must be an array")
+        self.exemptions = exemptions
+        for row in exemptions:
+            exemption_id = self.validate_exemption_row(row)
+            if exemption_id in self.exemption_ids:
+                raise CoverageReportError("coverage exemption_id is duplicate")
+            self.exemption_ids.add(exemption_id)
+            if (
+                row["matched_definition_ids"]
+                != sorted(set(row["matched_definition_ids"]))
+                or not set(row["matched_definition_ids"]) <= self.definition_ids
+            ):
+                raise CoverageReportError("coverage exemption join is invalid")
+            if not isinstance(row["state"], str) or row["state"] not in {
+                "used",
+                "overlap_only",
+                "unused",
+            }:
+                raise CoverageReportError("coverage exemption state is invalid")
+        if [row["exemption_id"] for row in exemptions] != sorted(self.exemption_ids):
+            raise CoverageReportError("coverage exemptions are not canonical")
+        for row in self.definitions:
+            if not set(row["matching_exemption_ids"]) <= self.exemption_ids:
+                raise CoverageReportError(
+                    "coverage definition exemption join is dangling"
+                )
 
-    exemptions = payload["exemptions"]
-    if not isinstance(exemptions, list):
-        raise CoverageReportError("coverage exemptions must be an array")
-    exemption_ids: set[str] = set()
-    for row in exemptions:
+    @staticmethod
+    def validate_exemption_row(row: dict[str, Any]) -> str:
         _require_fields(row, _EXEMPTION_FIELDS, "exemption")
         origin = row["origin"]
         if not isinstance(origin, str) or origin not in {
@@ -821,39 +915,47 @@ def validate_coverage_report(
             "exemption matched_definition_ids",
             sha256=True,
         )
-        expected_exemption_id = _stable_id(
+        expected_id = _stable_id(
             ["intent-exemption-v1", "inline", path, line, reason]
             if origin == "inline"
             else ["intent-exemption-v1", origin, selector]
         )
-        if row["exemption_id"] != expected_exemption_id:
+        if row["exemption_id"] != expected_id:
             raise CoverageReportError("coverage exemption_id is invalid")
-        if row["exemption_id"] in exemption_ids:
-            raise CoverageReportError("coverage exemption_id is duplicate")
-        exemption_ids.add(row["exemption_id"])
-        if (
-            row["matched_definition_ids"] != sorted(set(row["matched_definition_ids"]))
-            or not set(row["matched_definition_ids"]) <= definition_ids
-        ):
-            raise CoverageReportError("coverage exemption join is invalid")
-        if not isinstance(row["state"], str) or row["state"] not in {
-            "used",
-            "overlap_only",
-            "unused",
-        }:
-            raise CoverageReportError("coverage exemption state is invalid")
-    if [row["exemption_id"] for row in exemptions] != sorted(exemption_ids):
-        raise CoverageReportError("coverage exemptions are not canonical")
-    for row in definitions:
-        if not set(row["matching_exemption_ids"]) <= exemption_ids:
-            raise CoverageReportError("coverage definition exemption join is dangling")
+        return expected_id
 
-    requirements = payload["requirements"]
-    if not isinstance(requirements, list):
-        raise CoverageReportError("coverage requirements must be an array")
-    previous_requirement_key: tuple[str, str] | None = None
-    requirement_ids: set[str] = set()
-    for row in requirements:
+    def validate_requirements(self) -> None:
+        requirements = self.payload["requirements"]
+        if not isinstance(requirements, list):
+            raise CoverageReportError("coverage requirements must be an array")
+        self.requirements = requirements
+        previous_key: tuple[str, str] | None = None
+        for row in requirements:
+            path, section_id = self.validate_requirement_row(row)
+            requirement_key = (path, section_id)
+            if previous_key is not None and requirement_key < previous_key:
+                raise CoverageReportError("coverage requirements are not canonical")
+            previous_key = requirement_key
+            expected_id = _stable_id(["intent-requirement-v1", path, section_id])
+            if (
+                row["requirement_id"] != expected_id
+                or expected_id in self.requirement_ids
+            ):
+                raise CoverageReportError("coverage requirement_id is invalid")
+            self.requirement_ids.add(expected_id)
+            if not set(row["owner_definition_ids"]) <= self.definition_ids:
+                raise CoverageReportError("coverage requirement owner join is dangling")
+        active_unimplemented = sum(
+            row["rung"] == "active" and row["implementation_state"] != "implemented"
+            for row in requirements
+        )
+        if self.summary["unimplemented_requirements"] != active_unimplemented:
+            raise CoverageReportError(
+                "coverage summary unimplemented_requirements is invalid"
+            )
+
+    @staticmethod
+    def validate_requirement_row(row: dict[str, Any]) -> tuple[str, str]:
         _require_fields(row, _REQUIREMENT_FIELDS, "requirement")
         path = _require_canonical_path(row["path"], "requirement path")
         section_id = _require_string(
@@ -883,46 +985,38 @@ def validate_coverage_report(
             "requirement owner_definition_ids",
             sha256=True,
         )
-        requirement_key = (path, section_id)
-        if (
-            previous_requirement_key is not None
-            and requirement_key < previous_requirement_key
-        ):
-            raise CoverageReportError("coverage requirements are not canonical")
-        previous_requirement_key = requirement_key
-        expected_id = _stable_id(["intent-requirement-v1", path, section_id])
-        if row["requirement_id"] != expected_id or expected_id in requirement_ids:
-            raise CoverageReportError("coverage requirement_id is invalid")
-        requirement_ids.add(expected_id)
-        if not set(row["owner_definition_ids"]) <= definition_ids:
-            raise CoverageReportError("coverage requirement owner join is dangling")
-    active_unimplemented = sum(
-        row["rung"] == "active" and row["implementation_state"] != "implemented"
-        for row in requirements
-    )
-    if summary["unimplemented_requirements"] != active_unimplemented:
-        raise CoverageReportError(
-            "coverage summary unimplemented_requirements is invalid"
-        )
+        return path, section_id
 
-    issue_rows = payload["issues"]
-    if not isinstance(issue_rows, list):
-        raise CoverageReportError("coverage issues must be an array")
-    parsed_issues: list[Issue] = []
-    for row in issue_rows:
-        _validate_issue_row(row)
-        try:
-            parsed_issues.append(Issue(**row))
-        except (TypeError, ValueError) as exc:
-            raise CoverageReportError("coverage issue row is invalid") from exc
-    if parsed_issues != sorted(parsed_issues, key=issue_sort_key):
-        raise CoverageReportError("coverage issues are not canonical")
+    def validate_issues(self) -> None:
+        issue_rows = self.payload["issues"]
+        if not isinstance(issue_rows, list):
+            raise CoverageReportError("coverage issues must be an array")
+        self.issue_rows = issue_rows
+        parsed_issues: list[Issue] = []
+        for row in issue_rows:
+            _validate_issue_row(row)
+            try:
+                parsed_issues.append(Issue(**row))
+            except (TypeError, ValueError) as exc:
+                raise CoverageReportError("coverage issue row is invalid") from exc
+        if parsed_issues != sorted(parsed_issues, key=issue_sort_key):
+            raise CoverageReportError("coverage issues are not canonical")
 
-    trees = payload["trees"]
-    if not isinstance(trees, list):
-        raise CoverageReportError("coverage trees must be an array")
-    previous_tree_key: tuple[str, str] | None = None
-    for row in trees:
+    def validate_trees(self) -> None:
+        trees = self.payload["trees"]
+        if not isinstance(trees, list):
+            raise CoverageReportError("coverage trees must be an array")
+        previous_key: tuple[str, str] | None = None
+        for row in trees:
+            root, role = self.validate_tree_identity(row)
+            tree_key = (root, role)
+            if previous_key is not None and tree_key <= previous_key:
+                raise CoverageReportError("coverage trees are not canonical")
+            previous_key = tree_key
+            self.validate_tree_counts(row)
+
+    @staticmethod
+    def validate_tree_identity(row: dict[str, Any]) -> tuple[str, str]:
         _require_fields(row, _TREE_FIELDS, "tree")
         root = _require_canonical_path(row["root"], "tree root", allow_dot=True)
         if not isinstance(row["role"], str) or row["role"] not in {
@@ -930,10 +1024,9 @@ def validate_coverage_report(
             "test",
         }:
             raise CoverageReportError("coverage tree role is invalid")
-        tree_key = (root, row["role"])
-        if previous_tree_key is not None and tree_key <= previous_tree_key:
-            raise CoverageReportError("coverage trees are not canonical")
-        previous_tree_key = tree_key
+        return root, row["role"]
+
+    def validate_tree_counts(self, row: dict[str, Any]) -> None:
         for name in ("direct", "inherited", "exempt", "uncovered", "total"):
             _require_integer(row[name], f"tree {name}", minimum=0)
         if row["total"] != sum(
@@ -944,25 +1037,29 @@ def validate_coverage_report(
         _require_rate(row["accounted_rate"], "tree accounted_rate")
         if row["direct_rate"] != _rate(row["direct"], row["total"]):
             raise CoverageReportError("coverage tree direct_rate is invalid")
-        tree_accounted = (
+        accounted = (
             row["direct"]
             + row["exempt"]
-            + (row["inherited"] if inherited_counts else 0)
+            + (row["inherited"] if self.inherited_counts else 0)
         )
-        if row["accounted_rate"] != _rate(tree_accounted, row["total"]):
+        if row["accounted_rate"] != _rate(accounted, row["total"]):
             raise CoverageReportError("coverage tree accounted_rate is invalid")
         _require_boolean(row["complete"], "tree complete")
 
-    floor_rows = payload["floors"]
-    if not isinstance(floor_rows, list):
-        raise CoverageReportError("coverage floors must be an array")
-    previous_floor_scope: str | None = None
-    for row in floor_rows:
-        _require_fields(row, _FLOOR_FIELDS, "floor")
-        scope = _require_canonical_path(row["scope"], "floor scope", allow_dot=True)
-        if previous_floor_scope is not None and scope <= previous_floor_scope:
-            raise CoverageReportError("coverage floors are not canonical")
-        previous_floor_scope = scope
+    def validate_floors(self) -> None:
+        floor_rows = self.payload["floors"]
+        if not isinstance(floor_rows, list):
+            raise CoverageReportError("coverage floors must be an array")
+        previous_scope: str | None = None
+        for row in floor_rows:
+            _require_fields(row, _FLOOR_FIELDS, "floor")
+            scope = _require_canonical_path(row["scope"], "floor scope", allow_dot=True)
+            if previous_scope is not None and scope <= previous_scope:
+                raise CoverageReportError("coverage floors are not canonical")
+            previous_scope = scope
+            self.validate_floor_counts(row)
+
+    def validate_floor_counts(self, row: dict[str, Any]) -> None:
         for name in ("direct", "inherited", "exempt", "uncovered", "total"):
             _require_integer(row[name], f"floor {name}", minimum=0)
         if row["total"] != sum(
@@ -976,30 +1073,43 @@ def validate_coverage_report(
         _require_boolean(row["passes"], "floor passes")
         if row["direct_rate"] != _rate(row["direct"], row["total"]):
             raise CoverageReportError("coverage floor direct_rate is invalid")
-        floor_accounted = (
+        accounted = (
             row["direct"]
             + row["exempt"]
-            + (row["inherited"] if inherited_counts else 0)
+            + (row["inherited"] if self.inherited_counts else 0)
         )
-        if row["accounted_rate"] != _rate(floor_accounted, row["total"]):
+        if row["accounted_rate"] != _rate(accounted, row["total"]):
             raise CoverageReportError("coverage floor accounted_rate is invalid")
         expected_passes = _meets_report_floor(
             row["direct"],
             row["total"],
             row["direct_target"],
         ) and _meets_report_floor(
-            floor_accounted,
+            accounted,
             row["total"],
             row["accounted_target"],
         )
         if row["passes"] is not expected_passes:
             raise CoverageReportError("coverage floor passes is invalid")
 
-    unscannable_rows = payload["unscannable_files"]
-    if not isinstance(unscannable_rows, list):
-        raise CoverageReportError("coverage unscannable_files must be an array")
-    previous_unscannable_key: tuple[str, str] | None = None
-    for row in unscannable_rows:
+    def validate_unscannable_files(self) -> None:
+        rows = self.payload["unscannable_files"]
+        if not isinstance(rows, list):
+            raise CoverageReportError("coverage unscannable_files must be an array")
+        self.unscannable_rows = rows
+        previous_key: tuple[str, str] | None = None
+        for row in rows:
+            path, role = self.validate_unscannable_identity(row)
+            key = (path, role)
+            if previous_key is not None and key <= previous_key:
+                raise CoverageReportError(
+                    "coverage unscannable_files are not canonical"
+                )
+            previous_key = key
+            self.validate_unscannable_issue_identities(row)
+
+    @staticmethod
+    def validate_unscannable_identity(row: dict[str, Any]) -> tuple[str, str]:
         _require_fields(row, _UNSCANNABLE_FIELDS, "unscannable_file")
         path = _require_canonical_path(row["path"], "unscannable_file path")
         if not isinstance(row["role"], str) or row["role"] not in {
@@ -1007,73 +1117,76 @@ def validate_coverage_report(
             "test",
         }:
             raise CoverageReportError("coverage unscannable_file role is invalid")
-        unscannable_key = (path, row["role"])
-        if (
-            previous_unscannable_key is not None
-            and unscannable_key <= previous_unscannable_key
-        ):
-            raise CoverageReportError("coverage unscannable_files are not canonical")
-        previous_unscannable_key = unscannable_key
+        return path, row["role"]
+
+    @staticmethod
+    def validate_unscannable_issue_identities(row: dict[str, Any]) -> None:
         identities = row["issue_identities"]
         if not isinstance(identities, list) or not identities:
             raise CoverageReportError(
                 "coverage unscannable_file issue_identities is invalid"
             )
-        identity_keys: list[tuple[str, str, int]] = []
-        for identity in identities:
-            _require_fields(
-                identity,
-                _ISSUE_IDENTITY_FIELDS,
-                "unscannable issue identity",
-            )
-            code = _require_string(
-                identity["code"],
-                "unscannable issue code",
-                nonblank=True,
-            )
-            issue_path = _require_canonical_path(
-                identity["path"],
-                "unscannable issue path",
-            )
-            line = identity["line"]
-            if line is not None:
-                _require_integer(line, "unscannable issue line", minimum=1)
-            identity_keys.append((code, issue_path, line or 0))
+        identity_keys = [
+            _validate_unscannable_identity(identity) for identity in identities
+        ]
         if identity_keys != sorted(set(identity_keys)):
             raise CoverageReportError(
                 "coverage unscannable issue identities are not canonical"
             )
 
-    policy_rows = payload["policy_events"]
-    drift_rows = payload["drift_events"]
-    trend_rows = payload["stale_doc_trends"]
-    for event in drift_events:
-        _require_sha256(event.event_id, "drift_event event_id")
-        _require_sha256(event.edge_id, "drift_event edge_id")
-        _require_sha256(event.requirement_id, "drift_event requirement_id")
-        _require_sha256(event.definition_id, "drift_event definition_id")
-        source_requirement = next(
-            (
-                item
-                for item in requirements
-                if item["requirement_id"] == event.requirement_id
-            ),
-            None,
-        )
-        source_definition = definition_by_id.get(event.definition_id)
-        if source_requirement is None or source_definition is None:
-            raise CoverageReportError("coverage drift_event join is dangling")
-        source_edge_id = _stable_id(
-            [
-                "intent-edge-v1",
-                source_requirement["path"],
-                source_requirement["section_id"],
-                source_definition["path"],
-                source_definition["structural_locator"],
-            ]
-        )
-        if event.edge_id != source_edge_id:
-            raise CoverageReportError("coverage drift_event edge_id is invalid")
+    def validate_git_events(self) -> None:
+        self.policy_rows = self.payload["policy_events"]
+        self.drift_rows = self.payload["drift_events"]
+        self.trend_rows = self.payload["stale_doc_trends"]
+        self.validate_source_drift_events()
+        for name, rows in (
+            ("policy_events", self.policy_rows),
+            ("drift_events", self.drift_rows),
+            ("stale_doc_trends", self.trend_rows),
+        ):
+            if not isinstance(rows, list):
+                raise CoverageReportError(f"coverage {name} must be an array")
+        if (
+            self.policy_rows or self.drift_rows or self.trend_rows
+        ) and self.oid_length is None:
+            raise CoverageReportError("coverage Git-derived facts require a baseline")
+        self.event_oid_length = self.oid_length or 40
+        self.validate_policy_rows()
+        self.validate_drift_rows()
+        self.validate_trend_rows()
+
+    def validate_source_drift_events(self) -> None:
+        for event in self.drift_events:
+            _require_sha256(event.event_id, "drift_event event_id")
+            _require_sha256(event.edge_id, "drift_event edge_id")
+            _require_sha256(event.requirement_id, "drift_event requirement_id")
+            _require_sha256(event.definition_id, "drift_event definition_id")
+            requirement = next(
+                (
+                    item
+                    for item in self.requirements
+                    if item["requirement_id"] == event.requirement_id
+                ),
+                None,
+            )
+            definition = self.definition_by_id.get(event.definition_id)
+            if requirement is None or definition is None:
+                raise CoverageReportError("coverage drift_event join is dangling")
+            edge_id = _stable_id(
+                [
+                    "intent-edge-v1",
+                    requirement["path"],
+                    requirement["section_id"],
+                    definition["path"],
+                    definition["structural_locator"],
+                ]
+            )
+            if event.edge_id != edge_id:
+                raise CoverageReportError("coverage drift_event edge_id is invalid")
+            self.validate_source_drift_hashes(event)
+
+    @staticmethod
+    def validate_source_drift_hashes(event: DriftEvent) -> None:
         hashes = (
             event.before_section_hash,
             event.after_section_hash,
@@ -1096,7 +1209,7 @@ def validate_coverage_report(
             or event.before_connected_test_hash != event.after_connected_test_hash
         ):
             raise CoverageReportError("coverage drift_event predicate is invalid")
-        expected_event_id = _stable_id(
+        expected_id = _stable_id(
             [
                 "intent-drift-event-v1",
                 event.edge_id,
@@ -1111,64 +1224,59 @@ def validate_coverage_report(
                 event.after_connected_test_hash,
             ]
         )
-        if event.event_id != expected_event_id:
+        if event.event_id != expected_id:
             raise CoverageReportError("coverage drift_event event_id is invalid")
-    for name, rows in (
-        ("policy_events", policy_rows),
-        ("drift_events", drift_rows),
-        ("stale_doc_trends", trend_rows),
-    ):
-        if not isinstance(rows, list):
-            raise CoverageReportError(f"coverage {name} must be an array")
-    if (policy_rows or drift_rows or trend_rows) and oid_length is None:
-        raise CoverageReportError("coverage Git-derived facts require a baseline")
-    event_oid_length = oid_length or 40
 
-    previous_policy_id: str | None = None
-    for row in policy_rows:
-        _require_fields(row, _POLICY_EVENT_FIELDS, "policy_event")
-        event_id = _require_sha256(row["event_id"], "policy_event event_id")
-        if previous_policy_id is not None and event_id <= previous_policy_id:
-            raise CoverageReportError("coverage policy_events are not canonical")
-        previous_policy_id = event_id
-        key = _require_string(row["key"], "policy_event key", nonblank=True)
-        _require_json_value(row["baseline_value"], "policy_event baseline_value")
-        _require_json_value(row["current_value"], "policy_event current_value")
-        parent_commit = _require_git_oid(
-            row["parent_commit"],
-            "policy_event parent_commit",
-            expected_length=event_oid_length,
-        )
-        transition_commit = _require_nullable_git_oid(
-            row["transition_commit"],
-            "policy_event transition_commit",
-            expected_length=event_oid_length,
-        )
-        expected_event_id = _stable_id(
-            [
-                "intent-policy-event-v1",
-                parent_commit,
-                key,
-                row["baseline_value"],
-                row["current_value"],
-            ]
-        )
-        if event_id != expected_event_id:
-            raise CoverageReportError("coverage policy_event event_id is invalid")
-        _validate_acknowledgment(
-            row,
-            label="policy_event",
-            transition_commit=transition_commit,
-            oid_length=event_oid_length,
-        )
+    def validate_policy_rows(self) -> None:
+        previous_id: str | None = None
+        for row in self.policy_rows:
+            _require_fields(row, _POLICY_EVENT_FIELDS, "policy_event")
+            event_id = _require_sha256(row["event_id"], "policy_event event_id")
+            if previous_id is not None and event_id <= previous_id:
+                raise CoverageReportError("coverage policy_events are not canonical")
+            previous_id = event_id
+            key = _require_string(row["key"], "policy_event key", nonblank=True)
+            _require_json_value(row["baseline_value"], "policy_event baseline_value")
+            _require_json_value(row["current_value"], "policy_event current_value")
+            parent_commit = _require_git_oid(
+                row["parent_commit"],
+                "policy_event parent_commit",
+                expected_length=self.event_oid_length,
+            )
+            transition_commit = _require_nullable_git_oid(
+                row["transition_commit"],
+                "policy_event transition_commit",
+                expected_length=self.event_oid_length,
+            )
+            expected_id = _stable_id(
+                [
+                    "intent-policy-event-v1",
+                    parent_commit,
+                    key,
+                    row["baseline_value"],
+                    row["current_value"],
+                ]
+            )
+            if event_id != expected_id:
+                raise CoverageReportError("coverage policy_event event_id is invalid")
+            _validate_acknowledgment(
+                row,
+                label="policy_event",
+                transition_commit=transition_commit,
+                oid_length=self.event_oid_length,
+            )
 
-    previous_drift_id: str | None = None
-    for row in drift_rows:
-        _require_fields(row, _DRIFT_EVENT_FIELDS, "drift_event")
-        event_id = _require_sha256(row["event_id"], "drift_event event_id")
-        if previous_drift_id is not None and event_id <= previous_drift_id:
-            raise CoverageReportError("coverage drift_events are not canonical")
-        previous_drift_id = event_id
+    def validate_drift_rows(self) -> None:
+        previous_id: str | None = None
+        for row in self.drift_rows:
+            _require_fields(row, _DRIFT_EVENT_FIELDS, "drift_event")
+            event_id = _require_sha256(row["event_id"], "drift_event event_id")
+            if previous_id is not None and event_id <= previous_id:
+                raise CoverageReportError("coverage drift_events are not canonical")
+            previous_id = event_id
+            self.validate_drift_row(row)
+
+    def validate_drift_row(self, row: dict[str, Any]) -> None:
         edge_id = _require_sha256(row["edge_id"], "drift_event edge_id")
         requirement_id = _require_sha256(
             row["requirement_id"],
@@ -1179,10 +1287,14 @@ def validate_coverage_report(
             "drift_event definition_id",
         )
         requirement = next(
-            (item for item in requirements if item["requirement_id"] == requirement_id),
+            (
+                item
+                for item in self.requirements
+                if item["requirement_id"] == requirement_id
+            ),
             None,
         )
-        definition = definition_by_id.get(definition_id)
+        definition = self.definition_by_id.get(definition_id)
         if requirement is None or definition is None:
             raise CoverageReportError("coverage drift_event join is dangling")
         expected_edge_id = _stable_id(
@@ -1199,12 +1311,12 @@ def validate_coverage_report(
         _require_git_oid(
             row["parent_commit"],
             "drift_event parent_commit",
-            expected_length=event_oid_length,
+            expected_length=self.event_oid_length,
         )
         transition_commit = _require_nullable_git_oid(
             row["transition_commit"],
             "drift_event transition_commit",
-            expected_length=event_oid_length,
+            expected_length=self.event_oid_length,
         )
         base_projection = _require_sha256(
             row["base_projection_sha256"],
@@ -1230,165 +1342,251 @@ def validate_coverage_report(
             row,
             label="drift_event",
             transition_commit=transition_commit,
-            oid_length=event_oid_length,
+            oid_length=self.event_oid_length,
         )
 
-    previous_trend_id: str | None = None
-    for row in trend_rows:
-        _require_fields(row, _TREND_FIELDS, "stale_doc_trend")
-        edge_id = _require_sha256(row["edge_id"], "stale_doc_trend edge_id")
-        if previous_trend_id is not None and edge_id <= previous_trend_id:
-            raise CoverageReportError("coverage stale_doc_trends are not canonical")
-        previous_trend_id = edge_id
-        _require_nullable_git_oid(
-            row["section_change_commit"],
-            "stale_doc_trend section_change_commit",
-            expected_length=event_oid_length,
-        )
-        _require_integer(
-            row["unacknowledged_event_count"],
-            "stale_doc_trend unacknowledged_event_count",
-            minimum=0,
-        )
-        _require_nullable_git_oid(
-            row["last_event_commit"],
-            "stale_doc_trend last_event_commit",
-            expected_length=event_oid_length,
-        )
-        _require_boolean(
-            row["history_complete"],
-            "stale_doc_trend history_complete",
-        )
-        _require_integer(
-            row["commits_inspected"],
-            "stale_doc_trend commits_inspected",
-            minimum=0,
-        )
+    def validate_trend_rows(self) -> None:
+        previous_id: str | None = None
+        for row in self.trend_rows:
+            _require_fields(row, _TREND_FIELDS, "stale_doc_trend")
+            edge_id = _require_sha256(row["edge_id"], "stale_doc_trend edge_id")
+            if previous_id is not None and edge_id <= previous_id:
+                raise CoverageReportError("coverage stale_doc_trends are not canonical")
+            previous_id = edge_id
+            _require_nullable_git_oid(
+                row["section_change_commit"],
+                "stale_doc_trend section_change_commit",
+                expected_length=self.event_oid_length,
+            )
+            _require_integer(
+                row["unacknowledged_event_count"],
+                "stale_doc_trend unacknowledged_event_count",
+                minimum=0,
+            )
+            _require_nullable_git_oid(
+                row["last_event_commit"],
+                "stale_doc_trend last_event_commit",
+                expected_length=self.event_oid_length,
+            )
+            _require_boolean(
+                row["history_complete"],
+                "stale_doc_trend history_complete",
+            )
+            _require_integer(
+                row["commits_inspected"],
+                "stale_doc_trend commits_inspected",
+                minimum=0,
+            )
 
-    if summary["complete"] != (not unscannable_rows) or summary["unscannable"] != len(
-        unscannable_rows
-    ):
-        raise CoverageReportError("coverage completeness aggregate is invalid")
-    for rows_name, count_name in (
-        ("policy_events", "policy_events"),
-        ("drift_events", "drift_events"),
-        ("stale_doc_trends", "stale_doc_trends"),
-    ):
-        if summary[count_name] != len(payload[rows_name]):
-            raise CoverageReportError(f"coverage summary {count_name} is invalid")
-    if summary["acknowledged_policy_events"] != sum(
-        bool(row["acknowledged"]) for row in payload["policy_events"]
-    ) or summary["acknowledged_drift_events"] != sum(
-        bool(row["acknowledged"]) for row in payload["drift_events"]
-    ):
-        raise CoverageReportError("coverage acknowledgment aggregate is invalid")
-    growth = payload["spec_growth"]
-    _require_fields(
-        growth,
-        ("changed_sections", "utf8_byte_delta", "requirement_ids"),
-        "spec_growth",
-    )
-    _require_integer(
-        growth["changed_sections"],
-        "spec_growth changed_sections",
-        minimum=0,
-    )
-    _require_integer(growth["utf8_byte_delta"], "spec_growth utf8_byte_delta")
-    _require_string_array(
-        growth["requirement_ids"],
-        "spec_growth requirement_ids",
-        sha256=True,
-    )
-    if not set(growth["requirement_ids"]) <= requirement_ids:
-        raise CoverageReportError("coverage spec_growth join is dangling")
-    if payload["mode"] == "report" and (
-        payload["policy_events"]
-        or payload["drift_events"]
-        or payload["stale_doc_trends"]
-        or growth
-        != {
+    def validate_aggregates_and_growth(self) -> None:
+        summary = self.summary
+        if summary["complete"] != (not self.unscannable_rows) or summary[
+            "unscannable"
+        ] != len(self.unscannable_rows):
+            raise CoverageReportError("coverage completeness aggregate is invalid")
+        for rows_name, count_name in (
+            ("policy_events", "policy_events"),
+            ("drift_events", "drift_events"),
+            ("stale_doc_trends", "stale_doc_trends"),
+        ):
+            if summary[count_name] != len(self.payload[rows_name]):
+                raise CoverageReportError(f"coverage summary {count_name} is invalid")
+        if summary["acknowledged_policy_events"] != sum(
+            bool(row["acknowledged"]) for row in self.payload["policy_events"]
+        ) or summary["acknowledged_drift_events"] != sum(
+            bool(row["acknowledged"]) for row in self.payload["drift_events"]
+        ):
+            raise CoverageReportError("coverage acknowledgment aggregate is invalid")
+        growth = self.payload["spec_growth"]
+        _require_fields(
+            growth,
+            ("changed_sections", "utf8_byte_delta", "requirement_ids"),
+            "spec_growth",
+        )
+        _require_integer(
+            growth["changed_sections"],
+            "spec_growth changed_sections",
+            minimum=0,
+        )
+        _require_integer(growth["utf8_byte_delta"], "spec_growth utf8_byte_delta")
+        _require_string_array(
+            growth["requirement_ids"],
+            "spec_growth requirement_ids",
+            sha256=True,
+        )
+        if not set(growth["requirement_ids"]) <= self.requirement_ids:
+            raise CoverageReportError("coverage spec_growth join is dangling")
+        self.validate_report_mode(growth)
+
+    def validate_report_mode(self, growth: dict[str, Any]) -> None:
+        if self.payload["mode"] == "report" and (
+            self.payload["policy_events"]
+            or self.payload["drift_events"]
+            or self.payload["stale_doc_trends"]
+            or growth
+            != {
+                "changed_sections": 0,
+                "utf8_byte_delta": 0,
+                "requirement_ids": [],
+            }
+            or any(row["changed"] is not None for row in self.definitions)
+        ):
+            raise CoverageReportError("report mode contains Git-derived facts")
+
+    def validate_source_facts(self) -> None:
+        expected_definitions = [
+            _definition_row(
+                item,
+                changed=(
+                    item.definition.definition_id in self.changed_definition_ids
+                    if self.payload["mode"] == "ratchet"
+                    else None
+                ),
+            )
+            for item in self.source_result.definitions
+        ]
+        if self.definitions != expected_definitions:
+            raise CoverageReportError("coverage definitions differ from source facts")
+        if self.worklist != list(self.source_result.worklist):
+            raise CoverageReportError("coverage worklist differs from source facts")
+        if self.requirements != self.expected_requirements():
+            raise CoverageReportError("coverage requirements differ from source facts")
+        if self.exemptions != self.expected_exemptions():
+            raise CoverageReportError("coverage exemptions differ from source facts")
+        if self.payload["trees"] != _tree_rows(
+            self.source_result.definitions,
+            inherited_counts=self.inherited_counts,
+            unscannable_files=self.unscannable_files,
+        ):
+            raise CoverageReportError("coverage trees differ from source facts")
+        if self.payload["floors"] != _floor_rows(self.floors):
+            raise CoverageReportError("coverage floors differ from source facts")
+        if self.payload["unscannable_files"] != _unscannable_rows(
+            self.unscannable_files
+        ):
+            raise CoverageReportError(
+                "coverage unscannable_files differ from source facts"
+            )
+        self.validate_history_source_facts()
+
+    def validate_history_source_facts(self) -> None:
+        expected_baseline = (
+            None if self.baseline is None else dataclasses.asdict(self.baseline)
+        )
+        if self.payload["baseline"] != expected_baseline:
+            raise CoverageReportError("coverage baseline differs from source facts")
+        if self.payload["policy_events"] != [
+            _policy_event_row(item) for item in self.policy_events
+        ]:
+            raise CoverageReportError("coverage policy_events differ from source facts")
+        if self.payload["drift_events"] != [
+            _drift_event_row(item) for item in self.drift_events
+        ]:
+            raise CoverageReportError("coverage drift_events differ from source facts")
+        if self.payload["stale_doc_trends"] != [
+            _trend_row(item) for item in self.stale_doc_trends
+        ]:
+            raise CoverageReportError(
+                "coverage stale_doc_trends differ from source facts"
+            )
+        expected_growth = self.spec_growth or {
             "changed_sections": 0,
             "utf8_byte_delta": 0,
             "requirement_ids": [],
         }
-        or any(row["changed"] is not None for row in definitions)
-    ):
-        raise CoverageReportError("report mode contains Git-derived facts")
-    if definitions != [
-        _definition_row(
-            item,
-            changed=(
-                item.definition.definition_id in changed_definition_ids
-                if payload["mode"] == "ratchet"
-                else None
-            ),
-        )
-        for item in source_result.definitions
-    ]:
-        raise CoverageReportError("coverage definitions differ from source facts")
-    if worklist != list(source_result.worklist):
-        raise CoverageReportError("coverage worklist differs from source facts")
-    expected_requirements = [
-        {
-            "requirement_id": item.requirement_id,
-            "path": item.path,
-            "section_id": item.section_id,
-            "rung": item.rung,
-            "implementation_state": item.implementation_state,
-            "owner_definition_ids": list(item.owner_definition_ids),
-        }
-        for item in source_result.requirements
-    ]
-    if requirements != expected_requirements:
-        raise CoverageReportError("coverage requirements differ from source facts")
-    expected_exemptions = [
-        {
-            "exemption_id": item.exemption_id,
-            "origin": item.origin,
-            "path": item.path,
-            "line": item.line,
-            "selector": item.selector,
-            "reason": item.reason,
-            "matched_definition_ids": list(item.matched_definition_ids),
-            "state": item.state,
-        }
-        for item in source_result.exemptions
-    ]
-    if exemptions != expected_exemptions:
-        raise CoverageReportError("coverage exemptions differ from source facts")
-    if payload["trees"] != _tree_rows(
-        source_result.definitions,
+        if self.payload["spec_growth"] != expected_growth:
+            raise CoverageReportError("coverage spec_growth differs from source facts")
+        if self.issues != tuple(
+            sorted(self.issues, key=issue_sort_key)
+        ) or self.issue_rows != [dataclasses.asdict(item) for item in self.issues]:
+            raise CoverageReportError("coverage issues differ from source facts")
+
+    def expected_requirements(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "requirement_id": item.requirement_id,
+                "path": item.path,
+                "section_id": item.section_id,
+                "rung": item.rung,
+                "implementation_state": item.implementation_state,
+                "owner_definition_ids": list(item.owner_definition_ids),
+            }
+            for item in self.source_result.requirements
+        ]
+
+    def expected_exemptions(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "exemption_id": item.exemption_id,
+                "origin": item.origin,
+                "path": item.path,
+                "line": item.line,
+                "selector": item.selector,
+                "reason": item.reason,
+                "matched_definition_ids": list(item.matched_definition_ids),
+                "state": item.state,
+            }
+            for item in self.source_result.exemptions
+        ]
+
+    def validate_report_hash(self) -> None:
+        _require_sha256(self.payload["report_sha256"], "report_sha256")
+        if self.payload.get("report_sha256") != _report_hash(self.payload):
+            raise CoverageReportError("coverage report_sha256 does not match content")
+
+
+def _validate_unscannable_identity(identity: dict[str, Any]) -> tuple[str, str, int]:
+    _require_fields(
+        identity,
+        _ISSUE_IDENTITY_FIELDS,
+        "unscannable issue identity",
+    )
+    code = _require_string(
+        identity["code"],
+        "unscannable issue code",
+        nonblank=True,
+    )
+    path = _require_canonical_path(
+        identity["path"],
+        "unscannable issue path",
+    )
+    line = identity["line"]
+    if line is not None:
+        _require_integer(line, "unscannable issue line", minimum=1)
+    return code, path, line or 0
+
+
+def validate_coverage_report(
+    payload: dict[str, Any],
+    *,
+    source_result: IntentCoverageResult,
+    inherited_counts: bool,
+    floors: tuple[CoverageFloorResult, ...] = (),
+    unscannable_files: tuple[CoverageUnscannableFile, ...] = (),
+    issues: tuple[Issue, ...] = (),
+    baseline: GitBaselineMetadata | None = None,
+    changed_definition_ids: frozenset[str] = frozenset(),
+    policy_events: tuple[PolicyEvent, ...] = (),
+    drift_events: tuple[DriftEvent, ...] = (),
+    stale_doc_trends: tuple[StaleDocTrend, ...] = (),
+    spec_growth: dict[str, Any] | None = None,
+) -> None:
+    """Reject closed-schema drift, forged aggregates, and dangling joins."""
+
+    _CoverageReportValidator(
+        payload,
+        source_result=source_result,
         inherited_counts=inherited_counts,
+        floors=floors,
         unscannable_files=unscannable_files,
-    ):
-        raise CoverageReportError("coverage trees differ from source facts")
-    if payload["floors"] != _floor_rows(floors):
-        raise CoverageReportError("coverage floors differ from source facts")
-    if payload["unscannable_files"] != _unscannable_rows(unscannable_files):
-        raise CoverageReportError("coverage unscannable_files differ from source facts")
-    expected_baseline = None if baseline is None else dataclasses.asdict(baseline)
-    if payload["baseline"] != expected_baseline:
-        raise CoverageReportError("coverage baseline differs from source facts")
-    if payload["policy_events"] != [_policy_event_row(item) for item in policy_events]:
-        raise CoverageReportError("coverage policy_events differ from source facts")
-    if payload["drift_events"] != [_drift_event_row(item) for item in drift_events]:
-        raise CoverageReportError("coverage drift_events differ from source facts")
-    if payload["stale_doc_trends"] != [_trend_row(item) for item in stale_doc_trends]:
-        raise CoverageReportError("coverage stale_doc_trends differ from source facts")
-    expected_growth = spec_growth or {
-        "changed_sections": 0,
-        "utf8_byte_delta": 0,
-        "requirement_ids": [],
-    }
-    if payload["spec_growth"] != expected_growth:
-        raise CoverageReportError("coverage spec_growth differs from source facts")
-    if issues != tuple(sorted(issues, key=issue_sort_key)) or issue_rows != [
-        dataclasses.asdict(item) for item in issues
-    ]:
-        raise CoverageReportError("coverage issues differ from source facts")
-    _require_sha256(payload["report_sha256"], "report_sha256")
-    if payload.get("report_sha256") != _report_hash(payload):
-        raise CoverageReportError("coverage report_sha256 does not match content")
+        issues=issues,
+        baseline=baseline,
+        changed_definition_ids=changed_definition_ids,
+        policy_events=policy_events,
+        drift_events=drift_events,
+        stale_doc_trends=stale_doc_trends,
+        spec_growth=spec_growth,
+    ).validate()
 
 
 def _require_fields(

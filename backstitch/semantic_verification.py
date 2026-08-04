@@ -11,8 +11,7 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
-from importlib import resources
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from backstitch.canonical import canonical_json_bytes
 from backstitch.grammar import is_sha256_hex
@@ -21,21 +20,40 @@ from backstitch.semantic_evidence import (
     SemanticResultError,
     normalize_packet_evidence,
 )
-from backstitch.semantic_identity import ProviderIdentity, RequestIdentity
+from backstitch.semantic_identity import (
+    ProviderIdentity,
+    RequestIdentity,
+    request_identity_dict,
+)
 from backstitch.semantic_packets import (
-    PromptDescriptor,
     semantic_packet_projection,
+)
+from backstitch.semantic_policy import finding_hash
+from backstitch.semantic_verification_contract import (
+    VERIFY_CONTRACT_VERSION,
+    VERIFY_PROMPT_ID,
+    VERIFY_PROMPT_RESOURCE,
+    VERIFY_PROMPT_VERSION,
+    VerificationClaim,
+    VerificationContractError,
+    VerificationRequest,
+    VerificationWork,
+    VerifyIdentity,
+    verification_prompt_bytes,
+    verification_prompt_descriptor,
+)
+
+__all__ = (
+    "VERIFY_CONTRACT_VERSION",
+    "VERIFY_PROMPT_ID",
+    "VERIFY_PROMPT_RESOURCE",
+    "VERIFY_PROMPT_VERSION",
 )
 
 VerifierVerdict = Literal["support", "refute", "indeterminate"]
 AggregateState = Literal[
     "independently_verified", "disputed", "verification_indeterminate"
 ]
-
-VERIFY_CONTRACT_VERSION = 3
-VERIFY_PROMPT_ID = "backstitch.adversarial-verification"
-VERIFY_PROMPT_VERSION = 1
-VERIFY_PROMPT_RESOURCE = "adversarial_verification.md"
 
 _RESPONSE_FIELDS = frozenset(
     {"packet_id", "claim_hash", "verdict", "support_score", "summary", "evidence"}
@@ -50,68 +68,6 @@ _CLASSIFICATION_CODES = {
     "scope_overbroad": "SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD",
     "risk_unaddressed": "SEMANTIC_SUPPRESSION_RISK_UNADDRESSED",
 }
-
-
-class VerificationContractError(ValueError):
-    """A claim, verifier response, identity, or aggregate is invalid."""
-
-
-@dataclass(frozen=True, slots=True)
-class VerificationClaim:
-    _canonical_value: bytes
-    claim_hash: str
-
-    @classmethod
-    def from_value(cls, value: dict[str, Any]) -> VerificationClaim:
-        canonical = canonical_json_bytes(value)
-        return cls(canonical, hashlib.sha256(canonical).hexdigest())
-
-    @property
-    def value(self) -> dict[str, Any]:
-        value = json.loads(self._canonical_value)
-        assert isinstance(value, dict)
-        return value
-
-
-@dataclass(frozen=True, slots=True)
-class VerificationRequest:
-    _canonical_value: bytes
-    verifier_packet_hash: str
-
-    @classmethod
-    def from_value(cls, value: dict[str, Any]) -> VerificationRequest:
-        canonical = canonical_json_bytes(value)
-        return cls(canonical, hashlib.sha256(canonical).hexdigest())
-
-    @property
-    def value(self) -> dict[str, Any]:
-        value = json.loads(self._canonical_value)
-        assert isinstance(value, dict)
-        return value
-
-
-@dataclass(frozen=True, slots=True)
-class VerifyIdentity:
-    _canonical_contract: bytes
-    verify_key: str
-    _prompt_bytes: bytes
-
-    @classmethod
-    def from_contract(
-        cls, contract: dict[str, Any], *, prompt_bytes: bytes
-    ) -> VerifyIdentity:
-        canonical = canonical_json_bytes(contract)
-        return cls(canonical, hashlib.sha256(canonical).hexdigest(), prompt_bytes)
-
-    @property
-    def contract(self) -> dict[str, Any]:
-        value = json.loads(self._canonical_contract)
-        assert isinstance(value, dict)
-        return value
-
-    @property
-    def prompt_bytes(self) -> bytes:
-        return self._prompt_bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,26 +104,20 @@ class VerificationAggregate:
     context: str
 
 
-def verification_prompt_bytes() -> bytes:
-    prompt = (
-        resources.files("backstitch") / "prompts" / VERIFY_PROMPT_RESOURCE
-    ).read_bytes()
-    if not prompt.strip():
-        raise VerificationContractError("verification prompt is blank")
-    return prompt
+class VerificationWorkSettings(Protocol):
+    """Identity inputs required to build verifier work."""
 
+    @property
+    def provider_identity(self) -> ProviderIdentity: ...
 
-def verification_prompt_descriptor(
-    *, prompt_bytes: bytes | None = None
-) -> PromptDescriptor:
-    prompt = verification_prompt_bytes() if prompt_bytes is None else prompt_bytes
-    if not prompt.strip():
-        raise VerificationContractError("verification prompt is blank")
-    return PromptDescriptor(
-        id=VERIFY_PROMPT_ID,
-        version=VERIFY_PROMPT_VERSION,
-        sha256=hashlib.sha256(prompt).hexdigest(),
-    )
+    @property
+    def request_identity(self) -> RequestIdentity: ...
+
+    @property
+    def search_epochs(self) -> tuple[str, ...]: ...
+
+    @property
+    def effective_search_epochs(self) -> tuple[str, ...] | None: ...
 
 
 def _field(value: object, name: str) -> object:
@@ -329,11 +279,89 @@ def build_verify_identity(
         "claim_hash": claim.claim_hash,
         "prompt": asdict(verification_prompt_descriptor(prompt_bytes=prompt_bytes)),
         "provider": asdict(provider),
-        "request": asdict(request_identity),
+        "request": request_identity_dict(request_identity),
         "base_search_epoch": base_search_epoch,
         "effective_search_epoch": effective,
     }
     return VerifyIdentity.from_contract(contract, prompt_bytes=prompt_bytes)
+
+
+def build_verification_work(
+    rows: tuple[dict[str, Any], ...],
+    results: tuple[dict[str, Any], ...],
+    settings: VerificationWorkSettings,
+) -> tuple[
+    tuple[VerificationWork, ...],
+    tuple[
+        tuple[
+            str,
+            dict[str, Any],
+            VerificationClaim,
+            VerificationRequest,
+            tuple[VerifyIdentity, ...],
+        ],
+        ...,
+    ],
+]:
+    """Build cache-independent verifier work for analyzer findings."""
+
+    packets = {row["packet_id"]: row for row in rows}
+    effective_epochs = settings.effective_search_epochs or settings.search_epochs
+    if (
+        len(effective_epochs) != len(settings.search_epochs)
+        or len(set(effective_epochs)) != len(effective_epochs)
+        or any(not epoch.strip() for epoch in effective_epochs)
+    ):
+        raise ValueError(
+            "effective verifier search epochs must be unique nonblank values "
+            "matching verify.search_epochs cardinality"
+        )
+    work: list[VerificationWork] = []
+    groups: list[
+        tuple[
+            str,
+            dict[str, Any],
+            VerificationClaim,
+            VerificationRequest,
+            tuple[VerifyIdentity, ...],
+        ]
+    ] = []
+    for result in results:
+        if result["classification"] == "ok":
+            continue
+        packet = packets[result["packet_id"]]
+        claim = derive_verification_claim(packet, result)
+        verifier_request = build_verification_request(packet, claim)
+        identities = tuple(
+            build_verify_identity(
+                verifier_request,
+                claim,
+                settings.provider_identity,
+                settings.request_identity,
+                base_search_epoch=base_epoch,
+                effective_search_epoch=effective_epoch,
+            )
+            for base_epoch, effective_epoch in zip(
+                settings.search_epochs, effective_epochs, strict=True
+            )
+        )
+        for base_epoch, effective_epoch, identity in zip(
+            settings.search_epochs, effective_epochs, identities, strict=True
+        ):
+            work.append(
+                VerificationWork(
+                    packet,
+                    claim,
+                    verifier_request,
+                    identity,
+                    base_epoch,
+                    effective_epoch,
+                )
+            )
+        groups.append(
+            (finding_hash(result), packet, claim, verifier_request, identities)
+        )
+    return tuple(work), tuple(groups)
 
 
 def validate_verification_links(
@@ -403,7 +431,7 @@ def validate_verification_links(
     if not isinstance(request_contract, dict):
         raise VerificationContractError("verifier request identity is invalid")
     try:
-        normalized_request = asdict(RequestIdentity(**request_contract))
+        normalized_request = request_identity_dict(RequestIdentity(**request_contract))
     except (TypeError, ValueError):
         raise VerificationContractError(
             "verifier request identity is invalid"

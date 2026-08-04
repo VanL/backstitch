@@ -434,6 +434,58 @@ def test_cli_summarize_analysis(tmp_path: Path) -> None:
     assert "invalid analysis results" in result.stderr
 
 
+def test_cli_summarize_suppression_results_names_required_audit(
+    tmp_path: Path,
+) -> None:
+    report_path = tmp_path / "spec-trace.json"
+    results_path = tmp_path / "analysis.jsonl"
+    checked = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "backstitch",
+            "check",
+            "--repo-root",
+            str(CLEAN),
+            "--spec-root",
+            "docs/specs",
+            "--code-root",
+            "pkg",
+            "--no-config",
+            "--format",
+            "json",
+            "--output",
+            str(report_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert checked.returncode == 0, checked.stderr
+    results_path.write_text(
+        json.dumps(_v3_suppression_result_row()) + "\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "backstitch",
+            "summarize-analysis",
+            "--deterministic-report",
+            str(report_path),
+            "--analysis-results",
+            str(results_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "backstitch check --show-suppressions" in result.stderr
+
+
 def test_cli_summarize_analysis_malformed_report_exits_two(
     tmp_path: Path,
 ) -> None:

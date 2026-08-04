@@ -17,7 +17,6 @@
             "b34fb7307146ba3bb540789c24afb177034c6e0e7edf27895f9316a134bb1122"
           ],
           "counter_candidate_ids": [
-            "candidate:sha256:31b2c25cb12bbbf21cd61aff956d23acd39f6b29e29332fa6c74dc304fcdaa44",
             "candidate:sha256:5824a192f60111286f2470a9dd92ef48b1f4a5820fb53648419d5a4efaf6b31a"
           ]
         },
@@ -29,9 +28,7 @@
             "be18335f2bced9fb740f6ef98ce06a90286b0a91f185d55d634e010955d80efb"
           ],
           "counter_candidate_ids": [
-            "candidate:sha256:520ecfa1159ab9f4cb6bfef98b200adabf80c2bb59d8596125e61387bfe28683",
-            "candidate:sha256:752a683204c44569f5e444d0a721f4b4bcf20db181ae3176c76b5415f131285a",
-            "candidate:sha256:aad2bef998fbfccc043a439b82df6b1524da589b3543078da607a63827bc9130"
+            "candidate:sha256:752a683204c44569f5e444d0a721f4b4bcf20db181ae3176c76b5415f131285a"
           ]
         }
       ],
@@ -57,7 +54,6 @@
             "4c8202aa857e6d383a5bdfb42c56dda7b033d0a752bf8c088205dead1add205d"
           ],
           "counter_candidate_ids": [
-            "candidate:sha256:31b2c25cb12bbbf21cd61aff956d23acd39f6b29e29332fa6c74dc304fcdaa44",
             "candidate:sha256:5824a192f60111286f2470a9dd92ef48b1f4a5820fb53648419d5a4efaf6b31a"
           ]
         },
@@ -69,9 +65,7 @@
             "be18335f2bced9fb740f6ef98ce06a90286b0a91f185d55d634e010955d80efb"
           ],
           "counter_candidate_ids": [
-            "candidate:sha256:520ecfa1159ab9f4cb6bfef98b200adabf80c2bb59d8596125e61387bfe28683",
-            "candidate:sha256:752a683204c44569f5e444d0a721f4b4bcf20db181ae3176c76b5415f131285a",
-            "candidate:sha256:aad2bef998fbfccc043a439b82df6b1524da589b3543078da607a63827bc9130"
+            "candidate:sha256:752a683204c44569f5e444d0a721f4b4bcf20db181ae3176c76b5415f131285a"
           ]
         }
       ],
@@ -97,7 +91,6 @@
             "b34fb7307146ba3bb540789c24afb177034c6e0e7edf27895f9316a134bb1122"
           ],
           "counter_candidate_ids": [
-            "candidate:sha256:31b2c25cb12bbbf21cd61aff956d23acd39f6b29e29332fa6c74dc304fcdaa44",
             "candidate:sha256:5824a192f60111286f2470a9dd92ef48b1f4a5820fb53648419d5a4efaf6b31a"
           ]
         },
@@ -109,9 +102,7 @@
             "be18335f2bced9fb740f6ef98ce06a90286b0a91f185d55d634e010955d80efb"
           ],
           "counter_candidate_ids": [
-            "candidate:sha256:520ecfa1159ab9f4cb6bfef98b200adabf80c2bb59d8596125e61387bfe28683",
-            "candidate:sha256:752a683204c44569f5e444d0a721f4b4bcf20db181ae3176c76b5415f131285a",
-            "candidate:sha256:aad2bef998fbfccc043a439b82df6b1524da589b3543078da607a63827bc9130"
+            "candidate:sha256:752a683204c44569f5e444d0a721f4b4bcf20db181ae3176c76b5415f131285a"
           ]
         }
       ],

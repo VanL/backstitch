@@ -4,6 +4,7 @@ Intent coverage measures whether each physical Python definition is connected
 to an authored decision. It is a reach metric, not a claim that the decision
 text is good. The active contract is
 [`docs/specs/08-intent-coverage.md`](../specs/08-intent-coverage.md).
+Plan: `docs/plans/2026-07-29-architecture-quality-remediation-plan.md`.
 
 ## Ownership
 
@@ -12,11 +13,19 @@ canonical definition inventory and structural-locator grammar.
 `intent_coverage.py` projects that inventory onto the existing resolved trace
 graph and computes exemptions, requirement state, floors, and triage order.
 `intent_coverage_reporting.py` owns the closed coverage artifact.
+`coverage_application.py` owns accepted repository state, current and
+historical projection, ratchet orchestration, report construction, gate
+classification, and durable publication.
 `git_baseline.py` owns bounded Git access and diff-derived facts.
+`artifact_publication.py` owns durable same-directory output replacement.
 `intent_history.py` reconstructs immutable revision graphs from object-database
 blobs and computes exact section, mapping-set, implementation, and
-connected-test projections. `cli.py` orchestrates these owners over one
-accepted repository snapshot.
+connected-test projections. Historical configuration supplies ordered blob
+layers to `settings._assemble_settings`, the same typed merge/final-validation
+owner used by current configuration. Blob-side path normalization is lexical
+and never follows the checkout; final code/test-root containment is therefore
+source-independent. `cli.py` retains coverage argument validation, text/JSON
+rendering, stdout emission, and public exit mapping.
 
 The split matters. Coverage must not reopen live source, invent a second Python
 parser, reinterpret suppressed graph issues, or let rounded display rates
@@ -46,7 +55,9 @@ baseline.
 
 JSON is content-bound with canonical JSON and a final SHA-256. The validator
 recomputes identities, partitions, joins, aggregates, ordering, and the report
-hash before publication. Output replacement is same-directory and atomic.
+hash before publication. Generic mutable output replacement uses
+`artifact_publication.atomic_replace_bytes()`: it fsyncs the completed staging
+file, atomically replaces the final, then fsyncs the containing directory.
 
 Current-range first-parent transitions, the synthetic dirty transition, and
 bounded stale-document trends are implemented. The Git owner reads the oldest

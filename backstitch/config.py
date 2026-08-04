@@ -1,7 +1,7 @@
 """Profile configuration for traceability scans.
 
-Spec: docs/specs/02-backstitch-core.md [SC-3]
-Spec: docs/specs/03-backstitch-configuration.md [CFG-6]
+Spec: docs/specs/02-backstitch-core.md [SC-3], [SC-17]
+Spec: docs/specs/03-backstitch-configuration.md [CFG-4], [CFG-5.1], [CFG-6]
 Spec: docs/specs/04-backstitch-traceability-exclusions.md [EXC-3]
 """
 
@@ -62,12 +62,21 @@ class ProfileConfig:
         )
 
 
-def resolve_profile_root(repo_root: Path, value: str) -> Path:
-    """Resolve one profile root exactly as scan-boundary checks do."""
+def lexical_absolute_path(value: Path, *, base_dir: Path) -> Path:
+    """Return one absolute, lexically normalized path without filesystem I/O."""
+
+    if not base_dir.is_absolute():
+        raise ValueError("lexical path base must be absolute")
+    base = base_dir
+    candidate = value if value.is_absolute() else base / value
+    return Path(os.path.normpath(os.fspath(candidate)))
+
+
+def normalize_profile_root(repo_root: Path, value: str) -> Path:
+    """Normalize one profile root for source-independent containment."""
 
     expanded = os.path.expandvars(os.path.expanduser(value))
-    path = Path(expanded)
-    return path.resolve() if path.is_absolute() else (repo_root / path).resolve()
+    return lexical_absolute_path(Path(expanded), base_dir=repo_root)
 
 
 def uncontained_test_root(
@@ -78,10 +87,10 @@ def uncontained_test_root(
     """Return the first test root outside every final code root, if any."""
 
     resolved_code_roots = tuple(
-        resolve_profile_root(repo_root, value) for value in code_roots
+        normalize_profile_root(repo_root, value) for value in code_roots
     )
     for value in test_roots:
-        test_root = resolve_profile_root(repo_root, value)
+        test_root = normalize_profile_root(repo_root, value)
         if not any(
             test_root == code_root or test_root.is_relative_to(code_root)
             for code_root in resolved_code_roots

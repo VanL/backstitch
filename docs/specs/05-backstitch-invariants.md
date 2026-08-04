@@ -369,6 +369,8 @@ _Implementation mapping_:
 
 ## 9. Verification Expectations [INV-9]
 
+<!-- backstitch: meta because docs/specs/04-backstitch-traceability-exclusions.md#SUP-VERIFICATION-META -->
+
 Required proof:
 
 - fixture-backed grammar tests: declaration parsing in code (module, class,
@@ -404,10 +406,9 @@ Required proof:
 
 Fakes only at the model boundary, per [SC-10].
 
-_Implementation mapping_:
-- `tests/acceptance/test_probe_invariants.py`
-
 ## 10. Documentation And Traceability [INV-10]
+
+<!-- backstitch: meta because docs/specs/04-backstitch-traceability-exclusions.md#SUP-VERIFICATION-META -->
 
 This specification became Active after its dated, independently reviewed plan
 implemented the coordinated [SC-*], [CFG-*], and [EXC-*] changes and passed
@@ -419,9 +420,6 @@ there is durable human and agent guidance, not a machine bind or declaration.
 Implementation must also update the style-traceability implementation doc,
 repository map as needed, engineering-principles citation guidance, and the
 reciprocal spec and code traceability chain.
-
-_Implementation mapping_:
-- `tests/test_backstitch_corpus_traceability.py`
 
 ## 11. Phase Hardening Invariants [INV-11]
 
@@ -477,16 +475,24 @@ packaged `false` normalizes to `None`, while repository `"check"` and
 _Implementation mapping_:
 - `backstitch/canonical.py`
 - `backstitch/contract_validation.py`
+- `backstitch/filesystem_io.py`
 - `backstitch/grammar.py`
 - `backstitch/models.py`
 - `backstitch/repository_snapshot.py`
+- `backstitch/scan_exclusions.py`
 - `backstitch/settings.py`
 - `backstitch/semantic_packets.py`
 - `backstitch/code_parser.py`
+- `tests/test_architecture.py`
+- `tests/test_canonical_owners.py`
 - `backstitch/obligation_runtime.py`
 
 ## Related Plans
 
+- `docs/plans/2026-08-04-semantic-preparation-performance-plan.md`
+  (implementation plan; [INV-5] and [INV-6])
+- `docs/plans/2026-07-29-architecture-quality-remediation-plan.md`
+  (active implementation plan; [INV-11])
 - `docs/plans/2026-07-28-intent-coverage-implementation-plan.md`
   (active implementation plan; [INV.IDENTITY.1])
 - `docs/plans/2026-07-28-configured-default-command-plan.md`

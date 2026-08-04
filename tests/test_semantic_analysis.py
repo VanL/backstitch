@@ -18,13 +18,13 @@ from typing import Any, cast
 
 import pytest
 
+from backstitch.analysis_packets import PacketContribution, PacketPlan
 from backstitch.artifact_contracts import ValidatedSemanticPacket
 from backstitch.semantic_analysis import (
     ResolvedSemanticSettings,
     ResolvedVerificationSettings,
     SemanticAnalysisRequest,
     SemanticAnalysisRun,
-    _build_verification_work,
     required_independent_qualification_problem,
     run_semantic_analysis,
 )
@@ -37,9 +37,9 @@ from backstitch.semantic_cache import (
 )
 from backstitch.semantic_eval import (
     SemanticEvalRequest,
-    derive_semantic_eval_observed_facts,
     run_semantic_eval,
 )
+from backstitch.semantic_eval_observation import derive_semantic_eval_observed_facts
 from backstitch.semantic_eval_reports import (
     load_semantic_eval_corpus,
     load_semantic_eval_report,
@@ -62,6 +62,7 @@ from backstitch.semantic_policy import (
     materialize_semantic_policy,
 )
 from backstitch.semantic_reports import PacketReport, validate_packet_report
+from backstitch.semantic_verification import build_verification_work
 from backstitch.settings import SemanticDisposition, VerifyEvalSettings, resolve_config
 
 
@@ -120,6 +121,19 @@ PROVIDER = ProviderIdentity(
     plugin_distribution_version="1.2.3",
 )
 REQUEST = RequestIdentity("require", 0.0, 42, 512)
+CAPABILITY_CONFIG_LINES = (
+    "capability_schema_version = 1",
+    'capability_revision = "controlled-test-v1"',
+    "maximum_input_bytes = 10000000",
+    (
+        "request_constraints = { "
+        'json_mode = { presence = "required", allowed_values = ["require", "off"] }, '
+        'temperature = { presence = "required", allowed_values = [0.0] }, '
+        'seed = { presence = "required", minimum = 0, maximum = 2147483647 }, '
+        'max_tokens = { presence = "required", minimum = 1, maximum = 16384 }'
+        " }"
+    ),
+)
 PROVENANCE = SemanticProvenance(
     adapter_id="backstitch.llm",
     adapter_version=1,
@@ -588,7 +602,7 @@ def test_effective_verifier_epochs_change_event_keys_not_composition() -> None:
         required_verdicts=2,
     )
 
-    work, _ = _build_verification_work((row,), (result,), settings)
+    work, _ = build_verification_work((row,), (result,), settings)
 
     assert [(item.base_search_epoch, item.effective_search_epoch) for item in work] == [
         ("base-a", "effective-a"),
@@ -838,6 +852,44 @@ def _analysis_request(
         adapter_factory=adapter_factory or default_factory,
         result_path=tmp_path / "analysis.jsonl",
         report_path=tmp_path / "analysis-report.json",
+    )
+
+
+def _retained_plan(request: SemanticAnalysisRequest) -> PacketPlan:
+    row = request.packets[0].to_dict()
+    identity = build_inference_identity(
+        row,
+        request.settings.provider_identity,
+        request.settings.request_identity,
+        search_epoch=request.settings.search_epoch,
+    )
+    line = canonical_json_bytes(row) + b"\n"
+    retained = model_request_bytes(row, instruction_bytes=identity.prompt_bytes)
+    contribution = PacketContribution(
+        packet_id=cast(str, row["packet_id"]),
+        kind=cast(str, row["kind"]),
+        packet_byte_count=len(line),
+        request_byte_count=len(retained),
+        requirement_byte_count=len(canonical_json_bytes(row["requirement"])),
+        declared_evidence_byte_count=len(
+            canonical_json_bytes(row["declared_evidence"])
+        ),
+        counterevidence_byte_count=len(canonical_json_bytes(row["counterevidence"])),
+        packet_line_bytes=line,
+        model_request_bytes=retained,
+        packet=row,
+    )
+    return PacketPlan(
+        status="complete",
+        complete=True,
+        crossed_ceiling=None,
+        measured_packet_count=1,
+        unmeasured_packet_count=0,
+        measured_packet_bytes=len(line),
+        measured_prompt_bytes=len(retained),
+        maximum_request_bytes=len(retained),
+        first_crossing_packet_id=None,
+        contributions=(contribution,),
     )
 
 
@@ -1284,6 +1336,159 @@ def test_prompt_resource_mutation_cannot_change_frozen_preflight_or_budget_bytes
     assert run.problems == ()
     assert len(run.results) == 1
     assert observed == [frozen_request]
+
+
+@pytest.mark.parametrize(
+    ("cache_mode", "result_reuse"),
+    (("off", "exact-inference"), ("read-write", "evidence-stable")),
+)
+def test_current_analysis_counts_and_sends_retained_packet_plan_requests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cache_mode: str,
+    result_reuse: str,
+) -> None:
+    import backstitch.semantic_analysis as semantic_analysis
+    import backstitch.semantic_cache as semantic_cache
+
+    observed: list[bytes] = []
+
+    def factory() -> ProviderAdapter:
+        def call(prompt: str) -> ProviderCallResult:
+            observed.append(prompt.encode("utf-8"))
+            return ProviderCallResult(json.dumps(_model_row()), PROVENANCE)
+
+        return call
+
+    request = _analysis_request(
+        tmp_path,
+        settings=_resolved(
+            cache_path=tmp_path / "cache",
+            cache_mode=cache_mode,
+            result_reuse=result_reuse,
+            maximum_estimated_cost_microusd=100,
+            input_cost_microusd_per_million_tokens=1,
+            cost_rate_source="test",
+        ),
+        adapter_factory=factory,
+    )
+    plan = _retained_plan(request)
+    retained = plan.contributions[0].model_request_bytes
+    request = replace(
+        request,
+        packet_plan=plan,
+        scope="current_repository",
+        semantic_status="evaluated",
+        artifact_currentness="current",
+        source_provenance="captured_current",
+        result_path=None,
+        report_path=None,
+        settings=replace(request.settings, maximum_prompt_bytes=len(retained)),
+    )
+
+    def forbidden_rebuild(*_args: object, **_kwargs: object) -> bytes:
+        raise AssertionError("model request bytes were rebuilt after preparation")
+
+    monkeypatch.setattr(semantic_analysis, "model_request_bytes", forbidden_rebuild)
+    monkeypatch.setattr(semantic_cache, "model_request_bytes", forbidden_rebuild)
+
+    run = run_semantic_analysis(request)
+
+    assert run.exit_code == 0, run.stderr_lines
+    assert run.problems == ()
+    assert run.report["prompt_byte_count"] == len(retained)
+    assert observed == [retained]
+
+
+@pytest.mark.parametrize(
+    "defect",
+    ("missing", "incomplete", "wrong-packet", "wrong-count", "wrong-prompt"),
+)
+def test_current_analysis_rejects_misaligned_packet_plan_before_traffic(
+    tmp_path: Path,
+    defect: str,
+) -> None:
+    constructed = 0
+
+    def forbidden_factory() -> ProviderAdapter:
+        nonlocal constructed
+        constructed += 1
+        raise AssertionError("adapter construction reached")
+
+    request = _analysis_request(
+        tmp_path,
+        settings=_resolved(cache_path=tmp_path / "cache"),
+        adapter_factory=forbidden_factory,
+    )
+    plan: PacketPlan | None = _retained_plan(request)
+    assert plan is not None
+    contribution = plan.contributions[0]
+    if defect == "missing":
+        plan = None
+    elif defect == "incomplete":
+        plan = replace(plan, status="over_budget", complete=False)
+    elif defect == "wrong-packet":
+        plan = replace(
+            plan,
+            contributions=(replace(contribution, packet_id="wrong-packet"),),
+        )
+    elif defect == "wrong-count":
+        plan = replace(
+            plan,
+            contributions=(
+                replace(
+                    contribution,
+                    request_byte_count=contribution.request_byte_count + 1,
+                ),
+            ),
+        )
+    else:
+        wrong_request = b"wrong prompt\n\n{}"
+        plan = replace(
+            plan,
+            contributions=(
+                replace(
+                    contribution,
+                    request_byte_count=len(wrong_request),
+                    model_request_bytes=wrong_request,
+                ),
+            ),
+        )
+    current = replace(
+        request,
+        packet_plan=plan,
+        scope="current_repository",
+        semantic_status="evaluated",
+        artifact_currentness="current",
+        source_provenance="captured_current",
+    )
+
+    run = run_semantic_analysis(current)
+
+    assert run.exit_code == 2
+    assert run.problems[0].stage == "input"
+    assert run.problems[0].code == "invalid_input"
+    assert constructed == 0
+    assert request.result_path is not None
+    assert not request.result_path.exists()
+    assert request.report_path is not None
+    assert not request.report_path.exists()
+
+
+def test_historical_analysis_keeps_reconstruction_path_and_rejects_current_plan(
+    tmp_path: Path,
+) -> None:
+    request = _analysis_request(tmp_path)
+    plan = _retained_plan(request)
+
+    ordinary = run_semantic_analysis(request)
+    mixed = run_semantic_analysis(replace(request, packet_plan=plan))
+
+    assert ordinary.exit_code == 0
+    assert mixed.exit_code == 2
+    assert mixed.problems[0].message == (
+        "historical semantic analysis forbids a current packet plan"
+    )
 
 
 def test_shared_runner_rechecks_qualification_with_request_eval_settings(
@@ -1893,8 +2098,10 @@ def test_cloud_positive_cost_ceiling_rejects_two_zero_rates(tmp_path: Path) -> N
     assert constructed == 0
 
 
+@pytest.mark.parametrize("malformed_response", ["plain", "fenced"])
 def test_provider_failure_emits_partial_ordered_output_and_continues(
     tmp_path: Path,
+    malformed_response: str,
 ) -> None:
     first = _packet()
     second = _packet(packet_id="docs/specs/01-x.md#X-2", identity="X-2")
@@ -1909,7 +2116,13 @@ def test_provider_failure_emits_partial_ordered_output_and_continues(
         def call(prompt: str) -> ProviderCallResult:
             packet = json.loads(prompt.rsplit("\n\n", 1)[1])
             if packet["packet_id"] == first["packet_id"]:
-                return ProviderCallResult("not json", PROVENANCE)
+                if malformed_response == "plain":
+                    raw = "not json"
+                else:
+                    fenced = _model_row()
+                    fenced["packet_id"] = packet["packet_id"]
+                    raw = "```json\n" + json.dumps(fenced) + "\n```"
+                return ProviderCallResult(raw, PROVENANCE)
             response = _model_row()
             response["packet_id"] = packet["packet_id"]
             return ProviderCallResult(json.dumps(response), PROVENANCE)
@@ -2170,6 +2383,7 @@ def test_cli_resolves_env_model_into_identity_and_reads_packet_bytes_once(
                 'plugin_id = "openai"',
                 'plugin_distribution_name = "llm"',
                 'model_revision = "2026-01-01"',
+                *CAPABILITY_CONFIG_LINES,
                 "input_cost_microusd_per_million_tokens = 0",
                 "output_cost_microusd_per_million_tokens = 0",
                 "input_token_overhead = 256",
@@ -2244,6 +2458,7 @@ def test_cli_rejects_cached_env_model_that_disagrees_with_declared_revision_pair
                 'plugin_distribution_name = "llm"',
                 'model = "declared-model"',
                 'model_revision = "declared-model-2026-01-01"',
+                *CAPABILITY_CONFIG_LINES,
                 "input_cost_microusd_per_million_tokens = 0",
                 "output_cost_microusd_per_million_tokens = 0",
                 "input_token_overhead = 256",
@@ -2456,6 +2671,7 @@ def test_bare_default_analyze_matches_explicit_provider_capable_run(
                 'plugin_distribution_name = "llm"',
                 'model = "controlled-model"',
                 'model_revision = "2026-07-28"',
+                *CAPABILITY_CONFIG_LINES,
                 "input_cost_microusd_per_million_tokens = 0",
                 "output_cost_microusd_per_million_tokens = 0",
                 "input_token_overhead = 256",
@@ -2584,6 +2800,7 @@ def test_cli_cache_modes_rebuild_resample_and_fail_closed(
                     'plugin_distribution_name = "llm"',
                     'model = "lifecycle-controlled-model"',
                     'model_revision = "2026-07-27"',
+                    *CAPABILITY_CONFIG_LINES,
                     "input_cost_microusd_per_million_tokens = 0",
                     "output_cost_microusd_per_million_tokens = 0",
                     "input_token_overhead = 256",
@@ -2894,6 +3111,7 @@ def test_cli_current_verifier_uses_complete_resolved_provider_descriptor(
         'plugin_distribution_name = "llm"',
         'model = "controlled-model"',
         'model_revision = "2026-07-16"',
+        *CAPABILITY_CONFIG_LINES,
         "input_cost_microusd_per_million_tokens = 0",
         "output_cost_microusd_per_million_tokens = 0",
         "input_token_overhead = 256",
@@ -2929,8 +3147,10 @@ def test_cli_current_verifier_uses_complete_resolved_provider_descriptor(
                 'backend_id = "llm"',
                 'plugin_id = "controlled-verifier"',
                 'plugin_distribution_name = "llm"',
-                'model = "controlled-verifier-model"',
+                'model = "pkg:service/verify.example/controlled-verifier-model"',
+                'adapter_model_id = "controlled-verifier-model"',
                 'model_revision = "2026-07-16-verifier"',
+                *CAPABILITY_CONFIG_LINES,
                 "input_cost_microusd_per_million_tokens = 0",
                 "output_cost_microusd_per_million_tokens = 0",
                 "input_token_overhead = 256",
@@ -2942,10 +3162,12 @@ def test_cli_current_verifier_uses_complete_resolved_provider_descriptor(
         encoding="utf-8",
     )
     providers: list[ProviderIdentity] = []
+    adapter_model_ids: list[str] = []
 
     def adapter_factory(*args: object, **kwargs: object) -> ProviderAdapter:
         provider = cast(ProviderIdentity, kwargs["provider_identity"])
         providers.append(provider)
+        adapter_model_ids.append(cast(str, args[0]))
         is_verifier = "response_schema_builder" in kwargs
 
         def call(prompt: str) -> ProviderCallResult:
@@ -3016,7 +3238,11 @@ def test_cli_current_verifier_uses_complete_resolved_provider_descriptor(
     assert len(providers) == 2
     assert (providers[0] == providers[1]) is expected_same_provider
     if not expected_same_provider:
-        assert providers[1].model_id == "controlled-verifier-model"
+        assert (
+            providers[1].model_id
+            == "pkg:service/verify.example/controlled-verifier-model"
+        )
+        assert adapter_model_ids[1] == "controlled-verifier-model"
     assert report["provider_calls"] == 1
     assert report["verification"]["provider_calls"] == 1
     assert report["verification"]["events"][0]["aggregate_state"] == (
@@ -3095,7 +3321,7 @@ def test_independent_failure_authority_loads_exact_enforce_qualification(
     state: str,
     expected_reason: str | None,
 ) -> None:
-    import backstitch.semantic_eval as semantic_eval
+    import backstitch.semantic_eval_observation as eval_observation
     import backstitch.semantic_eval_reports as eval_reports
     from backstitch.obligation_runtime import ALGORITHMS
 
@@ -3201,7 +3427,7 @@ def test_independent_failure_authority_loads_exact_enforce_qualification(
         lambda *args, **kwargs: report,
     )
     monkeypatch.setattr(
-        semantic_eval,
+        eval_observation,
         "derive_semantic_eval_observed_facts",
         lambda *args, **kwargs: object(),
     )

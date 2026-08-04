@@ -45,6 +45,11 @@ from backstitch.obligations import (
     EvidenceCounts,
     ObligationRecord,
 )
+from backstitch.operation_progress import (
+    OperationDeadlineExceeded,
+    OperationProgress,
+    ProgressEvent,
+)
 from backstitch.repository_snapshot import (
     SnapshotAlgorithms,
     SnapshotSemanticConfig,
@@ -71,7 +76,7 @@ SETTINGS = ObligationSettings(
     maximum_work_units=1_000_000,
     static_neighbor_depth=2,
 )
-ALGORITHMS = SnapshotAlgorithms(1, 1, 1, 3, 1)
+ALGORITHMS = SnapshotAlgorithms(1, 1, 2, 3, 1)
 
 
 def _snapshot_config() -> SnapshotSemanticConfig:
@@ -263,6 +268,111 @@ def _capture(root: Path):  # type: ignore[no-untyped-def]
     return capture_repository_snapshot(root, _snapshot_config(), ALGORITHMS)
 
 
+def test_production_uses_discovery_algorithm_version_2() -> None:
+    from backstitch.obligation_runtime import ALGORITHMS as production_algorithms
+
+    assert production_algorithms.discovery_algorithm_version == 2
+
+
+@pytest.mark.parametrize(
+    "deadline_phase",
+    ("catalog", "relations", "closure", "candidate_detail"),
+)
+def test_discovery_deadline_table_cancels_in_each_real_phase(
+    tmp_path: Path,
+    deadline_phase: str,
+) -> None:
+    _write_repository(tmp_path)
+    snapshot = _capture(tmp_path)
+    now = [0.0]
+
+    def expire_in_phase(event: ProgressEvent) -> None:
+        if event.phase == deadline_phase:
+            now[0] = 1.001
+
+    progress = OperationProgress.start(
+        1.0,
+        clock=lambda: now[0],
+        sink=expire_in_phase,
+    )
+    progress.advance("snapshot", current_identity=snapshot.snapshot_hash)
+
+    with pytest.raises(OperationDeadlineExceeded) as raised:
+        discover_evidence_candidates(
+            snapshot,
+            _section_report(),
+            PROFILE,
+            _obligation(),
+            SETTINGS,
+            progress=progress,
+        )
+
+    assert raised.value.phase == deadline_phase
+
+
+def test_relations_deadline_cancels_inside_reference_batch(tmp_path: Path) -> None:
+    _write_repository(tmp_path)
+    snapshot = _capture(tmp_path)
+    in_relations = [False]
+    relations_checks = [0]
+
+    def record_phase(event: ProgressEvent) -> None:
+        if event.phase == "relations":
+            in_relations[0] = True
+
+    def clock() -> float:
+        if not in_relations[0]:
+            return 0.0
+        relations_checks[0] += 1
+        return 1.001 if relations_checks[0] >= 12 else 0.0
+
+    progress = OperationProgress.start(1.0, clock=clock, sink=record_phase)
+    progress.advance("snapshot", current_identity=snapshot.snapshot_hash)
+
+    with pytest.raises(OperationDeadlineExceeded) as raised:
+        discover_evidence_candidates(
+            snapshot,
+            _section_report(),
+            PROFILE,
+            _obligation(),
+            SETTINGS,
+            progress=progress,
+        )
+
+    assert raised.value.phase == "relations"
+    assert relations_checks[0] == 12
+
+
+def test_discovery_emits_one_ordered_progress_sequence(tmp_path: Path) -> None:
+    _write_repository(tmp_path)
+    snapshot = _capture(tmp_path)
+    events: list[ProgressEvent] = []
+    progress = OperationProgress.start(
+        1.0,
+        clock=lambda: 0.0,
+        sink=events.append,
+    )
+    progress.advance("snapshot", current_identity=snapshot.snapshot_hash)
+
+    discover_evidence_candidates(
+        snapshot,
+        _section_report(),
+        PROFILE,
+        _obligation(),
+        SETTINGS,
+        progress=progress,
+    )
+
+    collapsed = tuple(dict.fromkeys(event.phase for event in events))
+    assert collapsed == (
+        "snapshot",
+        "catalog",
+        "relations",
+        "closure",
+        "candidate_detail",
+    )
+
+
 def test_discovery_builds_all_kinds_bases_states_and_exact_helpers(
     tmp_path: Path,
 ) -> None:
@@ -276,10 +386,49 @@ def test_discovery_builds_all_kinds_bases_states_and_exact_helpers(
         "ambiguous section target",
         section_id="REQ-1",
     )
+    report = _section_report(issues=(issue,))
+    section = report.spec_sections[0]
+    unresolved_owners = (
+        "ambiguous_caller",
+        "assigned_shadow",
+        "computed",
+        "deleted_shadow",
+        "dynamic_import",
+        "loop_shadow",
+        "runtime_dispatch",
+        "shadowed",
+        "wildcard_call",
+    )
+    report = replace(
+        report,
+        spec_mappings=(
+            *report.spec_mappings,
+            *(
+                SpecMapping(
+                    section.path,
+                    section.section_id,
+                    4 + index,
+                    (
+                        f"src/worker.py::{owner}"
+                        if owner == "ambiguous_caller"
+                        else f"src/worker_consumer.py::{owner}"
+                    ),
+                    "path_symbol",
+                    (
+                        "src/worker.py"
+                        if owner == "ambiguous_caller"
+                        else "src/worker_consumer.py"
+                    ),
+                    owner,
+                )
+                for index, owner in enumerate(unresolved_owners)
+            ),
+        ),
+    )
 
     candidates = discover_evidence_candidates(
         snapshot,
-        _section_report(issues=(issue,)),
+        report,
         PROFILE,
         _obligation(),
         SETTINGS,
@@ -410,7 +559,6 @@ def test_discovery_builds_all_kinds_bases_states_and_exact_helpers(
         "runtime_dispatch",
         "computed",
         "wildcard_call",
-        "src.worker_consumer",
         "assigned_shadow",
         "deleted_shadow",
         "loop_shadow",
@@ -731,6 +879,63 @@ def test_prepared_catalog_parses_once_and_isolates_obligation_derivation(
     assert replay == first
 
 
+def test_prepared_catalog_reuses_node_tokens_but_scores_late_issue_nodes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_repository(tmp_path)
+    snapshot = _capture(tmp_path)
+    tokenizer = Mock(wraps=evidence_discovery._tokens)
+    monkeypatch.setattr(evidence_discovery, "_tokens", tokenizer)
+
+    catalog = prepare_evidence_catalog(snapshot, PROFILE, SETTINGS)
+    calls_after_prepare = tokenizer.call_count
+
+    discover_evidence_candidates(
+        snapshot,
+        _section_report(),
+        PROFILE,
+        _obligation(),
+        SETTINGS,
+        prepared_catalog=catalog,
+    )
+    discover_evidence_candidates(
+        snapshot,
+        _section_report(),
+        PROFILE,
+        _obligation(title="Helper behavior"),
+        SETTINGS,
+        prepared_catalog=catalog,
+    )
+    assert tokenizer.call_count == calls_after_prepare + 6
+
+    issue_candidates = discover_evidence_candidates(
+        snapshot,
+        _section_report(
+            issues=(
+                Issue(
+                    "SPEC_MAPPING_RECIPROCAL_MISSING",
+                    "warning",
+                    "docs/specs/example.md",
+                    2,
+                    "worker parser conflict",
+                    section_id="REQ-1",
+                ),
+            )
+        ),
+        PROFILE,
+        _obligation(),
+        SETTINGS,
+        prepared_catalog=catalog,
+    )
+
+    assert tokenizer.call_count == calls_after_prepare + 12
+    assert any(
+        item.candidate_kind == "report_issue" and item.lexical_score[0] > 0
+        for item in issue_candidates
+    )
+
+
 @pytest.mark.parametrize(
     "relative_path",
     ("src/worker_invalid.py", "docs/specs/invalid.md"),
@@ -841,21 +1046,20 @@ def test_work_budget_charges_the_closed_evc_7_1_units_exactly(
     )
     snapshot = _capture(tmp_path)
 
-    # Three catalog nodes, two nonempty receipt blocks, two declaration input
-    # scans, one definition-ancestry scan, six candidate comparisons, four
-    # static-edge inspections, and two unique closure insertions.
+    # Discovery-v2 still charges every raw static-edge inspection, but the
+    # mapped module is not closure adjacency and therefore is not inserted.
     with pytest.raises(EvidenceDiscoveryError) as caught:
         discover_evidence_candidates(
             snapshot,
             _section_report(),
             PROFILE,
             _obligation(title="Target"),
-            replace(SETTINGS, maximum_work_units=19),
+            replace(SETTINGS, maximum_work_units=17),
         )
     assert caught.value.details == {
         "budget": "work_units",
-        "limit": 19,
-        "observed": 20,
+        "limit": 17,
+        "observed": 18,
     }
 
     candidates = discover_evidence_candidates(
@@ -863,9 +1067,85 @@ def test_work_budget_charges_the_closed_evc_7_1_units_exactly(
         _section_report(),
         PROFILE,
         _obligation(title="Target"),
-        replace(SETTINGS, maximum_work_units=20),
+        replace(SETTINGS, maximum_work_units=18),
     )
-    assert [item.owner for item in candidates] == ["target", "src.simple"]
+    assert [item.owner for item in candidates] == ["target"]
+
+
+def test_collapsed_bridge_charges_edges_and_unique_insertions_exactly() -> None:
+    def closure_nodes() -> dict[str, evidence_discovery._Node]:
+        rows: dict[str, evidence_discovery._Node] = {}
+        definitions: tuple[tuple[str, evidence_discovery.CandidateKind, str], ...] = (
+            (
+                "owner",
+                "implementation_definition",
+                "python-definition:owner:function:0",
+            ),
+            ("reference", "static_reference", "python-reference:owner:call:0"),
+            (
+                "target",
+                "implementation_definition",
+                "python-definition:target:function:0",
+            ),
+        )
+        for candidate_id, candidate_kind, locator in definitions:
+            rows[candidate_id] = evidence_discovery._Node(
+                candidate_id=candidate_id,
+                candidate_kind=candidate_kind,
+                path="src/bridge.py",
+                owner=candidate_id,
+                symbol=candidate_id,
+                module_name="src.bridge",
+                role="implementation",
+                start_line=1,
+                end_line=1,
+                node_line=1,
+                structural_locator=locator,
+                receipt=evidence_discovery.SourceReceipt(
+                    1,
+                    "src/bridge.py",
+                    locator,
+                    1,
+                    1,
+                    "0" * 64,
+                ),
+            )
+        rows["owner"].bases.add("declared_relation")
+        return rows
+
+    edges = (
+        ("enclosing_definition", "owner", "reference"),
+        ("static_call", "reference", "target"),
+    )
+    settings = replace(
+        SETTINGS,
+        maximum_lexical_seeds=0,
+        static_neighbor_depth=1,
+    )
+    work = evidence_discovery._WorkBudget(5)
+
+    selected = evidence_discovery._closure(
+        closure_nodes(),
+        edges,
+        settings,
+        work,
+    )
+
+    assert selected == {"owner", "reference", "target"}
+    assert work.used == 5  # two edge inspections plus three unique insertions
+
+    with pytest.raises(EvidenceDiscoveryError) as caught:
+        evidence_discovery._closure(
+            closure_nodes(),
+            edges,
+            settings,
+            evidence_discovery._WorkBudget(4),
+        )
+    assert caught.value.details == {
+        "budget": "work_units",
+        "limit": 4,
+        "observed": 5,
+    }
 
 
 def test_irrelevant_issues_and_invariant_edges_each_charge_one_work_unit(
@@ -1079,11 +1359,26 @@ def test_fallback_module_identity_is_seeded_without_changing_named_identity(
         and item.structural_locator.startswith("python-module-path:")
     )
     assert fallback.structural_locator == "python-module-path:src/bad-name.py"
+    named_report = replace(
+        _section_report(),
+        spec_mappings=(
+            SpecMapping(
+                section.path,
+                section.section_id,
+                3,
+                "src/worker.py",
+                "path",
+                "src/worker.py",
+                None,
+            ),
+        ),
+        code_refs=(),
+    )
     named = next(
         item
         for item in discover_evidence_candidates(
             snapshot,
-            _section_report(),
+            named_report,
             PROFILE,
             _obligation(),
             SETTINGS,
@@ -1125,6 +1420,87 @@ def test_final_frontier_relations_do_not_reference_unselected_candidates(
     assert referenced_ids <= returned_ids
 
 
+@pytest.mark.parametrize(
+    ("seed_title", "neighbor_owner"),
+    (
+        pytest.param("Alpha origin", "beta_target", id="direct"),
+        pytest.param("Beta target", "alpha_origin", id="inverse"),
+    ),
+)
+def test_collapsed_definition_bridge_is_symmetric_and_keeps_raw_relations(
+    tmp_path: Path,
+    seed_title: str,
+    neighbor_owner: str,
+) -> None:
+    _write_repository(tmp_path)
+    (tmp_path / "src/bridge.py").write_text(
+        "def beta_target():\n"
+        "    return True\n\n"
+        "def alpha_origin():\n"
+        "    return beta_target()\n",
+        encoding="utf-8",
+    )
+    base = _section_report()
+    report = replace(base, spec_mappings=(), code_refs=(), edges=())
+
+    candidates = discover_evidence_candidates(
+        _capture(tmp_path),
+        report,
+        PROFILE,
+        _obligation(title=seed_title),
+        replace(SETTINGS, maximum_lexical_seeds=1, static_neighbor_depth=1),
+    )
+
+    definitions = {
+        item.owner: item
+        for item in candidates
+        if item.path == "src/bridge.py"
+        and item.candidate_kind == "implementation_definition"
+        and not item.structural_locator.startswith("python-module:")
+    }
+    references = [
+        item
+        for item in candidates
+        if item.path == "src/bridge.py"
+        and item.owner == "alpha_origin"
+        and item.candidate_kind == "static_reference"
+    ]
+    assert set(definitions) == {"alpha_origin", "beta_target"}
+    assert "static_neighbor" in definitions[neighbor_owner].discovery_bases
+    assert len(references) == 2
+    assert all("static_neighbor" in item.discovery_bases for item in references)
+    assert not any(
+        item.path == "src/bridge.py"
+        and item.structural_locator.startswith("python-module:")
+        for item in candidates
+    )
+
+    raw_relations = {
+        (
+            relation.relation_kind,
+            relation.source_candidate_id,
+            relation.target_candidate_id,
+        )
+        for item in candidates
+        for relation in item.static_relations
+    }
+    reference_ids = {item.candidate_id for item in references}
+    assert {row for row in raw_relations if row[0] == "enclosing_definition"} == {
+        ("enclosing_definition", definitions["alpha_origin"].candidate_id, item)
+        for item in reference_ids
+    }
+    target_rows = {row for row in raw_relations if row[0] != "enclosing_definition"}
+    assert len(target_rows) == 2
+    assert {row[0] for row in target_rows} == {"static_call", "static_reference"}
+    assert {row[1] for row in target_rows} == reference_ids
+    assert {row[2] for row in target_rows} == {definitions["beta_target"].candidate_id}
+    assert not any(
+        source == definitions["alpha_origin"].candidate_id
+        and target == definitions["beta_target"].candidate_id
+        for _kind, source, target in raw_relations
+    )
+
+
 def test_import_of_ambiguous_local_module_is_plausible_but_never_guessed(
     tmp_path: Path,
 ) -> None:
@@ -1153,10 +1529,26 @@ def test_import_of_ambiguous_local_module_is_plausible_but_never_guessed(
     )
     config = replace(_snapshot_config(), code_roots=profile.code_roots)
     snapshot = capture_repository_snapshot(tmp_path, config, ALGORITHMS)
+    section = _section_report().spec_sections[0]
+    seeded_report = replace(
+        _section_report(),
+        spec_mappings=(
+            SpecMapping(
+                section.path,
+                section.section_id,
+                3,
+                "app/consumer.py::call_target",
+                "path_symbol",
+                "app/consumer.py",
+                "call_target",
+            ),
+        ),
+        code_refs=(),
+    )
 
     candidates = discover_evidence_candidates(
         snapshot,
-        _section_report(),
+        seeded_report,
         profile,
         _obligation(title="Call shared target"),
         SETTINGS,
@@ -1176,22 +1568,6 @@ def test_import_of_ambiguous_local_module_is_plausible_but_never_guessed(
         for relation in item.static_relations
     )
 
-    section = _section_report().spec_sections[0]
-    seeded_report = replace(
-        _section_report(),
-        spec_mappings=(
-            SpecMapping(
-                section.path,
-                section.section_id,
-                3,
-                "app/consumer.py::call_target",
-                "path_symbol",
-                "app/consumer.py",
-                "call_target",
-            ),
-        ),
-        code_refs=(),
-    )
     reached = discover_evidence_candidates(
         snapshot,
         seeded_report,
@@ -1218,7 +1594,7 @@ def test_import_of_ambiguous_local_module_is_plausible_but_never_guessed(
     assert "ambiguous_relation" in ambiguous_call.discovery_bases
 
 
-def test_path_only_mapping_declares_only_the_module_candidate(tmp_path: Path) -> None:
+def test_path_only_mapping_never_expands_the_module_candidate(tmp_path: Path) -> None:
     _write_repository(tmp_path)
     base = _section_report()
     section = base.spec_sections[0]
@@ -1243,7 +1619,7 @@ def test_path_only_mapping_declares_only_the_module_candidate(tmp_path: Path) ->
         report,
         PROFILE,
         _obligation(title="No lexical seed"),
-        replace(SETTINGS, maximum_lexical_seeds=0, static_neighbor_depth=0),
+        replace(SETTINGS, maximum_lexical_seeds=0, static_neighbor_depth=1),
     )
 
     mapped = [
@@ -1255,6 +1631,9 @@ def test_path_only_mapping_declares_only_the_module_candidate(tmp_path: Path) ->
         )
     ]
     assert [item.structural_locator for item in mapped] == ["python-module:src.worker"]
+    assert [item.structural_locator for item in candidates] == [
+        "python-module:src.worker"
+    ]
 
 
 def test_comprehension_targets_never_resolve_to_an_outer_import(
@@ -1533,7 +1912,7 @@ def test_from_import_is_ambiguous_when_package_definition_and_submodule_collide(
     )
 
 
-def test_nested_definition_seed_reaches_its_lexical_owner(
+def test_nested_definition_seed_never_reaches_its_lexical_owner(
     tmp_path: Path,
 ) -> None:
     _write_repository(tmp_path)
@@ -1566,22 +1945,15 @@ def test_nested_definition_seed_reaches_its_lexical_owner(
         replace(SETTINGS, maximum_lexical_seeds=0, static_neighbor_depth=1),
     )
 
-    owner = next(
-        item
-        for item in candidates
-        if item.structural_locator == "python-definition:Owner:class:0"
-    )
     nested = next(
         item
         for item in candidates
         if item.structural_locator == "python-definition:Owner.nested:function:0"
     )
-    assert "static_neighbor" in owner.discovery_bases
-    assert any(
-        relation.relation_kind == "enclosing_definition"
-        and relation.source_candidate_id == owner.candidate_id
-        and relation.target_candidate_id == nested.candidate_id
-        for relation in owner.static_relations
+    assert nested
+    assert not any(
+        item.structural_locator == "python-definition:Owner:class:0"
+        for item in candidates
     )
 
 
@@ -1592,11 +1964,15 @@ def test_import_candidate_kind_reflects_complete_alias_resolution(
     (tmp_path / "src/first.py").write_text("VALUE = 1\n", encoding="utf-8")
     (tmp_path / "src/second.py").write_text("VALUE = 2\n", encoding="utf-8")
     (tmp_path / "src/multi_import.py").write_text(
-        "import src.first as first, src.second as second\n",
+        "def multi_import():\n"
+        "    import src.first as first, src.second as second\n"
+        "    return first, second\n",
         encoding="utf-8",
     )
     (tmp_path / "src/mixed_import.py").write_text(
-        "import src.first as first, shared as shared\n",
+        "def mixed_import():\n"
+        "    import src.first as first, shared as shared\n"
+        "    return first, shared\n",
         encoding="utf-8",
     )
     for root in ("first", "second"):
@@ -1623,12 +1999,19 @@ def test_import_candidate_kind_reflects_complete_alias_resolution(
                 section.path,
                 section.section_id,
                 3 + index,
+                f"{path}::{symbol}" if symbol is not None else path,
+                "path_symbol" if symbol is not None else "path",
                 path,
-                "path",
-                path,
-                None,
+                symbol,
             )
-            for index, path in enumerate(("src/mixed_import.py", "src/multi_import.py"))
+            for index, (path, symbol) in enumerate(
+                (
+                    ("src/mixed_import.py", "mixed_import"),
+                    ("src/multi_import.py", "multi_import"),
+                    ("src/first.py", None),
+                    ("src/second.py", None),
+                )
+            )
         ),
         code_refs=(),
     )
@@ -1857,27 +2240,36 @@ def test_pep695_static_resolution_uses_exact_source_order_without_runtime_ast(
         encoding="utf-8",
     )
     snapshot = _capture(tmp_path)
+    base = _section_report()
+    section = base.spec_sections[0]
+    report = replace(
+        base,
+        spec_mappings=(
+            SpecMapping(
+                section.path,
+                section.section_id,
+                3,
+                "src/ordered.py::sequence",
+                "path_symbol",
+                "src/ordered.py",
+                "sequence",
+            ),
+        ),
+        code_refs=(),
+    )
 
     candidates = discover_evidence_candidates(
         snapshot,
-        _section_report(),
+        report,
         PROFILE,
         _obligation(title="Ordered chosen target"),
         SETTINGS,
     )
 
-    module_call = next(
-        item
+    assert not any(
+        item.owner == "src.ordered" and ":call:" in item.structural_locator
         for item in candidates
-        if item.owner == "src.ordered"
-        and item.candidate_kind == "static_reference"
-        and ":call:" in item.structural_locator
     )
-    assert {
-        relation.target_locator
-        for relation in module_call.static_relations
-        if relation.relation_kind == "static_call"
-    } == {"python-definition:second:function:0"}
 
     sequence_calls = sorted(
         (
@@ -1957,15 +2349,8 @@ def test_static_resolution_fails_closed_for_lexical_and_branch_uncertainty(
         "    return branch()\n",
         encoding="utf-8",
     )
-
-    candidates = discover_evidence_candidates(
-        _capture(tmp_path),
-        _section_report(),
-        PROFILE,
-        _obligation(title="Uncertain target"),
-        SETTINGS,
-    )
-
+    base = _section_report()
+    section = base.spec_sections[0]
     uncertain_owners = {
         "target_before_local_assignment",
         "target_before_local_definition",
@@ -1979,6 +2364,31 @@ def test_static_resolution_fails_closed_for_lexical_and_branch_uncertainty(
         "target_conditional_import",
         "target_alternative_import",
     }
+    report = replace(
+        base,
+        spec_mappings=tuple(
+            SpecMapping(
+                section.path,
+                section.section_id,
+                3 + index,
+                f"src/uncertain_target.py::{owner}",
+                "path_symbol",
+                "src/uncertain_target.py",
+                owner,
+            )
+            for index, owner in enumerate(sorted(uncertain_owners))
+        ),
+        code_refs=(),
+    )
+
+    candidates = discover_evidence_candidates(
+        _capture(tmp_path),
+        report,
+        PROFILE,
+        _obligation(title="Uncertain target"),
+        SETTINGS,
+    )
+
     calls = [
         item
         for item in candidates

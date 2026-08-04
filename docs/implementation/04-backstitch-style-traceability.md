@@ -9,6 +9,7 @@ Plan: docs/plans/2026-07-09-backstitch-invariant-traceability-plan.md
 Plan: docs/plans/2026-07-02-backstitch-four-way-reconciliation-plan.md
 Plan: docs/plans/2026-07-07-tree-sitter-code-parser-plan.md
 Plan: docs/plans/2026-07-28-configured-default-command-plan.md
+Plan: docs/plans/2026-07-29-architecture-quality-remediation-plan.md
 
 This document explains why the reconciled implementation is shaped the way
 it is — boundaries, tradeoffs, and provenance — not a narration of the code.
@@ -30,6 +31,19 @@ Load-bearing boundaries:
   derived from the accepted `RepositorySnapshot` by
   `scan_snapshot_with_artifacts` and passed in, so graph policy is testable
   without IO and reruns are byte-stable.
+- **Application seams own workflows, not presentation.**
+  `check_application.py` owns capture, report construction, warning collection,
+  and the effective check classification. `packet_application.py` owns runtime
+  construction, deterministic-failure precedence, packet/report assembly, and
+  ordered artifact publication. `coverage_application.py` owns accepted
+  repository state, historical projection, ratchet policy, report construction,
+  gate classification, and durable publication. `semantic_application.py`
+  owns current/historical input validation, repository readiness and
+  packetization, semantic-run invocation, currentness recapture, and ordered
+  current artifact publication. These seams accept immutable resolved inputs
+  and return typed immutable outcomes. `cli.py` retains argument parsing,
+  provider-factory construction, suppression display, rendering, output
+  messages, and process-exit mapping.
 - **Markdown structure belongs to `markdown-it-py`.** `markdown_specs.py`
   interprets Backstitch traceability constructs over CommonMark tokens; it
   does not maintain an independent fence, indented-code, or block-boundary
@@ -81,8 +95,10 @@ Load-bearing boundaries:
   unified runner, not the presentation command, owns cache, policy,
   completeness, and exit authority ([INV-5], [SC-7], [SEM-5], [SEM-7]).
 - **The llm quarantine.** `check` and `packets` are structurally incapable
-  of importing `llm`: the import lives inside `analysis_llm.default_adapter`
-  and the `analyze` CLI handler, and a subprocess test asserts
+  of importing `llm`: the import lives inside
+  `analysis_llm._resolved_model_adapter_parts`, reached only through the
+  shipping `default_provider_adapter` factory imported lazily by `analyze`.
+  A subprocess test asserts
   `llm ∉ sys.modules` for deterministic commands ([SC-8]).
 - **Bare dispatch is config selection with selected-command argument parsing.**
   The packaged
@@ -98,12 +114,12 @@ Load-bearing boundaries:
   not recurse through `main`, start a subprocess, accept arguments in the
   config value, or resolve config twice
   ([SC-5], [CFG-5.1], [INV.PERF.1]).
-- **Constrained decoding when available.** `default_adapter` requests
-  provider-enforced JSON output (`json_object=True`) whenever the resolved
-  model's `Options` declares that field — a capability check, never a
-  provider name — so servers with constrained decoding cannot emit
-  syntactically invalid rows; models without the option get the unchanged
-  call (`docs/plans/2026-07-06-analyze-json-mode-plan.md`).
+- **Constrained decoding is part of the resolved request.**
+  `default_provider_adapter` requires the configured request options, verifies
+  schema support before dispatch, and sends the packet-specific closed result
+  schema. Unsupported request modes fail before a provider call; a rejected
+  request is never retried with weaker controls
+  (`docs/plans/2026-07-06-analyze-json-mode-plan.md`).
 - **The doctor shares the quarantine, not the pipeline.** `backstitch
   doctor` ([SC-14], `doctor.py`) diagnoses the same environment `analyze`
   depends on — model resolution via `resolve_model_name`, credentials,
@@ -142,10 +158,12 @@ Load-bearing boundaries:
   consuming code path's projection — that asymmetry is how nineteen review
   rounds found the same rule broken one field at a time. Packet JSONL and
   deterministic-report validators live in `artifact_contracts.py`; semantic
-  result and model-output validation stay with `analysis_results.py` and
-  `analysis_llm.py`. The counterweight is [SC-13.5]: everything the tool
-  emits must pass its own validation (acceptance probe 13), so tightening can
-  never orphan real output.
+  result and model-output validation stay with `analysis_results.py`,
+  `semantic_evidence.py`, and the immutable cache execution path.
+  `analysis_llm.py` owns only provider request construction and wire
+  adaptation. The counterweight is [SC-13.5]: everything the tool emits must
+  pass its own validation (acceptance probe 13), so tightening can never
+  orphan real output.
 - **Evidence locality is enforced where the packets are.** `analyze` holds
   the packets, so it is the boundary that rejects model evidence outside
   the packet's shown paths and line ranges ([SC-7]).
@@ -204,6 +222,16 @@ behavioral source of truth for built-in profile defaults, default excludes, the
 diagnostic registry, and diagnostic policy. `pyproject.toml` carries the
 committed repository overlay. Choices and their reasons:
 
+- Filesystem discovery and Git-blob history are source adapters into
+  `settings._assemble_settings`. The common finalizer owns model selection,
+  typed parsing, provenance projection, and final profile-root containment.
+  `config.normalize_profile_root` compares roots after pure lexical
+  normalization, so historical validation never follows the current
+  checkout's symlinks. Blob-side operational output, cache, qualification, and
+  target paths are also normalized lexically because they are not historical
+  gate authority; the current filesystem adapter retains physical
+  canonicalization for those addresses. `tests/test_config_parity.py` pins the
+  non-operational parity and rejection matrix.
 - `default_command = "analyze"` makes the repository's bare invocation enter
   current-repository semantic analysis. That is an intentional local
   credential, cache, provider, and bounded-cost choice. The hermetic
@@ -222,7 +250,7 @@ committed repository overlay. Choices and their reasons:
 - `extend_exclude` (never bare `exclude`): the packaged defaults already exclude
   `.worktrees`; replacing them would scan four archived bake-off
   implementations into the corpus.
-- Exclusion has exactly one authority: `settings.is_excluded`
+- Exclusion has exactly one authority: `scan_exclusions.is_excluded`
   (component-aware, so a bare `venv` skips the subtree at any depth). The
   resolver takes `None` to mean the built-in defaults and an explicit
   empty tuple to mean scan everything — no hard-coded dot-directory skip
@@ -240,15 +268,18 @@ committed repository overlay. Choices and their reasons:
   that directly enforces it; the default self-scan requires three binds and
   zero invariant findings.
 - The repository opts into `lint.require_suppression_declarations = true`.
-  Five structured rules replace the legacy meta/per-file tables: DOM process
-  metadata; two exact residual EVC process/deferred sections; the planned COV
-  spec; and test citation-inventory noise. Their five declarations live under
-  [EXC-10]. The EVC rule is section-bounded, and the test rule retains only
+  Three config rules govern DOM process metadata, the exact deferred
+  `EVC-8.6` section, and test citation-inventory noise. Inline `meta` markers
+  govern the exact EVC process, verification-policy, and documentation-policy
+  sections. All six declarations live under [EXC-10]. The deferred EVC rule
+  is section-bounded, and the test rule retains only
   `CODE_REF_UNMAPPED_FROM_SPEC` and `SPEC_MAPPING_RECIPROCAL_MISSING`.
 - `tests/test_backstitch_corpus_traceability.py` pins each declaration
-  population and allowed path/code/section boundary. The migration reduced
-  the audit from 206 to 192 records with no new suppression identity; every
-  retained record has a valid declaration and nonblank rationale.
+  population and allowed path/code/section boundary. The current audit has
+  263 records: 235 test-citation, 15 DOM-meta, 7 verification-meta,
+  2 documentation-meta, 2 EVC-process, and 2 deferred-MCP findings. The
+  deferred pair includes the one explicit `EVC-8.6` obligation skip. Every
+  record has a valid declaration and nonblank rationale.
 - `diagnostics.levels` appends across config layers. Repository rules can
   override defaults with a later `select = ["*"]` rule, and
   `config show` exposes both the config layer list and the resolved
@@ -292,9 +323,9 @@ remains available for dedicated lanes whose ini policy is off.
 Boundary and rationale:
 
 - **Real path only.** It drives the CLI (`packets` → `analyze` → `check` →
-  `summarize-analysis`) as subprocesses through the production `default_adapter`.
-  Nothing inside the live test is mocked; the only allowed skip is the explicit
-  pytest policy being disabled.
+  `summarize-analysis`) as subprocesses through the production
+  `default_provider_adapter`. Nothing inside the live test is mocked; the only
+  allowed skip is the explicit pytest policy being disabled.
 - **Bounded dogfood corpus.** The cloud lane keeps the smallest matching
   section packet from `docs/specs/02-backstitch-core.md` owned by a semantic-
   analysis module. The local lane instead generates `--kind invariant` and
@@ -305,11 +336,9 @@ Boundary and rationale:
 - **Structure, not wording.** Assertions are on the result contract: one row per
   packet, every row passes `validate_analysis_row`, and
   `load_analysis_results` reports zero errors. Cloud-provider runs also assert
-  no row carries an `error` field. `analysis_llm._error_record` deliberately
-  emits a schema-valid `ambiguous` row for a contained failure, and both
-  `analyze` (partial failure) and `summarize-analysis` (bad rows rendered as
-  advisory text) exit `0`, so exit codes prove command path and artifact health,
-  not model success.
+  no row carries an `error` field. Provider or normalization failures remain
+  typed semantic problems and never become trusted result rows. Exit codes
+  therefore prove the command path and artifact health, not model wording.
 - **Local endpoint proof.** With `BACKSTITCH_LIVE_LLM_KIND=local`, the test writes
   a temporary `llm` `extra-openai-models.yaml` entry pointing
   `backstitch-local` at a loopback counting proxy. The proxy forwards to the
@@ -320,8 +349,9 @@ Boundary and rationale:
   implementations, so recorded analyze calls cross a test-owned bridge: the
   proxy derives a strict schema from the real packet's result vocabulary and
   evidence bounds, forwards exactly one nonstreaming request, then relays the
-  assistant content unchanged as SSE to `default_adapter`. The ordinary result
-  parser remains the sole validator; the proxy never repairs model output.
+  assistant content unchanged as SSE to `default_provider_adapter`. The
+  ordinary result normalizer remains the sole validator; the proxy never
+  repairs model output.
   Summary and rationale length, evidence count, and request output are bounded
   (`48`, `72`, one item, and `128` tokens respectively) so constrained
   nonstream generation cannot run to the served model's broader 1024-token
@@ -331,7 +361,7 @@ Boundary and rationale:
   compatibility fallback before a second upstream request.
   The test validates the curated corpus before provider activity, verifies
   `/v1/models`, requires a subprocess transport probe through
-  `default_adapter`, at least one non-error row, and exact analyze bodies
+  `default_provider_adapter`, at least one non-error row, and exact analyze bodies
   showing the packet IDs, served model, temperature, seed, nonstream mode, and
   packet-bounded schema. Invalid completion JSON, malformed packet prompts,
   malformed upstream envelopes, and duplicate packet attempts fail locally

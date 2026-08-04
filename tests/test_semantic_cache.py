@@ -1,4 +1,7 @@
-"""Immutable semantic cache, locking, replay, and cleanup tests."""
+"""Immutable semantic cache, locking, replay, and cleanup tests.
+
+Spec: docs/specs/06-semantic-gates.md [SEM-4], [SEM-10]
+"""
 
 from __future__ import annotations
 
@@ -1631,14 +1634,28 @@ def test_result_visible_before_guard_deadline_wins_over_guard_timeout(
                     ),
                 )
             else:
-                future = pool.submit(
-                    semantic_cache._wait_for_result,
+                coordinator = semantic_cache._OwnershipCoordinator(
                     cache_path=cache_path,
-                    packet=packet,
-                    identity=identity,
-                    provider=PROVIDER,
+                    key=identity.analysis_key,
+                    lock_kind="analysis",
+                    result_path=result_path,
+                    lock_path=lock_path,
                     timeout_seconds=0.05,
                     poll_interval_seconds=0.01,
+                    load_result=lambda: semantic_cache._load_hit(
+                        cache_path, packet, identity, PROVIDER
+                    ),
+                    read_lock=lambda: semantic_cache._read_valid_lock(
+                        lock_path, identity.analysis_key
+                    )[1],
+                    remove_lock=lambda expected: semantic_cache._remove_owned_lock(
+                        lock_path, identity.analysis_key, expected
+                    ),
+                    wait_error="timed out waiting for semantic cache owner",
+                    ownership_name="semantic lock",
+                )
+                future = pool.submit(
+                    coordinator.wait,
                 )
             threading.Event().wait(0.01)
             result_path.write_bytes(result_bytes)

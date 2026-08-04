@@ -496,7 +496,7 @@ def test_spec_invariant_summary_retains_unresolved_mapping_declaration() -> None
     assert rows[0]["declared_target"] == "pkg/missing.py::run"
 
 
-def test_spec_invariant_summary_exposes_resolved_test_root_target_as_rejected() -> None:
+def test_spec_invariant_summary_keeps_resolved_test_target_as_test_evidence() -> None:
     spec = (
         b"# X\n\n## Contract [X-1]\n\n"
         b"Invariant: [INV.X.1] The value remains stable.\n\n"
@@ -565,11 +565,11 @@ def test_spec_invariant_summary_exposes_resolved_test_root_target_as_rejected() 
 
     rows = build_evidence_summary_items(report, obligation, snapshot, PROFILE)
 
-    rejected = next(row for row in rows if row["role"] == "implementation")
-    assert rejected["path"] == "docs/specs/x.md"
-    assert rejected["declared_target"] == "tests/implementation.py::run"
-    assert rejected["reciprocity_state"] == "one_sided"
-    assert rejected["receipt"]["path"] == "docs/specs/x.md"
+    test_evidence = next(row for row in rows if row["role"] == "test")
+    assert test_evidence["path"] == "tests/implementation.py"
+    assert test_evidence["declared_target"] == "tests/implementation.py::run"
+    assert test_evidence["reciprocity_state"] == "complete"
+    assert test_evidence["receipt"]["path"] == "tests/implementation.py"
 
 
 @pytest.mark.parametrize(

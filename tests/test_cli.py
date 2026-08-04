@@ -11,14 +11,13 @@ import argparse
 import json
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
-from backstitch.check_pipeline import CheckPipelineResult
-from backstitch.config import ProfileConfig
-from backstitch.markdown_specs import MarkdownParseMemo
-from backstitch.repository_snapshot import RepositorySnapshot
+from backstitch.coverage_application import INTENT_DIAGNOSTIC_CONTEXTS
 from backstitch.settings import BackstitchSettings, ProfileSettings
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -49,6 +48,47 @@ def check_clean(*extra: str) -> subprocess.CompletedProcess[str]:
         "pkg",
         *extra,
     )
+
+
+def test_tty_progress_renderer_is_line_safe_and_portable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backstitch.cli import _tty_progress_sink
+    from backstitch.operation_progress import ProgressEvent
+
+    class TTYStderr:
+        def __init__(self) -> None:
+            self.value = ""
+            self.flushes = 0
+
+        def isatty(self) -> bool:
+            return True
+
+        def write(self, value: str) -> int:
+            self.value += value
+            return len(value)
+
+        def flush(self) -> None:
+            self.flushes += 1
+
+    stderr = TTYStderr()
+    monkeypatch.setattr(sys, "stderr", stderr)
+    sink = _tty_progress_sink(enabled=True)
+    assert sink is not None
+
+    sink(
+        ProgressEvent(
+            phase="packet_accounting",
+            completed_work_units=2,
+            total_work_units=3,
+            current_identity="docs/specs/01-core.md#CORE-1",
+        )
+    )
+
+    assert stderr.value == (
+        "backstitch: progress packet_accounting 2/3 docs/specs/01-core.md#CORE-1\n"
+    )
+    assert stderr.flushes == 1
 
 
 def write_syntax_warning_repo(root: Path, *, inline_noqa: bool = False) -> None:
@@ -124,6 +164,8 @@ def _write_ratchet_repo(
     *,
     mapping: str = "pkg/api.py::answer",
     extra_coverage: str = "",
+    code_roots: str = '["pkg"]',
+    test_roots: str = "[]",
 ) -> None:
     (root / "docs" / "specs").mkdir(parents=True)
     (root / "pkg").mkdir()
@@ -146,8 +188,8 @@ def _write_ratchet_repo(
             'name = "backstitch-style-v1"\n'
             'spec_roots = ["docs/specs"]\n'
             "plan_roots = []\n"
-            'code_roots = ["pkg"]\n'
-            "test_roots = []\n\n"
+            f"code_roots = {code_roots}\n"
+            f"test_roots = {test_roots}\n\n"
             "[coverage]\n"
             'mode = "ratchet"\n'
             'ratchet_base = "baseline"\n'
@@ -195,6 +237,121 @@ def _commit_ratchet_change(root: Path, message: str) -> None:
     )
 
 
+def _prepare_uncovered_diagnostics(root: Path) -> None:
+    _write_ratchet_repo(root)
+    with (root / "pkg" / "api.py").open("a", encoding="utf-8") as handle:
+        handle.write("\n\ndef uncovered() -> None:\n    pass\n")
+
+
+def _prepare_inherited_diagnostics(root: Path) -> None:
+    _write_ratchet_repo(root, mapping="pkg/api.py")
+    source = root / "pkg" / "api.py"
+    source.write_text(
+        source.read_text(encoding="utf-8").replace(
+            "API implementation.",
+            "Changed API implementation.",
+        ),
+        encoding="utf-8",
+    )
+
+
+def _prepare_exemption_and_floor_diagnostics(root: Path) -> None:
+    _write_ratchet_repo(
+        root,
+        extra_coverage=(
+            '\n[[coverage.exemptions]]\npath = "pkg/missing.py"\n'
+            'reason = "Generated elsewhere."\n\n'
+            '[coverage.floors."pkg"]\ndirect = 1.0\n'
+        ),
+    )
+
+
+def _prepare_unreasoned_and_unimplemented_diagnostics(root: Path) -> None:
+    _write_ratchet_repo(root, mapping="pkg/missing.py::answer")
+    source = root / "pkg" / "api.py"
+    source.write_text(
+        source.read_text(encoding="utf-8").replace(
+            "def answer() -> int:",
+            "def answer() -> int:  # backstitch: no-spec",
+        ),
+        encoding="utf-8",
+    )
+
+
+def _prepare_drift_diagnostics(root: Path) -> None:
+    _write_ratchet_repo(root)
+    source = root / "pkg" / "api.py"
+    source.write_text(
+        source.read_text(encoding="utf-8").replace("return 1", "return 2"),
+        encoding="utf-8",
+    )
+    _commit_ratchet_change(root, "change implementation")
+
+
+def _prepare_incomplete_diagnostics(root: Path) -> None:
+    _write_ratchet_repo(root)
+    (root / "pkg" / "bad.py").write_text("def broken(:\n", encoding="utf-8")
+
+
+def _prepare_policy_diagnostics(root: Path) -> None:
+    _write_ratchet_repo(root)
+    config = root / ".backstitch.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8") + "\ninherited_counts = true\n",
+        encoding="utf-8",
+    )
+    _commit_ratchet_change(root, "weaken coverage policy")
+
+
+_INTENT_PRODUCER_SCENARIOS: tuple[tuple[str, Callable[[Path], None]], ...] = (
+    ("uncovered", _prepare_uncovered_diagnostics),
+    ("inherited", _prepare_inherited_diagnostics),
+    ("exemption-and-floor", _prepare_exemption_and_floor_diagnostics),
+    ("unreasoned-and-unimplemented", _prepare_unreasoned_and_unimplemented_diagnostics),
+    ("drift", _prepare_drift_diagnostics),
+    ("incomplete", _prepare_incomplete_diagnostics),
+    ("policy", _prepare_policy_diagnostics),
+)
+
+
+def test_every_intent_diagnostic_context_fires_from_a_real_producer(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Join the declared intent contract to real coverage CLI producers."""
+
+    observed: set[tuple[str, str | None, str]] = set()
+    for name, prepare in _INTENT_PRODUCER_SCENARIOS:
+        root = tmp_path_factory.mktemp(f"intent-producer-{name}")
+        prepare(root)
+        result = run_cli(
+            "coverage",
+            str(root),
+            "--require-ratchet",
+            "baseline",
+        )
+        assert result.returncode in {0, 1}, result.stdout + result.stderr
+        issues = json.loads(result.stdout)["issues"]
+        scenario_facts = {
+            (item["code"], item["context"], item["default_severity"])
+            for item in issues
+            if item["code"].startswith("INTENT_")
+        }
+        assert scenario_facts, f"{name} did not fire an intent diagnostic"
+        assert all(
+            item["severity"] == item["default_severity"]
+            for item in issues
+            if item["code"].startswith("INTENT_")
+        )
+        observed.update(scenario_facts)
+
+    expected = {
+        (code, context, severity)
+        for code, contexts in INTENT_DIAGNOSTIC_CONTEXTS.items()
+        for context, severity in contexts.items()
+    }
+    assert observed == expected
+
+
 def test_coverage_ratchet_marks_dirty_uncovered_definition_as_patch(
     tmp_path: Path,
 ) -> None:
@@ -227,6 +384,37 @@ def test_coverage_ratchet_marks_dirty_uncovered_definition_as_patch(
     ]
     assert changed[0]["changed"] is True
     assert payload["baseline"]["configured_ref"] == "baseline"
+
+
+def test_coverage_ratchet_rejects_invalid_historical_root_containment(
+    tmp_path: Path,
+) -> None:
+    _write_ratchet_repo(
+        tmp_path,
+        code_roots='["pkg"]',
+        test_roots='["qa"]',
+    )
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            'code_roots = ["pkg"]',
+            'code_roots = ["pkg", "qa"]',
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "qa").mkdir()
+
+    result = run_cli(
+        "coverage",
+        str(tmp_path),
+        "--require-ratchet",
+        "baseline",
+    )
+
+    assert result.returncode == 2
+    assert "test root 'qa'" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert result.stdout == ""
 
 
 def test_coverage_ratchet_computes_committed_drift_from_exact_projections(
@@ -627,7 +815,7 @@ def test_bare_default_check_resolves_once_and_reuses_snapshot(
 )
 def test_bare_default_forwards_path_and_command_arguments_with_one_resolution(
     monkeypatch: pytest.MonkeyPatch,
-    default_command: str,
+    default_command: Literal["check", "analyze"],
     argv: tuple[str, ...],
     handler_name: str,
     expected_overrides: dict[str, object],
@@ -647,9 +835,9 @@ def test_bare_default_forwards_path_and_command_arguments_with_one_resolution(
             if default_command == "analyze"
             else ()
         )
-        assert kwargs["cli_overrides_by_command"][default_command] == (
-            expected_overrides
-        )
+        overrides_by_command = kwargs["cli_overrides_by_command"]
+        assert isinstance(overrides_by_command, dict)
+        assert overrides_by_command[default_command] == expected_overrides
         return settings
 
     def handler(
@@ -895,30 +1083,20 @@ def test_check_routes_through_the_snapshot_backed_core(
 ) -> None:
     write_syntax_warning_repo(tmp_path)
 
+    import backstitch.check_application as check_application
     import backstitch.cli as cli
 
-    original = cli.build_check_report_from_snapshot
+    original = check_application.check_repository
     calls = 0
 
     def observe(
-        snapshot: RepositorySnapshot,
-        repo_root_display: str,
-        profile: ProfileConfig,
-        settings: BackstitchSettings,
-        *,
-        markdown_parse_memo: MarkdownParseMemo | None = None,
-    ) -> CheckPipelineResult:
+        request: check_application.CheckRequest,
+    ) -> check_application.CheckResult | check_application.CheckFailure:
         nonlocal calls
         calls += 1
-        return original(
-            snapshot,
-            repo_root_display,
-            profile,
-            settings,
-            markdown_parse_memo=markdown_parse_memo,
-        )
+        return original(request)
 
-    monkeypatch.setattr(cli, "build_check_report_from_snapshot", observe)
+    monkeypatch.setattr(check_application, "check_repository", observe)
 
     exit_code = cli.main(
         [

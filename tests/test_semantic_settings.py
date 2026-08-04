@@ -11,11 +11,16 @@ import json
 import tomllib
 from dataclasses import asdict
 from pathlib import Path
+from typing import TypedDict
 
 import pytest
 
-from backstitch.config import resolve_profile_root
+from backstitch.config import normalize_profile_root
 from backstitch.diagnostics import default_registry, resolve_level
+from backstitch.semantic_analysis import (
+    resolve_semantic_settings,
+    resolve_verification_settings,
+)
 from backstitch.settings import (
     ConfigLoadError,
     VerifySettings,
@@ -33,6 +38,15 @@ SEMANTIC_CODES = {
     "SEMANTIC_SUPPRESSION_SCOPE_OVERBROAD": "BSA007",
     "SEMANTIC_SUPPRESSION_RISK_UNADDRESSED": "BSA008",
 }
+
+
+class _ModelSelectionKwargs(TypedDict, total=False):
+    explicit: Path
+    environment: dict[str, str]
+    cli_options: tuple[tuple[str, str], ...]
+    cli_overrides: dict[str, str]
+
+
 VERIFICATION_STATES = (
     "evidence_bound",
     "verification_indeterminate",
@@ -132,6 +146,7 @@ def _valid_cached_analyze_lines() -> list[str]:
         'plugin_distribution_name = "plugin-dist"',
         'model = "model"',
         'model_revision = "revision"',
+        *_capability_descriptor_lines(),
         "input_cost_microusd_per_million_tokens = 0",
         "output_cost_microusd_per_million_tokens = 0",
         "input_token_overhead = 256",
@@ -152,6 +167,7 @@ def _flat_analyze_descriptor_lines(
         'plugin_distribution_name = "flat-dist"',
         f'model = "{model}"',
         f'model_revision = "{revision}"',
+        *_capability_descriptor_lines(),
         "input_cost_microusd_per_million_tokens = 10",
         "output_cost_microusd_per_million_tokens = 20",
         "input_token_overhead = 30",
@@ -172,10 +188,27 @@ def _catalog_descriptor_lines(
         'plugin_id = "catalog-plugin"',
         'plugin_distribution_name = "catalog-dist"',
         f'model_revision = "{revision}"',
+        *_capability_descriptor_lines(),
         "input_cost_microusd_per_million_tokens = 40",
         "output_cost_microusd_per_million_tokens = 50",
         "input_token_overhead = 60",
         'cost_rate_source = "catalog provider prices, reviewed 2026-07-28"',
+    ]
+
+
+def _capability_descriptor_lines() -> list[str]:
+    return [
+        "capability_schema_version = 1",
+        'capability_revision = "test-capability-v1"',
+        "maximum_input_bytes = 1000000",
+        (
+            "request_constraints = { "
+            'json_mode = { presence = "required", allowed_values = ["require", "off"] }, '
+            'temperature = { presence = "required", allowed_values = [0.0, 0.25] }, '
+            'seed = { presence = "required", minimum = 0, maximum = 2147483647 }, '
+            'max_tokens = { presence = "required", minimum = 1, maximum = 16384 }'
+            " }"
+        ),
     ]
 
 
@@ -203,8 +236,20 @@ VERIFY_PROVIDER_VALUES = {
     "backend_id": '"llm"',
     "plugin_id": '"verify-plugin"',
     "plugin_distribution_name": '"verify-dist"',
-    "model": '"verify-model"',
+    "model": '"pkg:service/verify.example/verify-model"',
+    "adapter_model_id": '"verify-model"',
     "model_revision": '"verify-revision"',
+    "capability_schema_version": "1",
+    "capability_revision": '"verify-capability-v1"',
+    "maximum_input_bytes": "1000000",
+    "request_constraints": (
+        "{ "
+        'json_mode = { presence = "required", allowed_values = ["require"] }, '
+        'temperature = { presence = "required", allowed_values = [0.25] }, '
+        'seed = { presence = "required", minimum = 0, maximum = 2147483647 }, '
+        'max_tokens = { presence = "required", minimum = 1, maximum = 16384 }'
+        " }"
+    ),
     "input_cost_microusd_per_million_tokens": "10",
     "output_cost_microusd_per_million_tokens": "20",
     "input_token_overhead": "30",
@@ -283,6 +328,7 @@ def _analyze_provider_lines() -> list[str]:
         'plugin_distribution_name = "analyze-dist"',
         'model = "analyze-model"',
         'model_revision = "analyze-revision"',
+        *_capability_descriptor_lines(),
         'cost_rate_source = "provider page, reviewed 2026-07-16"',
         "input_cost_microusd_per_million_tokens = 10",
         "output_cost_microusd_per_million_tokens = 20",
@@ -302,6 +348,35 @@ def test_packaged_semantic_defaults_are_exact(tmp_path: Path) -> None:
         "model": "",
         "adapter_model_id": "",
         "model_revision": "",
+        "capability_schema_version": 1,
+        "capability_revision": "packaged-compatible-v1",
+        "request_constraints": {
+            "json_mode": {
+                "presence": "required",
+                "allowed_values": ("require", "off"),
+                "minimum": None,
+                "maximum": None,
+            },
+            "temperature": {
+                "presence": "required",
+                "allowed_values": (0.0,),
+                "minimum": None,
+                "maximum": None,
+            },
+            "seed": {
+                "presence": "required",
+                "allowed_values": None,
+                "minimum": 0,
+                "maximum": 9223372036854775807,
+            },
+            "max_tokens": {
+                "presence": "required",
+                "allowed_values": None,
+                "minimum": 1,
+                "maximum": 2147483647,
+            },
+        },
+        "maximum_input_bytes": 10_000_000,
         "concurrency": 1,
         "json_mode": "prefer",
         "temperature": 0.0,
@@ -348,6 +423,29 @@ def test_repository_dogfood_semantic_configuration_is_explicit() -> None:
         "model": "pkg:service/openai.com/gpt-5.4-mini",
         "adapter_model_id": "gpt-5.4-mini",
         "model_revision": "gpt-5.4-mini-2026-03-17",
+        "capability_schema_version": 1,
+        "capability_revision": "openai-gpt-5.4-mini-2026-07-29",
+        "maximum_input_bytes": 1_600_000,
+        "request_constraints": {
+            "json_mode": {
+                "presence": "required",
+                "allowed_values": ["require"],
+            },
+            "temperature": {
+                "presence": "required",
+                "allowed_values": [0.0],
+            },
+            "seed": {
+                "presence": "required",
+                "minimum": 0,
+                "maximum": 2147483647,
+            },
+            "max_tokens": {
+                "presence": "required",
+                "minimum": 1,
+                "maximum": 16384,
+            },
+        },
         "concurrency": 1,
         "cache_path": ".backstitch/semantic-cache",
         "cache_mode": "read-write",
@@ -360,13 +458,13 @@ def test_repository_dogfood_semantic_configuration_is_explicit() -> None:
         "require_complete": True,
         "required_kinds": ["section", "invariant", "suppression"],
         "minimum_packets": 1,
-        "maximum_packets": 100,
-        "maximum_prompt_bytes": 1_500_000,
+        "maximum_packets": 128,
+        "maximum_prompt_bytes": 40_000_000,
         "finding_handling": "require_disposition",
-        "maximum_provider_calls": 100,
+        "maximum_provider_calls": 128,
         "lock_wait_timeout_seconds": 300,
         "maximum_runtime_seconds": 1800,
-        "maximum_estimated_cost_microusd": 1_000_000,
+        "maximum_estimated_cost_microusd": 30_000_000,
         "input_cost_microusd_per_million_tokens": 750_000,
         "output_cost_microusd_per_million_tokens": 4_500_000,
         "input_token_overhead": 256,
@@ -434,6 +532,57 @@ def test_repository_dogfood_semantic_configuration_is_explicit() -> None:
     assert update_settings.verify.cache_mode == "read-write"
 
 
+def test_capability_descriptor_rejects_incompatible_request_before_adapter(
+    tmp_path: Path,
+) -> None:
+    from backstitch.semantic_analysis import resolve_semantic_settings
+
+    lines = _flat_analyze_descriptor_lines(
+        "pkg:service/openai.com/gpt-5.5",
+        revision="gpt-5.5-2026-04-23",
+    )
+    lines = [
+        line.replace(
+            'plugin_distribution_name = "flat-dist"', 'plugin_distribution_name = "llm"'
+        )
+        for line in lines
+    ]
+    constraint_index = next(
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("request_constraints")
+    )
+    lines[constraint_index] = lines[constraint_index].replace(
+        'temperature = { presence = "required", allowed_values = [0.0, 0.25] }',
+        'temperature = { presence = "forbidden" }',
+    )
+    config = _write_config(tmp_path, "\n".join(["[analyze]", *lines]) + "\n")
+    settings = resolve_config(tmp_path, explicit=config)
+
+    with pytest.raises(ValueError, match=r"analyze\.temperature is forbidden"):
+        resolve_semantic_settings(settings.analyze)
+
+
+def test_capability_descriptor_authored_shape_is_strict(tmp_path: Path) -> None:
+    lines = _flat_analyze_descriptor_lines()
+    constraint_index = next(
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("request_constraints")
+    )
+    lines[constraint_index] = lines[constraint_index].replace(
+        'max_tokens = { presence = "required", minimum = 1, maximum = 16384 }',
+        'max_tokens = { presence = "required", minimum = 1 }',
+    )
+    config = _write_config(tmp_path, "\n".join(["[analyze]", *lines]) + "\n")
+
+    with pytest.raises(
+        ConfigLoadError,
+        match=r"analyze\.request_constraints\.max_tokens",
+    ):
+        resolve_config(tmp_path, explicit=config)
+
+
 def test_enabled_verify_override_parses_every_base_and_provider_key(
     tmp_path: Path,
 ) -> None:
@@ -464,8 +613,38 @@ def test_enabled_verify_override_parses_every_base_and_provider_key(
             "backend_id": "llm",
             "plugin_id": "verify-plugin",
             "plugin_distribution_name": "verify-dist",
-            "model": "verify-model",
+            "model": "pkg:service/verify.example/verify-model",
+            "adapter_model_id": "verify-model",
             "model_revision": "verify-revision",
+            "capability_schema_version": 1,
+            "capability_revision": "verify-capability-v1",
+            "request_constraints": {
+                "json_mode": {
+                    "presence": "required",
+                    "allowed_values": ("require",),
+                    "minimum": None,
+                    "maximum": None,
+                },
+                "temperature": {
+                    "presence": "required",
+                    "allowed_values": (0.25,),
+                    "minimum": None,
+                    "maximum": None,
+                },
+                "seed": {
+                    "presence": "required",
+                    "allowed_values": None,
+                    "minimum": 0,
+                    "maximum": 2147483647,
+                },
+                "max_tokens": {
+                    "presence": "required",
+                    "allowed_values": None,
+                    "minimum": 1,
+                    "maximum": 16384,
+                },
+            },
+            "maximum_input_bytes": 1000000,
             "input_cost_microusd_per_million_tokens": 10,
             "output_cost_microusd_per_million_tokens": 20,
             "input_token_overhead": 30,
@@ -546,6 +725,19 @@ def test_verify_override_requires_every_provider_key(
         resolve_config(tmp_path, explicit=config)
 
 
+def test_generic_option_cannot_partially_edit_verify_provider(
+    tmp_path: Path,
+) -> None:
+    config = _write_config(tmp_path, _enabled_verify_body())
+
+    with pytest.raises(ConfigLoadError, match=r"verify\.provider\.adapter_model_id"):
+        resolve_config(
+            tmp_path,
+            explicit=config,
+            cli_options=(("verify.provider.adapter_model_id", '"other-model"'),),
+        )
+
+
 def test_verify_provider_resolution_is_all_or_nothing(tmp_path: Path) -> None:
     missing_override = _write_config(
         tmp_path,
@@ -578,6 +770,38 @@ def test_verify_provider_resolution_is_all_or_nothing(tmp_path: Path) -> None:
     )
     with pytest.raises(ConfigLoadError, match="must be absent"):
         resolve_config(tmp_path, explicit=analyze_with_override)
+
+
+def test_analyze_inherited_verifier_request_must_satisfy_capability(
+    tmp_path: Path,
+) -> None:
+    analyze_lines = _analyze_provider_lines()
+    analyze_lines = [
+        line.replace(
+            'plugin_distribution_name = "analyze-dist"',
+            'plugin_distribution_name = "llm"',
+        ).replace(
+            'temperature = { presence = "required", allowed_values = [0.0, 0.25] }',
+            'temperature = { presence = "required", allowed_values = [0.0] }',
+        )
+        for line in analyze_lines
+    ]
+    config = _write_config(
+        tmp_path,
+        "\n".join(analyze_lines)
+        + "\n"
+        + _enabled_verify_body(
+            base_overrides={"provider_source": '"analyze"'},
+            include_provider=False,
+        ),
+    )
+    settings = resolve_config(tmp_path, explicit=config)
+
+    with pytest.raises(ValueError, match=r"verify\.temperature"):
+        resolve_verification_settings(
+            settings.verify,
+            resolve_semantic_settings(settings.analyze),
+        )
 
 
 @pytest.mark.parametrize(
@@ -759,6 +983,8 @@ def test_verify_tables_reject_wrong_shapes(tmp_path: Path, body: str) -> None:
         ("plugin_id", '""'),
         ("plugin_distribution_name", '""'),
         ("model", '""'),
+        ("model", '"verify-model"'),
+        ("adapter_model_id", '"   "'),
         ("model_revision", '""'),
         ("input_cost_microusd_per_million_tokens", "-1"),
         ("output_cost_microusd_per_million_tokens", "true"),
@@ -1197,6 +1423,7 @@ def test_explicit_trusted_config_keeps_mutable_paths_outside_target_root(
                 'plugin_distribution_name = "llm"',
                 'model = "trusted-model"',
                 'model_revision = "trusted-revision"',
+                *_capability_descriptor_lines(),
                 "input_cost_microusd_per_million_tokens = 0",
                 "output_cost_microusd_per_million_tokens = 0",
                 "input_token_overhead = 256",
@@ -1228,11 +1455,11 @@ def test_explicit_trusted_config_keeps_mutable_paths_outside_target_root(
     assert settings.profile_overrides.code_roots == ("pkg",)
     assert settings.profile_overrides.test_roots == ("pkg/tests",)
     assert (
-        resolve_profile_root(target, settings.profile_overrides.spec_roots[0])
+        normalize_profile_root(target, settings.profile_overrides.spec_roots[0])
         == (target / "docs/specs").resolve()
     )
     assert (
-        resolve_profile_root(target, settings.profile_overrides.code_roots[0])
+        normalize_profile_root(target, settings.profile_overrides.code_roots[0])
         == (target / "pkg").resolve()
     )
 
@@ -1796,7 +2023,7 @@ def test_adapter_alias_selects_catalog_service_purl(
         )
         + "\n",
     )
-    kwargs: dict[str, object] = {"explicit": config, "environment": {}}
+    kwargs = _ModelSelectionKwargs(explicit=config, environment={})
     if source == "environment":
         kwargs["environment"] = {"LLM_MODEL": "gpt-5.4-mini"}
     elif source == "generic":
@@ -1864,10 +2091,10 @@ def test_catalog_selection_obeys_cli_environment_precedence(
         )
         + "\n",
     )
-    kwargs: dict[str, object] = {
-        "explicit": config,
-        "environment": {"LLM_MODEL": "pkg:service/openai.com/environment-model"},
-    }
+    kwargs = _ModelSelectionKwargs(
+        explicit=config,
+        environment={"LLM_MODEL": "pkg:service/openai.com/environment-model"},
+    )
     expected = "pkg:service/openai.com/environment-model"
     expected_source = "LLM_MODEL environment variable"
     if selector_source == "generic":
@@ -1910,7 +2137,7 @@ def test_unknown_model_override_is_rejected_when_file_owns_flat_descriptor(
         )
         + "\n",
     )
-    kwargs: dict[str, object] = {"explicit": config, "environment": {}}
+    kwargs = _ModelSelectionKwargs(explicit=config, environment={})
     if source == "environment":
         kwargs["environment"] = {"LLM_MODEL": "unknown-model"}
     elif source == "generic":

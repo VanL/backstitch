@@ -35,6 +35,8 @@ may cite only the active, hashed revision recorded there.
 
 ## 1. Purpose And Scope [EVC-1]
 
+<!-- backstitch: meta because docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-PROCESS -->
+
 Backstitch answers three different questions and must keep them separate:
 
 1. **What does the repository say must be true?** Spec sections and invariant
@@ -271,12 +273,49 @@ The closed relation kinds are:
 The first five may describe declared evidence. The last five are derived
 orientation or counterevidence only. A static relation never claims runtime
 reach, execution, assertion, or conformance.
+In discovery algorithm version 2, `enclosing_definition` is orientation only:
+it remains a returned relation and trace-summary membership but never becomes
+a closure hop.
 
 For section implementation evidence, one `spec_mapping` and one resolving
 `code_backlink` must form the reciprocal relation required by [SC-4]. One side
 alone is visible in evidence summary but does not satisfy the role. Invariant
 roles use [INV-5]'s declaration, bind, and test rules without inventing a
 parallel relation language.
+
+All consumers use one resolved evidence atom with exactly:
+
+```text
+{
+  source_role,
+  model_role,
+  source_identity,
+  relation_kinds,
+  reciprocity_state,
+  eligibility,
+  reason
+}
+```
+
+`source_role` uses this section's role vocabulary. `model_role` is
+`implementation` for implementation evidence and `test` for test or
+binding-test evidence. `source_identity` is the canonical resolved receipt
+identity. `relation_kinds` is the sorted nonempty set of relations carried by
+that receipt. `reciprocity_state` is `complete` or `one_sided`.
+`eligibility` is `implementation`, `test`, `binding_test`, or `invalid`.
+`reason` is null for valid evidence and otherwise is the canonical blocking
+reason. Diagnostics, obligation readiness, invariant-target selection,
+evidence summaries, discovery, and packet projection consume this atom; none
+may infer a different role or eligibility from a path.
+
+A resolving mapping under a configured test root is valid test evidence. It is
+excluded from both successful and broken implementation-target counts. Only an
+invalid production mapping can poison implementation readiness. When an
+implementation mapping resolves but every resolved target is under configured
+test roots, deterministic resolution emits `SPEC_MAPPING_TEST_ONLY` (`BSC009`)
+at the mapping. The issue supplies test evidence and no implementation
+evidence; [SC-11] and [SC-15] own its default warning severity, policy, and
+firing contract.
 
 _Implementation mapping_:
 
@@ -536,6 +575,7 @@ through [EVC-6] rather than rewriting this event.
 _Implementation mapping_:
 
 - `backstitch/semantic_verification.py`
+- `backstitch/semantic_verification_contract.py`
 
 ## 4. Derived Evidence Artifacts [EVC-4]
 
@@ -737,12 +777,34 @@ A repository that wants another provider or model uses
 backend_id = "llm"
 plugin_id = "provider-plugin"
 plugin_distribution_name = "provider-distribution"
-model = "provider-model-id"
+model = "pkg:service/provider.example/provider-model"
+adapter_model_id = "provider-model-id"
 model_revision = "repository-declared-revision"
+capability_schema_version = 1
+capability_revision = "provider-capabilities-2026-07-29"
+maximum_input_bytes = 1000000
 input_cost_microusd_per_million_tokens = 400000
 output_cost_microusd_per_million_tokens = 1600000
 input_token_overhead = 256
 cost_rate_source = "reviewed source and date"
+
+[tool.backstitch.verify.provider.request_constraints.json_mode]
+presence = "required"
+allowed_values = ["require"]
+
+[tool.backstitch.verify.provider.request_constraints.temperature]
+presence = "required"
+allowed_values = [0.0]
+
+[tool.backstitch.verify.provider.request_constraints.seed]
+presence = "required"
+minimum = 0
+maximum = 9223372036854775807
+
+[tool.backstitch.verify.provider.request_constraints.max_tokens]
+presence = "required"
+minimum = 1
+maximum = 2147483647
 ```
 
 When disabled, Backstitch makes no verify call, reads or writes no verifier
@@ -765,8 +827,10 @@ complete forms.
 
 For `analyze`, the nested provider table must be absent. Backstitch reuses the
 fully resolved analyze `backend_id`, `plugin_id`,
-`plugin_distribution_name`, `model`, `model_revision`, input/output cost rates,
-token overhead, and cost-rate source after ordinary config precedence.
+`plugin_distribution_name`, canonical-PURL `model`, raw `adapter_model_id`,
+`model_revision`, capability schema and revision, normalized request
+constraints, maximum input bytes, input/output cost rates, token overhead,
+cost-rate source, and descriptor provenance after ordinary config precedence.
 `provider_source = "analyze"` requires that complete descriptor to be declared
 in resolved config. `--model` or `LLM_MODEL` may be absent or equal that model;
 it cannot select another model while retaining the configured revision or cost
@@ -778,12 +842,27 @@ inherited descriptor must satisfy the same nonblank provider and cached-identity
 validation as an override; analyze's optional off-cache resolution cannot
 supply guessed or blank verify identity.
 
-For `override`, the nested table is required with exactly every shown key.
-Partial override, analyze fallback for a missing override field, an override
-table in analyze mode, and unknown nested keys are invalid. Provider strings
-are nonblank. Cost fields use [SEM-9]'s exact rules. The resolved override tuple
-may equal or differ from analyze's tuple. Equality is valid; difference is an
-optional ensemble choice and grants no additional policy authority.
+For `override`, the nested table is required with exactly every shown scalar
+key and every shown `request_constraints` child. It resolves one complete
+`ResolvedInference`: stable PURL and raw `adapter_model_id` remain distinct,
+the verifier request is frozen and capability-validated before
+`RequestIdentity` is derived, and the adapter may only serialize that frozen
+request. Partial override, analyze fallback for a missing override field, an
+override table in analyze mode, generic-option edits, and unknown nested keys
+are invalid. Provider strings are nonblank. Cost fields use [SEM-9]'s exact
+rules. The resolved override tuple may equal or differ from analyze's tuple.
+Equality is valid; difference is an optional ensemble choice and grants no
+additional policy authority.
+
+For `provider_source = "analyze"`, stable identity, raw selector, capabilities,
+descriptor provenance, and cost inputs are inherited atomically from the
+selected analyzer descriptor, but the verifier freezes and validates its own
+independent effective request from the verify base table. An inherited
+verifier request that violates the analyzer descriptor's capability
+constraints is exit `2` before credential, cache, or provider work. This is a
+strict validation break for configurations that previously loaded only
+because inherited capability constraints were not enforced; Backstitch does
+not silently correct the verifier request.
 
 `required_verdicts` is a positive integer excluding booleans and equals the
 length of unique ordered `search_epochs`. `minimum_support_score` is finite in
@@ -794,6 +873,14 @@ provider/request descriptor enters [EVC-3.1]'s inference contract; config
 spelling and `provider_source` do not, so equal resolved contracts have equal
 identity. Epoch enters each event key. Operational budgets, concurrency, and
 cost rates do not enter the event identity.
+
+Raw selector aliases and descriptor provenance remain audit facts outside
+`RequestIdentity`, `analysis_key`, `review_key`, and `verify_key`. Changing
+only a raw alias for the same stable descriptor revision therefore preserves
+semantic and cache identity; changing stable identity, capability-bearing
+descriptor members, or the frozen effective request changes the affected
+identity. This contract changes no cache object, analysis/report schema, or
+bounded historical reader. Existing receipts remain audit evidence only.
 
 A positive verifier cost ceiling requires a nonblank resolved cost-rate source
 and explicit resolved rates/overhead whether they came from analyze or the
@@ -918,12 +1005,14 @@ outside repository currentness.
 Each staged artifact is created beside its final path as a unique exclusive
 regular file named with the current process ID plus 128 bits of randomness,
 written completely, flushed, and closed before the final snapshot comparison.
-After a match, Backstitch atomically replaces final paths in dependency order:
+After a match, Backstitch atomically replaces each final path in dependency order:
 `--packets-output`, `--packet-report-output`, `--output`, then `--report`.
 A replacement failure is exit 2 and reports which earlier finals were
-published. A consumer validates paired digests and may reject an earlier final
-paired with a later failed replacement. No current analysis report or gate
-success is emitted. The current invocation removes only the exact staging
+published. Cross-path replacement is not physically atomic: a later failure or
+process crash may leave an earlier final beside an absent or older paired
+artifact. A consumer must validate paired digests and reject that orphaned
+final as an invalid pair. No current analysis report or gate success is
+emitted. The current invocation removes only the exact staging
 paths it created and recorded in memory. There is no automatic startup cleanup
 or age-based deletion of another run's staging files in v1.
 
@@ -956,8 +1045,10 @@ accepted by current, historical schema-3, completeness, or qualification runs.
 
 _Implementation mapping_:
 
+- `backstitch/artifact_publication.py`
 - `backstitch/cli.py`
 - `backstitch/semantic_analysis.py`
+- `backstitch/semantic_application.py`
 
 ## 6. Policy And Diagnostic Integration [EVC-6]
 
@@ -1137,8 +1228,9 @@ The initial seed set for one obligation is:
   function, and method `implementation_definition` and `test_definition`
   candidates in the complete captured candidate catalog; whole-module
   candidates are not lexical seeds;
-- every definition or reference reachable within `static_neighbor_depth`
-  through the closed relations below;
+- every definition reachable within `static_neighbor_depth` through the
+  discovery-v2 collapsed definition graph below, plus the reference candidates
+  that orient each traversed hop;
 - every same-name ambiguous local definition encountered during that closure.
 
 A path-only Python source declaration seeds only the exact `python-module`
@@ -1147,6 +1239,23 @@ file, or candidates below a directory path, as declared. An explicit symbol
 seeds only the matching definition owner. This preserves the distinction
 between a whole-file human declaration and the graph nodes used to find nearby
 advisory candidates.
+
+Discovery algorithm version 2 treats `enclosing_definition` as directed
+orientation metadata, never as an undirected closure edge. A resolved
+`static_import`, `static_call`, or `static_reference` from a reference
+candidate contributes one collapsed hop from that reference's unique enclosing
+definition to each uniquely resolved target definition. Both endpoints must be
+`implementation_definition` or `test_definition` candidates; a
+`python_module`, unresolved reference, or enclosing module is not a collapsed
+endpoint. The inverse hop represents the same conservative relation. One
+collapsed definition-to-definition hop consumes one `static_neighbor_depth`
+unit regardless of its orienting reference. When a hop is selected, its
+orienting reference candidate remains in the candidate inventory with
+`static_neighbor`; it consumes no additional depth. Ambiguous local targets
+remain governed by the same-name expansion below. Therefore selecting a
+definition can reach its direct conservative definition neighbors, but lexical
+ownership alone cannot pull its enclosing module or unrelated definitions and
+references from that module into closure.
 
 Lexical matching is exact and portable. Normalize source strings to UTF-8 NFC,
 split their ASCII letter/digit runs at non-alphanumeric bytes, lower-to-upper
@@ -1197,7 +1306,17 @@ _Implementation mapping_:
 
 Candidate spans follow [EVC-4.2]. Overlapping candidates remain distinct.
 Packet construction separately merges overlapping model-visible text while
-retaining candidate identities and receipts.
+retaining candidate accounting and receipt-derived semantic identity.
+Discovery-v2 visible-source equality is the role-independent tuple
+`(path, start_line, end_line, raw_sha256)`. It affects only repeated snippet
+rendering; it never changes a candidate's trace state, discovery bases,
+relation membership, receipt hash, trace-summary counts, or source-declared
+alignment.
+Public candidate IDs, receipts, raw static relations, and candidate ordering
+are unchanged from discovery-v1; only closure membership can change. Building
+the per-obligation collapsed bridge index inspects each raw static edge once.
+Selecting an orienting reference and a definition endpoint remains one unique
+closure insertion attempt per identity under the existing work-unit rules.
 
 Deterministic work budgets select or reject a universe. Wall time never selects
 a prefix. The work-unit accounting is:
@@ -1245,6 +1364,11 @@ remain unresolved. A plausible local unresolved form becomes an
 `unresolved_reference`; an obviously external form may be omitted from the
 mandatory universe. The rule is based on captured local module prefixes and
 definition names, never on environment imports.
+
+Collapsing a resolved reference for discovery-v2 closure does not create a
+public owner-to-target relation. Returned relations remain the original
+owner-to-reference `enclosing_definition` and reference-to-target
+`static_import`, `static_call`, or `static_reference` rows.
 
 _Implementation mapping_:
 
@@ -1523,10 +1647,13 @@ provider configuration are operational and excluded.
 
 _Implementation mapping_:
 
+- `backstitch/check_application.py`
 - `backstitch/check_pipeline.py`
+- `backstitch/filesystem_io.py`
 - `backstitch/obligation_runtime.py`
 - `backstitch/repository_snapshot.py`
 - `backstitch/resolver.py`
+- `backstitch/scan_exclusions.py`
 - `backstitch/settings.py`
 
 ### 8.3 Exact CLI Grammar [EVC-8.3]
@@ -1536,6 +1663,11 @@ The new command grammar is:
 ```text
 backstitch obligation list
   [--repo-root PATH] [--cursor TOKEN] [--limit N] [--format text|json]
+  [--active-only]
+  [--alignment-state untraced|partial|complete|invalid]...
+  [--gate-state not_executable|executable]...
+  [--kind section|invariant|suppression]...
+  [--reason BLOCKING_REASON_CODE]...
 
 backstitch obligation OBLIGATION_ID
   [--repo-root PATH] [--format text|json]
@@ -1574,6 +1706,14 @@ Candidate detail is one bounded item and is not paginated. Unknown IDs,
 snapshot-mismatched cursors, selector misuse, and invalid limits are exit 2.
 Analyze flag compatibility, output ownership, path rules, stdout, and config
 anchors are exactly [EVC-5.1].
+
+The five list filters are valid only for `obligation list`. Repeated values
+within one filter family combine with OR; different families combine with AND.
+`--active-only` retains only `obligation_rung = "active"` and
+`disposition = "evaluate"`. Filtering occurs before pagination without
+changing canonical row order. The complete normalized filter object enters
+cursor identity. Reusing a cursor with a different filter object is
+`CURSOR_INVALID`; it never silently changes the addressed result set.
 
 The MCP line is conditional. CLI is the complete required interface. A Phase D
 deferral may omit the MCP command, extra, tools, and resource without weakening
@@ -1630,6 +1770,24 @@ The operation-specific results are closed:
 ```text
 obligation.list result = {
   bootstrap_state,
+  applied_filters: {
+    active_only,
+    alignment_states,
+    gate_states,
+    kinds,
+    reasons
+  },
+  readiness_summary: {
+    total,
+    active_evaluate,
+    executable,
+    skipped,
+    alignment_debt,
+    blocked,
+    out_of_scope,
+    reason_counts: [{code, count}]
+  },
+  filtered_count,
   entries,
   next_cursor
 }
@@ -1648,7 +1806,13 @@ obligation.get result = {
 ```
 
 `bootstrap_state` is `no_intent` or `intent_found`. `kind` is `section` or
-`invariant`. Count fields are nonnegative integers. Nullable `role`,
+`invariant` in schema-1 historical examples and additionally `suppression` in
+the current schema-2 envelope. Applied-filter arrays use their declaration
+order and contain no duplicates. Summary buckets are disjoint and recompute
+from the filtered inventory before pagination; reason counts contain every
+blocking reason with a nonzero count in declaration order. `filtered_count`
+equals the filtered row population, including unaddressable intent rows.
+Count fields are nonnegative integers. Nullable `role`,
 `relation_kind`, and `issue_identity` are present on every blocking row.
 Blocking reason code is one of `IMPLEMENTATION_UNTRACED`,
 `IMPLEMENTATION_PARTIAL`, `TEST_UNTRACED`,
@@ -1756,6 +1920,7 @@ _Implementation mapping_:
 - `backstitch/evidence_summary.py`
 - `backstitch/obligation_api.py`
 - `backstitch/obligations.py`
+- `backstitch/packet_application.py`
 
 #### 8.3.1 Configuration [EVC-8.3.1]
 
@@ -1883,7 +2048,7 @@ The transport-neutral core result envelope is:
 
 ```text
 {
-  schema_version: 1,
+  schema_version: 2,
   operation,
   snapshot: {snapshot_hash, file_count, byte_count, unreadable_count} | null,
   result,
@@ -1899,6 +2064,10 @@ problems. Failure has null result and one or more ordered problems. Snapshot is
 null exactly when failure occurs before one capture is accepted. Core JSON
 contains no absolute root, timestamps, transport IDs, ANSI text, or provider
 metadata.
+
+Schema 2 is the current live obligation-command envelope. All operation
+producers and CLI/MCP consumers change together; it is not a persisted
+artifact and has no permissive schema-1 compatibility reader.
 
 The closed guidance codes are:
 
@@ -1942,7 +2111,12 @@ CURSOR_INVALID:      {reason}
 SNAPSHOT_UNSTABLE:   {attempts}
 SOURCE_UNREADABLE:   {path, error_class}
 BUDGET_EXHAUSTED:    {budget, limit, observed}
-DEADLINE_EXCEEDED:   {limit_milliseconds}
+DEADLINE_EXCEEDED:   {
+  limit_milliseconds,
+  phase,
+  configured_key,
+  cooperative_tolerance_milliseconds
+}
 INTERNAL_ERROR:      {}
 ```
 
@@ -1954,6 +2128,30 @@ observations, and milliseconds are nonnegative integers. Budget is one of
 then path, field, identity, reason, and canonical details bytes, with absent
 sort fields as empty strings.
 
+One absolute monotonic deadline begins immediately before snapshot capture and
+passes through catalog construction, relation derivation, closure,
+candidate-detail work, packet materialization, and packet accounting.
+Checkpoints run before and after each repository file read and at bounded work
+unit intervals. Discovery work samples its monotonic clock at phase entry and
+after no more than 64 work-budget checkpoint requests; receipt hashing samples
+before the next bounded block. The closed deadline phases are `snapshot`, `catalog`,
+`relations`, `closure`, `candidate_detail`, `packet_materialization`, and
+`packet_accounting`. `configured_key` is exactly
+`obligations.maximum_call_seconds`; `cooperative_tolerance_milliseconds` is
+`100`. A fake-monotonic-clock firing test must detect cancellation within that
+tolerance. Blocking operating-system reads and scheduler suspension are
+outside the cooperative wall-time guarantee. The problem action contains a
+syntactically valid recovery command such as
+`--option obligations.maximum_call_seconds 30`.
+
+Those seven phases plus terminal `complete` form the closed ordered progress
+vocabulary. Events contain completed work units, nullable total work units,
+and a line-safe current identity. Progress is best effort and noncanonical.
+Only a TTY stderr adapter renders it. It never enters stdout, this envelope,
+packet or report bytes, cache identity, or exit classification. A
+progress-sink failure disables later progress and does not change the domain
+operation.
+
 Each problem has a line-safe message, one required action, and only bounded
 non-secret details. Tracebacks, secrets, provider raw responses, and source
 bytes outside the addressed repository are forbidden.
@@ -1963,10 +2161,13 @@ to [SEM-7]'s analysis problem union, not this five-operation read envelope.
 
 A page cursor is unpadded base64url canonical JSON followed by a period and
 the lowercase SHA-256 of those decoded JSON bytes. Its object has exactly
-`cursor_version = 1`, `operation`, `snapshot_hash`, nullable
-`obligation_id`, `selector`, `limit`, and `after`. `after` is the complete
+`cursor_version = 2`, `operation`, `snapshot_hash`, nullable
+`obligation_id`, `selector`, `filters`, `limit`, and `after`. `filters` is the
+complete normalized [EVC-8.3] list-filter object and is empty for operations
+that do not support list filters. `after` is the complete
 last-row ordering tuple. A malformed digest, changed snapshot, wrong operation,
-wrong obligation, wrong selector, or changed limit is `CURSOR_INVALID`.
+wrong obligation, wrong selector, changed filters, or changed limit is
+`CURSOR_INVALID`.
 Evidence-summary rows order by `(role_order, path, start_line, end_line,
 symbol_or_empty, ordered_relation_kinds, declared_target_or_empty)`, where role
 order is `implementation`, `test`, then `binding_test`. The evidence cursor's
@@ -1980,6 +2181,7 @@ _Implementation mapping_:
 - `backstitch/evidence_summary.py`
 - `backstitch/obligation_api.py`
 - `backstitch/obligations.py`
+- `backstitch/operation_progress.py`
 
 ### 8.5 Result Economy And Repair [EVC-8.5]
 
@@ -2000,6 +2202,8 @@ _Implementation mapping_:
 - `backstitch/obligation_api.py`
 
 ### 8.6 Optional Local MCP Adapter [EVC-8.6]
+
+<!-- backstitch: skip-obligation [EVC-8.6] "The optional Phase D local MCP adapter remains deferred until a separate product promotion." -->
 
 This adapter is an optional product phase, not setup required by another phase.
 Its owner records `implemented` or `deferred` under [EVC-10.2]. A deferred
@@ -2071,6 +2275,42 @@ Current analyze applies this first-matching precedence:
 | 7 | `finding_handling = "require_disposition"` and one semantic finding lacks an exact disposition | complete report with finding debt | 2 |
 | 8 | One failure-authoritative semantic diagnostic has effective severity in `fail_on` | complete current report | 1 |
 | 9 | Otherwise | complete current report | 0 |
+
+`analyze --preflight` evaluates rows 1 through 5 through the same immutable
+preparation that ordinary current analysis consumes and stops before cache or
+provider work. An invocation or configuration failure before a preparation
+exists remains the ordinary one-line stderr error with empty stdout. Once a
+preparation assessment exists, preflight renders the complete versioned
+assessment to stdout even when its exit is 1 or 2. An executable or valid
+all-skipped assessment exits 0; a row-3 deterministic target finding exits 1;
+readiness, packet, aggregate-prompt, request-capability, budget, snapshot, or
+tool blockers exit 2. A phase whose prerequisite failed is `not_evaluated`
+with its blocking phase; it is never fabricated as pass or fail.
+
+Preflight performs no credential read, provider call, cache read or mutation,
+output temporary creation, or artifact publication. Ordinary current analysis
+executes the same accepted preparation and retains rows 6 through 9. Source is
+recaptured before cache/provider work and again before current artifact
+publication. A mismatch at the first boundary makes zero provider calls; a
+mismatch at the second cannot publish a current artifact.
+
+Artifact publication follows this closed matrix:
+
+| Mode or stage | Published artifacts |
+|---|---|
+| current preflight, any outcome | none |
+| current failure before execution | none |
+| current source change before execution | none |
+| current execution, source, or output failure | no current-success artifact |
+| current success | complete requested current artifacts as one digest-bound logical set; each path replacement is atomic |
+| historical input validation failure | none |
+| historical attempted run after valid input | only the failed or incomplete historical artifacts already authorized by this section |
+| progress | never an artifact |
+
+No mode treats a measured packet prefix, a digest-mismatched packet/report
+half-pair, or an incomplete current artifact set as valid output or current
+success. Ordered replacement failure may leave an earlier final path as the
+explicitly reported invalid residue defined by [EVC-5.1].
 
 Row 4 is reached only after row 3, so setting BSE001 or another retained trace
 diagnostic to a failing level prohibits the skip or fails its unresolved trace
@@ -2173,8 +2413,13 @@ but has no process-exit contract per call.
 
 _Implementation mapping_:
 
+- `backstitch/check_application.py`
 - `backstitch/cli.py`
+- `backstitch/coverage_application.py`
+- `backstitch/obligation_api.py`
+- `backstitch/packet_application.py`
 - `backstitch/semantic_analysis.py`
+- `backstitch/semantic_application.py`
 
 ## 9. Current CI Gate [EVC-9]
 
@@ -2206,6 +2451,7 @@ traffic.
 _Implementation mapping_:
 
 - `backstitch/semantic_analysis.py`
+- `backstitch/semantic_application.py`
 
 ### 9.1 Source-Aligned Evidence Packets [EVC-9.1]
 
@@ -2215,6 +2461,53 @@ schema-4 row and projection in [SEM-3]. A current JSONL artifact may contain
 both versions. `kind` is `section`, `invariant`, or `suppression` and must
 agree with row schema and canonical identity. Schema-3 semantics and bytes
 do not change.
+
+One authoritative `PacketPlan` owns selection, materialization, canonical
+JSONL bytes, packet-report inputs, code-owned prompt bytes, and budget facts
+for standalone packets, preflight, current analysis, and historical
+validation. A complete plan retains the exact canonical JSONL line bytes and
+exact model-request bytes it measured. Publication and execution consume those
+retained bytes; they do not regenerate, reserialize, or reframe them.
+
+The complete plan has exactly:
+
+```text
+{
+  status: "complete",
+  complete: true,
+  packet_count,
+  packet_bytes,
+  aggregate_prompt_bytes,
+  maximum_request_bytes,
+  packets: [{
+    packet_id, kind, packet_byte_count, request_byte_count,
+    requirement_byte_count, declared_evidence_byte_count,
+    counterevidence_byte_count,
+    packet_line_bytes, model_request_bytes
+  }]
+}
+```
+
+`maximum_request_bytes` is the largest `model_request_bytes` length, or zero
+for an empty valid all-skipped plan. `packet_bytes` includes every JSONL
+line-feed terminator. `aggregate_prompt_bytes` is the sum of all complete
+`model_request_bytes` lengths and is the quantity governed by
+`analyze.maximum_prompt_bytes`. That key remains an aggregate corpus ceiling;
+it is never interpreted as a per-packet or per-request limit. A trusted
+[SEM-3] capability `maximum_input_bytes`, when present, separately limits each
+complete request.
+
+Every `*_byte_count` member is a nonnegative integer length. The two members
+ending in `_bytes` are the retained immutable byte strings. Thus a field never
+changes type between accounting and execution, and `request_byte_count` must
+equal `len(model_request_bytes)`.
+
+Prompt instructions are code-owned, selected only by obligation kind, and
+independent of provider, stable model identity, raw transport selector,
+effective request, and capability descriptor. A firing matrix varies every
+resolved inference field while holding packet content fixed and requires
+byte-identical prompt bytes. Changing the prompt contract bytes changes prompt
+counts and packet-plan identity.
 
 ```text
 {
@@ -2324,17 +2617,31 @@ fatal.
 
 Packet construction includes all required declared evidence and the complete
 closed counterevidence universe from [EVC-7]. No caller, agent, or model selects
-rows. `declared` candidates whose exact receipt duplicates declared evidence
-remain represented in trace summary but do not duplicate visible snippet
-text. Untraced and conflicted candidates remain explicit counterevidence.
+rows. Any candidate whose discovery-v2 visible-source tuple exactly equals a
+declared-evidence tuple remains represented in candidate and relation counts
+but does not duplicate that declared snippet as counterevidence text. This is
+role-independent and does not depend on trace state. Candidate and declared
+receipt hashes remain the semantic identities used by trace accounting; a hash
+match without the same path and coordinates does not suppress text. Untraced
+and conflicted candidates with distinct visible-source tuples remain explicit
+counterevidence.
+
+This presentation rule preserves schema 3's existing boundary: a suppressed
+duplicate candidate remains individually available from the authoritative
+discovery result, while the packet preserves its candidate-kind, trace-state,
+and relation aggregate memberships in `trace_summary`. Schema 3 does not add an
+individual duplicate-candidate row merely to carry text-free identity. Doing
+so would require a new packet schema rather than a discovery-version change.
 
 Within each model role and path, identical and fully contained snippet spans
 merge to the first maximal span. Equal later duplicates are omitted. The
 maximal region accumulates every source or candidate subrow. Its symbol is
 retained only when every accumulated source has the same symbol; otherwise it
 is null. Partial or disjoint spans remain separate. Text-free candidate and
-receipt identities therefore remain represented and merging never hides
-universe membership.
+receipt identities attached to retained counter regions therefore remain
+represented and merging never hides their universe membership. The exact
+declared-duplicate suppression above has the separately stated schema-3
+aggregate boundary.
 
 `evidence_regions` is derived after merging. It begins with the nonblank
 requirement region, then every nonblank declared region, then every nonblank
@@ -2379,6 +2686,13 @@ model-visible projection contracts. Their packet hash uses contract version
 population, byte-ceiling, canonical JSONL ordering, publication, and
 self-validation rules. There is no compatibility normalization from one row
 version or kind into another.
+
+Discovery-v2 increments `discovery_algorithm_version` without changing packet
+schema 3 or 4. Its snapshot and derivation identities deliberately cold-miss
+discovery-v1 current caches. Historical schema-3 and schema-4 rows retain
+their recorded discovery-v1 identities and continue through their exact
+readers; current-source comparison never rewrites or accepts an old derivation
+identity as discovery-v2.
 
 `obligation_state_hash` is SHA-256 of canonical JSON for:
 
@@ -2555,6 +2869,56 @@ limits the complete canonical packet JSONL artifact, including its line-feed
 terminators, not each row independently. Exact-limit output succeeds;
 limit-plus-one fails before any packet or report publication.
 
+Ordinary planning stops immediately after the first exactly measured row
+crosses any fail-closed packet-count, complete-JSONL, aggregate-prompt, or
+trusted per-request capability ceiling. Its nonpublishable overflow plan has
+exactly:
+
+```text
+{
+  status: "over_budget",
+  complete: false,
+  crossed_ceiling,
+  measured_packet_count,
+  unmeasured_packet_count,
+  measured_packet_bytes,
+  measured_prompt_bytes,
+  first_crossing_packet_id,
+  top_measured_contributors: [{
+    packet_id, kind, packet_byte_count, request_byte_count
+  }]
+}
+```
+
+Prefix values are always named `measured`; they are never labeled totals,
+forecasts, or a complete corpus. Contributors sort by descending measured
+bytes for the crossed ceiling, then packet ID. An overflow plan cannot be
+loaded as current or historical input and publishes no partial JSONL, packet
+report, analysis report, cache entry, or policy result. Exact-limit succeeds;
+limit-plus-one fails.
+
+Gate 1 uses a provider-free, nonpublishing diagnostic measurement built by the
+same planner and serializer. Its closed record includes snapshot,
+configuration, and algorithm identities; selected and debt counts by kind;
+complete-versus-prefix state; committed ceilings; packet and aggregate prompt
+totals; first crossing; top packet IDs with packet, prompt, requirement,
+declared-evidence, and counterevidence bytes plus source owners; unmeasured
+identities/count; prompt-instruction descriptor hashes/sizes; work units; and
+elapsed time. Diagnostic continuation may measure after the ordinary first
+crossing only to produce a complete Gate-1 audit. It is never a sendable plan
+and cannot publish artifacts, read credentials, touch cache, or call a
+provider.
+
+Gate 1 selects the current representation only when one complete audited plan
+fits `maximum_packets`, `maximum_packet_bytes`,
+`analyze.maximum_prompt_bytes`, every trusted per-request
+`maximum_input_bytes`, and the reviewed cost ceiling after all trace changes
+have an identity-level truthful-owner disposition. An incomplete measurement
+or unresolved trace row is no decision. If a complete audited plan still
+exceeds a ceiling, implementation pauses for a separately reviewed and
+promoted representation or budget delta; no fallback is inferred from this
+section.
+
 The standalone `backstitch packets` inspection command may filter packet JSONL
 with `--kind`, but current schema-3 `--report` is valid only with `--kind all`. A
 filtered JSONL file has no complete-corpus packet report and therefore cannot
@@ -2562,7 +2926,7 @@ be supplied to historical analysis. Current `analyze --repo-root` and its
 optional packet/report output pair always compile the unfiltered selected
 corpus.
 
-The current analysis report schema 5 retains [SEM-7]'s closed analysis,
+The current analysis report schema 6 retains [SEM-7]'s closed analysis,
 finding, problem, debt, cost, cache, selected-inference, result-source, and
 producer records. The EVC fields first added by analysis-report schema 3 remain
 required and are exactly:
@@ -2624,6 +2988,7 @@ with exactly:
 {
   verify_contract_version,
   prompt: {id, version, sha256},
+  adapter_model_id,
   provider: {
     backend_id, plugin_id, model_id, model_revision,
     adapter_id, adapter_version,
@@ -2638,13 +3003,16 @@ with exactly:
 }
 ```
 
-These fields are the common projection of [EVC-3.1] and [EVC-5]; epochs retain
-configured order. Enabled verification with zero selected findings, including
-an all-skipped corpus, has this non-null contract but requires empty events,
-zero aggregate counts, and zero cache/provider counters. With selected
-findings, events and counters are recomputed under [EVC-3.1]. Counts and cache/
-provider counters are nonnegative integers and aggregate counts equal the
-number of events in each state.
+`adapter_model_id` is the nonblank raw verifier transport selector selected for
+this run. It is operational provenance, not part of the verifier review or
+cache identity. Analysis-report schema 5 lacks this member and remains an
+exact historical reader shape. These fields otherwise are the common
+projection of [EVC-3.1] and [EVC-5]; epochs retain configured order. Enabled
+verification with zero selected findings, including an all-skipped corpus, has
+this non-null contract but requires empty events, zero aggregate counts, and
+zero cache/provider counters. With selected findings, events and counters are
+recomputed under [EVC-3.1]. Counts and cache/provider counters are nonnegative
+integers and aggregate counts equal the number of events in each state.
 Current reports require `artifact_currentness = current`. Packet-only reports
 require `unverifiable` and `claimed_unverified`; compare mode reports
 `current`/`compared_match` or `stale`/`compared_mismatch` while scope remains
@@ -2656,6 +3024,8 @@ _Implementation mapping_:
 - `backstitch/markdown_specs.py`
 
 ## 10. Measurement And Promotion [EVC-10]
+
+<!-- backstitch: meta because docs/specs/04-backstitch-traceability-exclusions.md#SUP-VERIFICATION-META -->
 
 Qualification measures distinct product questions separately:
 
@@ -2733,10 +3103,6 @@ reviewed contract update and baseline rerun. The first implementation slice
 that claims performance qualification must add this file and the named job.
 Their absence makes qualification unavailable; it does not block promotion of
 an otherwise reviewed pre-implementation contract.
-
-_Implementation mapping_:
-
-- `tests/performance/semantic_scale.py`
 
 ### 10.1 Evaluation Artifact [EVC-10.1]
 
@@ -3248,6 +3614,13 @@ the identical base/effective pair. The configured base epoch stays in
 trial from reusing an analyzer object from another trial without making trial
 index part of report-level composition.
 
+One code-owned
+`derive_eval_search_epoch(domain, base, corpus_sha256, trial_index)` function
+owns the closed domains `eval-analyze` and `eval-verify`, inserts the single
+`:` separator, and hashes the exact object above. Producer and authoritative
+validator both call it. The validator independently supplies and rechecks
+every input; a report never supplies an epoch prefix or hash preimage.
+
 Each composition SHA-256 hashes [EVC-4.1] canonical JSON for exactly its named
 closed object. `composition_sha256` hashes canonical JSON for exactly
 `{analysis_composition_sha256, verify_composition_sha256}`. Objects and stored
@@ -3502,6 +3875,8 @@ composition, requires a new qualification report.
 _Implementation mapping_:
 
 - `backstitch/semantic_eval.py`
+- `backstitch/semantic_eval_identity.py`
+- `backstitch/semantic_eval_observation.py`
 - `backstitch/semantic_eval_reports.py`
 - `backstitch/semantic_analysis.py`
 - `backstitch/cli.py`
@@ -4102,6 +4477,8 @@ _Implementation mapping_:
 
 ## 12. Verification Expectations [EVC-12]
 
+<!-- backstitch: meta because docs/specs/04-backstitch-traceability-exclusions.md#SUP-VERIFICATION-META -->
+
 Implementation is not complete until real-boundary tests prove:
 
 1. Empty and no-spec repositories return the bootstrap state and action.
@@ -4257,12 +4634,9 @@ evidence binding, empty and nonempty required-kind completeness, and the
 invariant that schema-3 section/invariant bytes and identities do not change
 merely because suppression support is installed.
 
-_Implementation mapping_:
-
-- `tests/acceptance/test_probe_obligations.py`
-- `tests/acceptance/test_probe_suppression_semantic_lifecycle.py`
-
 ### 12.1 Required Cross-Spec Promotion [EVC-12.1]
+
+<!-- backstitch: meta because docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-PROCESS -->
 
 This revision changed active contracts through one coordinated spec change;
 EVC does not silently override them. The promotion recorded in the related
@@ -4380,16 +4754,27 @@ dispatch. They must not mock the canonical resolver, config discovery,
 
 _Implementation mapping_:
 
+- `backstitch/coverage_application.py`
 - `tests/test_cli.py`
 - `tests/test_cli_config.py`
+- `tests/test_coverage_application.py`
 - `tests/test_doctor.py`
 - `tests/test_release_workflow.py`
+- `tests/test_config_parity.py`
 - `tests/test_semantic_analysis.py`
 - `tests/test_semantic_settings.py`
 - `tests/test_settings.py`
 
 ## Related Plans
 
+- `docs/plans/2026-08-04-semantic-preparation-performance-plan.md`
+  (implementation plan; [EVC-9.1])
+- `docs/plans/2026-07-29-usability-remediation-plan.md`
+  (active implementation and coordinated specification plan; [EVC-2.2],
+  [EVC-8.3], [EVC-8.4], [EVC-8.7], and [EVC-9.1])
+- `docs/plans/2026-07-29-architecture-quality-remediation-plan.md`
+  (active implementation plan; [EVC-3.1], [EVC-5.1], [EVC-10.1], and
+  [EVC-12.2])
 - `docs/plans/2026-07-28-intent-coverage-implementation-plan.md`
   (active implementation plan; [EVC-7]/[EVC-8] shared read-only inventory)
 - `docs/plans/2026-07-28-evidence-stable-semantic-result-reuse-plan.md`

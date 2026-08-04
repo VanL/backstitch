@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -36,11 +37,61 @@ from backstitch.semantic_reports import PacketReport, validate_packet_report
 from backstitch.settings import resolve_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+LOCAL_LLM_PLUGIN_ROOT = (
+    Path(__file__).resolve().parent / "fixtures" / "local_llm_plugin"
+)
+LOCAL_LLM_DISTRIBUTION = "backstitch-acceptance-local-model"
+LOCAL_LLM_MODEL = "backstitch-acceptance-local"
 
 
 def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         [sys.executable, "-m", "backstitch", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert "Traceback" not in result.stderr, result.stderr
+    return result
+
+
+def local_llm_environment(ledger: Path) -> dict[str, str]:
+    """Return the secret-free environment for the test-owned ``llm`` plugin."""
+
+    environment = os.environ.copy()
+    existing_pythonpath = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        (
+            str(LOCAL_LLM_PLUGIN_ROOT),
+            *((existing_pythonpath,) if existing_pythonpath else ()),
+        )
+    )
+    environment["LLM_LOAD_PLUGINS"] = LOCAL_LLM_DISTRIBUTION
+    environment["BACKSTITCH_DOGFOOD_MODEL_LEDGER"] = str(ledger)
+    environment.pop("LLM_MODEL", None)
+    for key in tuple(environment):
+        if key.endswith("_API_KEY") or key.endswith("_API_TOKEN"):
+            environment.pop(key)
+    return environment
+
+
+def run_installed_cli(
+    *args: str,
+    cwd: Path | None = None,
+    environment: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run the installed console script, preserving its true process boundary."""
+
+    executable = Path(sys.executable).with_name(
+        "backstitch.exe" if sys.platform == "win32" else "backstitch"
+    )
+    assert executable.is_file(), (
+        f"installed backstitch entry point missing: {executable}"
+    )
+    result = subprocess.run(
+        [str(executable), *args],
+        cwd=cwd,
+        env=environment,
         capture_output=True,
         text=True,
         check=False,

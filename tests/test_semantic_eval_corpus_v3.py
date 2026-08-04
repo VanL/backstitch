@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from backstitch.semantic_eval import derive_semantic_eval_observed_facts
+from backstitch.semantic_eval_observation import derive_semantic_eval_observed_facts
 from backstitch.semantic_eval_reports import (
     SemanticEvalContractError,
     load_semantic_eval_corpus,

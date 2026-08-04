@@ -3,7 +3,8 @@
 This module owns the untrusted filesystem protocol. Callers provide validated
 packets, offline inference identity inputs, and a lazy provider adapter.
 
-Spec: docs/specs/06-semantic-gates.md [SEM-4]
+Spec: docs/specs/02-backstitch-core.md [SC-17]
+Spec: docs/specs/06-semantic-gates.md [SEM-4], [SEM-10]
 Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-4], [EVC-11]
 """
 
@@ -26,12 +27,12 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, TypeVar, cast
+from typing import Any, Generic, Literal, TypeVar, cast
 
 from backstitch.artifact_contracts import ValidatedSemanticPacket
 from backstitch.canonical import canonical_json_bytes
+from backstitch.filesystem_io import file_stat_identity
 from backstitch.grammar import is_sha256_hex
-from backstitch.repository_snapshot import _file_stat_identity
 from backstitch.semantic_evidence import (
     SemanticResultError,
     normalize_model_result,
@@ -43,6 +44,7 @@ from backstitch.semantic_identity import (
     RequestIdentity,
     ReviewIdentity,
     build_inference_identity,
+    request_identity_dict,
 )
 from backstitch.semantic_packets import (
     model_request_bytes,
@@ -50,15 +52,15 @@ from backstitch.semantic_packets import (
 )
 from backstitch.semantic_verification import (
     CanonicalVerificationResult,
-    VerificationClaim,
-    VerificationContractError,
-    VerificationRequest,
-    VerifyIdentity,
     load_canonical_verification_result,
     normalize_verifier_response,
     parse_verifier_response,
     validate_verification_links,
     verifier_request_bytes,
+)
+from backstitch.semantic_verification_contract import (
+    VerificationContractError,
+    VerificationWork,
 )
 
 CacheMode = Literal["off", "read-write", "require"]
@@ -329,9 +331,9 @@ class SemanticSelectionEvent:
 class _ReviewLockLease:
     cache_path: Path
     review_key: str
-    expected_lock: bytes
     timeout_seconds: float
     poll_interval_seconds: float
+    coordinator: _OwnershipCoordinator[SemanticResultEnvelope]
     released: bool = False
 
 
@@ -494,16 +496,6 @@ class CleanupResult:
 
 
 @dataclass(frozen=True, slots=True)
-class VerificationWork:
-    packet: dict[str, Any]
-    claim: VerificationClaim
-    request: VerificationRequest
-    identity: VerifyIdentity
-    base_search_epoch: str
-    effective_search_epoch: str
-
-
-@dataclass(frozen=True, slots=True)
 class VerificationCacheRun:
     results: tuple[CanonicalVerificationResult, ...]
     problems: tuple[SemanticProblem, ...]
@@ -608,7 +600,7 @@ def _freeze_inference_identities(
     if len(frozen) != len(rows):
         raise ValueError("frozen inference identity count does not match packets")
     expected_provider = asdict(provider)
-    expected_request = asdict(request)
+    expected_request = request_identity_dict(request)
     for row, identity in zip(rows, frozen, strict=True):
         contract = identity.contract
         if (
@@ -622,6 +614,29 @@ def _freeze_inference_identities(
             != identity.review_identity.review_key
         ):
             raise ValueError("frozen inference identity does not match packet request")
+    return frozen
+
+
+def _freeze_request_bytes(
+    rows: tuple[dict[str, Any], ...],
+    identities: tuple[InferenceIdentity, ...],
+    requests: Iterable[bytes] | None,
+) -> tuple[bytes, ...]:
+    frozen = (
+        tuple(
+            model_request_bytes(row, instruction_bytes=identity.prompt_bytes)
+            for row, identity in zip(rows, identities, strict=True)
+        )
+        if requests is None
+        else tuple(requests)
+    )
+    if len(frozen) != len(rows):
+        raise ValueError("frozen model request count does not match packets")
+    for identity, request in zip(identities, frozen, strict=True):
+        if not isinstance(request, bytes):
+            raise ValueError("frozen model request must be bytes")
+        if not request.startswith(identity.prompt_bytes + b"\n\n"):
+            raise ValueError("frozen model request does not match inference identity")
     return frozen
 
 
@@ -643,7 +658,7 @@ def _load_published_result_after_lock_timeout(
 
 
 def _lstat_identity(value: os.stat_result) -> tuple[int, ...]:
-    return _file_stat_identity(value)
+    return file_stat_identity(value)
 
 
 def _read_regular_bytes(path: Path) -> tuple[bytes, os.stat_result]:
@@ -834,12 +849,14 @@ def _validate_inference_contract_shape(value: object) -> dict[str, Any]:
         )
 
     request = value.get("request")
-    if not isinstance(request, dict) or set(request) != _REQUEST_FIELDS:
+    if not isinstance(request, dict) or not set(request) <= _REQUEST_FIELDS:
         raise CacheProtocolError("cached inference request has invalid closed shape")
     try:
-        RequestIdentity(**request)
+        normalized_request = RequestIdentity(**request).to_dict()
     except (TypeError, ValueError) as exc:
         raise CacheProtocolError(f"cached inference request is invalid: {exc}") from exc
+    if request != normalized_request:
+        raise CacheProtocolError("cached inference request is not canonical")
     return value
 
 
@@ -868,12 +885,14 @@ def _validate_review_contract_shape(value: object) -> dict[str, Any]:
     ):
         raise CacheProtocolError("cached review prompt is invalid")
     request = value.get("request")
-    if not isinstance(request, dict) or set(request) != _REQUEST_FIELDS:
+    if not isinstance(request, dict) or not set(request) <= _REQUEST_FIELDS:
         raise CacheProtocolError("cached review request has invalid closed shape")
     try:
-        RequestIdentity(**request)
+        normalized_request = RequestIdentity(**request).to_dict()
     except (TypeError, ValueError) as exc:
         raise CacheProtocolError(f"cached review request is invalid: {exc}") from exc
+    if request != normalized_request:
+        raise CacheProtocolError("cached review request is not canonical")
     return value
 
 
@@ -1063,7 +1082,106 @@ def _drain_owned_cleanup_under_guard(guard_path: Path) -> None:
     _forget_owned_cleanup(guard_path)
 
 
+def _guard_contract(
+    cache_path: Path, key: str, lock_kind: _LockKind
+) -> tuple[Path, bytes, frozenset[str], str, str]:
+    if lock_kind == "verify":
+        return (
+            _verify_guard_path(cache_path, key),
+            _verify_guard_bytes(key),
+            _VERIFY_GUARD_FIELDS,
+            "verification cache guard has invalid closed shape",
+            "cannot open verification cache guard",
+        )
+    if lock_kind == "review":
+        return (
+            _review_guard_path(cache_path, key),
+            _review_guard_bytes(key),
+            _REVIEW_GUARD_FIELDS,
+            "semantic review guard has invalid closed shape",
+            "cannot open semantic review guard",
+        )
+    return (
+        _guard_path(cache_path, key),
+        _guard_bytes(key),
+        _GUARD_FIELDS,
+        "semantic cache guard has invalid closed shape",
+        "cannot open semantic cache guard",
+    )
+
+
+def _wait_for_guard(
+    *,
+    acquire: Callable[[], bool],
+    deadline: float | None,
+    timeout_seconds: float | None,
+    poll_interval_seconds: float,
+) -> None:
+    while not acquire():
+        if deadline is None:
+            raise _guard_wait_failure(timeout_seconds)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _guard_wait_failure(timeout_seconds)
+        time.sleep(min(poll_interval_seconds, remaining))
+
+
 @contextmanager
+def _cache_guard(
+    cache_path: Path,
+    key: str,
+    *,
+    lock_kind: _LockKind,
+    timeout_seconds: float | None,
+    poll_interval_seconds: float,
+    drain_owned_cleanup: bool = True,
+) -> Iterator[None]:
+    path, expected, fields, shape_error, open_error = _guard_contract(
+        cache_path, key, lock_kind
+    )
+    _publish_immutable(path, expected)
+    value, actual = _read_canonical_object(path)
+    if set(value) != fields or actual != expected:
+        raise CacheProtocolError(shape_error)
+
+    process_guard = _process_guard(path)
+    deadline = (
+        time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+    )
+    _wait_for_guard(
+        acquire=lambda: process_guard.acquire(blocking=False),
+        deadline=deadline,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+
+    try:
+        try:
+            handle = path.open("r+b", buffering=0)
+        except OSError as exc:
+            raise CacheProtocolError(f"{open_error}: {exc}") from exc
+        acquired_os = False
+        try:
+            _wait_for_guard(
+                acquire=lambda: _try_lock_guard(handle),
+                deadline=deadline,
+                timeout_seconds=timeout_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+            )
+            acquired_os = True
+            if drain_owned_cleanup:
+                _drain_owned_cleanup_under_guard(path)
+            yield
+        finally:
+            try:
+                if acquired_os:
+                    _unlock_guard(handle)
+            finally:
+                handle.close()
+    finally:
+        process_guard.release()
+
+
 def _semantic_guard(
     cache_path: Path,
     analysis_key: str,
@@ -1071,63 +1189,17 @@ def _semantic_guard(
     timeout_seconds: float | None,
     poll_interval_seconds: float,
     drain_owned_cleanup: bool = True,
-) -> Iterator[None]:
-    path = _guard_path(cache_path, analysis_key)
-    expected = _guard_bytes(analysis_key)
-    _publish_immutable(path, expected)
-    value, actual = _read_canonical_object(path)
-    if set(value) != _GUARD_FIELDS or actual != expected:
-        raise CacheProtocolError("semantic cache guard has invalid closed shape")
-
-    process_guard = _process_guard(path)
-    deadline = (
-        time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+) -> AbstractContextManager[None]:
+    return _cache_guard(
+        cache_path,
+        analysis_key,
+        lock_kind="analysis",
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        drain_owned_cleanup=drain_owned_cleanup,
     )
-    acquired_process = False
-    while not acquired_process:
-        acquired_process = process_guard.acquire(blocking=False)
-        if acquired_process:
-            break
-        if deadline is None:
-            raise _guard_wait_failure(timeout_seconds)
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise _guard_wait_failure(timeout_seconds)
-        time.sleep(min(poll_interval_seconds, remaining))
-
-    try:
-        try:
-            handle = path.open("r+b", buffering=0)
-        except OSError as exc:
-            raise CacheProtocolError(
-                f"cannot open semantic cache guard: {exc}"
-            ) from exc
-        acquired_os = False
-        try:
-            while not acquired_os:
-                acquired_os = _try_lock_guard(handle)
-                if acquired_os:
-                    break
-                if deadline is None:
-                    raise _guard_wait_failure(timeout_seconds)
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise _guard_wait_failure(timeout_seconds)
-                time.sleep(min(poll_interval_seconds, remaining))
-            if drain_owned_cleanup:
-                _drain_owned_cleanup_under_guard(path)
-            yield
-        finally:
-            try:
-                if acquired_os:
-                    _unlock_guard(handle)
-            finally:
-                handle.close()
-    finally:
-        process_guard.release()
 
 
-@contextmanager
 def _review_guard(
     cache_path: Path,
     review_key: str,
@@ -1135,60 +1207,15 @@ def _review_guard(
     timeout_seconds: float | None,
     poll_interval_seconds: float,
     drain_owned_cleanup: bool = True,
-) -> Iterator[None]:
-    path = _review_guard_path(cache_path, review_key)
-    expected = _review_guard_bytes(review_key)
-    _publish_immutable(path, expected)
-    value, actual = _read_canonical_object(path)
-    if set(value) != _REVIEW_GUARD_FIELDS or actual != expected:
-        raise CacheProtocolError("semantic review guard has invalid closed shape")
-
-    process_guard = _process_guard(path)
-    deadline = (
-        time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+) -> AbstractContextManager[None]:
+    return _cache_guard(
+        cache_path,
+        review_key,
+        lock_kind="review",
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        drain_owned_cleanup=drain_owned_cleanup,
     )
-    acquired_process = False
-    while not acquired_process:
-        acquired_process = process_guard.acquire(blocking=False)
-        if acquired_process:
-            break
-        if deadline is None:
-            raise _guard_wait_failure(timeout_seconds)
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise _guard_wait_failure(timeout_seconds)
-        time.sleep(min(poll_interval_seconds, remaining))
-
-    try:
-        try:
-            handle = path.open("r+b", buffering=0)
-        except OSError as exc:
-            raise CacheProtocolError(
-                f"cannot open semantic review guard: {exc}"
-            ) from exc
-        acquired_os = False
-        try:
-            while not acquired_os:
-                acquired_os = _try_lock_guard(handle)
-                if acquired_os:
-                    break
-                if deadline is None:
-                    raise _guard_wait_failure(timeout_seconds)
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise _guard_wait_failure(timeout_seconds)
-                time.sleep(min(poll_interval_seconds, remaining))
-            if drain_owned_cleanup:
-                _drain_owned_cleanup_under_guard(path)
-            yield
-        finally:
-            try:
-                if acquired_os:
-                    _unlock_guard(handle)
-            finally:
-                handle.close()
-    finally:
-        process_guard.release()
 
 
 def _validate_packet_object(path: Path, packet: dict[str, Any]) -> None:
@@ -1448,17 +1475,23 @@ def _remove_owned_lock(path: Path, analysis_key: str, expected: bytes) -> None:
     _fsync_directory(path.parent)
 
 
-def _new_lock(analysis_key: str) -> tuple[dict[str, Any], bytes]:
-    value = {
-        "schema_version": 1,
-        "object_type": "semantic-lock",
-        "analysis_key": analysis_key,
-        "owner_token": secrets.token_hex(32),
-        "pid": os.getpid(),
-        "host": socket.gethostname().strip() or "unknown-host",
-        "created_at_utc": _format_utc(_utc_now()),
-    }
-    return value, canonical_json_bytes(value)
+def _new_owned_lock(key: str, lock_kind: _LockKind) -> bytes:
+    key_field, object_type = {
+        "analysis": ("analysis_key", "semantic-lock"),
+        "review": ("review_key", "semantic-review-lock"),
+        "verify": ("verify_key", "semantic-verification-lock"),
+    }[lock_kind]
+    return canonical_json_bytes(
+        {
+            "schema_version": 1,
+            "object_type": object_type,
+            key_field: key,
+            "owner_token": secrets.token_hex(32),
+            "pid": os.getpid(),
+            "host": socket.gethostname().strip() or "unknown-host",
+            "created_at_utc": _format_utc(_utc_now()),
+        }
+    )
 
 
 def _validate_review_lock(value: object, review_key: str) -> None:
@@ -1497,19 +1530,6 @@ def _read_review_lock(path: Path, review_key: str) -> bytes:
     value, raw = _read_canonical_object(path)
     _validate_review_lock(value, review_key)
     return raw
-
-
-def _new_review_lock(review_key: str) -> bytes:
-    value = {
-        "schema_version": 1,
-        "object_type": "semantic-review-lock",
-        "review_key": review_key,
-        "owner_token": secrets.token_hex(32),
-        "pid": os.getpid(),
-        "host": socket.gethostname().strip() or "unknown-host",
-        "created_at_utc": _format_utc(_utc_now()),
-    }
-    return canonical_json_bytes(value)
 
 
 def _remove_review_lock(path: Path, review_key: str, expected: bytes) -> None:
@@ -1599,6 +1619,224 @@ def _owned_guard_context(
     )
 
 
+@dataclass(slots=True)
+class _OwnershipCoordinator(Generic[_PublishedResult]):
+    """Own the shared guard, claim, wait, token, completion, and cleanup flow."""
+
+    cache_path: Path
+    key: str
+    lock_kind: _LockKind
+    result_path: Path
+    lock_path: Path
+    timeout_seconds: float
+    poll_interval_seconds: float
+    load_result: Callable[[], _PublishedResult]
+    read_lock: Callable[[], bytes]
+    remove_lock: Callable[[bytes], None]
+    wait_error: str
+    ownership_name: str
+    runtime_deadline: float | None = None
+    budget_error: str | None = None
+    owned_lock: bytes = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.owned_lock = _new_owned_lock(self.key, self.lock_kind)
+
+    def remaining_timeout(self) -> float:
+        if self.runtime_deadline is None:
+            return self.timeout_seconds
+        remaining = self.runtime_deadline - time.monotonic()
+        if remaining <= 0:
+            raise _AnalysisFailure(
+                "budget",
+                "budget_exceeded",
+                self.budget_error or "maximum semantic runtime exceeded",
+            )
+        return min(self.timeout_seconds, remaining)
+
+    def guard(
+        self, timeout_seconds: float | None = None
+    ) -> AbstractContextManager[None]:
+        return _owned_guard_context(
+            cache_path=self.cache_path,
+            key=self.key,
+            lock_kind=self.lock_kind,
+            timeout_seconds=(
+                self.remaining_timeout() if timeout_seconds is None else timeout_seconds
+            ),
+            poll_interval_seconds=self.poll_interval_seconds,
+        )
+
+    def published(self) -> _PublishedResult | None:
+        if not _path_exists(self.result_path):
+            return None
+        return self.load_result()
+
+    def _claim_once(
+        self, *, timeout_seconds: float
+    ) -> tuple[bool, _PublishedResult | None]:
+        try:
+            with self.guard(timeout_seconds):
+                published = self.published()
+                if published is not None:
+                    return False, published
+                acquired = _link_candidate(self.lock_path, self.owned_lock)
+                if acquired:
+                    return True, None
+                published = self.published()
+                if published is not None:
+                    return False, published
+                self.read_lock()
+                return False, None
+        except _AnalysisFailure as exc:
+            published = _load_published_result_after_lock_timeout(
+                exc,
+                result_path=self.result_path,
+                load_result=self.load_result,
+            )
+            if published is not None:
+                return False, published
+            raise
+
+    def acquire(
+        self, *, retry_vacated: bool = False
+    ) -> tuple[bool, _PublishedResult | None]:
+        deadline = time.monotonic() + self.remaining_timeout()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                published = self.published()
+                if published is not None:
+                    return False, published
+                raise _AnalysisFailure("lock", "lock_timeout", self.wait_error)
+            acquired, published = self._claim_once(timeout_seconds=remaining)
+            if acquired or published is not None or not retry_vacated:
+                return acquired, published
+            time.sleep(min(self.poll_interval_seconds, remaining))
+
+    def wait(self) -> _PublishedResult:
+        deadline = time.monotonic() + self.remaining_timeout()
+        while True:
+            published = self.published()
+            if published is not None:
+                return published
+            if _path_exists(self.lock_path):
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    try:
+                        with _owned_guard_context(
+                            cache_path=self.cache_path,
+                            key=self.key,
+                            lock_kind=self.lock_kind,
+                            timeout_seconds=remaining,
+                            poll_interval_seconds=self.poll_interval_seconds,
+                        ):
+                            if _path_exists(self.lock_path):
+                                self.read_lock()
+                    except _AnalysisFailure as exc:
+                        published = _load_published_result_after_lock_timeout(
+                            exc,
+                            result_path=self.result_path,
+                            load_result=self.load_result,
+                        )
+                        if published is not None:
+                            return published
+                        raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                published = self.published()
+                if published is not None:
+                    return published
+                raise _AnalysisFailure("lock", "lock_timeout", self.wait_error)
+            time.sleep(min(self.poll_interval_seconds, remaining))
+
+    def check_owned(self, *, phase: str) -> _PublishedResult | None:
+        with self.guard():
+            try:
+                current = self.read_lock()
+            except FileNotFoundError:
+                published = self.published()
+                if published is not None:
+                    return published
+                raise CacheProtocolError(
+                    f"{self.ownership_name} ownership disappeared before {phase}"
+                ) from None
+            if current != self.owned_lock:
+                published = self.published()
+                if published is not None:
+                    return published
+                raise CacheProtocolError(
+                    f"{self.ownership_name} ownership changed before {phase}"
+                )
+        return None
+
+    def complete(
+        self,
+        *,
+        publish: Callable[[], object],
+    ) -> _PublishedResult | None:
+        with self.guard():
+            try:
+                current = self.read_lock()
+            except FileNotFoundError:
+                published = self.published()
+                if published is not None:
+                    return published
+                raise CacheProtocolError(
+                    f"{self.ownership_name} ownership disappeared before publication"
+                ) from None
+            if current != self.owned_lock:
+                published = self.published()
+                if published is not None:
+                    return published
+                raise CacheProtocolError(
+                    f"{self.ownership_name} ownership changed before publication"
+                )
+            publish()
+            self.remove_lock(self.owned_lock)
+        return None
+
+    def release(self) -> None:
+        with self.guard():
+            self.remove_lock(self.owned_lock)
+
+    def release_published(self) -> _PublishedResult | None:
+        with self.guard():
+            current = self.read_lock()
+            if current != self.owned_lock:
+                raise CacheProtocolError(f"{self.ownership_name} ownership changed")
+            published = self.published()
+            if published is not None:
+                self.remove_lock(self.owned_lock)
+            return published
+
+    def publish_and_load(
+        self,
+        *,
+        publish: Callable[[], object],
+    ) -> _PublishedResult:
+        with self.guard():
+            current = self.read_lock()
+            if current != self.owned_lock:
+                raise CacheProtocolError(f"{self.ownership_name} ownership changed")
+            publish()
+            result = self.load_result()
+            self.remove_lock(self.owned_lock)
+            return result
+
+    def cleanup_failure(self) -> bool:
+        cleaned = _retry_owned_failure_cleanup(
+            cache_path=self.cache_path,
+            key=self.key,
+            expected_lock=self.owned_lock,
+            lock_kind=self.lock_kind,
+            poll_interval_seconds=self.poll_interval_seconds,
+        )
+        if not cleaned:
+            _log_cleanup_guidance(key=self.key, lock_kind=self.lock_kind)
+        return cleaned
+
+
 def _log_cleanup_guidance(*, key: str, lock_kind: _LockKind) -> None:
     _LOGGER.warning(
         "owned %s cache lock %s was preserved after %d guarded cleanup "
@@ -1611,54 +1849,6 @@ def _log_cleanup_guidance(*, key: str, lock_kind: _LockKind) -> None:
         key,
         _OWNED_FAILURE_CLEANUP_RETRY_LIMIT,
     )
-
-
-def _wait_for_result(
-    *,
-    cache_path: Path,
-    packet: dict[str, Any],
-    identity: InferenceIdentity,
-    provider: ProviderIdentity,
-    timeout_seconds: float,
-    poll_interval_seconds: float,
-) -> dict[str, Any]:
-    lock_path = _lock_path(cache_path, identity.analysis_key)
-    result_path = _result_path(cache_path, identity.analysis_key)
-    deadline = time.monotonic() + timeout_seconds
-    while True:
-        if _path_exists(result_path):
-            return _load_hit(cache_path, packet, identity, provider)
-        if _path_exists(lock_path):
-            remaining = deadline - time.monotonic()
-            if remaining > 0:
-                try:
-                    with _semantic_guard(
-                        cache_path,
-                        identity.analysis_key,
-                        timeout_seconds=remaining,
-                        poll_interval_seconds=poll_interval_seconds,
-                    ):
-                        if _path_exists(lock_path):
-                            _read_valid_lock(lock_path, identity.analysis_key)
-                except _AnalysisFailure as exc:
-                    published = _load_published_result_after_lock_timeout(
-                        exc,
-                        result_path=result_path,
-                        load_result=lambda: _load_hit(
-                            cache_path, packet, identity, provider
-                        ),
-                    )
-                    if published is not None:
-                        return published
-                    raise
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            if _path_exists(result_path):
-                return _load_hit(cache_path, packet, identity, provider)
-            raise _AnalysisFailure(
-                "lock", "lock_timeout", "timed out waiting for semantic cache owner"
-            )
-        time.sleep(min(poll_interval_seconds, remaining))
 
 
 def _normalize_provider_result(
@@ -1718,18 +1908,6 @@ def _resolve_cached_result(
     poll_interval_seconds: float,
     runtime_deadline: float | None = None,
 ) -> _Resolution:
-    def remaining_timeout() -> float:
-        if runtime_deadline is None:
-            return timeout_seconds
-        remaining = runtime_deadline - time.monotonic()
-        if remaining <= 0:
-            raise _AnalysisFailure(
-                "budget",
-                "budget_exceeded",
-                "maximum semantic analysis runtime exceeded",
-            )
-        return min(timeout_seconds, remaining)
-
     result_path = _result_path(cache_path, identity.analysis_key)
     if _path_exists(result_path):
         return _Resolution(_load_hit(cache_path, packet, identity, provider), "hit")
@@ -1742,114 +1920,51 @@ def _resolve_cached_result(
         _publish_immutable(packet_path, packet_bytes)
 
     lock_path = _lock_path(cache_path, identity.analysis_key)
-    _, owned_lock = _new_lock(identity.analysis_key)
-    acquired = False
-    try:
-        with _semantic_guard(
-            cache_path,
-            identity.analysis_key,
-            timeout_seconds=remaining_timeout(),
-            poll_interval_seconds=poll_interval_seconds,
-        ):
-            if _path_exists(result_path):
-                return _Resolution(
-                    _load_hit(cache_path, packet, identity, provider), "hit"
-                )
-            acquired = _link_candidate(lock_path, owned_lock)
-            if not acquired:
-                if _path_exists(result_path):
-                    return _Resolution(
-                        _load_hit(cache_path, packet, identity, provider), "hit"
-                    )
-                _read_valid_lock(lock_path, identity.analysis_key)
-    except _AnalysisFailure as exc:
-        published = _load_published_result_after_lock_timeout(
-            exc,
-            result_path=result_path,
-            load_result=lambda: _load_hit(cache_path, packet, identity, provider),
-        )
-        if published is not None:
-            return _Resolution(published, "hit")
-        raise
+    coordinator = _OwnershipCoordinator(
+        cache_path=cache_path,
+        key=identity.analysis_key,
+        lock_kind="analysis",
+        result_path=result_path,
+        lock_path=lock_path,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        load_result=lambda: _load_hit(cache_path, packet, identity, provider),
+        read_lock=lambda: _read_valid_lock(lock_path, identity.analysis_key)[1],
+        remove_lock=lambda expected: _remove_owned_lock(
+            lock_path, identity.analysis_key, expected
+        ),
+        wait_error="timed out waiting for semantic cache owner",
+        ownership_name="semantic lock",
+        runtime_deadline=runtime_deadline,
+        budget_error="maximum semantic analysis runtime exceeded",
+    )
+    acquired, published = coordinator.acquire()
+    if published is not None:
+        return _Resolution(published, "hit")
     if not acquired:
-        row = _wait_for_result(
-            cache_path=cache_path,
-            packet=packet,
-            identity=identity,
-            provider=provider,
-            timeout_seconds=remaining_timeout(),
-            poll_interval_seconds=poll_interval_seconds,
-        )
-        remaining_timeout()
+        row = coordinator.wait()
+        coordinator.remaining_timeout()
         return _Resolution(row, "hit")
 
     try:
-        with _semantic_guard(
-            cache_path,
-            identity.analysis_key,
-            timeout_seconds=remaining_timeout(),
-            poll_interval_seconds=poll_interval_seconds,
-        ):
-            try:
-                _, current = _read_valid_lock(lock_path, identity.analysis_key)
-            except FileNotFoundError:
-                if _path_exists(result_path):
-                    return _Resolution(
-                        _load_hit(cache_path, packet, identity, provider), "hit"
-                    )
-                raise CacheProtocolError(
-                    "semantic lock ownership disappeared before provider call"
-                ) from None
-            if current != owned_lock:
-                if _path_exists(result_path):
-                    return _Resolution(
-                        _load_hit(cache_path, packet, identity, provider), "hit"
-                    )
-                raise CacheProtocolError(
-                    "semantic lock ownership changed before provider call"
-                )
+        published = coordinator.check_owned(phase="provider call")
+        if published is not None:
+            return _Resolution(published, "hit")
         response = call_provider()
-        remaining_timeout()
+        coordinator.remaining_timeout()
         row, result_object = _normalize_provider_result(
             packet, identity, response, provider
         )
-        with _semantic_guard(
-            cache_path,
-            identity.analysis_key,
-            timeout_seconds=remaining_timeout(),
-            poll_interval_seconds=poll_interval_seconds,
-        ):
-            try:
-                _, current = _read_valid_lock(lock_path, identity.analysis_key)
-            except FileNotFoundError:
-                if _path_exists(result_path):
-                    return _Resolution(
-                        _load_hit(cache_path, packet, identity, provider), "hit"
-                    )
-                raise CacheProtocolError(
-                    "semantic lock ownership disappeared before publication"
-                ) from None
-            if current != owned_lock:
-                if _path_exists(result_path):
-                    return _Resolution(
-                        _load_hit(cache_path, packet, identity, provider), "hit"
-                    )
-                raise CacheProtocolError(
-                    "semantic lock ownership changed before publication"
-                )
-            _publish_immutable(result_path, canonical_json_bytes(result_object))
-            _remove_owned_lock(lock_path, identity.analysis_key, owned_lock)
+        published = coordinator.complete(
+            publish=lambda: _publish_immutable(
+                result_path, canonical_json_bytes(result_object)
+            ),
+        )
+        if published is not None:
+            return _Resolution(published, "hit")
         return _Resolution(row, "miss")
     except Exception:
-        cleaned = _retry_owned_failure_cleanup(
-            cache_path=cache_path,
-            key=identity.analysis_key,
-            expected_lock=owned_lock,
-            lock_kind="analysis",
-            poll_interval_seconds=poll_interval_seconds,
-        )
-        if not cleaned:
-            _log_cleanup_guidance(key=identity.analysis_key, lock_kind="analysis")
+        coordinator.cleanup_failure()
         raise
 
 
@@ -1902,73 +2017,46 @@ def _acquire_review_lease(
     review = identity.review_identity
     baseline_path = _baseline_path(cache_path, review.review_key)
     lock_path = _review_lock_path(cache_path, review.review_key)
-    owned = _new_review_lock(review.review_key)
-    deadline = time.monotonic() + timeout_seconds
-    while True:
-        baseline = load_semantic_baseline(cache_path, packet, review)
-        if baseline is not None:
-            return None, baseline
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise _AnalysisFailure(
-                "lock",
-                "lock_timeout",
-                "timed out waiting for semantic review cache owner",
-            )
-        try:
-            with _review_guard(
-                cache_path,
-                review.review_key,
-                timeout_seconds=remaining,
-                poll_interval_seconds=poll_interval_seconds,
-            ):
-                baseline = load_semantic_baseline(cache_path, packet, review)
-                if baseline is not None:
-                    return None, baseline
-                acquired = _link_candidate(lock_path, owned)
-                if acquired:
-                    return (
-                        _ReviewLockLease(
-                            cache_path=cache_path,
-                            review_key=review.review_key,
-                            expected_lock=owned,
-                            timeout_seconds=timeout_seconds,
-                            poll_interval_seconds=poll_interval_seconds,
-                        ),
-                        None,
-                    )
-                if _path_exists(baseline_path):
-                    baseline = load_semantic_baseline(cache_path, packet, review)
-                    if baseline is not None:
-                        return None, baseline
-                _read_review_lock(lock_path, review.review_key)
-        except _AnalysisFailure as exc:
-            if exc.stage == "lock" and exc.code == "lock_timeout":
-                baseline = load_semantic_baseline(cache_path, packet, review)
-                if baseline is not None:
-                    return None, baseline
-            raise
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise _AnalysisFailure(
-                "lock",
-                "lock_timeout",
-                "timed out waiting for semantic review cache owner",
-            )
-        time.sleep(min(poll_interval_seconds, remaining))
+    coordinator = _OwnershipCoordinator(
+        cache_path=cache_path,
+        key=review.review_key,
+        lock_kind="review",
+        result_path=baseline_path,
+        lock_path=lock_path,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        load_result=lambda: cast(
+            SemanticResultEnvelope,
+            load_semantic_baseline(cache_path, packet, review),
+        ),
+        read_lock=lambda: _read_review_lock(lock_path, review.review_key),
+        remove_lock=lambda expected: _remove_review_lock(
+            lock_path, review.review_key, expected
+        ),
+        wait_error="timed out waiting for semantic review cache owner",
+        ownership_name="semantic review lock",
+    )
+    acquired, baseline = coordinator.acquire(retry_vacated=True)
+    if baseline is not None:
+        return None, baseline
+    assert acquired
+    return (
+        _ReviewLockLease(
+            cache_path=cache_path,
+            review_key=review.review_key,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            coordinator=coordinator,
+        ),
+        None,
+    )
 
 
 def _release_review_lease(lease: _ReviewLockLease) -> None:
     if lease.released:
         return
-    lock_path = _review_lock_path(lease.cache_path, lease.review_key)
-    with _review_guard(
-        lease.cache_path,
-        lease.review_key,
-        timeout_seconds=lease.timeout_seconds,
-        poll_interval_seconds=lease.poll_interval_seconds,
-    ):
-        _remove_review_lock(lock_path, lease.review_key, lease.expected_lock)
+    lease.coordinator.timeout_seconds = lease.timeout_seconds
+    lease.coordinator.release()
     lease.released = True
 
 
@@ -1976,19 +2064,12 @@ def _release_review_lease_after_failure(lease: _ReviewLockLease) -> None:
     if lease.released:
         return
     try:
-        cleaned = _retry_owned_failure_cleanup(
-            cache_path=lease.cache_path,
-            key=lease.review_key,
-            expected_lock=lease.expected_lock,
-            lock_kind="review",
-            poll_interval_seconds=lease.poll_interval_seconds,
-        )
+        cleaned = lease.coordinator.cleanup_failure()
     except Exception:  # noqa: BLE001 - cleanup never displaces primary failure
         cleaned = False
+        _log_cleanup_guidance(key=lease.review_key, lock_kind="review")
     if cleaned:
         lease.released = True
-    else:
-        _log_cleanup_guidance(key=lease.review_key, lock_kind="review")
 
 
 def _runtime_bounded_timeout(
@@ -2009,29 +2090,16 @@ def _runtime_bounded_timeout(
 
 def _recheck_owned_review_lease(
     lease: _ReviewLockLease,
-    packet: dict[str, Any],
-    review: ReviewIdentity,
     *,
     runtime_deadline: float | None,
 ) -> SemanticResultEnvelope | None:
-    lock_path = _review_lock_path(lease.cache_path, lease.review_key)
-    with _review_guard(
-        lease.cache_path,
-        lease.review_key,
-        timeout_seconds=_runtime_bounded_timeout(
-            lease.timeout_seconds, runtime_deadline
-        ),
-        poll_interval_seconds=lease.poll_interval_seconds,
-    ):
-        current = _read_review_lock(lock_path, lease.review_key)
-        if current != lease.expected_lock:
-            raise CacheProtocolError("semantic review lock ownership changed")
-        baseline = load_semantic_baseline(lease.cache_path, packet, review)
-        if baseline is None:
-            return None
-        _remove_review_lock(lock_path, lease.review_key, lease.expected_lock)
+    lease.coordinator.timeout_seconds = _runtime_bounded_timeout(
+        lease.timeout_seconds, runtime_deadline
+    )
+    baseline = lease.coordinator.release_published()
+    if baseline is not None:
         lease.released = True
-        return baseline
+    return baseline
 
 
 @contextmanager
@@ -2137,8 +2205,6 @@ def prepare_evidence_stable_cache(
                 lease = leases_by_key[key]
                 baseline = _recheck_owned_review_lease(
                     lease,
-                    packet,
-                    identity.review_identity,
                     runtime_deadline=runtime_deadline,
                 )
                 if baseline is not None:
@@ -2225,28 +2291,17 @@ def _publish_owned_semantic_baseline(
         "review_key": review.review_key,
         "analysis_key": envelope.analysis_key,
     }
-    lock_path = _review_lock_path(lease.cache_path, lease.review_key)
-    with _review_guard(
-        lease.cache_path,
-        lease.review_key,
-        timeout_seconds=_runtime_bounded_timeout(
-            lease.timeout_seconds, runtime_deadline
-        ),
-        poll_interval_seconds=lease.poll_interval_seconds,
-    ):
-        current = _read_review_lock(lock_path, lease.review_key)
-        if current != lease.expected_lock:
-            raise CacheProtocolError("semantic review lock ownership changed")
-        _link_candidate(
-            _baseline_path(lease.cache_path, review.review_key),
+    baseline_path = _baseline_path(lease.cache_path, review.review_key)
+    lease.coordinator.timeout_seconds = _runtime_bounded_timeout(
+        lease.timeout_seconds, runtime_deadline
+    )
+    selected = lease.coordinator.publish_and_load(
+        publish=lambda: _link_candidate(
+            baseline_path,
             canonical_json_bytes(baseline),
-        )
-        selected = load_semantic_baseline(
-            lease.cache_path, item.packet, item.review_identity
-        )
-        assert selected is not None
-        _remove_review_lock(lock_path, lease.review_key, lease.expected_lock)
-        lease.released = True
+        ),
+    )
+    lease.released = True
     return selected
 
 
@@ -2316,35 +2371,19 @@ def resolve_prepared_evidence_stable_result(
     return event
 
 
-def analyze_with_cache(
+def _analyze_config_problems(
     *,
-    packets: Iterable[ValidatedSemanticPacket],
-    cache_path: Path,
+    packet_list: tuple[ValidatedSemanticPacket, ...],
+    rows: tuple[dict[str, Any], ...],
     cache_mode: str,
-    result_reuse: str = "exact-inference",
+    result_reuse: str,
     provider_identity: ProviderIdentity,
-    request_identity: RequestIdentity,
     adapter_factory: AdapterFactory | None,
     search_epoch: str,
     lock_wait_timeout_seconds: float,
-    poll_interval_seconds: float = 0.1,
-    runtime_deadline: float | None = None,
-    provider_call_budget: ProviderCallBudget | None = None,
-    provider_call_packet_ids: frozenset[str] | None = None,
-    identities: Iterable[InferenceIdentity] | None = None,
-) -> SemanticCacheRun:
-    """Resolve packets in order through off/read-write/require cache modes."""
-
-    packet_list = tuple(packets)
+    poll_interval_seconds: float,
+) -> list[SemanticProblem]:
     problems: list[SemanticProblem] = []
-    canonical_results: list[bytes] = []
-    result_envelopes: list[SemanticResultEnvelope] = []
-    selection_events: list[SemanticSelectionEvent] = []
-    cache_hits = 0
-    cache_misses = 0
-    provider_calls = 0
-    kind_counts = _empty_analyzer_kind_counts()
-    runtime_exceeded = False
     if result_reuse != "exact-inference":
         problems.append(
             SemanticProblem(
@@ -2390,7 +2429,6 @@ def analyze_with_cache(
                 "poll interval must be greater than zero and no more than one second",
             )
         )
-    rows = tuple(packet.to_dict() for packet in packet_list)
     packet_ids = [row["packet_id"] for row in rows]
     if len(packet_ids) != len(set(packet_ids)):
         problems.append(
@@ -2398,9 +2436,8 @@ def analyze_with_cache(
                 None, "input", "invalid_input", "duplicate semantic packet ID"
             )
         )
-    if cache_mode in ("read-write", "require") and any(
-        not packet.cache_eligible for packet in packet_list
-    ):
+    cached_mode = cache_mode in ("read-write", "require")
+    if cached_mode and any(not packet.cache_eligible for packet in packet_list):
         problems.append(
             SemanticProblem(
                 None,
@@ -2409,7 +2446,7 @@ def analyze_with_cache(
                 "legacy-normalized packets are not cache eligible",
             )
         )
-    if cache_mode in ("read-write", "require"):
+    if cached_mode:
         cached_identity_fields = {
             "backend_id": provider_identity.backend_id,
             "plugin_id": provider_identity.plugin_id,
@@ -2439,6 +2476,50 @@ def analyze_with_cache(
                 "require cache mode forbids an adapter factory",
             )
         )
+    return problems
+
+
+def analyze_with_cache(
+    *,
+    packets: Iterable[ValidatedSemanticPacket],
+    cache_path: Path,
+    cache_mode: str,
+    result_reuse: str = "exact-inference",
+    provider_identity: ProviderIdentity,
+    request_identity: RequestIdentity,
+    adapter_factory: AdapterFactory | None,
+    search_epoch: str,
+    lock_wait_timeout_seconds: float,
+    poll_interval_seconds: float = 0.1,
+    runtime_deadline: float | None = None,
+    provider_call_budget: ProviderCallBudget | None = None,
+    provider_call_packet_ids: frozenset[str] | None = None,
+    identities: Iterable[InferenceIdentity] | None = None,
+    request_bytes: Iterable[bytes] | None = None,
+) -> SemanticCacheRun:
+    """Resolve packets in order through off/read-write/require cache modes."""
+
+    packet_list = tuple(packets)
+    canonical_results: list[bytes] = []
+    result_envelopes: list[SemanticResultEnvelope] = []
+    selection_events: list[SemanticSelectionEvent] = []
+    cache_hits = 0
+    cache_misses = 0
+    provider_calls = 0
+    kind_counts = _empty_analyzer_kind_counts()
+    runtime_exceeded = False
+    rows = tuple(packet.to_dict() for packet in packet_list)
+    problems = _analyze_config_problems(
+        packet_list=packet_list,
+        rows=rows,
+        cache_mode=cache_mode,
+        result_reuse=result_reuse,
+        provider_identity=provider_identity,
+        adapter_factory=adapter_factory,
+        search_epoch=search_epoch,
+        lock_wait_timeout_seconds=lock_wait_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
     if problems:
         return SemanticCacheRun((), tuple(problems), b"", 0, 0, 0)
     try:
@@ -2448,6 +2529,11 @@ def analyze_with_cache(
             request_identity,
             search_epoch,
             identities,
+        )
+        frozen_requests = _freeze_request_bytes(
+            rows,
+            frozen_identities,
+            request_bytes,
         )
     except ValueError as exc:
         return SemanticCacheRun(
@@ -2480,7 +2566,10 @@ def analyze_with_cache(
 
     adapter: ProviderAdapter | None = None
 
-    def call(packet: dict[str, Any], identity: InferenceIdentity) -> ProviderCallResult:
+    def call(
+        packet: dict[str, Any],
+        request: bytes,
+    ) -> ProviderCallResult:
         nonlocal adapter, provider_calls, runtime_exceeded
         if runtime_exceeded or (
             runtime_deadline is not None and time.monotonic() >= runtime_deadline
@@ -2543,11 +2632,7 @@ def analyze_with_cache(
         packet_kind = cast(SemanticPacketKind, packet["kind"])
         kind_counts["provider_calls"][packet_kind] += 1
         try:
-            response = adapter(
-                model_request_bytes(
-                    packet, instruction_bytes=identity.prompt_bytes
-                ).decode("utf-8")
-            )
+            response = adapter(request.decode("utf-8"))
         except _AnalysisFailure:
             raise
         except Exception as exc:  # noqa: BLE001 - external provider boundary
@@ -2558,11 +2643,13 @@ def analyze_with_cache(
             runtime_exceeded = True
         return response
 
-    for row, identity in zip(rows, frozen_identities, strict=True):
+    for row, identity, frozen_request in zip(
+        rows, frozen_identities, frozen_requests, strict=True
+    ):
         packet_id = row["packet_id"]
         try:
             if cache_mode == "off":
-                response = call(row, identity)
+                response = call(row, frozen_request)
                 normalized, result_object = _normalize_provider_result(
                     row, identity, response, provider_identity
                 )
@@ -2600,9 +2687,9 @@ def analyze_with_cache(
 
                 def call_current(
                     current_row: dict[str, Any] = row,
-                    current_identity: InferenceIdentity = identity,
+                    current_request: bytes = frozen_request,
                 ) -> ProviderCallResult:
-                    return call(current_row, current_identity)
+                    return call(current_row, current_request)
 
                 resolution = _resolve_cached_result(
                     cache_path=cache_path,
@@ -2862,7 +2949,6 @@ def _verify_guard_bytes(verify_key: str) -> bytes:
     )
 
 
-@contextmanager
 def _verify_guard(
     cache_path: Path,
     verify_key: str,
@@ -2870,55 +2956,15 @@ def _verify_guard(
     timeout_seconds: float | None,
     poll_interval_seconds: float,
     drain_owned_cleanup: bool = True,
-) -> Iterator[None]:
-    path = _verify_guard_path(cache_path, verify_key)
-    expected = _verify_guard_bytes(verify_key)
-    _publish_immutable(path, expected)
-    value, actual = _read_canonical_object(path)
-    if set(value) != _VERIFY_GUARD_FIELDS or actual != expected:
-        raise CacheProtocolError("verification cache guard has invalid closed shape")
-
-    process_guard = _process_guard(path)
-    deadline = (
-        time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+) -> AbstractContextManager[None]:
+    return _cache_guard(
+        cache_path,
+        verify_key,
+        lock_kind="verify",
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        drain_owned_cleanup=drain_owned_cleanup,
     )
-    while not process_guard.acquire(blocking=False):
-        if deadline is None:
-            raise _guard_wait_failure(timeout_seconds)
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise _guard_wait_failure(timeout_seconds)
-        time.sleep(min(poll_interval_seconds, remaining))
-    try:
-        try:
-            handle = path.open("r+b", buffering=0)
-        except OSError as exc:
-            raise CacheProtocolError(
-                f"cannot open verification cache guard: {exc}"
-            ) from exc
-        acquired_os = False
-        try:
-            while not acquired_os:
-                acquired_os = _try_lock_guard(handle)
-                if acquired_os:
-                    break
-                if deadline is None:
-                    raise _guard_wait_failure(timeout_seconds)
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise _guard_wait_failure(timeout_seconds)
-                time.sleep(min(poll_interval_seconds, remaining))
-            if drain_owned_cleanup:
-                _drain_owned_cleanup_under_guard(path)
-            yield
-        finally:
-            try:
-                if acquired_os:
-                    _unlock_guard(handle)
-            finally:
-                handle.close()
-    finally:
-        process_guard.release()
 
 
 def _validate_verify_contract(value: object) -> dict[str, Any]:
@@ -3043,20 +3089,6 @@ def _read_verify_lock(path: Path, verify_key: str) -> bytes:
     return raw
 
 
-def _new_verify_lock(verify_key: str) -> bytes:
-    return canonical_json_bytes(
-        {
-            "schema_version": 1,
-            "object_type": "semantic-verification-lock",
-            "verify_key": verify_key,
-            "owner_token": secrets.token_hex(32),
-            "pid": os.getpid(),
-            "host": socket.gethostname().strip() or "unknown-host",
-            "created_at_utc": _format_utc(_utc_now()),
-        }
-    )
-
-
 def _remove_verify_lock(path: Path, verify_key: str, expected: bytes) -> None:
     try:
         current = _read_verify_lock(path, verify_key)
@@ -3116,56 +3148,6 @@ def _normalize_verify_provider_result(
     return result, result_object
 
 
-def _wait_for_verify_result(
-    cache_path: Path,
-    work: VerificationWork,
-    provider: ProviderIdentity,
-    *,
-    timeout_seconds: float,
-    poll_interval_seconds: float,
-    runtime_deadline: float | None,
-) -> CanonicalVerificationResult:
-    result_path = _verify_result_path(cache_path, work.identity.verify_key)
-    lock_path = _verify_lock_path(cache_path, work.identity.verify_key)
-    deadline = time.monotonic() + timeout_seconds
-    if runtime_deadline is not None:
-        deadline = min(deadline, runtime_deadline)
-    while True:
-        if _path_exists(result_path):
-            return _load_verify_hit(cache_path, work, provider)
-        if _path_exists(lock_path):
-            remaining = deadline - time.monotonic()
-            if remaining > 0:
-                try:
-                    with _verify_guard(
-                        cache_path,
-                        work.identity.verify_key,
-                        timeout_seconds=remaining,
-                        poll_interval_seconds=poll_interval_seconds,
-                    ):
-                        if _path_exists(lock_path):
-                            _read_verify_lock(lock_path, work.identity.verify_key)
-                except _AnalysisFailure as exc:
-                    published = _load_published_result_after_lock_timeout(
-                        exc,
-                        result_path=result_path,
-                        load_result=lambda: _load_verify_hit(
-                            cache_path, work, provider
-                        ),
-                    )
-                    if published is not None:
-                        return published
-                    raise
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            if _path_exists(result_path):
-                return _load_verify_hit(cache_path, work, provider)
-            raise _AnalysisFailure(
-                "lock", "lock_timeout", "timed out waiting for verifier cache owner"
-            )
-        time.sleep(min(poll_interval_seconds, remaining))
-
-
 def _resolve_cached_verify_result(
     cache_path: Path,
     work: VerificationWork,
@@ -3176,16 +3158,6 @@ def _resolve_cached_verify_result(
     poll_interval_seconds: float,
     runtime_deadline: float | None,
 ) -> tuple[CanonicalVerificationResult, CacheSource]:
-    def remaining_timeout() -> float:
-        if runtime_deadline is None:
-            return timeout_seconds
-        remaining = runtime_deadline - time.monotonic()
-        if remaining <= 0:
-            raise _AnalysisFailure(
-                "budget", "budget_exceeded", "maximum verifier runtime exceeded"
-            )
-        return min(timeout_seconds, remaining)
-
     result_path = _verify_result_path(cache_path, work.identity.verify_key)
     if _path_exists(result_path):
         return _load_verify_hit(cache_path, work, provider), "hit"
@@ -3196,101 +3168,47 @@ def _resolve_cached_verify_result(
     else:
         _publish_immutable(packet_path, packet_bytes)
     lock_path = _verify_lock_path(cache_path, work.identity.verify_key)
-    owned = _new_verify_lock(work.identity.verify_key)
-    acquired = False
+    coordinator = _OwnershipCoordinator(
+        cache_path=cache_path,
+        key=work.identity.verify_key,
+        lock_kind="verify",
+        result_path=result_path,
+        lock_path=lock_path,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        load_result=lambda: _load_verify_hit(cache_path, work, provider),
+        read_lock=lambda: _read_verify_lock(lock_path, work.identity.verify_key),
+        remove_lock=lambda expected: _remove_verify_lock(
+            lock_path, work.identity.verify_key, expected
+        ),
+        wait_error="timed out waiting for verifier cache owner",
+        ownership_name="verification lock",
+        runtime_deadline=runtime_deadline,
+        budget_error="maximum verifier runtime exceeded",
+    )
+    acquired, published = coordinator.acquire()
+    if published is not None:
+        return published, "hit"
+    if not acquired:
+        return coordinator.wait(), "hit"
     try:
-        with _verify_guard(
-            cache_path,
-            work.identity.verify_key,
-            timeout_seconds=remaining_timeout(),
-            poll_interval_seconds=poll_interval_seconds,
-        ):
-            if _path_exists(result_path):
-                return _load_verify_hit(cache_path, work, provider), "hit"
-            acquired = _link_candidate(lock_path, owned)
-            if not acquired:
-                if _path_exists(result_path):
-                    return _load_verify_hit(cache_path, work, provider), "hit"
-                _read_verify_lock(lock_path, work.identity.verify_key)
-    except _AnalysisFailure as exc:
-        published = _load_published_result_after_lock_timeout(
-            exc,
-            result_path=result_path,
-            load_result=lambda: _load_verify_hit(cache_path, work, provider),
-        )
+        published = coordinator.check_owned(phase="provider call")
         if published is not None:
             return published, "hit"
-        raise
-    if not acquired:
-        return (
-            _wait_for_verify_result(
-                cache_path,
-                work,
-                provider,
-                timeout_seconds=remaining_timeout(),
-                poll_interval_seconds=poll_interval_seconds,
-                runtime_deadline=runtime_deadline,
-            ),
-            "hit",
-        )
-    try:
-        with _verify_guard(
-            cache_path,
-            work.identity.verify_key,
-            timeout_seconds=remaining_timeout(),
-            poll_interval_seconds=poll_interval_seconds,
-        ):
-            try:
-                current = _read_verify_lock(lock_path, work.identity.verify_key)
-            except FileNotFoundError:
-                if _path_exists(result_path):
-                    return _load_verify_hit(cache_path, work, provider), "hit"
-                raise CacheProtocolError(
-                    "verification lock ownership disappeared before provider call"
-                ) from None
-            if current != owned:
-                if _path_exists(result_path):
-                    return _load_verify_hit(cache_path, work, provider), "hit"
-                raise CacheProtocolError(
-                    "verification lock ownership changed before provider call"
-                )
         response = call_provider()
         result, result_object = _normalize_verify_provider_result(
             work, response, provider
         )
-        with _verify_guard(
-            cache_path,
-            work.identity.verify_key,
-            timeout_seconds=remaining_timeout(),
-            poll_interval_seconds=poll_interval_seconds,
-        ):
-            try:
-                current = _read_verify_lock(lock_path, work.identity.verify_key)
-            except FileNotFoundError:
-                if _path_exists(result_path):
-                    return _load_verify_hit(cache_path, work, provider), "hit"
-                raise CacheProtocolError(
-                    "verification lock ownership disappeared before publication"
-                ) from None
-            if current != owned:
-                if _path_exists(result_path):
-                    return _load_verify_hit(cache_path, work, provider), "hit"
-                raise CacheProtocolError(
-                    "verification lock ownership changed before publication"
-                )
-            _publish_immutable(result_path, canonical_json_bytes(result_object))
-            _remove_verify_lock(lock_path, work.identity.verify_key, owned)
+        published = coordinator.complete(
+            publish=lambda: _publish_immutable(
+                result_path, canonical_json_bytes(result_object)
+            ),
+        )
+        if published is not None:
+            return published, "hit"
         return result, "miss"
     except Exception:
-        cleaned = _retry_owned_failure_cleanup(
-            cache_path=cache_path,
-            key=work.identity.verify_key,
-            expected_lock=owned,
-            lock_kind="verify",
-            poll_interval_seconds=poll_interval_seconds,
-        )
-        if not cleaned:
-            _log_cleanup_guidance(key=work.identity.verify_key, lock_kind="verify")
+        coordinator.cleanup_failure()
         raise
 
 
@@ -3318,7 +3236,7 @@ def inspect_verification_cache(
             SemanticProblem(None, "input", "invalid_input", "duplicate verifier key")
         )
     expected_provider = asdict(provider_identity)
-    expected_request = asdict(request_identity)
+    expected_request = request_identity_dict(request_identity)
     for item in work:
         packet_id = item.packet.get("packet_id")
         problem_packet_id = packet_id if isinstance(packet_id, str) else None
@@ -3484,7 +3402,7 @@ def verify_with_cache(
                 )
             )
     expected_provider = asdict(provider_identity)
-    expected_request = asdict(request_identity)
+    expected_request = request_identity_dict(request_identity)
     for item in work:
         packet_id = item.packet.get("packet_id")
         problem_packet_id = packet_id if isinstance(packet_id, str) else None

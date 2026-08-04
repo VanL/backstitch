@@ -9,7 +9,7 @@ runs. Current hermetic CI overrides that setting off; dedicated lanes may still
 enable it with ``BACKSTITCH_LIVE_LLM=1``. When enabled it drives the real CLI
 (``packets`` -> ``analyze`` -> ``check`` -> ``summarize-analysis``) over this
 repository's own specs, calling a real provider or a local OpenAI-compatible
-endpoint through the production ``default_adapter``. It asserts structured
+endpoint through the production ``default_provider_adapter``. It asserts structured
 contracts and command behavior -- never model wording or classification.
 
 Exit codes here prove the command path and artifact health, not model success:
@@ -34,27 +34,26 @@ from typing import Any
 
 import pytest
 
-from backstitch.analysis_llm import (
-    _packet_evidence_bounds,
-    _semantic_response_schema,
-    build_prompt,
-)
+from backstitch.analysis_llm import _semantic_response_schema
 from backstitch.analysis_results import (
     INVARIANT_CLASSIFICATIONS,
     load_analysis_results,
     validate_analysis_row,
 )
-from backstitch.semantic_packets import prompt_instruction_bytes
+from backstitch.canonical import lf_end_line
+from backstitch.semantic_packets import (
+    model_request_bytes,
+    prompt_instruction_bytes,
+)
 
 # The root collection hook applies policy skips after collecting this marker,
 # so a disabled direct invocation reports one skip instead of exiting 5.
 # Collection stays hermetic: `import llm` lives inside the test body, not here.
 pytestmark = pytest.mark.live_llm
 
-# Keep this reviewed default aligned with the local documentation. The trusted
-# semantic refresh model lives in pyproject.toml and has a stronger revision
-# identity than this transport-contract probe.
-DEFAULT_BACKSTITCH_LIVE_LLM_MODEL = "gpt-4.1-mini"
+# Keep this reviewed default aligned with the repository descriptor. Live cloud
+# probes normalize aliases to exact snapshots before provider construction.
+DEFAULT_BACKSTITCH_LIVE_LLM_MODEL = "gpt-5.4-mini"
 DEFAULT_BACKSTITCH_LOCAL_LLM_BASE_MODEL = "llama3.2:3b"
 DEFAULT_BACKSTITCH_LOCAL_LLM_SERVED_MODEL = DEFAULT_BACKSTITCH_LOCAL_LLM_BASE_MODEL
 
@@ -426,7 +425,11 @@ def _live_kind() -> str:
 def _resolve_live_model() -> str:
     import llm
 
-    model_name = os.environ.get("LLM_MODEL") or DEFAULT_BACKSTITCH_LIVE_LLM_MODEL
+    requested_model = os.environ.get("LLM_MODEL") or DEFAULT_BACKSTITCH_LIVE_LLM_MODEL
+    model_name = {
+        "gpt-5.4-mini": "gpt-5.4-mini-2026-03-17",
+        "gpt-5.5": "gpt-5.5-2026-04-23",
+    }.get(requested_model, requested_model)
     try:
         model = llm.get_model(model_name)
     except llm.UnknownModelError as exc:
@@ -450,6 +453,79 @@ def _resolve_live_model() -> str:
     return model_name
 
 
+def _live_descriptor_lines(*, kind: str, adapter_model_id: str) -> list[str]:
+    """Return one complete, costed descriptor for the qualified transport."""
+
+    if kind == "local":
+        stable_model_id = "pkg:service/local.test/live-contract"
+        plugin_id = "live-contract"
+        capability_revision = "local-live-contract-v1"
+        maximum_input_bytes = _local_prompt_byte_ceiling()
+        temperature = float(LOCAL_INFERENCE_TEMPERATURE)
+        input_rate = 0
+        output_rate = 0
+        maximum_cost = 0
+        max_tokens = LOCAL_ANALYZE_MAX_TOKENS
+        cost_source = "non-billable loopback live-contract endpoint"
+    elif adapter_model_id == "gpt-5.4-mini-2026-03-17":
+        stable_model_id = "pkg:service/openai.com/gpt-5.4-mini"
+        plugin_id = "openai"
+        capability_revision = "openai-gpt-5.4-mini-2026-07-29"
+        maximum_input_bytes = 1_600_000
+        temperature = 0.0
+        input_rate = 750_000
+        output_rate = 4_500_000
+        maximum_cost = 100_000
+        max_tokens = 512
+        cost_source = "OpenAI GPT-5.4 mini model page, reviewed 2026-07-28"
+    elif adapter_model_id == "gpt-5.5-2026-04-23":
+        stable_model_id = "pkg:service/openai.com/gpt-5.5"
+        plugin_id = "openai"
+        capability_revision = "openai-gpt-5.5-2026-07-29"
+        maximum_input_bytes = 1_600_000
+        # A real qualification rejected 0.0 and accepted 1.0 for this snapshot.
+        temperature = 1.0
+        input_rate = 5_000_000
+        output_rate = 30_000_000
+        maximum_cost = 100_000
+        max_tokens = 1_024
+        cost_source = "OpenAI GPT-5.5 model page, reviewed 2026-07-29"
+    else:
+        pytest.fail(
+            f"live model {adapter_model_id!r} has no reviewed Backstitch "
+            "capability and cost descriptor"
+        )
+
+    request_constraints = (
+        "{ "
+        'json_mode = { presence = "required", allowed_values = ["require"] }, '
+        f'temperature = {{ presence = "required", allowed_values = [{temperature}] }}, '
+        'seed = { presence = "required", minimum = 0, maximum = 2147483647 }, '
+        'max_tokens = { presence = "required", minimum = 1, maximum = 16384 } '
+        "}"
+    )
+    return [
+        'backend_id = "llm"',
+        f"plugin_id = {json.dumps(plugin_id)}",
+        'plugin_distribution_name = "llm"',
+        f"model = {json.dumps(stable_model_id)}",
+        f"adapter_model_id = {json.dumps(adapter_model_id)}",
+        f"model_revision = {json.dumps(adapter_model_id)}",
+        "capability_schema_version = 1",
+        f"capability_revision = {json.dumps(capability_revision)}",
+        f"request_constraints = {request_constraints}",
+        f"maximum_input_bytes = {maximum_input_bytes}",
+        f"temperature = {temperature}",
+        f"seed = {LOCAL_INFERENCE_SEED}",
+        f"max_tokens = {max_tokens}",
+        f"maximum_estimated_cost_microusd = {maximum_cost}",
+        f"input_cost_microusd_per_million_tokens = {input_rate}",
+        f"output_cost_microusd_per_million_tokens = {output_rate}",
+        "input_token_overhead = 256",
+        f"cost_rate_source = {json.dumps(cost_source)}",
+    ]
+
+
 def _select_live_packets(
     all_packets_text: str,
     count: int,
@@ -458,8 +534,8 @@ def _select_live_packets(
 ) -> list[dict[str, object]]:
     """Deterministically choose the bounded live subset from generated packets.
 
-    There is no packet-filter subcommand and calling ``analyze_packets``
-    directly is forbidden, so the cloud filtering lives here. The local lane
+    There is no packet-filter subcommand and direct library analysis is
+    forbidden, so the cloud filtering lives here. The local lane
     uses ``_select_local_live_packets`` and a curated invariant corpus instead.
     """
 
@@ -665,8 +741,26 @@ def _local_analyze_packet(payload: dict[str, object]) -> dict[str, object]:
 
 def _local_evidence_schema(packet: dict[str, object]) -> list[dict[str, object]]:
     variants: list[dict[str, object]] = []
-    for path, ranges in _packet_evidence_bounds(packet).items():
-        for start_line, end_line in ranges:
+    for item_field in ("targets", "binding_tests"):
+        items = packet.get(item_field)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            path = item.get("path")
+            start_line = item.get("start_line")
+            snippet = item.get("snippet")
+            if (
+                not isinstance(path, str)
+                or not isinstance(start_line, int)
+                or isinstance(start_line, bool)
+                or not isinstance(snippet, str)
+            ):
+                continue
+            end_line = lf_end_line(start_line, snippet)
+            if end_line is None:
+                continue
             variants.append(
                 {
                     "type": "object",
@@ -911,7 +1005,8 @@ import sys
 
 import llm
 
-from backstitch.analysis_llm import default_adapter
+from backstitch.analysis_llm import default_provider_adapter
+from backstitch.semantic_identity import ProviderIdentity, RequestIdentity
 
 expected_api_base = {config.adapter_endpoint!r}.rstrip("/")
 model = llm.get_model("backstitch-local")
@@ -927,11 +1022,29 @@ if getattr(model, "needs_key", None) is not None:
         f"local api_base model unexpectedly requires key {{model.needs_key!r}}"
     )
 
-adapter = default_adapter("backstitch-local")
-out = adapter("Reply with the single word OK")
-if not str(out).strip():
+adapter = default_provider_adapter(
+    "backstitch-local",
+    provider_identity=ProviderIdentity(
+        "llm",
+        "openai",
+        "backstitch-local",
+        "transport-preflight",
+        "backstitch.llm",
+        1,
+        "live",
+        "llm",
+        "live",
+    ),
+    request_identity=RequestIdentity("require", 0.0, 42, 128),
+    response_schema_builder=lambda _prompt: {{
+        "type": "object",
+        "additionalProperties": True,
+    }},
+)
+out = adapter("Reply with JSON containing an OK value").raw_response
+if not out.strip():
     raise SystemExit("transport preflight returned empty text")
-print(str(out).strip())
+print(out.strip())
 """
     try:
         result = subprocess.run(
@@ -959,10 +1072,10 @@ def _assert_local_prompt_budget(subset: list[dict[str, object]]) -> None:
         kind = packet["kind"]
         assert kind in {"section", "invariant"}
         prompt_bytes = len(
-            build_prompt(
+            model_request_bytes(
                 packet,
-                prompt_bytes=prompt_instruction_bytes(kind),
-            ).encode("utf-8")
+                instruction_bytes=prompt_instruction_bytes(kind),
+            )
         )
         if prompt_bytes > ceiling:
             too_large.append(f"{packet['packet_id']} ({prompt_bytes} bytes)")
@@ -1149,19 +1262,14 @@ def _exercise_live_llm_analysis_contract(
         _assert_model_listed(local_config)
         _assert_local_transport(local_config)
     live_config = live_root / ".backstitch.toml"
+    descriptor_lines = _live_descriptor_lines(
+        kind=kind,
+        adapter_model_id=live_model,
+    )
     live_config.write_text(
         live_config.read_text(encoding="utf-8").replace(
             "[analyze]\n",
-            "[analyze]\n"
-            'backend_id = "llm"\n'
-            'plugin_id = "live-contract"\n'
-            'plugin_distribution_name = "llm"\n'
-            f'model = "{live_model}"\n'
-            'model_revision = "live-contract-v1"\n'
-            "input_cost_microusd_per_million_tokens = 0\n"
-            "output_cost_microusd_per_million_tokens = 0\n"
-            "input_token_overhead = 256\n"
-            'cost_rate_source = "live contract fixture"\n',
+            "[analyze]\n" + "\n".join(descriptor_lines) + "\n",
             1,
         ),
         encoding="utf-8",

@@ -27,6 +27,7 @@ from backstitch.models import (
     SuppressionDecision,
     issue_sort_key,
 )
+from backstitch.obligations import mapping_test_only_issues
 from backstitch.repository_snapshot import RepositorySnapshot
 from backstitch.resolver import ScanArtifacts, scan_snapshot_with_artifacts
 from backstitch.settings import BackstitchSettings
@@ -107,11 +108,39 @@ def apply_check_policy(
     profile: ProfileConfig,
     settings: BackstitchSettings,
 ) -> CheckPipelineResult:
+    index = _build_suppression_index(artifacts, profile, settings)
+    effective_meta_spec_globs = tuple(
+        sorted(
+            {
+                rule.path
+                for rule in index.rules
+                if rule.mechanism == "meta" and not rule.sections
+            }
+        )
+    )
+    effective_section_meta = frozenset(
+        (rule.path, section_id)
+        for rule in index.rules
+        if rule.mechanism == "meta"
+        for section_id in rule.sections
+    )
+    role_issues = mapping_test_only_issues(
+        raw_report,
+        profile=profile,
+        section_meta=effective_section_meta,
+        meta_spec_globs=effective_meta_spec_globs,
+    )
+    if role_issues:
+        raw_report = dataclasses.replace(
+            raw_report,
+            issues=tuple(
+                sorted((*raw_report.issues, *role_issues), key=issue_sort_key)
+            ),
+        )
     report, off_records = apply_policy_to_report(
         raw_report,
         effective_policy=settings.diagnostics,
     )
-    index = _build_suppression_index(artifacts, profile, settings)
     kept: list[Issue] = []
     suppressed: list[SuppressionDecision] = [
         SuppressionDecision(
@@ -195,21 +224,8 @@ def apply_check_policy(
         report=filtered_report,
         artifacts=artifacts,
         suppressed=tuple(suppressed),
-        effective_meta_spec_globs=tuple(
-            sorted(
-                {
-                    rule.path
-                    for rule in index.rules
-                    if rule.mechanism == "meta" and not rule.sections
-                }
-            )
-        ),
-        effective_section_meta=frozenset(
-            (rule.path, section_id)
-            for rule in index.rules
-            if rule.mechanism == "meta"
-            for section_id in rule.sections
-        ),
+        effective_meta_spec_globs=effective_meta_spec_globs,
+        effective_section_meta=effective_section_meta,
         obligation_skip_audit=skip_audit,
         warnings=(),
     )

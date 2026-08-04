@@ -41,6 +41,8 @@ jobs:
           grep -Eq 'SKIPPED \[1\]' <<< "${output}"
       - name: Lint
         run: uv run ruff check .
+      - name: Complexity ceiling
+        run: uv run ruff check backstitch bin --select C901
       - name: Format
         run: >
           uv run ruff format --check

@@ -42,6 +42,10 @@ scan-boundary exclusion ([CFG-6]/[EXC-*]), or semantic judgment mechanics
 ([SEM-*]). Together with [INV-*] and the semantic lane, these axes form the
 contract-coverage matrix stated in [SC-16].
 
+_Implementation mapping_:
+
+- `backstitch/coverage_application.py`
+
 ## 2. Mental Model [COV-2]
 
 The four-tool suite, one sentence each: `ruff` — every line well-formed;
@@ -54,6 +58,10 @@ Like test coverage, intent coverage is a *reach* metric, not a quality
 metric: a covered definition has an intent edge; whether the spec text is
 informative is a separate, sampled semantic question ([COV-7]). The
 deterministic layer never claims more than reach.
+
+_Implementation mapping_:
+
+- `backstitch/coverage_application.py`
 
 ## 3. Coverage Computation [COV-3]
 
@@ -308,6 +316,7 @@ hex digest with `sha256:`.
 _Implementation mapping_:
 
 - `backstitch/code_parser.py::parse_python_source`
+- `backstitch/coverage_application.py`
 - `backstitch/python_refs.py::python_definition_inventory_bytes`
 - `backstitch/intent_coverage.py`
 - `backstitch/intent_coverage_reporting.py`
@@ -406,6 +415,11 @@ already accepted current snapshot. It never fetches, executes an external diff
 driver, invokes a shell, trusts pager/editor configuration, or reads baseline
 files through a checkout path.
 
+Historical repository configuration uses [CFG-5.1]'s common effective settings
+assembler and final validation. An invalid historical configuration fails
+before baseline comparison. Git-blob lookup supplies bytes and source
+provenance only; it is not a second merge or validation policy.
+
 The current side includes tracked worktree/index changes and untracked Python
 files present in the accepted snapshot. A new file makes every current
 definition changed. A deleted definition has no patch-coverage obligation but
@@ -437,6 +451,14 @@ environment, external include, explicit CLI `--config`, CLI `--no-config`,
 CLI `--profile`, and CLI `--option` contributions to gate inputs as an
 invocation error. Only `format`, `output`, the root alias, and the
 `--require-ratchet REF` assertion may be operational invocation overrides.
+
+Coverage help must mark `--profile`, `--config`, `--no-config`, and
+`--option` as report-mode-only and name the ratchet recovery path: edit the
+repository-owned `[tool.backstitch.coverage]` table (or the equivalent
+standalone table), commit the policy change and any required acknowledgment,
+then rerun with `--require-ratchet REF`. A rejected ratchet override is a
+one-line exit-`2` error that names the exact rejected flag or dotted key and
+that same recovery path. It must never suggest another runtime override.
 
 The canonical policy is the following closed JSON mapping after normal config
 merge, path normalization, and profile selection. Tuple/set-like collections
@@ -614,6 +636,7 @@ _Implementation mapping_:
 - `backstitch/settings.py::CoverageFloor`
 - `backstitch/settings.py::CoverageSettings`
 - `backstitch/settings.py::_parse_coverage_settings`
+- `backstitch/coverage_application.py`
 - `backstitch/git_baseline.py`
 - `backstitch/intent_history.py`
 
@@ -673,6 +696,10 @@ implementation stays fixed while informative contract text is replaced by
 vacuous, overbroad, or non-discriminating prose. The ordinary current-source
 semantic packet and analyzer judge those cases; no proposal provenance,
 author label, or new packet schema is introduced.
+
+_Implementation mapping_:
+
+- `backstitch/coverage_application.py`
 
 ## 8. Drift Coverage [COV-8]
 
@@ -800,6 +827,12 @@ explicit CLI `--config`. Ratchet configuration must come from ordinary
 repository discovery, after which every discovered/include layer must meet the
 repository-owned-layer rule. This prevents selecting an alternate lax
 in-repository config whose baseline and current policy happen to match.
+The rejection text follows [COV-5]'s exact committed-config recovery rule.
+When `--format json` is present, invocation rejection still follows [SC-5]:
+stdout is empty and the line-safe remedy is on stderr. For a produced JSON
+coverage report, BSN009 and other policy findings retain the canonical changed
+key in structured fields and their `message` names the same repository-owned
+configuration and acknowledgment workflow; text output gives the same action.
 `--require-ratchet REF` is an operational assertion with no config equivalent:
 it returns exit `2` without producing a report unless the repository-owned
 effective mode is `ratchet` and its literal `ratchet_base` equals `REF`. It
@@ -866,11 +899,17 @@ and history-completeness state has a firing test. Executable gates also cover:
 
 _Implementation mapping_:
 
+- `backstitch/artifact_publication.py`
+- `backstitch/coverage_application.py`
 - `backstitch/intent_coverage_reporting.py`
 - `backstitch/git_baseline.py`
 
 ## Related Plans
 
+- `docs/plans/2026-07-29-usability-remediation-plan.md`
+  (active usability implementation plan; [COV-5] and [COV-9])
+- `docs/plans/2026-07-29-architecture-quality-remediation-plan.md`
+  (active implementation plan; [COV-5] and [COV-9])
 - `docs/plans/2026-07-28-intent-coverage-implementation-plan.md`
   (active implementation plan; spec promotion baseline)
 - `docs/plans/2026-07-15-agent-guided-evidence-cases-plan.md`

@@ -18,7 +18,7 @@ import hashlib
 import re
 import unicodedata
 from collections.abc import MutableMapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from backstitch.canonical import lf_line_count, lf_split
@@ -548,6 +548,424 @@ def parse_python_file(
     )
 
 
+@dataclass(slots=True)
+class _PythonProjectionState:
+    rel_path: str
+    parsed: ParsedModule
+    allow_unknown_codes: bool
+    is_test_file: bool
+    refs: list[CodeRef] = field(default_factory=list)
+    invariants: list[InvariantDeclaration] = field(default_factory=list)
+    binding_refs: list[InvariantBind] = field(default_factory=list)
+    marker_issues: list[Issue] = field(default_factory=list)
+    consumed_doc_lines: set[int] = field(default_factory=set)
+    noqa_diagnostics: list[SuppressionDiagnostic] = field(default_factory=list)
+    module_noqa: frozenset[str] = frozenset()
+    span_noqa: list[tuple[int, int, frozenset[str]]] = field(default_factory=list)
+    module_suppression_rules: tuple[SuppressionRule, ...] = ()
+    span_suppression_rules: list[tuple[int, int, SuppressionRule]] = field(
+        default_factory=list
+    )
+    definitions: dict[str, Definition] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.definitions = {item.qualname: item for item in self.parsed.definitions}
+
+    def emit(
+        self,
+        owner: str,
+        line_no: int,
+        text: str,
+        context: RefContext,
+    ) -> None:
+        for line_ref in _extract_line_refs(text):
+            self.refs.append(
+                CodeRef(
+                    path=self.rel_path,
+                    owner_symbol=owner,
+                    line=line_no,
+                    raw=text.strip(),
+                    spec_path=line_ref.spec_path,
+                    section_ids=line_ref.section_ids,
+                    anchor=line_ref.anchor,
+                    ranges=line_ref.ranges,
+                    ref_context=context,
+                )
+            )
+
+    def marker_issue(
+        self,
+        code: str,
+        line: int,
+        message: str,
+        *,
+        owner: str | None,
+        invariant_id: str | None,
+    ) -> None:
+        self.marker_issues.append(
+            Issue(
+                code=code,
+                severity=(
+                    "warning" if code == "INVARIANT_BINDING_NOT_TEST" else "error"
+                ),
+                path=self.rel_path,
+                line=line,
+                message=message,
+                symbol=owner,
+                invariant_id=invariant_id,
+            )
+        )
+
+    def concrete_tests(self, owner: str) -> list[Definition]:
+        definition = self.definitions.get(owner)
+        if not self.is_test_file or definition is None:
+            return []
+        if definition.kind in {
+            "function",
+            "async-function",
+        } and definition.name.startswith("test_"):
+            return [definition]
+        if definition.kind == "class":
+            return [
+                item
+                for item in self.parsed.definitions
+                if item.parent_qualname == definition.qualname
+                and item.parent_kind == "class"
+                and item.kind in {"function", "async-function"}
+                and item.name.startswith("test_")
+            ]
+        return []
+
+    def add_bindings(
+        self,
+        ids: tuple[str, ...],
+        owner: str,
+        marker_line: int,
+    ) -> None:
+        targets = self.concrete_tests(owner)
+        if not targets:
+            self.marker_issue(
+                "INVARIANT_BINDING_NOT_TEST",
+                marker_line,
+                "invariant binding marker is not attached to a concrete test definition",
+                owner=owner,
+                invariant_id=ids[0] if ids else None,
+            )
+            return
+        for invariant_id in ids:
+            for target in targets:
+                self.binding_refs.append(
+                    InvariantBind(
+                        invariant_id=invariant_id,
+                        test_path=self.rel_path,
+                        test_symbol=target.qualname,
+                        marker_line=marker_line,
+                        start_line=target.start_line,
+                        end_line=target.end_line,
+                    )
+                )
+
+    def owner_for_line(self, line_no: int) -> str:
+        best: str | None = None
+        best_size: int | None = None
+        for qualname, start, end in self.parsed.owner_spans:
+            if start <= line_no <= end:
+                size = end - start
+                if best_size is None or size < best_size:
+                    best, best_size = qualname, size
+        return best or "module"
+
+    def finish(self) -> ParsedPython:
+        return ParsedPython(
+            path=self.rel_path,
+            refs=tuple(self.refs),
+            issues=tuple(self.marker_issues),
+            module_noqa=self.module_noqa,
+            span_noqa=tuple(self.span_noqa),
+            noqa_diagnostics=tuple(self.noqa_diagnostics),
+            module_suppression_rules=self.module_suppression_rules,
+            span_suppression_rules=tuple(self.span_suppression_rules),
+            invariants=tuple(self.invariants),
+            binding_refs=tuple(self.binding_refs),
+        )
+
+
+def _project_python_doc_markers(state: _PythonProjectionState) -> None:
+    for candidate in state.parsed.doc_candidates:
+        physical_lines = _physical_doc_lines(candidate)
+        if candidate.node_type != "string" or candidate.text is None:
+            evaluated_has_marker = bool(
+                candidate.text
+                and any(_reserved_marker(line) for line in lf_split(candidate.text))
+            )
+            physical_has_marker = any(
+                _reserved_marker(line.text) for line in physical_lines
+            )
+            if evaluated_has_marker or physical_has_marker:
+                state.marker_issue(
+                    "INVARIANT_MARKER_INVALID",
+                    candidate.start_line,
+                    "invariant marker must be on a physical line in one non-interpolated string literal",
+                    owner=candidate.owner_qualname,
+                    invariant_id=_parsed_id(candidate.text or candidate.raw_text),
+                )
+                state.consumed_doc_lines.update(
+                    range(candidate.start_line, candidate.end_line + 1)
+                )
+            continue
+
+        index = 0
+        while index < len(physical_lines):
+            physical = physical_lines[index]
+            marker = _reserved_marker(physical.text)
+            if marker is None:
+                index += 1
+                continue
+            prefix, payload = marker
+            state.consumed_doc_lines.add(physical.line)
+            if physical.escaped_from_previous:
+                state.marker_issue(
+                    "INVARIANT_MARKER_INVALID",
+                    candidate.start_line,
+                    "escaped newline cannot create an invariant marker line",
+                    owner=candidate.owner_qualname,
+                    invariant_id=_parsed_id(payload),
+                )
+                index += 1
+                continue
+            if prefix == "Tests-invariant:":
+                ids = _parse_binding_ids(payload)
+                if ids is None:
+                    state.marker_issue(
+                        "INVARIANT_MARKER_INVALID",
+                        physical.line,
+                        "malformed Tests-invariant ID list",
+                        owner=candidate.owner_qualname,
+                        invariant_id=_parsed_id(payload),
+                    )
+                else:
+                    state.add_bindings(
+                        ids,
+                        candidate.owner_qualname,
+                        physical.line,
+                    )
+                index += 1
+                continue
+
+            declaration = _DECLARATION_RE.fullmatch(payload)
+            if declaration is None:
+                state.marker_issue(
+                    "INVARIANT_MARKER_INVALID",
+                    physical.line,
+                    "invariant declaration requires one valid ID and a statement",
+                    owner=candidate.owner_qualname,
+                    invariant_id=_parsed_id(payload),
+                )
+                index += 1
+                continue
+            segments = [declaration.group("statement").strip()]
+            continuation = index + 1
+            while continuation < len(physical_lines):
+                next_line = physical_lines[continuation]
+                if (
+                    not next_line.text.strip()
+                    or _reserved_marker(next_line.text) is not None
+                    or next_line.indent <= physical.indent
+                ):
+                    break
+                segments.append(next_line.text.strip())
+                state.consumed_doc_lines.add(next_line.line)
+                continuation += 1
+            state.invariants.append(
+                InvariantDeclaration(
+                    invariant_id=declaration.group("id"),
+                    statement="\n".join(segments),
+                    tier=("draft" if prefix == "Invariant (draft):" else "required"),
+                    declaration_kind="code",
+                    path=state.rel_path,
+                    line=physical.line,
+                    owner_symbol=(
+                        "<module>"
+                        if candidate.owner_qualname == "module"
+                        else candidate.owner_qualname
+                    ),
+                    section_id=None,
+                )
+            )
+            index = continuation
+
+
+def _project_python_doc_refs(state: _PythonProjectionState) -> None:
+    for doc_block in state.parsed.doc_blocks:
+        source_lines = (
+            (doc_block.start_line + offset, text_line)
+            for offset, text_line in enumerate(lf_split(doc_block.text))
+        )
+        for line_no, text_line in source_lines:
+            if line_no in state.consumed_doc_lines or _reserved_marker(text_line):
+                continue
+            if is_noqa_directive_line(text_line):
+                continue
+            context: RefContext = (
+                "asserted" if text_line.lstrip().startswith("Spec:") else "docstring"
+            )
+            state.emit(
+                doc_block.owner_qualname,
+                line_no,
+                text_line,
+                context,
+            )
+
+
+def _project_python_noqa(state: _PythonProjectionState) -> None:
+    source_markers = [
+        (doc.start_line + offset, source_line)
+        for doc in state.parsed.doc_blocks
+        for offset, source_line in enumerate(lf_split(doc.text))
+    ]
+    source_markers.extend(
+        (comment.line, comment.text) for comment in state.parsed.comment_nodes
+    )
+    for line_no, source_line in source_markers:
+        lowered = source_line.strip().lower()
+        if "suppression-declaration" in lowered and lowered.startswith(
+            ("_traceability:", "backstitch:")
+        ):
+            state.noqa_diagnostics.append(
+                SuppressionDiagnostic(
+                    code="SUPPRESSION_INVALID_SYNTAX",
+                    path=state.rel_path,
+                    line=line_no,
+                    message=(
+                        f"{state.rel_path}:{line_no}: suppression-declaration is not "
+                        "valid in Python source"
+                    ),
+                )
+            )
+    module_doc = next(
+        (doc for doc in state.parsed.doc_blocks if doc.owner_qualname == "module"),
+        None,
+    )
+    if module_doc is None:
+        return
+    module_directives, doc_warnings = parse_noqa_directives(
+        module_doc.text,
+        allow_unknown=state.allow_unknown_codes,
+        location=f"{state.rel_path} module docstring",
+        path=state.rel_path,
+        line=module_doc.start_line,
+    )
+    state.noqa_diagnostics.extend(doc_warnings)
+    state.module_noqa = frozenset(
+        code for directive in module_directives for code in directive.codes
+    )
+    state.module_suppression_rules = tuple(
+        SuppressionRule(
+            mechanism="ignore",
+            provenance="inline_code",
+            path=state.rel_path,
+            sections=(),
+            codes=tuple(sorted(directive.codes)),
+            declaration=directive.declaration,
+            origin=SuppressionOrigin(
+                source=state.rel_path,
+                line=directive.line or module_doc.start_line,
+            ),
+        )
+        for directive in module_directives
+    )
+
+
+def _project_python_comments(state: _PythonProjectionState) -> None:
+    statement_spans = list(state.parsed.statement_spans)
+    for comment in state.parsed.comment_nodes:
+        line_no = comment.line
+        comment_text = comment.text
+        comment_directives, comment_warnings = parse_noqa_directives(
+            comment_text,
+            allow_unknown=state.allow_unknown_codes,
+            location=f"{state.rel_path}:{line_no}",
+            path=state.rel_path,
+            line=line_no,
+        )
+        state.noqa_diagnostics.extend(comment_warnings)
+        codes = frozenset(
+            code for directive in comment_directives for code in directive.codes
+        )
+        if codes:
+            span = _next_statement_span(line_no, statement_spans)
+            if span is not None:
+                state.span_noqa.append((span[0], span[1], codes))
+                state.span_suppression_rules.extend(
+                    (
+                        span[0],
+                        span[1],
+                        SuppressionRule(
+                            mechanism="ignore",
+                            provenance="inline_code",
+                            path=state.rel_path,
+                            sections=(),
+                            codes=tuple(sorted(directive.codes)),
+                            declaration=directive.declaration,
+                            origin=SuppressionOrigin(
+                                source=state.rel_path,
+                                line=directive.line or line_no,
+                            ),
+                        ),
+                    )
+                    for directive in comment_directives
+                )
+            continue
+        marker = _reserved_marker(comment_text)
+        if marker is not None:
+            prefix, payload = marker
+            if prefix != "Tests-invariant:":
+                state.marker_issue(
+                    "INVARIANT_MARKER_INVALID",
+                    line_no,
+                    "Invariant declarations are not allowed in comments",
+                    owner=state.owner_for_line(line_no),
+                    invariant_id=_parsed_id(payload),
+                )
+                continue
+            ids = _parse_binding_ids(payload)
+            if ids is None:
+                state.marker_issue(
+                    "INVARIANT_MARKER_INVALID",
+                    line_no,
+                    "malformed Tests-invariant ID list",
+                    owner=state.owner_for_line(line_no),
+                    invariant_id=_parsed_id(payload),
+                )
+                continue
+            attached = next(
+                (
+                    item
+                    for item in state.parsed.definitions
+                    if item.attachment_line == line_no + 1
+                    and item.indent_column == comment.column
+                ),
+                None,
+            )
+            if attached is None:
+                state.marker_issue(
+                    "INVARIANT_BINDING_NOT_TEST",
+                    line_no,
+                    "invariant binding comment is not immediately attached to a definition",
+                    owner=state.owner_for_line(line_no),
+                    invariant_id=ids[0],
+                )
+            else:
+                state.add_bindings(ids, attached.qualname, line_no)
+            continue
+        state.emit(
+            state.owner_for_line(line_no),
+            line_no,
+            comment_text,
+            "comment",
+        )
+
+
 def parse_python_bytes(
     source_bytes: bytes,
     rel_path: str,
@@ -578,393 +996,18 @@ def parse_python_bytes(
         )
         return ParsedPython(path=rel_path, refs=(), issues=(issue,))
 
-    refs: list[CodeRef] = []
-    invariants: list[InvariantDeclaration] = []
-    binding_refs: list[InvariantBind] = []
-    marker_issues: list[Issue] = []
-    consumed_doc_lines: set[int] = set()
-
-    def emit(owner: str, line_no: int, text: str, context: RefContext) -> None:
-        for line_ref in _extract_line_refs(text):
-            refs.append(
-                CodeRef(
-                    path=rel_path,
-                    owner_symbol=owner,
-                    line=line_no,
-                    raw=text.strip(),
-                    spec_path=line_ref.spec_path,
-                    section_ids=line_ref.section_ids,
-                    anchor=line_ref.anchor,
-                    ranges=line_ref.ranges,
-                    ref_context=context,
-                )
-            )
-
-    definitions = {item.qualname: item for item in parsed.definitions}
-
-    def marker_issue(
-        code: str,
-        line: int,
-        message: str,
-        *,
-        owner: str | None,
-        invariant_id: str | None,
-    ) -> None:
-        marker_issues.append(
-            Issue(
-                code=code,
-                severity=(
-                    "warning" if code == "INVARIANT_BINDING_NOT_TEST" else "error"
-                ),
-                path=rel_path,
-                line=line,
-                message=message,
-                symbol=owner,
-                invariant_id=invariant_id,
-            )
-        )
-
-    def concrete_tests(owner: str) -> list[Definition]:
-        definition = definitions.get(owner)
-        if not is_test_file or definition is None:
-            return []
-        if definition.kind in {
-            "function",
-            "async-function",
-        } and definition.name.startswith("test_"):
-            return [definition]
-        if definition.kind == "class":
-            return [
-                item
-                for item in parsed.definitions
-                if item.parent_qualname == definition.qualname
-                and item.parent_kind == "class"
-                and item.kind in {"function", "async-function"}
-                and item.name.startswith("test_")
-            ]
-        return []
-
-    def add_bindings(ids: tuple[str, ...], owner: str, marker_line: int) -> None:
-        targets = concrete_tests(owner)
-        if not targets:
-            marker_issue(
-                "INVARIANT_BINDING_NOT_TEST",
-                marker_line,
-                "invariant binding marker is not attached to a concrete test definition",
-                owner=owner,
-                invariant_id=ids[0] if ids else None,
-            )
-            return
-        for invariant_id in ids:
-            for target in targets:
-                binding_refs.append(
-                    InvariantBind(
-                        invariant_id=invariant_id,
-                        test_path=rel_path,
-                        test_symbol=target.qualname,
-                        marker_line=marker_line,
-                        start_line=target.start_line,
-                        end_line=target.end_line,
-                    )
-                )
-
-    for candidate in parsed.doc_candidates:
-        physical_lines = _physical_doc_lines(candidate)
-        if candidate.node_type != "string" or candidate.text is None:
-            evaluated_has_marker = bool(
-                candidate.text
-                and any(_reserved_marker(line) for line in lf_split(candidate.text))
-            )
-            physical_has_marker = any(
-                _reserved_marker(line.text) for line in physical_lines
-            )
-            if evaluated_has_marker or physical_has_marker:
-                marker_issue(
-                    "INVARIANT_MARKER_INVALID",
-                    candidate.start_line,
-                    "invariant marker must be on a physical line in one non-interpolated string literal",
-                    owner=candidate.owner_qualname,
-                    invariant_id=_parsed_id(candidate.text or candidate.raw_text),
-                )
-                consumed_doc_lines.update(
-                    range(candidate.start_line, candidate.end_line + 1)
-                )
-            continue
-
-        index = 0
-        while index < len(physical_lines):
-            physical = physical_lines[index]
-            marker = _reserved_marker(physical.text)
-            if marker is None:
-                index += 1
-                continue
-            prefix, payload = marker
-            consumed_doc_lines.add(physical.line)
-            if physical.escaped_from_previous:
-                marker_issue(
-                    "INVARIANT_MARKER_INVALID",
-                    candidate.start_line,
-                    "escaped newline cannot create an invariant marker line",
-                    owner=candidate.owner_qualname,
-                    invariant_id=_parsed_id(payload),
-                )
-                index += 1
-                continue
-            if prefix == "Tests-invariant:":
-                ids = _parse_binding_ids(payload)
-                if ids is None:
-                    marker_issue(
-                        "INVARIANT_MARKER_INVALID",
-                        physical.line,
-                        "malformed Tests-invariant ID list",
-                        owner=candidate.owner_qualname,
-                        invariant_id=_parsed_id(payload),
-                    )
-                else:
-                    add_bindings(ids, candidate.owner_qualname, physical.line)
-                index += 1
-                continue
-
-            declaration = _DECLARATION_RE.fullmatch(payload)
-            if declaration is None:
-                marker_issue(
-                    "INVARIANT_MARKER_INVALID",
-                    physical.line,
-                    "invariant declaration requires one valid ID and a statement",
-                    owner=candidate.owner_qualname,
-                    invariant_id=_parsed_id(payload),
-                )
-                index += 1
-                continue
-            segments = [declaration.group("statement").strip()]
-            continuation = index + 1
-            while continuation < len(physical_lines):
-                next_line = physical_lines[continuation]
-                if (
-                    not next_line.text.strip()
-                    or _reserved_marker(next_line.text) is not None
-                    or next_line.indent <= physical.indent
-                ):
-                    break
-                segments.append(next_line.text.strip())
-                consumed_doc_lines.add(next_line.line)
-                continuation += 1
-            invariants.append(
-                InvariantDeclaration(
-                    invariant_id=declaration.group("id"),
-                    statement="\n".join(segments),
-                    tier=("draft" if prefix == "Invariant (draft):" else "required"),
-                    declaration_kind="code",
-                    path=rel_path,
-                    line=physical.line,
-                    owner_symbol=(
-                        "<module>"
-                        if candidate.owner_qualname == "module"
-                        else candidate.owner_qualname
-                    ),
-                    section_id=None,
-                )
-            )
-            index = continuation
-
-    # Doc blocks: module first, then each class/function owner.
-    for doc_block in parsed.doc_blocks:
-        source_lines = (
-            (doc_block.start_line + offset, text_line)
-            for offset, text_line in enumerate(lf_split(doc_block.text))
-        )
-        for line_no, text_line in source_lines:
-            if line_no in consumed_doc_lines or _reserved_marker(text_line):
-                continue
-            # A declaration-bearing noqa contains a spec path by design, but
-            # that path is suppression metadata, not an asserted/prose code
-            # reference. The canonical directive parser below owns it.
-            if is_noqa_directive_line(text_line):
-                continue
-            # [SC-11] context: a `Spec:` marker line ASSERTS a trace edge;
-            # any other docstring line is prose. The distinction is made
-            # here, at parse time, never re-inferred downstream.
-            context: RefContext = (
-                "asserted" if text_line.lstrip().startswith("Spec:") else "docstring"
-            )
-            emit(
-                doc_block.owner_qualname,
-                line_no,
-                text_line,
-                context,
-            )
-
-    # [EXC-5] module-docstring noqa: file-scoped suppression codes.
-    noqa_diagnostics: list[SuppressionDiagnostic] = []
-    source_markers = [
-        (doc.start_line + offset, source_line)
-        for doc in parsed.doc_blocks
-        for offset, source_line in enumerate(lf_split(doc.text))
-    ]
-    source_markers.extend(
-        (comment.line, comment.text) for comment in parsed.comment_nodes
+    state = _PythonProjectionState(
+        rel_path=rel_path,
+        parsed=parsed,
+        allow_unknown_codes=allow_unknown_codes,
+        is_test_file=is_test_file,
     )
-    for line_no, source_line in source_markers:
-        lowered = source_line.strip().lower()
-        if "suppression-declaration" in lowered and lowered.startswith(
-            ("_traceability:", "backstitch:")
-        ):
-            noqa_diagnostics.append(
-                SuppressionDiagnostic(
-                    code="SUPPRESSION_INVALID_SYNTAX",
-                    path=rel_path,
-                    line=line_no,
-                    message=(
-                        f"{rel_path}:{line_no}: suppression-declaration is not "
-                        "valid in Python source"
-                    ),
-                )
-            )
-    module_doc = next(
-        (doc for doc in parsed.doc_blocks if doc.owner_qualname == "module"), None
-    )
-    if module_doc is not None:
-        module_directives, doc_warnings = parse_noqa_directives(
-            module_doc.text,
-            allow_unknown=allow_unknown_codes,
-            location=f"{rel_path} module docstring",
-            path=rel_path,
-            line=module_doc.start_line,
-        )
-        noqa_diagnostics.extend(doc_warnings)
-        module_noqa = frozenset(
-            code for directive in module_directives for code in directive.codes
-        )
-        module_suppression_rules = tuple(
-            SuppressionRule(
-                mechanism="ignore",
-                provenance="inline_code",
-                path=rel_path,
-                sections=(),
-                codes=tuple(sorted(directive.codes)),
-                declaration=directive.declaration,
-                origin=SuppressionOrigin(
-                    source=rel_path,
-                    line=directive.line or module_doc.start_line,
-                ),
-            )
-            for directive in module_directives
-        )
-    else:
-        module_noqa = frozenset()
-        module_suppression_rules = ()
 
-    # Comments, with the innermost enclosing owner.
-    def owner_for_line(line_no: int) -> str:
-        best: str | None = None
-        best_size: int | None = None
-        for qualname, start, end in parsed.owner_spans:
-            if start <= line_no <= end:
-                size = end - start
-                if best_size is None or size < best_size:
-                    best, best_size = qualname, size
-        return best or "module"
+    _project_python_doc_markers(state)
 
-    statement_spans = list(parsed.statement_spans)
-    span_noqa: list[tuple[int, int, frozenset[str]]] = []
-    span_suppression_rules: list[tuple[int, int, SuppressionRule]] = []
-    for comment in parsed.comment_nodes:
-        line_no = comment.line
-        comment_text = comment.text
-        comment_directives, comment_warnings = parse_noqa_directives(
-            comment_text,
-            allow_unknown=allow_unknown_codes,
-            location=f"{rel_path}:{line_no}",
-            path=rel_path,
-            line=line_no,
-        )
-        noqa_diagnostics.extend(comment_warnings)
-        codes = frozenset(
-            code for directive in comment_directives for code in directive.codes
-        )
-        if codes:
-            # [EXC-5] comment form: next statement only, never file-wide.
-            span = _next_statement_span(line_no, statement_spans)
-            if span is not None:
-                span_noqa.append((span[0], span[1], codes))
-                span_suppression_rules.extend(
-                    (
-                        span[0],
-                        span[1],
-                        SuppressionRule(
-                            mechanism="ignore",
-                            provenance="inline_code",
-                            path=rel_path,
-                            sections=(),
-                            codes=tuple(sorted(directive.codes)),
-                            declaration=directive.declaration,
-                            origin=SuppressionOrigin(
-                                source=rel_path,
-                                line=directive.line or line_no,
-                            ),
-                        ),
-                    )
-                    for directive in comment_directives
-                )
-            continue
-        marker = _reserved_marker(comment_text)
-        if marker is not None:
-            prefix, payload = marker
-            if prefix != "Tests-invariant:":
-                marker_issue(
-                    "INVARIANT_MARKER_INVALID",
-                    line_no,
-                    "Invariant declarations are not allowed in comments",
-                    owner=owner_for_line(line_no),
-                    invariant_id=_parsed_id(payload),
-                )
-                continue
-            ids = _parse_binding_ids(payload)
-            if ids is None:
-                marker_issue(
-                    "INVARIANT_MARKER_INVALID",
-                    line_no,
-                    "malformed Tests-invariant ID list",
-                    owner=owner_for_line(line_no),
-                    invariant_id=_parsed_id(payload),
-                )
-                continue
-            attached = next(
-                (
-                    item
-                    for item in parsed.definitions
-                    if item.attachment_line == line_no + 1
-                    and item.indent_column == comment.column
-                ),
-                None,
-            )
-            if attached is None:
-                marker_issue(
-                    "INVARIANT_BINDING_NOT_TEST",
-                    line_no,
-                    "invariant binding comment is not immediately attached to a definition",
-                    owner=owner_for_line(line_no),
-                    invariant_id=ids[0],
-                )
-            else:
-                add_bindings(ids, attached.qualname, line_no)
-            continue
-        emit(
-            owner_for_line(line_no),
-            line_no,
-            comment_text,
-            "comment",
-        )
+    _project_python_doc_refs(state)
 
-    return ParsedPython(
-        path=rel_path,
-        refs=tuple(refs),
-        issues=tuple(marker_issues),
-        module_noqa=module_noqa,
-        span_noqa=tuple(span_noqa),
-        noqa_diagnostics=tuple(noqa_diagnostics),
-        module_suppression_rules=module_suppression_rules,
-        span_suppression_rules=tuple(span_suppression_rules),
-        invariants=tuple(invariants),
-        binding_refs=tuple(binding_refs),
-    )
+    _project_python_noqa(state)
+
+    _project_python_comments(state)
+    return state.finish()

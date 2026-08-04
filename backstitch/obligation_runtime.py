@@ -35,7 +35,9 @@ from backstitch.obligations import (
     SnapshotIdentity,
     build_obligation_inventory,
     is_unaddressable_issue,
+    resolve_evidence_atom,
 )
+from backstitch.operation_progress import OperationProgress
 from backstitch.repository_snapshot import (
     RepositorySnapshot,
     SnapshotAlgorithms,
@@ -49,7 +51,7 @@ from backstitch.settings import BackstitchSettings
 ALGORITHMS = SnapshotAlgorithms(
     snapshot_algorithm_version=1,
     obligation_algorithm_version=1,
-    discovery_algorithm_version=1,
+    discovery_algorithm_version=2,
     packet_contract_version=3,
     normalization_version=1,
 )
@@ -93,6 +95,8 @@ class ObligationRuntime:
         obligation: ObligationRecord,
         *,
         prepared_catalog: PreparedEvidenceCatalog | None = None,
+        progress: OperationProgress | None = None,
+        emit_progress: bool = True,
     ) -> tuple[EvidenceCandidate, ...]:
         """Return the complete deterministic candidate universe."""
 
@@ -110,15 +114,24 @@ class ObligationRuntime:
                 obligation.obligation_id, ""
             ),
             prepared_catalog=prepared_catalog,
+            progress=progress,
+            emit_progress=emit_progress,
         )
 
-    def prepare_discovery_catalog(self) -> PreparedEvidenceCatalog:
+    def prepare_discovery_catalog(
+        self,
+        *,
+        progress: OperationProgress | None = None,
+        emit_progress: bool = True,
+    ) -> PreparedEvidenceCatalog:
         """Parse snapshot-owned Python input once for a multi-obligation read."""
 
         return prepare_evidence_catalog(
             self.snapshot,
             self.profile,
             self.settings.obligations,
+            progress=progress,
+            emit_progress=emit_progress,
         )
 
 
@@ -212,9 +225,17 @@ def atomic_invariant_targets(
 
     targets: set[tuple[str, str | None]] = set()
     for edge in report.edges:
+        if edge.kind != "mapping":
+            continue
+        atom = resolve_evidence_atom(
+            path=edge.code_path,
+            symbol=edge.code_symbol,
+            relation_kinds=("invariant_bind",),
+            reciprocity_state="one_sided",
+            test_roots=profile.test_roots,
+        )
         if (
-            edge.kind != "mapping"
-            or any(_is_under(edge.code_path, root) for root in profile.test_roots)
+            atom.source_role != "implementation"
             or snapshot.path_kind(edge.code_path) != "regular_file"
             or PurePosixPath(edge.code_path).suffix != ".py"
         ):
@@ -453,6 +474,7 @@ def capture_obligation_snapshot(
     *,
     operational_exclusions: tuple[str, ...] = (),
     markdown_parse_memo: MarkdownParseMemo | None = None,
+    progress: OperationProgress | None = None,
 ) -> RepositorySnapshot:
     """Capture and converge the exact declared-target set within one ceiling."""
 
@@ -474,6 +496,7 @@ def capture_obligation_snapshot(
             allow_unknown_codes=settings.allow_unknown_keys,
             markdown_parse_memo=markdown_parse_memo,
         ),
+        progress=progress,
     )
     if not _captured_config_identities_match(snapshot, config_identities):
         raise SnapshotCaptureError(
@@ -490,6 +513,7 @@ def build_obligation_runtime(
     settings: BackstitchSettings,
     *,
     operational_exclusions: tuple[str, ...] = (),
+    progress: OperationProgress | None = None,
 ) -> ObligationRuntime:
     """Capture and resolve the one runtime shared by reads and packet gates."""
 
@@ -502,6 +526,7 @@ def build_obligation_runtime(
         settings,
         operational_exclusions=operational_exclusions,
         markdown_parse_memo=markdown_parse_memo,
+        progress=progress,
     )
     return build_obligation_runtime_from_snapshot(
         snapshot,

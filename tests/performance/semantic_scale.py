@@ -288,8 +288,18 @@ def _fixture_config(shape: ScaleShape) -> bytes:
         'backend_id = "llm"\n'
         'plugin_id = "performance-fixture"\n'
         'plugin_distribution_name = "llm"\n'
-        'model = "semantic-scale-fixture"\n'
+        'model = "pkg:service/backstitch.test/semantic-scale-fixture"\n'
+        'adapter_model_id = "semantic-scale-fixture"\n'
         'model_revision = "1"\n'
+        "capability_schema_version = 1\n"
+        'capability_revision = "semantic-scale-fixture-v1"\n'
+        "maximum_input_bytes = 500000000\n"
+        "request_constraints = { "
+        'json_mode = { presence = "required", allowed_values = ["require"] }, '
+        'temperature = { presence = "required", allowed_values = [0.0] }, '
+        'seed = { presence = "required", minimum = 0, maximum = 2147483647 }, '
+        'max_tokens = { presence = "required", minimum = 1, maximum = 16384 }'
+        " }\n"
         "input_cost_microusd_per_million_tokens = 0\n"
         "output_cost_microusd_per_million_tokens = 0\n"
         "input_token_overhead = 0\n"

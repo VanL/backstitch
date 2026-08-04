@@ -15,7 +15,9 @@ from types import ModuleType
 import pytest
 from openai import OpenAIError
 
-from backstitch.analysis_llm import default_adapter
+from backstitch.analysis_llm import default_provider_adapter
+from backstitch.semantic_identity import ProviderIdentity, RequestIdentity
+from backstitch.settings import resolve_config
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -34,21 +36,114 @@ def _load_live_module() -> ModuleType:
 live_llm = _load_live_module()
 
 
+@pytest.mark.parametrize(
+    (
+        "adapter_model_id",
+        "stable_model_id",
+        "temperature",
+        "max_tokens",
+        "input_rate",
+        "output_rate",
+    ),
+    (
+        (
+            "gpt-5.4-mini-2026-03-17",
+            "pkg:service/openai.com/gpt-5.4-mini",
+            0.0,
+            512,
+            750_000,
+            4_500_000,
+        ),
+        (
+            "gpt-5.5-2026-04-23",
+            "pkg:service/openai.com/gpt-5.5",
+            1.0,
+            1_024,
+            5_000_000,
+            30_000_000,
+        ),
+    ),
+)
+def test_cloud_live_descriptor_is_complete_and_costed(
+    tmp_path: Path,
+    adapter_model_id: str,
+    stable_model_id: str,
+    temperature: float,
+    max_tokens: int,
+    input_rate: int,
+    output_rate: int,
+) -> None:
+    config = tmp_path / ".backstitch.toml"
+    descriptor = live_llm._live_descriptor_lines(
+        kind="openai",
+        adapter_model_id=adapter_model_id,
+    )
+    config.write_text(
+        "[analyze]\n"
+        + "\n".join(descriptor)
+        + '\njson_mode = "require"\n'
+        + 'cache_path = ".backstitch/semantic-cache"\n',
+        encoding="utf-8",
+    )
+
+    analyze = resolve_config(
+        tmp_path,
+        explicit=config,
+        environment={},
+    ).analyze
+
+    assert analyze.model == stable_model_id
+    assert analyze.adapter_model_id == adapter_model_id
+    assert analyze.plugin_id == "openai"
+    assert analyze.model_revision == adapter_model_id
+    assert analyze.capability_schema_version == 1
+    assert analyze.capability_revision
+    assert analyze.maximum_input_bytes == 1_600_000
+    assert analyze.temperature == temperature
+    assert analyze.max_tokens == max_tokens
+    assert analyze.request_constraints.temperature.allowed_values == (temperature,)
+    assert analyze.maximum_estimated_cost_microusd == 100_000
+    assert analyze.input_cost_microusd_per_million_tokens == input_rate
+    assert analyze.output_cost_microusd_per_million_tokens == output_rate
+    assert analyze.cost_rate_source
+
+
 def _local_packet(packet_id: str) -> dict[str, object]:
     suffix = packet_id.rsplit(".", 1)[-1]
     return {
         "packet_id": packet_id,
         "kind": "invariant",
+        "invariant_id": f"INV.RES.{suffix}",
+        "tier": "required",
+        "statement": "The resolver preserves the requested contract.",
+        "declaration": {
+            "kind": "code",
+            "path": "backstitch/resolver.py",
+            "line": 10,
+            "symbol": "resolve",
+            "section_id": None,
+            "start_line": 10,
+            "end_line": 10,
+            "excerpt": "Invariant: the resolver preserves the requested contract.",
+        },
         "targets": [
-            {"path": "backstitch/resolver.py", "start_line": 10, "snippet": "x"}
+            {
+                "path": "backstitch/resolver.py",
+                "symbol": "resolve",
+                "start_line": 10,
+                "snippet": "x",
+            }
         ],
         "binding_tests": [
             {
                 "path": f"tests/test_resolver_{suffix}.py",
+                "symbol": "test_resolve",
                 "start_line": 20,
                 "snippet": "assert x",
             }
         ],
+        "issues": [],
+        "packet_warnings": [],
     }
 
 
@@ -482,7 +577,7 @@ def test_local_llm_counting_proxy_rejects_malformed_nonstream_completion() -> No
         thread.join(timeout=5)
 
 
-def test_local_llm_proxy_allows_one_upstream_attempt_through_default_adapter(
+def test_local_llm_proxy_allows_one_upstream_attempt_through_provider_adapter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -518,7 +613,26 @@ def test_local_llm_proxy_allows_one_upstream_attempt_through_default_adapter(
             )
             proxy.start_analyze_phase()
             packet = _local_packet("invariant::INV.RES.1")
-            adapter = default_adapter("backstitch-local")
+            packet["packet_contract_version"] = 3
+            adapter = default_provider_adapter(
+                "backstitch-local",
+                provider_identity=ProviderIdentity(
+                    "llm",
+                    "openai",
+                    "backstitch-local",
+                    "test-revision",
+                    "backstitch.llm",
+                    1,
+                    "test",
+                    "llm",
+                    "test",
+                ),
+                request_identity=RequestIdentity("require", 0.0, 42, 128),
+                response_schema_builder=lambda _prompt: {
+                    "type": "object",
+                    "additionalProperties": True,
+                },
+            )
 
             with pytest.raises(OpenAIError):
                 adapter("review\n\n" + json.dumps(packet))

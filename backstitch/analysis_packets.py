@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+from dataclasses import dataclass
 from functools import partial
 from typing import Any, Literal, cast
 
@@ -24,12 +25,17 @@ from backstitch.markdown_specs import project_section_packet_requirement
 from backstitch.models import SuppressionDecision, issue_sort_key
 from backstitch.obligation_runtime import ALGORITHMS, ObligationRuntime
 from backstitch.obligations import ObligationRecord, suppression_rule_row
+from backstitch.operation_progress import OperationProgress
 from backstitch.semantic_packets import (
     ISSUE_FIELDS,
+    SemanticPacketKind,
+    model_request_bytes,
+    prompt_instruction_bytes,
     semantic_packet_hash,
 )
 
 PacketKind = Literal["section", "invariant", "suppression", "all"]
+PacketPlanStatus = Literal["complete", "over_budget"]
 
 
 _SOURCE_ROLE_ORDER = {"implementation": 0, "test": 1, "binding_test": 2}
@@ -75,8 +81,113 @@ class SourceAlignedPacketError(ValueError):
         self.code = code
 
 
+@dataclass(frozen=True, slots=True)
+class PacketContribution:
+    """Exact retained bytes and accounting for one measured packet."""
+
+    packet_id: str
+    kind: str
+    packet_byte_count: int
+    request_byte_count: int
+    requirement_byte_count: int
+    declared_evidence_byte_count: int
+    counterevidence_byte_count: int
+    packet_line_bytes: bytes
+    model_request_bytes: bytes
+    packet: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class PacketPlan:
+    """One authoritative complete plan or truthful measured prefix."""
+
+    status: PacketPlanStatus
+    complete: bool
+    crossed_ceiling: str | None
+    measured_packet_count: int
+    unmeasured_packet_count: int
+    measured_packet_bytes: int
+    measured_prompt_bytes: int
+    maximum_request_bytes: int
+    first_crossing_packet_id: str | None
+    contributions: tuple[PacketContribution, ...]
+
+    @property
+    def packets(self) -> tuple[dict[str, Any], ...]:
+        if not self.complete:
+            raise SourceAlignedPacketError(
+                "PACKET_PLAN_INCOMPLETE",
+                "an over-budget packet plan cannot be replayed or published",
+            )
+        return tuple(item.packet for item in self.contributions)
+
+    @property
+    def packet_jsonl(self) -> bytes:
+        if not self.complete:
+            raise SourceAlignedPacketError(
+                "PACKET_PLAN_INCOMPLETE",
+                "an over-budget packet plan cannot be replayed or published",
+            )
+        return b"".join(item.packet_line_bytes for item in self.contributions)
+
+    def to_summary(self) -> dict[str, object]:
+        if self.complete:
+            return {
+                "status": "complete",
+                "complete": True,
+                "packet_count": self.measured_packet_count,
+                "packet_bytes": self.measured_packet_bytes,
+                "aggregate_prompt_bytes": self.measured_prompt_bytes,
+                "maximum_request_bytes": self.maximum_request_bytes,
+            }
+        contributors = sorted(
+            self.contributions,
+            key=lambda item: (
+                -(
+                    item.request_byte_count
+                    if self.crossed_ceiling
+                    in {"maximum_prompt_bytes", "maximum_input_bytes"}
+                    else item.packet_byte_count
+                ),
+                item.packet_id,
+            ),
+        )[:10]
+        return {
+            "status": "over_budget",
+            "complete": False,
+            "crossed_ceiling": self.crossed_ceiling,
+            "measured_packet_count": self.measured_packet_count,
+            "unmeasured_packet_count": self.unmeasured_packet_count,
+            "measured_packet_bytes": self.measured_packet_bytes,
+            "measured_prompt_bytes": self.measured_prompt_bytes,
+            "first_crossing_packet_id": self.first_crossing_packet_id,
+            "top_measured_contributors": [
+                {
+                    "packet_id": item.packet_id,
+                    "kind": item.kind,
+                    "packet_byte_count": item.packet_byte_count,
+                    "request_byte_count": item.request_byte_count,
+                }
+                for item in contributors
+            ],
+        }
+
+
 def _receipt_hash(receipt: object) -> str:
     return hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
+
+
+def _source_region_identity(
+    receipt: dict[str, object],
+) -> tuple[str, int, int, str]:
+    """Return discovery-v2 visible-source identity from one source receipt."""
+
+    return (
+        cast(str, receipt["path"]),
+        cast(int, receipt["start_line"]),
+        cast(int, receipt["end_line"]),
+        cast(str, receipt["raw_sha256"]),
+    )
 
 
 def _canonical_span_text(text: str) -> str:
@@ -328,6 +439,7 @@ def _compile_source_aligned_packet(
     runtime: ObligationRuntime,
     obligation: ObligationRecord,
     prepared_catalog: PreparedEvidenceCatalog,
+    progress: OperationProgress | None,
 ) -> dict[str, Any]:
     declared_items = [dict(item) for item in runtime.evidence_summary(obligation)]
     declared_sources = _unique_rows(
@@ -348,11 +460,16 @@ def _compile_source_aligned_packet(
             }
         )
     declared_regions = _merge_declared_regions(declared_atoms)
-    declared_receipts = {str(source["receipt_hash"]) for source in declared_sources}
+    declared_region_identities = {
+        _source_region_identity(cast(dict[str, object], item["receipt"]))
+        for item in declared_items
+    }
 
     candidates = runtime.discover_candidates(
         obligation,
         prepared_catalog=prepared_catalog,
+        progress=progress,
+        emit_progress=False,
     )
     counter_atoms: list[dict[str, object]] = []
     candidate_rows: list[dict[str, object]] = []
@@ -364,7 +481,8 @@ def _compile_source_aligned_packet(
             },
             key=_RELATION_INDEX.__getitem__,
         )
-        receipt_hash = _receipt_hash(candidate.receipt.to_row())
+        candidate_receipt = candidate.receipt.to_row()
+        receipt_hash = _receipt_hash(candidate_receipt)
         source_row: dict[str, object] = {
             "candidate_id": candidate.candidate_id,
             "candidate_kind": candidate.candidate_kind,
@@ -374,7 +492,7 @@ def _compile_source_aligned_packet(
             "relation_kinds": relations,
         }
         candidate_rows.append(source_row)
-        if candidate.trace_state == "declared" and receipt_hash in declared_receipts:
+        if _source_region_identity(candidate_receipt) in declared_region_identities:
             continue
         source = get_candidate_source(candidate)
         counter_atoms.append(
@@ -695,13 +813,69 @@ def _compile_suppression_packet(
     return packet
 
 
-def generate_source_aligned_packets(
+def _packet_contribution(packet: dict[str, Any]) -> PacketContribution:
+    kind = cast(SemanticPacketKind, str(packet["kind"]))
+    line = canonical_json_bytes(packet) + b"\n"
+    request = model_request_bytes(
+        packet,
+        instruction_bytes=prompt_instruction_bytes(kind),
+    )
+
+    def projected_size(field: str) -> int:
+        value = packet.get(field, [])
+        return len(canonical_json_bytes(value))
+
+    return PacketContribution(
+        packet_id=str(packet["packet_id"]),
+        kind=kind,
+        packet_byte_count=len(line),
+        request_byte_count=len(request),
+        requirement_byte_count=projected_size("requirement"),
+        declared_evidence_byte_count=projected_size("declared_evidence"),
+        counterevidence_byte_count=projected_size("counterevidence"),
+        packet_line_bytes=line,
+        model_request_bytes=request,
+        packet=packet,
+    )
+
+
+def _crossed_ceiling(
+    *,
+    contribution: PacketContribution,
+    packet_count: int,
+    packet_bytes: int,
+    prompt_bytes: int,
+    maximum_packets: int | None,
+    maximum_packet_bytes: int,
+    maximum_prompt_bytes: int | None,
+    maximum_input_bytes: int | None,
+) -> str | None:
+    if maximum_packets not in (None, 0) and packet_count > maximum_packets:
+        return "maximum_packets"
+    if packet_bytes > maximum_packet_bytes:
+        return "maximum_packet_bytes"
+    if maximum_prompt_bytes not in (None, 0) and prompt_bytes > maximum_prompt_bytes:
+        return "maximum_prompt_bytes"
+    if (
+        maximum_input_bytes is not None
+        and contribution.request_byte_count > maximum_input_bytes
+    ):
+        return "maximum_input_bytes"
+    return None
+
+
+def plan_source_aligned_packets(
     runtime: ObligationRuntime,
     *,
     require_complete_corpus: bool = True,
     kind: PacketKind = "all",
-) -> list[dict[str, Any]]:
-    """Compile the complete current executable corpus from one runtime."""
+    maximum_packets: int | None = None,
+    maximum_prompt_bytes: int | None = None,
+    maximum_input_bytes: int | None = None,
+    continue_after_budget: bool = False,
+    progress: OperationProgress | None = None,
+) -> PacketPlan:
+    """Measure and retain the only packet bytes eligible for publication."""
 
     active = [
         item
@@ -730,28 +904,125 @@ def generate_source_aligned_packets(
         and (kind == "all" or item.kind == kind)
     ]
     if not selected:
-        return []
+        if progress is not None:
+            progress.advance(
+                "packet_materialization",
+                current_identity=runtime.snapshot.snapshot_hash,
+            )
+            progress.advance(
+                "packet_accounting",
+                current_identity=runtime.snapshot.snapshot_hash,
+            )
+        return PacketPlan(
+            status="complete",
+            complete=True,
+            crossed_ceiling=None,
+            measured_packet_count=0,
+            unmeasured_packet_count=0,
+            measured_packet_bytes=0,
+            measured_prompt_bytes=0,
+            maximum_request_bytes=0,
+            first_crossing_packet_id=None,
+            contributions=(),
+        )
     prepared_catalog = (
-        runtime.prepare_discovery_catalog()
+        runtime.prepare_discovery_catalog(progress=progress)
         if any(item.kind != "suppression" for item in selected)
         else None
     )
-    packets: list[dict[str, Any]] = []
+    if progress is not None:
+        progress.advance(
+            "packet_materialization",
+            total_work_units=len(selected),
+            current_identity=runtime.snapshot.snapshot_hash,
+        )
+    contributions: list[PacketContribution] = []
+    packet_bytes = 0
+    prompt_bytes = 0
+    maximum_request = 0
+    first_crossing: str | None = None
+    first_crossing_packet_id: str | None = None
     for item in selected:
         if item.kind == "suppression":
-            packets.append(_compile_suppression_packet(runtime, item))
+            packet = _compile_suppression_packet(runtime, item)
         else:
             assert prepared_catalog is not None
-            packets.append(
-                _compile_source_aligned_packet(runtime, item, prepared_catalog)
+            packet = _compile_source_aligned_packet(
+                runtime,
+                item,
+                prepared_catalog,
+                progress,
             )
-    rendered = render_packets_jsonl(packets).encode("utf-8")
-    if len(rendered) > runtime.settings.obligations.maximum_packet_bytes:
+        contribution = _packet_contribution(packet)
+        contributions.append(contribution)
+        packet_bytes += contribution.packet_byte_count
+        prompt_bytes += contribution.request_byte_count
+        maximum_request = max(maximum_request, contribution.request_byte_count)
+        if progress is not None:
+            progress.advance(
+                "packet_materialization",
+                completed_work_units=len(contributions),
+                total_work_units=len(selected),
+                current_identity=contribution.packet_id,
+            )
+        crossed = _crossed_ceiling(
+            contribution=contribution,
+            packet_count=len(contributions),
+            packet_bytes=packet_bytes,
+            prompt_bytes=prompt_bytes,
+            maximum_packets=maximum_packets,
+            maximum_packet_bytes=runtime.settings.obligations.maximum_packet_bytes,
+            maximum_prompt_bytes=maximum_prompt_bytes,
+            maximum_input_bytes=maximum_input_bytes,
+        )
+        if crossed is not None and first_crossing is None:
+            first_crossing = crossed
+            first_crossing_packet_id = contribution.packet_id
+            if not continue_after_budget:
+                break
+    complete = first_crossing is None
+    if progress is not None:
+        progress.advance(
+            "packet_accounting",
+            completed_work_units=len(contributions),
+            total_work_units=len(selected),
+            current_identity=(
+                first_crossing_packet_id or runtime.snapshot.snapshot_hash
+            ),
+        )
+    return PacketPlan(
+        status="complete" if complete else "over_budget",
+        complete=complete,
+        crossed_ceiling=first_crossing,
+        measured_packet_count=len(contributions),
+        unmeasured_packet_count=len(selected) - len(contributions),
+        measured_packet_bytes=packet_bytes,
+        measured_prompt_bytes=prompt_bytes,
+        maximum_request_bytes=maximum_request,
+        first_crossing_packet_id=first_crossing_packet_id,
+        contributions=tuple(contributions),
+    )
+
+
+def generate_source_aligned_packets(
+    runtime: ObligationRuntime,
+    *,
+    require_complete_corpus: bool = True,
+    kind: PacketKind = "all",
+) -> list[dict[str, Any]]:
+    """Compatibility projection of the authoritative complete packet plan."""
+
+    plan = plan_source_aligned_packets(
+        runtime,
+        require_complete_corpus=require_complete_corpus,
+        kind=kind,
+    )
+    if not plan.complete:
         raise SourceAlignedPacketError(
             "PACKET_BUDGET_EXHAUSTED",
             "complete packet JSONL exceeds maximum_packet_bytes",
         )
-    return packets
+    return list(plan.packets)
 
 
 def render_packets_jsonl(packets: list[dict[str, Any]]) -> str:

@@ -22,8 +22,10 @@ from typing import Any, Literal, cast
 
 from backstitch.canonical import canonical_json_bytes, lf_slice
 from backstitch.contract_validation import ValidationPolicy, make_validators
+from backstitch.filesystem_io import StableReadError, read_regular_nofollow
 from backstitch.grammar import candidate_ref
-from backstitch.repository_snapshot import StableReadError, read_regular_nofollow
+from backstitch.semantic_eval_identity import derive_eval_search_epoch
+from backstitch.semantic_verification_contract import VerificationContractError
 
 _DEFAULT_MANIFEST_BYTES = 16 * 1024 * 1024
 _DEFAULT_TREE_MANIFEST_BYTES = 16 * 1024 * 1024
@@ -757,173 +759,220 @@ def _validate_span_record(
     return path, locator, start, end
 
 
-def load_semantic_eval_corpus(
-    path: Path,
-    *,
-    mode: Literal["report", "enforce"],
-    maximum_manifest_bytes: int = _DEFAULT_MANIFEST_BYTES,
-    maximum_tree_manifest_bytes: int = _DEFAULT_TREE_MANIFEST_BYTES,
-) -> SemanticEvalCorpus:
-    """Load one closed schema-3 corpus and freeze all addressed fixture bytes."""
+@dataclass(slots=True)
+class _SemanticEvalCorpusValidator:
+    """Ordered schema-3 corpus validation over one frozen manifest."""
 
-    if mode not in ("report", "enforce"):
-        raise SemanticEvalContractError("semantic eval corpus mode is invalid")
-    manifest_path = path.resolve()
-    raw = _read_regular(
-        manifest_path,
-        maximum_bytes=maximum_manifest_bytes,
-        name="semantic eval corpus manifest",
+    manifest_path: Path
+    canonical: bytes
+    row: dict[str, Any]
+    corpus_id: str
+    corpus_sha256: str
+    mode: Literal["report", "enforce"]
+    maximum_tree_manifest_bytes: int
+    case_ids: list[str] = field(default_factory=list)
+    fixtures: dict[tuple[str, str], SemanticEvalFixture] = field(default_factory=dict)
+    case_rows: dict[str, dict[str, Any]] = field(default_factory=dict)
+    fixture_paths: set[Path] = field(default_factory=set)
+    tree_paths: set[Path] = field(default_factory=set)
+    critical: tuple[str, ...] = ()
+    critical_vacuous: tuple[str, ...] = ()
+    expected_by_case_variant: dict[tuple[str, str], list[dict[str, Any]]] = field(
+        default_factory=dict
     )
-    manifest, canonical = _parse_canonical_object(
-        raw, name="semantic eval corpus manifest", final_lf="optional"
+    finding_by_gold: dict[tuple[str, str, str], dict[str, Any]] = field(
+        default_factory=dict
     )
-    row = _closed(manifest, _MANIFEST_FIELDS, "semantic eval corpus manifest")
-    if row["schema_version"] != 3:
-        raise SemanticEvalContractError("semantic eval corpus schema_version must be 3")
-    corpus_id = _nonblank(row["corpus_id"], "semantic eval corpus.corpus_id")
-    corpus_sha256 = "sha256:" + hashlib.sha256(canonical).hexdigest()
-    cases = _array(row["cases"], "semantic eval corpus.cases")
-    case_ids: list[str] = []
-    fixtures: dict[tuple[str, str], SemanticEvalFixture] = {}
-    case_rows: dict[str, dict[str, Any]] = {}
-    fixture_paths: set[Path] = set()
-    tree_paths: set[Path] = set()
-    manifest_root = manifest_path.parent
-    for case_index, item in enumerate(cases):
-        case = _closed(item, _CASE_FIELDS, f"cases[{case_index}]")
-        case_id = _nonblank(case["case_id"], f"cases[{case_index}].case_id")
-        if case_ids and case_id <= case_ids[-1]:
+    historical_targets: set[tuple[str, str, str]] = field(default_factory=set)
+
+    def validate(self) -> SemanticEvalCorpus:
+        self._load_cases()
+        self._validate_critical_cases()
+        self._validate_gold()
+        self._validate_critical_vacuous_cases()
+        self._validate_historical_units()
+        self._validate_enforce_requirements()
+        return SemanticEvalCorpus(
+            path=self.manifest_path,
+            corpus_id=self.corpus_id,
+            corpus_sha256=self.corpus_sha256,
+            mode=self.mode,
+            case_ids=tuple(self.case_ids),
+            variant_keys=tuple(self.fixtures),
+            _canonical=self.canonical,
+            _fixtures=MappingProxyType(dict(self.fixtures)),
+        )
+
+    def _load_cases(self) -> None:
+        cases = _array(self.row["cases"], "semantic eval corpus.cases")
+        for case_index, item in enumerate(cases):
+            case = _closed(item, _CASE_FIELDS, f"cases[{case_index}]")
+            case_id = _nonblank(case["case_id"], f"cases[{case_index}].case_id")
+            if self.case_ids and case_id <= self.case_ids[-1]:
+                raise SemanticEvalContractError(
+                    "semantic eval case IDs must be unique and ordered"
+                )
+            self.case_ids.append(case_id)
+            self.case_rows[case_id] = case
+            _validate_deterministic_config(
+                case["deterministic_config"],
+                f"cases[{case_index}].deterministic_config",
+            )
+            _boolean(case["critical"], f"cases[{case_index}].critical")
+            fixture_values = [
+                case["clean"],
+                *_array(case["mutations"], f"cases[{case_index}].mutations"),
+            ]
+            variant_ids: list[str] = []
+            for variant_index, fixture_value in enumerate(fixture_values):
+                self._load_fixture(
+                    case_index,
+                    case_id,
+                    case,
+                    variant_index,
+                    fixture_value,
+                    variant_ids,
+                )
+
+    def _load_fixture(
+        self,
+        case_index: int,
+        case_id: str,
+        case: dict[str, Any],
+        variant_index: int,
+        fixture_value: object,
+        variant_ids: list[str],
+    ) -> None:
+        name = f"cases[{case_index}].fixtures[{variant_index}]"
+        fixture_row = _closed(fixture_value, _FIXTURE_FIELDS, name)
+        variant_id = _nonblank(
+            fixture_row["variant_id"],
+            f"{name}.variant_id",
+        )
+        self._validate_fixture_identity(
+            case_index,
+            variant_index,
+            variant_id,
+            fixture_row["transform"],
+            variant_ids,
+        )
+        variant_ids.append(variant_id)
+        fixture_relative = _relative_path(
+            fixture_row["fixture_path"],
+            f"{name}.fixture_path",
+        )
+        tree_relative = _relative_path(
+            fixture_row["tree_manifest_path"],
+            f"{name}.tree_manifest_path",
+        )
+        manifest_root = self.manifest_path.parent
+        fixture_path = _contained_artifact_path(
+            manifest_root,
+            fixture_relative,
+            f"{name}.fixture_path",
+        )
+        tree_path = _contained_artifact_path(
+            manifest_root,
+            tree_relative,
+            f"{name}.tree_manifest_path",
+        )
+        if tree_path.resolve().is_relative_to(fixture_path.resolve()):
+            raise SemanticEvalContractError("tree manifest must be outside its fixture")
+        if fixture_path in self.fixture_paths or tree_path in self.tree_paths:
+            raise SemanticEvalContractError("fixture and tree paths must be unique")
+        self.fixture_paths.add(fixture_path)
+        self.tree_paths.add(tree_path)
+        tags = _ordered_unique_strings(
+            fixture_row["control_tags"],
+            f"{name}.control_tags",
+            order=_CONTROL_TAGS,
+        )
+        deterministic = cast(dict[str, Any], case["deterministic_config"])
+        limits = cast(dict[str, Any], deterministic["obligations"])
+        tree_digest = _digest(
+            fixture_row["tree_manifest_sha256"],
+            f"{name}.tree_manifest_sha256",
+            prefixed=True,
+        )
+        file_names, executable_files, file_bytes = _load_fixture_tree(
+            fixture_path,
+            tree_path,
+            expected_digest=tree_digest,
+            maximum_tree_manifest_bytes=self.maximum_tree_manifest_bytes,
+            maximum_files=cast(int, limits["maximum_snapshot_files"]),
+            maximum_file_bytes=cast(int, limits["maximum_file_bytes"]),
+            maximum_total_bytes=cast(int, limits["maximum_snapshot_bytes"]),
+            name=name,
+        )
+        self.fixtures[(case_id, variant_id)] = SemanticEvalFixture(
+            case_id=case_id,
+            variant_id=variant_id,
+            control_tags=tags,
+            tree_manifest_sha256=tree_digest,
+            files=file_names,
+            executable_files=executable_files,
+            _file_bytes=MappingProxyType(dict(file_bytes)),
+        )
+
+    @staticmethod
+    def _validate_fixture_identity(
+        case_index: int,
+        variant_index: int,
+        variant_id: str,
+        transform: object,
+        variant_ids: list[str],
+    ) -> None:
+        if variant_index == 0:
+            if variant_id != "clean" or transform is not None:
+                raise SemanticEvalContractError(
+                    f"cases[{case_index}].clean identity or transform is invalid"
+                )
+        elif (
+            variant_id == "clean"
+            or not isinstance(transform, str)
+            or not transform.strip()
+        ):
             raise SemanticEvalContractError(
-                "semantic eval case IDs must be unique and ordered"
+                f"cases[{case_index}].mutations[{variant_index - 1}] transform is invalid"
             )
-        case_ids.append(case_id)
-        case_rows[case_id] = case
-        _validate_deterministic_config(
-            case["deterministic_config"], f"cases[{case_index}].deterministic_config"
+        elif variant_ids[1:] and variant_id <= variant_ids[-1]:
+            raise SemanticEvalContractError(
+                f"cases[{case_index}].mutations must be unique and ordered"
+            )
+        if variant_id in variant_ids:
+            raise SemanticEvalContractError(f"cases[{case_index}] repeats variant_id")
+
+    def _validate_critical_cases(self) -> None:
+        critical_expected = tuple(
+            case_id
+            for case_id in self.case_ids
+            if cast(bool, self.case_rows[case_id]["critical"])
         )
-        _boolean(case["critical"], f"cases[{case_index}].critical")
-        fixture_values = [
-            case["clean"],
-            *_array(case["mutations"], f"cases[{case_index}].mutations"),
-        ]
-        variant_ids: list[str] = []
-        for variant_index, fixture_value in enumerate(fixture_values):
-            fixture_row = _closed(
-                fixture_value,
-                _FIXTURE_FIELDS,
-                f"cases[{case_index}].fixtures[{variant_index}]",
+        self.critical = _ordered_unique_strings(
+            self.row["critical_case_ids"],
+            "semantic eval corpus.critical_case_ids",
+            require_sorted=True,
+        )
+        if self.critical != critical_expected:
+            raise SemanticEvalContractError(
+                "critical_case_ids does not match critical cases"
             )
-            variant_id = _nonblank(
-                fixture_row["variant_id"],
-                f"cases[{case_index}].fixtures[{variant_index}].variant_id",
-            )
-            if variant_index == 0:
-                if variant_id != "clean" or fixture_row["transform"] is not None:
-                    raise SemanticEvalContractError(
-                        f"cases[{case_index}].clean identity or transform is invalid"
-                    )
-            else:
-                if (
-                    variant_id == "clean"
-                    or not isinstance(fixture_row["transform"], str)
-                    or not fixture_row["transform"].strip()
-                ):
-                    raise SemanticEvalContractError(
-                        f"cases[{case_index}].mutations[{variant_index - 1}] transform is invalid"
-                    )
-                if variant_ids[1:] and variant_id <= variant_ids[-1]:
-                    raise SemanticEvalContractError(
-                        f"cases[{case_index}].mutations must be unique and ordered"
-                    )
-            if variant_id in variant_ids:
-                raise SemanticEvalContractError(
-                    f"cases[{case_index}] repeats variant_id"
-                )
-            variant_ids.append(variant_id)
-            fixture_relative = _relative_path(
-                fixture_row["fixture_path"],
-                f"cases[{case_index}].fixtures[{variant_index}].fixture_path",
-            )
-            tree_relative = _relative_path(
-                fixture_row["tree_manifest_path"],
-                f"cases[{case_index}].fixtures[{variant_index}].tree_manifest_path",
-            )
-            fixture_path = _contained_artifact_path(
-                manifest_root,
-                fixture_relative,
-                f"cases[{case_index}].fixtures[{variant_index}].fixture_path",
-            )
-            tree_path = _contained_artifact_path(
-                manifest_root,
-                tree_relative,
-                f"cases[{case_index}].fixtures[{variant_index}].tree_manifest_path",
-            )
-            if tree_path.resolve().is_relative_to(fixture_path.resolve()):
-                raise SemanticEvalContractError(
-                    "tree manifest must be outside its fixture"
-                )
-            if fixture_path in fixture_paths or tree_path in tree_paths:
-                raise SemanticEvalContractError("fixture and tree paths must be unique")
-            fixture_paths.add(fixture_path)
-            tree_paths.add(tree_path)
-            tags = _ordered_unique_strings(
-                fixture_row["control_tags"],
-                f"cases[{case_index}].fixtures[{variant_index}].control_tags",
-                order=_CONTROL_TAGS,
-            )
-            deterministic = cast(dict[str, Any], case["deterministic_config"])
-            limits = cast(dict[str, Any], deterministic["obligations"])
-            tree_digest = _digest(
-                fixture_row["tree_manifest_sha256"],
-                f"cases[{case_index}].fixtures[{variant_index}].tree_manifest_sha256",
-                prefixed=True,
-            )
-            file_names, executable_files, file_bytes = _load_fixture_tree(
-                fixture_path,
-                tree_path,
-                expected_digest=tree_digest,
-                maximum_tree_manifest_bytes=maximum_tree_manifest_bytes,
-                maximum_files=cast(int, limits["maximum_snapshot_files"]),
-                maximum_file_bytes=cast(int, limits["maximum_file_bytes"]),
-                maximum_total_bytes=cast(int, limits["maximum_snapshot_bytes"]),
-                name=f"cases[{case_index}].fixtures[{variant_index}]",
-            )
-            fixtures[(case_id, variant_id)] = SemanticEvalFixture(
-                case_id=case_id,
-                variant_id=variant_id,
-                control_tags=tags,
-                tree_manifest_sha256=tree_digest,
-                files=file_names,
-                executable_files=executable_files,
-                _file_bytes=MappingProxyType(dict(file_bytes)),
+        self.critical_vacuous = _ordered_unique_strings(
+            self.row["critical_vacuous_trace_case_ids"],
+            "semantic eval corpus.critical_vacuous_trace_case_ids",
+            require_sorted=True,
+        )
+        if not set(self.critical_vacuous).issubset(self.critical):
+            raise SemanticEvalContractError(
+                "critical_vacuous_trace_case_ids is not a critical subset"
             )
 
-    critical_expected = tuple(
-        case_id for case_id in case_ids if cast(bool, case_rows[case_id]["critical"])
-    )
-    critical = _ordered_unique_strings(
-        row["critical_case_ids"],
-        "semantic eval corpus.critical_case_ids",
-        require_sorted=True,
-    )
-    if critical != critical_expected:
-        raise SemanticEvalContractError(
-            "critical_case_ids does not match critical cases"
-        )
-    critical_vacuous = _ordered_unique_strings(
-        row["critical_vacuous_trace_case_ids"],
-        "semantic eval corpus.critical_vacuous_trace_case_ids",
-        require_sorted=True,
-    )
-    if not set(critical_vacuous).issubset(critical):
-        raise SemanticEvalContractError(
-            "critical_vacuous_trace_case_ids is not a critical subset"
-        )
+    def _validate_gold(self) -> None:
+        for case_index, case_id in enumerate(self.case_ids):
+            self._validate_case_gold(case_index, case_id)
 
-    expected_by_case_variant: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    finding_by_gold: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for case_index, case_id in enumerate(case_ids):
-        case = case_rows[case_id]
+    def _validate_case_gold(self, case_index: int, case_id: str) -> None:
+        case = self.case_rows[case_id]
         variants = [
             "clean",
             *[
@@ -947,166 +996,288 @@ def load_semantic_eval_corpus(
             prior: tuple[int, str] | None = None
             for row_index, value in enumerate(rows):
                 gold = _closed(
-                    value, fields, f"cases[{case_index}].{array_name}[{row_index}]"
+                    value,
+                    fields,
+                    f"cases[{case_index}].{array_name}[{row_index}]",
                 )
-                gold_id = _nonblank(
-                    gold["gold_id"],
-                    f"cases[{case_index}].{array_name}[{row_index}].gold_id",
+                gold_id, variant, prior = self._validate_gold_identity(
+                    case_index,
+                    array_name,
+                    row_index,
+                    gold,
+                    variant_order,
+                    prior,
+                    all_gold_ids,
                 )
-                variant = _nonblank(
-                    gold["variant_id"],
-                    f"cases[{case_index}].{array_name}[{row_index}].variant_id",
+                self._validate_gold_row(
+                    case_index,
+                    case_id,
+                    array_name,
+                    gold_id,
+                    variant,
+                    gold,
+                    obligations,
+                    evidence,
+                    candidates,
                 )
-                if variant not in variant_order:
-                    raise SemanticEvalContractError(
-                        f"cases[{case_index}].{array_name}[{row_index}] has unknown variant"
-                    )
-                order_key = (variant_order[variant], gold_id)
-                if prior is not None and order_key <= prior:
-                    raise SemanticEvalContractError(
-                        f"cases[{case_index}].{array_name} is not unique and ordered"
-                    )
-                prior = order_key
-                if gold_id in all_gold_ids:
-                    raise SemanticEvalContractError(
-                        f"cases[{case_index}] repeats gold_id {gold_id!r}"
-                    )
-                all_gold_ids.add(gold_id)
-                if array_name == "gold_obligations":
-                    obligation_id = _nonblank(
-                        gold["obligation_id"], f"obligation {gold_id}.obligation_id"
-                    )
-                    packet_id = _nonblank(
-                        gold["packet_id"], f"obligation {gold_id}.packet_id"
-                    )
-                    if packet_id != obligation_id:
-                        raise SemanticEvalContractError(
-                            f"obligation {gold_id} packet_id must equal obligation_id"
-                        )
-                    _enum(
-                        gold["intent_state"],
-                        _INTENT_STATES,
-                        f"obligation {gold_id}.intent_state",
-                    )
-                    _enum(
-                        gold["alignment_state"],
-                        _ALIGNMENT_STATES,
-                        f"obligation {gold_id}.alignment_state",
-                    )
-                    _enum(
-                        gold["disposition"],
-                        _DISPOSITIONS,
-                        f"obligation {gold_id}.disposition",
-                    )
-                    _enum(
-                        gold["obligation_rung"],
-                        _RUNGS,
-                        f"obligation {gold_id}.obligation_rung",
-                    )
-                    _enum(
-                        gold["gate_state"],
-                        _GATE_STATES,
-                        f"obligation {gold_id}.gate_state",
-                    )
-                    key = (variant, obligation_id)
-                    if key in obligations:
-                        raise SemanticEvalContractError(
-                            f"cases[{case_index}] repeats obligation identity"
-                        )
-                    obligations[key] = gold
-                elif array_name == "gold_evidence":
-                    fixture = fixtures[(case_id, variant)]
-                    obligation_id = _nonblank(
-                        gold["obligation_id"], f"evidence {gold_id}.obligation_id"
-                    )
-                    if (variant, obligation_id) not in obligations:
-                        raise SemanticEvalContractError(
-                            f"evidence {gold_id} has unknown obligation"
-                        )
-                    _enum(
-                        gold["source_role"],
-                        _SOURCE_ROLES,
-                        f"evidence {gold_id}.source_role",
-                    )
-                    _enum(
-                        gold["reciprocity_state"],
-                        _RECIPROCITY_STATES,
-                        f"evidence {gold_id}.reciprocity_state",
-                    )
-                    _validate_span_record(gold, fixture, f"evidence {gold_id}")
-                    evidence[gold_id] = gold
-                elif array_name == "gold_candidates":
-                    fixture = fixtures[(case_id, variant)]
-                    obligation_id = _nonblank(
-                        gold["obligation_id"], f"candidate {gold_id}.obligation_id"
-                    )
-                    if (variant, obligation_id) not in obligations:
-                        raise SemanticEvalContractError(
-                            f"candidate {gold_id} has unknown obligation"
-                        )
-                    kind = _enum(
-                        gold["candidate_kind"],
-                        _CANDIDATE_KINDS,
-                        f"candidate {gold_id}.candidate_kind",
-                    )
-                    state = _enum(
-                        gold["trace_state"],
-                        _TRACE_STATES,
-                        f"candidate {gold_id}.trace_state",
-                    )
-                    if kind == "report_issue" and state not in {
-                        "partially_declared",
-                        "conflicted",
-                    }:
-                        raise SemanticEvalContractError(
-                            f"candidate {gold_id} has impossible report_issue trace state"
-                        )
-                    candidate_path, locator, _start, _end = _validate_span_record(
-                        gold, fixture, f"candidate {gold_id}"
-                    )
-                    expected_id = _candidate_id(
-                        kind=kind, path=candidate_path, locator=locator
-                    )
-                    if gold["candidate_id"] != expected_id:
-                        raise SemanticEvalContractError(
-                            f"candidate {gold_id}.candidate_id does not recompute"
-                        )
-                    candidates[gold_id] = gold
-                else:
-                    packet_id = _nonblank(
-                        gold["packet_id"], f"finding {gold_id}.packet_id"
-                    )
-                    obligation_matches = [
-                        item
-                        for (
-                            candidate_variant,
-                            _obligation,
-                        ), item in obligations.items()
-                        if candidate_variant == variant
-                        and item["packet_id"] == packet_id
-                    ]
-                    if len(obligation_matches) != 1:
-                        raise SemanticEvalContractError(
-                            f"finding {gold_id} has unknown or ambiguous packet"
-                        )
-                    classification = _nonblank(
-                        gold["classification"], f"finding {gold_id}.classification"
-                    )
-                    code = _nonblank(gold["code"], f"finding {gold_id}.code")
-                    if _CODE_BY_CLASSIFICATION.get(classification) != code:
-                        raise SemanticEvalContractError(
-                            f"finding {gold_id} code/classification mismatch"
-                        )
-                    expected_by_case_variant.setdefault((case_id, variant), []).append(
-                        gold
-                    )
-                    finding_by_gold[(case_id, variant, gold_id)] = gold
-        for key, rows in expected_by_case_variant.items():
+        self._validate_expected_packet_uniqueness()
+        self._validate_readiness(case_id, case, obligations)
+        self._validate_finding_evidence(
+            case_id,
+            obligations,
+            evidence,
+            candidates,
+        )
+        self._validate_controls(case_id, variants)
+
+    @staticmethod
+    def _validate_gold_identity(
+        case_index: int,
+        array_name: str,
+        row_index: int,
+        gold: dict[str, Any],
+        variant_order: dict[str, int],
+        prior: tuple[int, str] | None,
+        all_gold_ids: set[str],
+    ) -> tuple[str, str, tuple[int, str]]:
+        gold_id = _nonblank(
+            gold["gold_id"],
+            f"cases[{case_index}].{array_name}[{row_index}].gold_id",
+        )
+        variant = _nonblank(
+            gold["variant_id"],
+            f"cases[{case_index}].{array_name}[{row_index}].variant_id",
+        )
+        if variant not in variant_order:
+            raise SemanticEvalContractError(
+                f"cases[{case_index}].{array_name}[{row_index}] has unknown variant"
+            )
+        order_key = (variant_order[variant], gold_id)
+        if prior is not None and order_key <= prior:
+            raise SemanticEvalContractError(
+                f"cases[{case_index}].{array_name} is not unique and ordered"
+            )
+        if gold_id in all_gold_ids:
+            raise SemanticEvalContractError(
+                f"cases[{case_index}] repeats gold_id {gold_id!r}"
+            )
+        all_gold_ids.add(gold_id)
+        return gold_id, variant, order_key
+
+    def _validate_gold_row(
+        self,
+        case_index: int,
+        case_id: str,
+        array_name: str,
+        gold_id: str,
+        variant: str,
+        gold: dict[str, Any],
+        obligations: dict[tuple[str, str], dict[str, Any]],
+        evidence: dict[str, dict[str, Any]],
+        candidates: dict[str, dict[str, Any]],
+    ) -> None:
+        if array_name == "gold_obligations":
+            self._validate_gold_obligation(
+                case_index,
+                gold_id,
+                variant,
+                gold,
+                obligations,
+            )
+        elif array_name == "gold_evidence":
+            self._validate_gold_evidence(
+                case_id,
+                gold_id,
+                variant,
+                gold,
+                obligations,
+                evidence,
+            )
+        elif array_name == "gold_candidates":
+            self._validate_gold_candidate(
+                case_id,
+                gold_id,
+                variant,
+                gold,
+                obligations,
+                candidates,
+            )
+        else:
+            self._validate_expected_finding(
+                case_id,
+                gold_id,
+                variant,
+                gold,
+                obligations,
+            )
+
+    @staticmethod
+    def _validate_gold_obligation(
+        case_index: int,
+        gold_id: str,
+        variant: str,
+        gold: dict[str, Any],
+        obligations: dict[tuple[str, str], dict[str, Any]],
+    ) -> None:
+        obligation_id = _nonblank(
+            gold["obligation_id"],
+            f"obligation {gold_id}.obligation_id",
+        )
+        packet_id = _nonblank(gold["packet_id"], f"obligation {gold_id}.packet_id")
+        if packet_id != obligation_id:
+            raise SemanticEvalContractError(
+                f"obligation {gold_id} packet_id must equal obligation_id"
+            )
+        _enum(
+            gold["intent_state"], _INTENT_STATES, f"obligation {gold_id}.intent_state"
+        )
+        _enum(
+            gold["alignment_state"],
+            _ALIGNMENT_STATES,
+            f"obligation {gold_id}.alignment_state",
+        )
+        _enum(
+            gold["disposition"],
+            _DISPOSITIONS,
+            f"obligation {gold_id}.disposition",
+        )
+        _enum(
+            gold["obligation_rung"],
+            _RUNGS,
+            f"obligation {gold_id}.obligation_rung",
+        )
+        _enum(
+            gold["gate_state"],
+            _GATE_STATES,
+            f"obligation {gold_id}.gate_state",
+        )
+        key = (variant, obligation_id)
+        if key in obligations:
+            raise SemanticEvalContractError(
+                f"cases[{case_index}] repeats obligation identity"
+            )
+        obligations[key] = gold
+
+    def _validate_gold_evidence(
+        self,
+        case_id: str,
+        gold_id: str,
+        variant: str,
+        gold: dict[str, Any],
+        obligations: dict[tuple[str, str], dict[str, Any]],
+        evidence: dict[str, dict[str, Any]],
+    ) -> None:
+        obligation_id = _nonblank(
+            gold["obligation_id"],
+            f"evidence {gold_id}.obligation_id",
+        )
+        if (variant, obligation_id) not in obligations:
+            raise SemanticEvalContractError(
+                f"evidence {gold_id} has unknown obligation"
+            )
+        _enum(gold["source_role"], _SOURCE_ROLES, f"evidence {gold_id}.source_role")
+        _enum(
+            gold["reciprocity_state"],
+            _RECIPROCITY_STATES,
+            f"evidence {gold_id}.reciprocity_state",
+        )
+        _validate_span_record(
+            gold,
+            self.fixtures[(case_id, variant)],
+            f"evidence {gold_id}",
+        )
+        evidence[gold_id] = gold
+
+    def _validate_gold_candidate(
+        self,
+        case_id: str,
+        gold_id: str,
+        variant: str,
+        gold: dict[str, Any],
+        obligations: dict[tuple[str, str], dict[str, Any]],
+        candidates: dict[str, dict[str, Any]],
+    ) -> None:
+        obligation_id = _nonblank(
+            gold["obligation_id"],
+            f"candidate {gold_id}.obligation_id",
+        )
+        if (variant, obligation_id) not in obligations:
+            raise SemanticEvalContractError(
+                f"candidate {gold_id} has unknown obligation"
+            )
+        kind = _enum(
+            gold["candidate_kind"],
+            _CANDIDATE_KINDS,
+            f"candidate {gold_id}.candidate_kind",
+        )
+        state = _enum(
+            gold["trace_state"],
+            _TRACE_STATES,
+            f"candidate {gold_id}.trace_state",
+        )
+        if kind == "report_issue" and state not in {
+            "partially_declared",
+            "conflicted",
+        }:
+            raise SemanticEvalContractError(
+                f"candidate {gold_id} has impossible report_issue trace state"
+            )
+        candidate_path, locator, _start, _end = _validate_span_record(
+            gold,
+            self.fixtures[(case_id, variant)],
+            f"candidate {gold_id}",
+        )
+        expected_id = _candidate_id(kind=kind, path=candidate_path, locator=locator)
+        if gold["candidate_id"] != expected_id:
+            raise SemanticEvalContractError(
+                f"candidate {gold_id}.candidate_id does not recompute"
+            )
+        candidates[gold_id] = gold
+
+    def _validate_expected_finding(
+        self,
+        case_id: str,
+        gold_id: str,
+        variant: str,
+        gold: dict[str, Any],
+        obligations: dict[tuple[str, str], dict[str, Any]],
+    ) -> None:
+        packet_id = _nonblank(gold["packet_id"], f"finding {gold_id}.packet_id")
+        obligation_matches = [
+            item
+            for (candidate_variant, _obligation), item in obligations.items()
+            if candidate_variant == variant and item["packet_id"] == packet_id
+        ]
+        if len(obligation_matches) != 1:
+            raise SemanticEvalContractError(
+                f"finding {gold_id} has unknown or ambiguous packet"
+            )
+        classification = _nonblank(
+            gold["classification"],
+            f"finding {gold_id}.classification",
+        )
+        code = _nonblank(gold["code"], f"finding {gold_id}.code")
+        if _CODE_BY_CLASSIFICATION.get(classification) != code:
+            raise SemanticEvalContractError(
+                f"finding {gold_id} code/classification mismatch"
+            )
+        self.expected_by_case_variant.setdefault((case_id, variant), []).append(gold)
+        self.finding_by_gold[(case_id, variant, gold_id)] = gold
+
+    def _validate_expected_packet_uniqueness(self) -> None:
+        for key, rows in self.expected_by_case_variant.items():
             packet_ids = [cast(str, finding["packet_id"]) for finding in rows]
             if len(packet_ids) != len(set(packet_ids)):
                 raise SemanticEvalContractError(
                     f"{key[0]}/{key[1]} has multiple expected findings for one packet"
                 )
+
+    def _validate_readiness(
+        self,
+        case_id: str,
+        case: dict[str, Any],
+        obligations: dict[tuple[str, str], dict[str, Any]],
+    ) -> None:
         for (variant, obligation_id), obligation in obligations.items():
             if cast(str, obligation["gate_state"]) == "executable" and (
                 obligation["intent_state"] != "identified"
@@ -1119,15 +1290,23 @@ def load_semantic_eval_corpus(
                 )
             if (
                 cast(bool, case["critical"])
-                and mode == "enforce"
+                and self.mode == "enforce"
                 and obligation["disposition"] == "skipped"
             ):
                 raise SemanticEvalContractError(
                     "skip is invalid on a qualifying critical unit"
                 )
+
+    def _validate_finding_evidence(
+        self,
+        case_id: str,
+        obligations: dict[tuple[str, str], dict[str, Any]],
+        evidence: dict[str, dict[str, Any]],
+        candidates: dict[str, dict[str, Any]],
+    ) -> None:
         for (variant, _obligation_id), obligation in obligations.items():
             packet_id = cast(str, obligation["packet_id"])
-            for finding in expected_by_case_variant.get((case_id, variant), []):
+            for finding in self.expected_by_case_variant.get((case_id, variant), []):
                 if finding["packet_id"] != packet_id:
                     continue
                 declared = _ordered_unique_strings(
@@ -1140,29 +1319,51 @@ def load_semantic_eval_corpus(
                     f"finding {finding['gold_id']}.required_counterevidence_gold_ids",
                     require_sorted=True,
                 )
-                for referenced in declared:
-                    item = evidence.get(referenced)
-                    if (
-                        item is None
-                        or item["variant_id"] != variant
-                        or item["obligation_id"] != obligation["obligation_id"]
-                    ):
-                        raise SemanticEvalContractError(
-                            f"finding {finding['gold_id']} has cross-variant or cross-obligation declared evidence"
-                        )
-                for referenced in counter:
-                    item = candidates.get(referenced)
-                    if (
-                        item is None
-                        or item["variant_id"] != variant
-                        or item["obligation_id"] != obligation["obligation_id"]
-                    ):
-                        raise SemanticEvalContractError(
-                            f"finding {finding['gold_id']} has cross-variant or cross-obligation counterevidence"
-                        )
+                self._validate_finding_references(
+                    finding,
+                    variant,
+                    obligation,
+                    declared,
+                    counter,
+                    evidence,
+                    candidates,
+                )
+
+    @staticmethod
+    def _validate_finding_references(
+        finding: dict[str, Any],
+        variant: str,
+        obligation: dict[str, Any],
+        declared: tuple[str, ...],
+        counter: tuple[str, ...],
+        evidence: dict[str, dict[str, Any]],
+        candidates: dict[str, dict[str, Any]],
+    ) -> None:
+        for referenced in declared:
+            item = evidence.get(referenced)
+            if (
+                item is None
+                or item["variant_id"] != variant
+                or item["obligation_id"] != obligation["obligation_id"]
+            ):
+                raise SemanticEvalContractError(
+                    f"finding {finding['gold_id']} has cross-variant or cross-obligation declared evidence"
+                )
+        for referenced in counter:
+            item = candidates.get(referenced)
+            if (
+                item is None
+                or item["variant_id"] != variant
+                or item["obligation_id"] != obligation["obligation_id"]
+            ):
+                raise SemanticEvalContractError(
+                    f"finding {finding['gold_id']} has cross-variant or cross-obligation counterevidence"
+                )
+
+    def _validate_controls(self, case_id: str, variants: list[str]) -> None:
         for variant in variants:
-            tag_set = set(fixtures[(case_id, variant)].control_tags)
-            findings = expected_by_case_variant.get((case_id, variant), [])
+            tag_set = set(self.fixtures[(case_id, variant)].control_tags)
+            findings = self.expected_by_case_variant.get((case_id, variant), [])
             if tag_set & _NEGATIVE_CONTROL_TAGS and findings:
                 raise SemanticEvalContractError(
                     f"{case_id}/{variant} false-positive control must be negative"
@@ -1172,45 +1373,65 @@ def load_semantic_eval_corpus(
                     f"{case_id}/{variant} positive control requires an expected finding"
                 )
 
-    for case_id in critical_vacuous:
-        variants = [key for key in fixtures if key[0] == case_id]
-        if not any(
-            "valid_vacuous_trace" in fixtures[key].control_tags
-            and any(
-                finding["code"] == "SEMANTIC_MISSING_TRACE"
-                for finding in expected_by_case_variant.get(key, [])
-            )
-            for key in variants
-        ):
-            raise SemanticEvalContractError(
-                f"critical vacuous case {case_id!r} has no matching missing-trace finding"
-            )
+    def _validate_critical_vacuous_cases(self) -> None:
+        for case_id in self.critical_vacuous:
+            variants = [key for key in self.fixtures if key[0] == case_id]
+            if not any(
+                "valid_vacuous_trace" in self.fixtures[key].control_tags
+                and any(
+                    finding["code"] == "SEMANTIC_MISSING_TRACE"
+                    for finding in self.expected_by_case_variant.get(key, [])
+                )
+                for key in variants
+            ):
+                raise SemanticEvalContractError(
+                    f"critical vacuous case {case_id!r} has no matching missing-trace finding"
+                )
 
-    historical = _array(row["reviewed_historical_units"], "reviewed_historical_units")
-    prior_unit: str | None = None
-    source_refs: set[str] = set()
-    targets: set[tuple[str, str, str]] = set()
-    for index, value in enumerate(historical):
-        unit = _closed(value, _HISTORICAL_FIELDS, f"reviewed_historical_units[{index}]")
-        unit_id = _nonblank(
-            unit["unit_id"], f"reviewed_historical_units[{index}].unit_id"
+    def _validate_historical_units(self) -> None:
+        historical = _array(
+            self.row["reviewed_historical_units"],
+            "reviewed_historical_units",
         )
-        if prior_unit is not None and unit_id <= prior_unit:
-            raise SemanticEvalContractError(
-                "reviewed historical unit IDs must be unique and ordered"
+        prior_unit: str | None = None
+        source_refs: set[str] = set()
+        for index, value in enumerate(historical):
+            unit = _closed(
+                value,
+                _HISTORICAL_FIELDS,
+                f"reviewed_historical_units[{index}]",
             )
-        prior_unit = unit_id
+            unit_id = _nonblank(
+                unit["unit_id"],
+                f"reviewed_historical_units[{index}].unit_id",
+            )
+            if prior_unit is not None and unit_id <= prior_unit:
+                raise SemanticEvalContractError(
+                    "reviewed historical unit IDs must be unique and ordered"
+                )
+            prior_unit = unit_id
+            self._validate_historical_unit(index, unit_id, unit, source_refs)
+
+    def _validate_historical_unit(
+        self,
+        index: int,
+        unit_id: str,
+        unit: dict[str, Any],
+        source_refs: set[str],
+    ) -> None:
         case_id = _nonblank(
-            unit["case_id"], f"reviewed_historical_units[{index}].case_id"
+            unit["case_id"],
+            f"reviewed_historical_units[{index}].case_id",
         )
         variant_id = _nonblank(
-            unit["variant_id"], f"reviewed_historical_units[{index}].variant_id"
+            unit["variant_id"],
+            f"reviewed_historical_units[{index}].variant_id",
         )
         finding_id = _nonblank(
             unit["expected_finding_gold_id"],
             f"reviewed_historical_units[{index}].expected_finding_gold_id",
         )
-        if (case_id, variant_id, finding_id) not in finding_by_gold:
+        if (case_id, variant_id, finding_id) not in self.finding_by_gold:
             raise SemanticEvalContractError(
                 f"reviewed historical unit {unit_id!r} has no expected finding"
             )
@@ -1228,47 +1449,74 @@ def load_semantic_eval_corpus(
             )
         source_refs.add(source_ref)
         target = (case_id, variant_id, finding_id)
-        if target in targets:
+        if target in self.historical_targets:
             raise SemanticEvalContractError(
                 "reviewed historical target tuples must be unique"
             )
-        targets.add(target)
+        self.historical_targets.add(target)
         if (
             "historical_misalignment"
-            not in fixtures[(case_id, variant_id)].control_tags
+            not in self.fixtures[(case_id, variant_id)].control_tags
         ):
             raise SemanticEvalContractError(
                 f"reviewed historical unit {unit_id!r} lacks its control tag"
             )
 
-    if mode == "enforce":
+    def _validate_enforce_requirements(self) -> None:
+        if self.mode != "enforce":
+            return
         observed_tags = {
-            tag for fixture in fixtures.values() for tag in fixture.control_tags
+            tag for fixture in self.fixtures.values() for tag in fixture.control_tags
         }
         if observed_tags != set(_CONTROL_TAGS):
             raise SemanticEvalContractError(
                 "enforce corpus must contain every control tag"
             )
-        if not critical or not critical_vacuous:
+        if not self.critical or not self.critical_vacuous:
             raise SemanticEvalContractError(
                 "enforce corpus requires critical and vacuous-critical cases"
             )
-        if len(targets) < 20:
+        if len(self.historical_targets) < 20:
             raise SemanticEvalContractError(
                 "enforce corpus requires 20 reviewed historical targets"
             )
 
-    variant_keys = tuple(fixtures)
-    return SemanticEvalCorpus(
-        path=manifest_path,
-        corpus_id=corpus_id,
-        corpus_sha256=corpus_sha256,
-        mode=mode,
-        case_ids=tuple(case_ids),
-        variant_keys=variant_keys,
-        _canonical=canonical,
-        _fixtures=MappingProxyType(dict(fixtures)),
+
+def load_semantic_eval_corpus(
+    path: Path,
+    *,
+    mode: Literal["report", "enforce"],
+    maximum_manifest_bytes: int = _DEFAULT_MANIFEST_BYTES,
+    maximum_tree_manifest_bytes: int = _DEFAULT_TREE_MANIFEST_BYTES,
+) -> SemanticEvalCorpus:
+    """Load one closed schema-3 corpus and freeze all addressed fixture bytes."""
+
+    if mode not in ("report", "enforce"):
+        raise SemanticEvalContractError("semantic eval corpus mode is invalid")
+    manifest_path = path.resolve()
+    raw = _read_regular(
+        manifest_path,
+        maximum_bytes=maximum_manifest_bytes,
+        name="semantic eval corpus manifest",
     )
+    manifest, canonical = _parse_canonical_object(
+        raw,
+        name="semantic eval corpus manifest",
+        final_lf="optional",
+    )
+    row = _closed(manifest, _MANIFEST_FIELDS, "semantic eval corpus manifest")
+    if row["schema_version"] != 3:
+        raise SemanticEvalContractError("semantic eval corpus schema_version must be 3")
+    corpus_id = _nonblank(row["corpus_id"], "semantic eval corpus.corpus_id")
+    return _SemanticEvalCorpusValidator(
+        manifest_path=manifest_path,
+        canonical=canonical,
+        row=row,
+        corpus_id=corpus_id,
+        corpus_sha256="sha256:" + hashlib.sha256(canonical).hexdigest(),
+        mode=mode,
+        maximum_tree_manifest_bytes=maximum_tree_manifest_bytes,
+    ).validate()
 
 
 _REPORT_FIELDS = frozenset(
@@ -1587,24 +1835,19 @@ def _validate_provider(value: object, name: str) -> dict[str, Any]:
 
 
 def _validate_request(value: object, name: str) -> dict[str, Any]:
-    from backstitch.semantic_identity import RequestIdentity
+    from backstitch.semantic_identity import RequestIdentity, request_identity_dict
 
-    row = _closed(value, _REQUEST_FIELDS, name)
+    if not isinstance(value, dict) or not set(value) <= _REQUEST_FIELDS:
+        raise SemanticEvalContractError(f"{name} has invalid closed shape")
+    row = value
     try:
-        request = RequestIdentity(
-            json_mode=cast(Any, row["json_mode"]),
-            temperature=cast(Any, row["temperature"]),
-            seed=cast(Any, row["seed"]),
-            max_tokens=cast(Any, row["max_tokens"]),
-        )
-    except ValueError as exc:
+        request = RequestIdentity(**row)
+    except (TypeError, ValueError) as exc:
         raise SemanticEvalContractError(f"{name} is invalid: {exc}") from exc
-    return {
-        "json_mode": request.json_mode,
-        "temperature": request.temperature,
-        "seed": request.seed,
-        "max_tokens": request.max_tokens,
-    }
+    normalized = request_identity_dict(request)
+    if row != normalized:
+        raise SemanticEvalContractError(f"{name} is not canonical")
+    return normalized
 
 
 def _validate_eval_config(value: object) -> dict[str, Any]:
@@ -1784,21 +2027,6 @@ def _validate_identity(value: object, corpus: SemanticEvalCorpus) -> dict[str, A
     return row
 
 
-def _effective_epoch(prefix: str, base: str, corpus_sha256: str, trial: int) -> str:
-    return (
-        prefix
-        + hashlib.sha256(
-            canonical_json_bytes(
-                {
-                    "base_search_epoch": base,
-                    "qualification_corpus_sha256": corpus_sha256,
-                    "trial_index": trial,
-                }
-            )
-        ).hexdigest()
-    )
-
-
 def _validate_provenance(value: object, name: str) -> dict[str, Any]:
     row = _closed(value, _PROVENANCE_FIELDS, name)
     _nonblank(row["adapter_id"], f"{name}.adapter_id")
@@ -1958,8 +2186,8 @@ def _validate_analysis_attempt(
     effective = _nonblank(
         row["effective_search_epoch"], f"{name}.effective_search_epoch"
     )
-    if effective != _effective_epoch(
-        "eval-analyze:", base, corpus.corpus_sha256, trial
+    if effective != derive_eval_search_epoch(
+        "eval-analyze", base, corpus.corpus_sha256, trial
     ):
         raise SemanticEvalContractError(
             f"{name}.effective_search_epoch does not recompute"
@@ -2097,7 +2325,7 @@ def _validate_event_result(
     effective = _nonblank(
         row["effective_search_epoch"], f"{name}.effective_search_epoch"
     )
-    if effective != _effective_epoch("eval-verify:", base, corpus_sha256, trial):
+    if effective != derive_eval_search_epoch("eval-verify", base, corpus_sha256, trial):
         raise SemanticEvalContractError(
             f"{name}.effective_search_epoch does not recompute"
         )
@@ -2729,7 +2957,6 @@ def _validate_observed_facts(
         )
 
     from backstitch.semantic_verification import (
-        VerificationContractError,
         build_verification_request,
         derive_verification_claim,
     )

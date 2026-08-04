@@ -299,6 +299,7 @@ _Implementation mapping_:
 - `backstitch/python_refs.py`
 - `backstitch/resolver.py`
 - `backstitch/models.py`
+- `tests/test_traceability_reducer.py`
 
 ## 5. CLI Contract [SC-5]
 
@@ -379,6 +380,8 @@ backstitch obligation OBLIGATION_ID --summarize-evidence
 backstitch obligation OBLIGATION_ID --find-evidence
 backstitch obligation OBLIGATION_ID --candidate CANDIDATE_ID
 backstitch guide alignment --format text
+backstitch analyze --repo-root . --preflight --format text
+backstitch analyze --repo-root . --preflight --format json
 backstitch analyze --repo-root . --output analysis.jsonl --report analysis-report.json
 backstitch analyze --packets packets.jsonl --packet-report packet-report.json --output analysis.jsonl --report analysis-report.json
 backstitch eval --corpus tests/semantic_eval/v3/manifest.json --output semantic-eval-report.json
@@ -392,6 +395,195 @@ historical replay. `backstitch mcp` is registered only if the optional Phase D
 adapter ships and then follows [EVC-8.6]. CLI is the complete required
 interface. No obligation, guide, packet, or implemented MCP operation writes
 repository source.
+
+`analyze --preflight` accepts the ordinary current-repository input,
+configuration, model-selection, and `--format text|json` grammar. It requires
+current `--repo-root` input and rejects historical `--packets` or
+`--packet-report` input and every semantic packet, result, or report output
+path. Preflight executes the same provider-free preparation later consumed by
+ordinary current analysis. It performs no model invocation, credential read,
+network access, semantic-cache read or mutation, output temporary creation, or
+artifact publication. Provider-local model construction is allowed only when
+the selected adapter must be constructed to validate the exact request; that
+construction performs none of the forbidden effects.
+
+Preflight exits `0` when the prepared analysis is executable or has a valid
+all-skipped state. An effective deterministic target finding selected by
+`fail_on` exits `1`. Repository readiness, packet, prompt,
+request-capability, cost, output-overlap, or other preparation blockers exit
+`2`. Invalid CLI syntax or malformed configuration is also exit `2`, but
+remains an invocation error rather than a preparation report.
+
+JSON preflight writes exactly one closed schema-2 object to stdout for both
+ready and provider-free blocked outcomes, with empty stderr. Schema 2
+supersedes the ephemeral schema-1 output shape; Backstitch has no persisted
+preflight artifact or compatibility loader, and consumers must reject rather
+than reinterpret an unknown schema:
+
+```text
+{
+  "schema_version": 2,
+  "operation": "analysis.preflight",
+  "ready": boolean,
+  "selected_command": "analyze",
+  "config": {"selected_path": string|null, "settings_sha256": "sha256:..."},
+  "snapshot": {"snapshot_hash": "sha256:...", "file_count": integer,
+               "byte_count": integer}|null,
+  "readiness": {
+    "total": integer, "executable": integer, "blocked": integer,
+    "reason_groups": [
+      {"code": string, "count": integer,
+       "example_obligation_ids": [string]}
+    ],
+    "next_command": string
+  }|null,
+  "packet_plan":
+    {
+      "status": "complete", "complete": true,
+      "packet_count": integer, "packet_bytes": integer,
+      "aggregate_prompt_bytes": integer,
+      "maximum_request_bytes": integer
+    }
+    | {
+      "status": "over_budget", "complete": false,
+      "crossed_ceiling": string,
+      "measured_packet_count": integer,
+      "unmeasured_packet_count": integer,
+      "measured_packet_bytes": integer,
+      "measured_prompt_bytes": integer,
+      "first_crossing_packet_id": string,
+      "top_measured_contributors": [{
+        "packet_id": string, "kind": string,
+        "packet_byte_count": integer, "request_byte_count": integer
+      }]
+    }
+    | null,
+  "inference": {
+    "analyzer": {
+      "stable_model_id": string,
+      "adapter_model_id": string,
+      "capability_revision": string,
+      "effective_request": object,
+      "request_identity": object
+    },
+    "verifier": {
+      "stable_model_id": string,
+      "adapter_model_id": string,
+      "capability_revision": string,
+      "effective_request": object,
+      "request_identity": object
+    }|null
+  }|null,
+  "budgets": {
+    "projection": "conservative_cold",
+    "limits": {
+      "maximum_packets": integer|null,
+      "maximum_prompt_bytes": integer|null,
+      "maximum_input_bytes": integer|null,
+      "maximum_provider_calls": integer,
+      "maximum_estimated_cost_microusd": integer|null,
+      "maximum_runtime_seconds": integer
+    },
+    "analyzer": {
+      "provider_calls": integer|null,
+      "estimated_cost_microusd": integer|null,
+      "provider_call_status":
+        "within_limit"|"requires_cache_hits"|"exceeds"|"unavailable",
+      "estimated_cost_status":
+        "within_limit"|"requires_cache_hits"|"exceeds"|"disabled"|"unavailable",
+      "cost_rate_source": string|null
+    },
+    "verifier": {
+      "status": "disabled"|"deferred_until_analyzer_results",
+      "maximum_input_bytes": integer|null,
+      "maximum_prompt_bytes": integer|null,
+      "maximum_provider_calls": integer|null,
+      "maximum_estimated_cost_microusd": integer|null,
+      "maximum_runtime_seconds": integer|null
+    },
+    "call_cost_status":
+      "within_limits"|"requires_cache_hits"|"exceeds"|"unknown"|"unavailable"
+  },
+  "outputs": {"current_artifacts_would_publish": boolean},
+  "problems": [
+    {"stage": string, "code": string, "details": object,
+     "action": string}
+  ]
+}
+```
+
+The two `packet_plan` variants are the closed preflight projection of
+[EVC-9.1]'s complete and overflow `PacketPlan`: they omit retained byte
+payloads but rename no status, count, byte, crossing, or contributor field.
+`maximum_request_bytes` is the largest complete `model_request_bytes` length,
+not the largest code-owned instruction block. Nested inference,
+request-identity, and problem values use their closed [SEM-*]/[EVC-*]
+contracts; `object` above does not grant open extension.
+Fields remain present with `null`, zero, or empty values when their phase is
+not authoritative. A blocked phase never fabricates later facts.
+`effective_request` contains no credential or secret. Each reason group
+contains at most three example obligation IDs in canonical obligation order.
+
+`budgets` is a presentation projection over the authoritative retained
+`PacketPlan`, resolved inference, and configured limits. It never owns or
+rebuilds packet or model-request bytes. Zero disables `maximum_packets`,
+`maximum_prompt_bytes`, and `maximum_estimated_cost_microusd`; their rendered
+limits are then null. The trusted capability always supplies
+`maximum_input_bytes` when inference is resolved. A complete plan projects one
+analyzer call per packet for `read-write` and `off`; `require` projects zero
+provider calls because that mode forbids them. The conservative cold analyzer
+cost applies [SEM-7]'s existing per-request ceiling formula to every projected
+call and uses the exact retained model-request byte length. It is null with
+`estimated_cost_status = "disabled"` when the configured cost ceiling is zero.
+
+For `read-write`, a cold projection over a configured call or cost ceiling is
+`requires_cache_hits`, not a provider-free blocker: ordinary analysis still
+performs the authoritative cache-aware planned-miss gate after its first
+currentness recapture. For `off`, the same exceedance is exact and blocks
+preflight with exit 2. For `require`, call and cost projections are zero but
+`call_cost_status = "requires_cache_hits"` because preflight does not inspect
+cache availability. When verification is enabled, verifier work and request
+bytes depend on analyzer findings; preflight reports
+`deferred_until_analyzer_results` and `call_cost_status = "unknown"` unless an
+already-authoritative analyzer exceedance takes precedence. It never
+fabricates verifier calls, request bytes, or cost. It does report the resolved
+verifier input, aggregate prompt, call, cost, and runtime ceilings so the
+deferred boundary is visible. An incomplete or absent packet plan leaves analyzer
+projections null and unavailable. An exact packet-plan budget crossing remains
+authoritative in `packet_plan`, while the later call/cost projection and its
+combined status remain unavailable.
+
+The conservative cost validator and arithmetic have one lower-layer owner
+shared by preflight and execution. A positive cost ceiling with no reviewed
+backend/plugin framing contract, insufficient input overhead, or missing
+authoritative rate source is a structured provider-free preflight blocker.
+Preflight does not read analyzer or verifier cache state. An exact warm-cache
+preview would be a different cache-reading/currentness contract and is not
+part of this command.
+
+Text preflight writes a concise status to stdout. A ready result includes the
+packet count plus the analyzer projected/maximum call and, when enabled,
+projected/maximum cost values with their cold or cache-dependent status. A
+blocker may occupy
+multiple bounded lines: one summary, canonical reason groups with no more than
+three obligation IDs each, and one exact next command. Invalid CLI syntax or
+malformed configuration instead writes the ordinary one-line
+`backstitch: error: ...` message to stderr with empty stdout. Ordinary current
+`analyze --format json` uses the same structured preparation-failure object on
+stdout, with empty stderr, when preparation blocks before provider work.
+Ordinary text analyze renders the same bounded facts on stderr.
+
+Candidate discovery and packet materialization may publish progress only
+through an optional event sink. Its phase vocabulary is closed and ordered:
+`snapshot`, `catalog`, `relations`, `closure`, `candidate_detail`,
+`packet_materialization`, `packet_accounting`, `complete`. Each event contains
+the phase, completed work units, optional
+total work units, and a line-safe current identity. The CLI may attach a
+TTY-only stderr renderer; otherwise it uses a no-op sink. Progress never
+appears on stdout, non-TTY stderr, JSON, reports, artifacts, cache identities,
+or hashes. JSON preflight keeps stderr empty even when stderr is a TTY.
+Renderer failure disables progress and does not change the domain result,
+public bytes, or exit code.
 
 `cache cleanup-lock` requires exactly one key flag. `--analysis-key` addresses
 the analyzer lock/guard/audit contract; `--review-key` addresses the disjoint
@@ -500,12 +692,19 @@ _Implementation mapping_:
 - `backstitch/analysis_llm.py`
 - `backstitch/analysis_results.py`
 - `backstitch/artifact_contracts.py`
+- `backstitch/check_application.py`
 - `backstitch/check_pipeline.py`
+- `backstitch/coverage_application.py`
 - `backstitch/doctor.py`
+- `backstitch/obligation_api.py`
+- `backstitch/operation_progress.py`
+- `backstitch/packet_application.py`
 - `backstitch/profiles.py`
 - `backstitch/reporting.py`
 - `backstitch/resolver.py`
 - `backstitch/semantic_analysis.py`
+- `backstitch/semantic_application.py`
+- `backstitch/semantic_budget.py`
 - `backstitch/semantic_reports.py`
 
 ### 5.1 Configuration Inputs [SC-5.1]
@@ -706,7 +905,9 @@ _Implementation mapping_:
 - `backstitch/analysis_results.py`
 - `backstitch/artifact_contracts.py`
 - `backstitch/cli.py`
+- `backstitch/packet_application.py`
 - `backstitch/semantic_analysis.py`
+- `backstitch/semantic_application.py`
 - `backstitch/semantic_cache.py`
 - `backstitch/semantic_evidence.py`
 - `backstitch/semantic_identity.py`
@@ -795,6 +996,8 @@ _Implementation mapping_:
 
 ## 10. Verification Expectations [SC-10]
 
+<!-- backstitch: meta because docs/specs/04-backstitch-traceability-exclusions.md#SUP-VERIFICATION-META -->
+
 Verification must use real files and real subprocesses where practical.
 
 Required proof surfaces:
@@ -836,6 +1039,17 @@ Required proof surfaces:
   present in that registry
 - diagnostic-policy tests proving all-error, all-info, mixed-level, `off`, and
   `fail_on` behavior through the real CLI and JSON report path
+- an enumerated runtime-import graph test proving [SC-17]'s DAG and ranked
+  dependency direction without hiding function-local imports
+- configured C901 verification over the same production paths as CI
+- registry consistency tests named and documented as consistency tests, plus
+  separate firing fixtures that reach each diagnostic through its real
+  producer; constructing the producer's output type is not firing proof
+- application-interface tests proving CLI adapters preserve public bytes and
+  exits while deterministic commands remain provider-free
+- a table-driven transition matrix for Backstitch's traceability reducer over
+  `markdown-it-py` tokens; `markdown-it-py` remains the sole Markdown syntax
+  parser
 - suppression-hygiene tests proving unused, unknown, malformed,
   unsuppressible, duplicate, broad, deprecated, and redirected suppressions
   produce structured diagnostics with stable codes where implemented
@@ -901,6 +1115,30 @@ Required proof surfaces:
 - [EVC-12]'s obligation bootstrap, source-authority, no-mutation, readiness,
   skip, evidence-summary, discovery, snapshot, currentness, verify, and
   qualification probes run through installed public interfaces
+- a normal-suite hermetic dogfood journey runs from installed CLI entry points
+  and one real settings snapshot. It exercises `check`, filtered obligation
+  views, preflight, packets, current analyze through a deterministic
+  test-owned local `llm` model, result/report loading, summarize, eval,
+  historical replay, exact cache replay, cache miss, cleanup-lock, currentness
+  races, and atomic publication. A second identical analyze produces
+  byte-identical artifacts and zero local-model calls. Only remote model
+  computation and isolated clock/barrier seams may be replaced; settings,
+  snapshot, readiness, packet planning, application, adapter, cache, and
+  artifact-loading owners stay real
+- a second hermetic dogfood journey introduces controlled readiness debt in an
+  isolated self-corpus copy while deterministic `check` stays clean. Bare
+  analyze, explicit analyze, and preflight must report the same preparation
+  identity, debt count, canonical reason groups, bounded IDs, exact recovery
+  command, and zero model calls
+- protected scheduled qualification and every release candidate exercise the
+  committed GPT-5.4-mini default and GPT-5.5 override through their production
+  stable/raw identity split. One event makes at most two generation calls
+  total, at most one per descriptor, and has a hard $0.10 USD estimated-cost
+  ceiling. A successful receipt is current for seven days; release requires a
+  compatible receipt no older than seven days for each descriptor. Receipts
+  are operational evidence and never enter cache identity. Provider
+  unavailability is recorded as `unavailable`, not `incompatible`; neither
+  outcome edits a descriptor or satisfies the release receipt gate
 - every implemented diagnostic code in the default registry has at least one
   test that proves it fires. Reserved codes may appear in the registry only
   with `status = "reserved"` and must not be accepted as emitted issue codes or
@@ -973,22 +1211,6 @@ delta is reviewed rather than discovered, and optional otherwise; it must be
 paired with a documented regeneration command so updating it is deliberate
 but not painful.
 
-_Implementation mapping_:
-- `tests/test_markdown_specs.py`
-- `tests/test_code_parser.py`
-- `tests/test_python_refs.py`
-- `tests/test_resolver.py`
-- `tests/test_cli.py`
-- `tests/test_backstitch_corpus_traceability.py`
-- `tests/conftest.py`
-- `tests/live/test_live_llm.py`
-- `tests/test_pytest_policy.py`
-- `tests/performance/wall_clock.py`
-- `tests/performance/test_evidence_spike_wall_clock.py`
-- `tests/test_wall_clock_benchmark.py`
-- `tests/test_release_script.py`
-- `tests/test_release_workflow.py`
-
 ## 11. Diagnostic Codes And Default Policy [SC-11]
 
 Deterministic target-repository diagnostics use stable canonical codes. The
@@ -1024,6 +1246,7 @@ row is emittable.
 | `CODE_REF_PLANNED_SPEC` | `BSC006` | warning | none | Shipped code cites planned spec |
 | `CODE_REF_EXPLORATORY_SPEC` | `BSC007` | warning | none | Shipped code cites exploratory spec |
 | `CODE_REF_UNMAPPED_FROM_SPEC` | `BSC008` | info | none | Code cites spec without spec mapping to file |
+| `SPEC_MAPPING_TEST_ONLY` | `BSC009` | warning | none | Active implementation mapping resolves only to test roots |
 | `INVARIANT_UNTESTED` | `BSI001` | error/warning | `required`, `draft` | Unique invariant declaration has no valid binding test |
 | `INVARIANT_UNKNOWN` | `BSI002` | error | none | Valid test binding names no declaration |
 | `INVARIANT_DUPLICATE` | `BSI003` | error | none | Invariant ID is duplicate or collides with a section ID |
@@ -1060,6 +1283,15 @@ context: an ambiguous ID in an asserted backlink or mapping means the claimed
 edge cannot be built (error), while the same ID in a comment or prose is a weak
 link (warning). In every case, report precisely and never guess an edge.
 
+`SPEC_MAPPING_TEST_ONLY` fires once for an active, non-meta requirement when
+at least one implementation-mapping target resolves under an effective
+`test_root` and no implementation-mapping target resolves outside all
+effective test roots. Test targets remain valid test evidence and retain their
+graph edges; they are not reclassified as production evidence. Invalid or
+unresolved production tokens keep their ordinary mapping diagnostics and do
+not suppress BSC009. One resolved production target clears BSC009. Planned,
+exploratory, and meta sections do not fire it.
+
 Every issue record carries at least one non-empty locator (`path`,
 `section_id`, or `symbol`), and issues arising from a code reference carry the
 citing file and line, so a human or agent can always navigate to the problem.
@@ -1084,6 +1316,7 @@ _Implementation mapping_:
 - `backstitch/diagnostics.py`
 - `backstitch/artifact_contracts.py`
 - `backstitch/models.py`
+- `backstitch/obligations.py`
 - `backstitch/python_refs.py`
 - `backstitch/resolver.py`
 
@@ -1244,6 +1477,16 @@ constrained decoding is available), `skip` when the model is unresolved;
 "unknown" detail); `endpoint` — `pass`/`fail`, `skip` without `--probe`,
 when the model is unresolved, or when the model has no `api_base`.
 
+Doctor owns environment diagnosis only. It does not capture a repository
+snapshot, compute semantic readiness or packet budgets, validate the trusted
+Backstitch capability descriptor against the exact effective request, or
+claim that analysis is executable. Exact stable/raw identity resolution,
+request-capability validation, request identity, and repository preparation
+belong to `analyze --preflight`, which consumes the same resolved-inference
+owner as execution. `doctor --probe` remains a reachability check and never
+performs a generation. A green doctor is therefore necessary environment
+evidence, not a successful request or analysis-readiness receipt.
+
 `--format json` emits `{"checks": [{"name": ..., "status":
 "pass"|"fail"|"skip", "detail": ..., "remedy": ...}], "ok": <bool>}`;
 `remedy` is empty for non-failures. `ok` is `true` and the exit code is
@@ -1366,6 +1609,7 @@ The initial suppression-hygiene and reserved diagnostic allocation is:
 | `INTENT_COVERAGE_FLOOR_REGRESSION` | `BSN007` | implemented | Intent-coverage ratchet ([COV-9]) |
 | `INTENT_COVERAGE_INCOMPLETE` | `BSN008` | implemented | Intent coverage (`repository`, `patch` contexts; [COV-9]) |
 | `INTENT_COVERAGE_POLICY_REGRESSION` | `BSN009` | implemented | Intent-coverage policy ratchet ([COV-9]) |
+| `SPEC_MAPPING_TEST_ONLY` | `BSC009` | implemented | Active section maps implementation only to test roots ([SC-11]) |
 
 The BSI allocations remained reserved through contract alignment, then all
 five became `implemented` together with their first emissions and firing
@@ -1473,8 +1717,65 @@ implementation status.
 _Implementation mapping_:
 - `backstitch/cli.py`
 
+## 17. Internal Architecture And Dependency Direction [SC-17]
+
+The static runtime import graph among `backstitch.*` modules is a directed
+acyclic graph. A function-local import remains an edge and does not excuse an
+internal cycle. Lazy imports are permitted at the external provider
+quarantine, but no lazy import may create an internal strongly connected
+component.
+
+Dependency direction is leaf primitives and closed contracts, then source and
+configuration adapters, then domain owners, then application workflows, then
+CLI adapters. The CLI owns argument parsing, translation to typed application
+requests, rendering, and public exit mapping. It does not own domain
+computation, snapshot or cache lifecycle, or artifact-set publication.
+
+Each supported behavior has one shipping orchestration path, and behavioral
+tests exercise that path. A test-only duplicate orchestration path is not a
+supported interface. Cohesion, shared state, and lifecycle determine module
+boundaries; file length alone does not. Generic no-follow I/O, identity, and
+artifact-publication primitives have one leaf owner when they are genuinely
+independent of a domain lifecycle.
+
+Names changed by architecture work read as short declarative statements at
+their call sites. Architecture work does not require a standalone rename wave.
+
+Executable gates enumerate the internal import graph and enforce zero strongly
+connected components larger than one. Ruff enforces a McCabe ceiling of 39
+over production code. Lower-scoring functions remain reviewable design debt;
+the ceiling is not a claim that every permitted function is simple.
+
+_Implementation mapping_:
+- `backstitch/cli.py`
+- `backstitch/config.py`
+- `backstitch/settings.py`
+- `backstitch/filesystem_io.py`
+- `backstitch/scan_exclusions.py`
+- `backstitch/semantic_eval_identity.py`
+- `backstitch/semantic_verification_contract.py`
+- `backstitch/artifact_publication.py`
+- `backstitch/check_application.py`
+- `backstitch/coverage_application.py`
+- `backstitch/packet_application.py`
+- `backstitch/semantic_application.py`
+- `backstitch/obligation_api.py`
+- `backstitch/semantic_cache.py`
+- `backstitch/markdown_specs.py`
+- `tests/test_architecture.py`
+- `tests/test_traceability_reducer.py`
+- `pyproject.toml`
+- `.github/workflows/ci.yml`
+
 ## Related Plans
 
+- `docs/plans/2026-08-04-semantic-preparation-performance-plan.md`
+  (implementation plan; [SC-5] and [SC-7])
+- `docs/plans/2026-07-29-usability-remediation-plan.md`
+  (active usability implementation plan; [SC-5], [SC-10], [SC-11], [SC-14],
+  and [SC-15])
+- `docs/plans/2026-07-29-architecture-quality-remediation-plan.md`
+  (active architecture-quality implementation plan)
 - `docs/plans/2026-07-28-intent-coverage-implementation-plan.md`
   (active implementation plan; [SC-5], [SC-6], [SC-8], [SC-10], [SC-11],
   and [SC-15] coverage registrations)

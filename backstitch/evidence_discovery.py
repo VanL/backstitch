@@ -25,6 +25,7 @@ from backstitch.canonical import canonical_json_bytes, lf_slice
 from backstitch.code_parser import (
     ParsedModule,
     StaticBinding,
+    StaticImportAlias,
     StaticReference,
     parse_python_source,
 )
@@ -39,7 +40,8 @@ from backstitch.models import (
     Report,
     SpecMapping,
 )
-from backstitch.obligations import ObligationRecord
+from backstitch.obligations import ObligationRecord, resolve_evidence_atom
+from backstitch.operation_progress import DeadlinePhase, OperationProgress
 from backstitch.python_refs import python_definition_inventory_bytes
 from backstitch.repository_snapshot import RepositorySnapshot
 from backstitch.settings import ObligationSettings
@@ -275,7 +277,44 @@ def _budget_error(budget: str, limit: int, observed: int) -> EvidenceDiscoveryEr
 @dataclass(slots=True)
 class _WorkBudget:
     limit: int
+    progress: OperationProgress | None = None
+    emit_progress: bool = True
     used: int = 0
+    phase: DeadlinePhase = "catalog"
+    _checkpoint_countdown: int = 0
+
+    def enter(
+        self,
+        phase: DeadlinePhase,
+        *,
+        current_identity: str,
+        total_work_units: int | None = None,
+    ) -> None:
+        """Name the next work phase without changing deterministic accounting."""
+
+        self.phase = phase
+        self._checkpoint_countdown = 63
+        if self.progress is not None:
+            if self.emit_progress:
+                self.progress.advance(
+                    phase,
+                    completed_work_units=self.used,
+                    total_work_units=total_work_units,
+                    current_identity=current_identity,
+                )
+            else:
+                self.progress.checkpoint(phase)
+
+    def checkpoint(self) -> None:
+        """Sample the deadline at a bounded interval without charging work."""
+
+        if self.progress is None:
+            return
+        if self._checkpoint_countdown:
+            self._checkpoint_countdown -= 1
+            return
+        self.progress.checkpoint(self.phase)
+        self._checkpoint_countdown = 63
 
     def charge(self, units: int = 1) -> None:
         if units <= 0:
@@ -284,6 +323,7 @@ class _WorkBudget:
         if observed > self.limit:
             raise _budget_error("work_units", self.limit, observed)
         self.used = observed
+        self.checkpoint()
 
 
 def _is_under(path: str, roots: Sequence[str]) -> bool:
@@ -412,6 +452,7 @@ class _Node:
     trace_flags: set[str] = field(default_factory=set)
     bases: set[DiscoveryBasis] = field(default_factory=set)
     lexical_score: tuple[int, int] = (0, 0)
+    lexical_tokens: frozenset[str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -538,6 +579,7 @@ def _source_rows(
     snapshot: RepositorySnapshot,
     profile: ProfileConfig,
     settings: ObligationSettings,
+    work: _WorkBudget,
 ) -> tuple[tuple[str, bytes, EvidenceRole], ...]:
     if len(snapshot.path_catalog) > settings.maximum_catalog_items:
         raise _budget_error(
@@ -560,6 +602,7 @@ def _source_rows(
     rows: list[tuple[str, bytes, EvidenceRole]] = []
     roots = tuple(dict.fromkeys((*profile.code_roots, *profile.test_roots)))
     for row in snapshot.files:
+        work.checkpoint()
         if (
             row.raw_bytes is not None
             and len(row.raw_bytes) > settings.maximum_file_bytes
@@ -577,20 +620,26 @@ def _source_rows(
                 f"source is unreadable: {row.path}",
                 {"path": row.path, "error_class": row.error_class},
             )
-        role: EvidenceRole = (
-            "test" if _is_under(row.path, profile.test_roots) else "implementation"
+        role = resolve_evidence_atom(
+            path=row.path,
+            symbol=None,
+            relation_kinds=("enclosing_definition",),
+            reciprocity_state="one_sided",
+            test_roots=profile.test_roots,
         )
-        rows.append((row.path, row.raw_bytes, role))
+        rows.append((row.path, row.raw_bytes, role.source_role))
     return tuple(rows)
 
 
 def _validate_semantic_utf8(
     snapshot: RepositorySnapshot,
     profile: ProfileConfig,
+    work: _WorkBudget,
 ) -> None:
     markdown_roots = (*profile.spec_roots, *profile.plan_roots)
     python_roots = (*profile.code_roots, *profile.test_roots)
     for row in snapshot.files:
+        work.checkpoint()
         semantic = (
             row.path.endswith(".md") and _is_under(row.path, markdown_roots)
         ) or (row.path.endswith(".py") and _is_under(row.path, python_roots))
@@ -664,7 +713,7 @@ def _catalog_python(
     dict[str, str | None],
     dict[str, bytes],
 ]:
-    sources = _source_rows(snapshot, profile, settings)
+    sources = _source_rows(snapshot, profile, settings, work)
     module_name_by_path = resolved_python_module_names(
         tuple(path for path, _, _ in sources), profile, snapshot
     )
@@ -679,12 +728,14 @@ def _catalog_python(
     candidate_by_scope: dict[tuple[str, int], str] = {}
     module_candidate_by_path: dict[str, str] = {}
     for path, raw, role in sources:
+        work.checkpoint()
         raw_by_path[path] = raw
         module_name = module_name_by_path[path]
         try:
             parsed = parse_python_source(raw, include_static_facts=True)
         except UnicodeDecodeError:
             continue
+        work.checkpoint()
         if not parsed.parse_ok:
             continue
         parsed_by_path[path] = parsed
@@ -776,8 +827,10 @@ def _catalog_python(
 
     references: list[_Reference] = []
     for path, parsed in parsed_by_path.items():
+        work.checkpoint()
         reference_ordinals: dict[tuple[str, str], int] = defaultdict(int)
         for fact in parsed.static_references:
+            work.checkpoint()
             owner_id = (
                 candidate_by_scope.get((path, fact.owner_scope_start_byte))
                 if fact.owner_scope_start_byte is not None
@@ -803,6 +856,11 @@ def _catalog_python(
                 )
             )
 
+    work.enter(
+        "relations",
+        current_identity=snapshot.snapshot_hash,
+        total_work_units=settings.maximum_work_units,
+    )
     _resolve_references(
         references,
         nodes,
@@ -831,280 +889,402 @@ def _relative_module(
     return ".".join(base)
 
 
-def _resolve_references(
-    references: Sequence[_Reference],
-    nodes: dict[str, _Node],
-    definitions: Sequence[_Definition],
-    parsed_by_path: Mapping[str, ParsedModule],
-    module_name_by_path: Mapping[str, str | None],
-    derived_module_names: Mapping[str, tuple[str, ...]],
-    raw_by_path: Mapping[str, bytes],
-    work: _WorkBudget,
-) -> None:
-    module_nodes = {
-        item.module_name: item.candidate_id
-        for item in nodes.values()
-        if item.structural_locator.startswith("python-module:")
-        and item.module_name is not None
-    }
-    module_paths = {
-        module_name: path
-        for path, module_name in module_name_by_path.items()
-        if module_name is not None
-    }
-    plausible_module_names = frozenset(
-        name for names in derived_module_names.values() for name in names
-    )
-    definitions_by_module_name: dict[tuple[str, str], list[str]] = defaultdict(list)
-    possible_definitions_by_module_name: dict[tuple[str, str], list[str]] = defaultdict(
-        list
-    )
-    definitions_by_scope_name: dict[tuple[str, int | None, str], list[str]] = (
-        defaultdict(list)
-    )
-    for definition in definitions:
+@dataclass(frozen=True, slots=True)
+class _ReferenceResolution:
+    targets: tuple[str, ...] = ()
+    ambiguous_targets: tuple[str, ...] = ()
+    plausible: bool = False
+    unresolved_local: bool = False
+    relation_kind: str = "static_reference"
+
+
+class _ReferenceResolver:
+    """Build lexical bindings, resolve references, then project static edges."""
+
+    def __init__(
+        self,
+        references: Sequence[_Reference],
+        nodes: dict[str, _Node],
+        definitions: Sequence[_Definition],
+        parsed_by_path: Mapping[str, ParsedModule],
+        module_name_by_path: Mapping[str, str | None],
+        derived_module_names: Mapping[str, tuple[str, ...]],
+        raw_by_path: Mapping[str, bytes],
+        work: _WorkBudget,
+    ) -> None:
+        self.references = references
+        self.nodes = nodes
+        self.definitions = definitions
+        self.parsed_by_path = parsed_by_path
+        self.module_name_by_path = module_name_by_path
+        self.derived_module_names = derived_module_names
+        self.raw_by_path = raw_by_path
+        self.work = work
+        self.module_nodes: dict[str, str] = {}
+        self.module_paths: dict[str, str] = {}
+        self.plausible_module_names: frozenset[str] = frozenset()
+        self.definitions_by_module_name: dict[tuple[str, str], list[str]] = defaultdict(
+            list
+        )
+        self.possible_definitions_by_module_name: dict[tuple[str, str], list[str]] = (
+            defaultdict(list)
+        )
+        self.definitions_by_scope_name: dict[tuple[str, int | None, str], list[str]] = (
+            defaultdict(list)
+        )
+        self.local_definition_names: set[str] = set()
+        self.local_prefixes: set[str] = set()
+        self.bindings: dict[tuple[str, int | None, str], list[_Binding]] = defaultdict(
+            list
+        )
+        self.definitions_by_scope: dict[tuple[str, int], _Definition] = {}
+        self.parent_scope: dict[tuple[str, int], int | None] = {}
+        self.function_scopes: set[tuple[str, int]] = set()
+
+    def resolve(self) -> None:
+        self.build_symbol_tables()
+        self.bind_definitions()
+        self.bind_imports()
+        shadow_rows = self.shadow_rows()
+        self.bind_shadows(shadow_rows)
+        self.bind_closure_shadows(shadow_rows)
+        self.build_parent_scopes()
+        static_edges = self.resolve_all_references()
+        self.project_edges(static_edges)
+
+    def build_symbol_tables(self) -> None:
+        for item in self.nodes.values():
+            self.work.checkpoint()
+            if (
+                item.structural_locator.startswith("python-module:")
+                and item.module_name is not None
+            ):
+                self.module_nodes[item.module_name] = item.candidate_id
+        for path, module_name in self.module_name_by_path.items():
+            self.work.checkpoint()
+            if module_name is not None:
+                self.module_paths[module_name] = path
+        plausible_module_names: set[str] = set()
+        for names in self.derived_module_names.values():
+            self.work.checkpoint()
+            plausible_module_names.update(names)
+        self.plausible_module_names = frozenset(plausible_module_names)
+        for definition in self.definitions:
+            self.work.checkpoint()
+            self.index_definition(definition)
+        local_definition_names: set[str] = set()
+        for definition in self.definitions:
+            self.work.checkpoint()
+            local_definition_names.add(definition.name)
+        self.local_definition_names = local_definition_names
+        local_prefixes: set[str] = set()
+        for name in self.plausible_module_names:
+            self.work.checkpoint()
+            local_prefixes.add(name.split(".", 1)[0])
+        self.local_prefixes = local_prefixes
+        definitions_by_scope: dict[tuple[str, int], _Definition] = {}
+        function_scopes: set[tuple[str, int]] = set()
+        for definition in self.definitions:
+            self.work.checkpoint()
+            definitions_by_scope[(definition.path, definition.scope_start_byte)] = (
+                definition
+            )
+            if definition.node_kind in {"function", "async-function"}:
+                function_scopes.add((definition.path, definition.scope_start_byte))
+        self.definitions_by_scope = definitions_by_scope
+        self.function_scopes = function_scopes
+
+    def index_definition(self, definition: _Definition) -> None:
         if definition.module_name is not None and definition.parent_qualname is None:
-            definitions_by_module_name[
+            self.definitions_by_module_name[
                 (definition.module_name, definition.name)
             ].append(definition.candidate_id)
         if definition.parent_qualname is None:
-            for possible_module in derived_module_names[definition.path]:
-                possible_definitions_by_module_name[
+            for possible_module in self.derived_module_names[definition.path]:
+                self.work.checkpoint()
+                self.possible_definitions_by_module_name[
                     (possible_module, definition.name)
                 ].append(definition.candidate_id)
-        definitions_by_scope_name[
+        self.definitions_by_scope_name[
             (definition.path, definition.parent_scope_start_byte, definition.name)
         ].append(definition.candidate_id)
-    local_definition_names = {item.name for item in definitions}
-    local_prefixes = {name.split(".", 1)[0] for name in plausible_module_names}
 
-    bindings: dict[tuple[str, int | None, str], list[_Binding]] = defaultdict(list)
-    for definition in definitions:
-        scope_key = (
-            definition.path,
-            definition.parent_scope_start_byte,
-            definition.name,
-        )
-        bindings[scope_key].append(
-            _Binding(
-                definition.source_order,
-                "definition",
-                target_ids=tuple(definitions_by_scope_name[scope_key]),
-                plausible_local=True,
-                conditional=definition.conditional,
+    def bind_definitions(self) -> None:
+        for definition in self.definitions:
+            self.work.checkpoint()
+            scope_key = (
+                definition.path,
+                definition.parent_scope_start_byte,
+                definition.name,
             )
+            self.bindings[scope_key].append(
+                _Binding(
+                    definition.source_order,
+                    "definition",
+                    target_ids=tuple(self.definitions_by_scope_name[scope_key]),
+                    plausible_local=True,
+                    conditional=definition.conditional,
+                )
+            )
+
+    def bind_imports(self) -> None:
+        references_by_scope: dict[tuple[str, int | None], list[_Reference]] = (
+            defaultdict(list)
         )
-
-    reference_by_scope: dict[tuple[str, int | None], list[_Reference]] = defaultdict(
-        list
-    )
-    for reference in references:
-        reference_by_scope[
-            (reference.path, reference.fact.owner_scope_start_byte)
-        ].append(reference)
-
-    for (path, owner_scope), scope_refs in reference_by_scope.items():
-        module_name = module_name_by_path[path]
-        if module_name is None:
-            continue
-        is_package = PurePosixPath(path).name == "__init__.py"
-        for reference in scope_refs:
-            fact = reference.fact
-            if fact.node_kind != "import":
+        for reference in self.references:
+            self.work.checkpoint()
+            references_by_scope[
+                (reference.path, reference.fact.owner_scope_start_byte)
+            ].append(reference)
+        for (path, owner_scope), scope_references in references_by_scope.items():
+            self.work.checkpoint()
+            module_name = self.module_name_by_path[path]
+            if module_name is None:
                 continue
-            if any(alias.bound_name == "*" for alias in fact.import_aliases):
-                base = _relative_module(
-                    module_name,
-                    is_package,
-                    fact.relative_level,
-                    _python_dotted_identifier(fact.import_module),
-                )
-                plausible = (
-                    base.split(".", 1)[0] in local_prefixes
-                    if base is not None
-                    else True
-                )
-                if plausible:
-                    wildcard = next(
-                        alias
-                        for alias in fact.import_aliases
-                        if alias.bound_name == "*"
-                    )
-                    bindings[(path, owner_scope, "*")].append(
-                        _Binding(
-                            wildcard.source_order,
-                            "shadow",
-                            plausible_local=True,
-                            conditional=fact.conditional,
-                        )
-                    )
-                continue
-            for alias in fact.import_aliases:
-                bound_name = _python_identifier(alias.bound_name)
-                target_ids: tuple[str, ...] = ()
-                ambiguous: tuple[str, ...] = ()
-                target_module: str | None = None
-                plausible = False
-                imported_parts = tuple(
-                    _python_identifier(part) for part in alias.imported
-                )
-                imported = ".".join(imported_parts)
-                if fact.import_module is None and fact.relative_level == 0:
-                    target_module = (
-                        imported
-                        if bound_name != imported_parts[0]
-                        else imported.split(".")[0]
-                    )
-                    target_id = module_nodes.get(imported)
-                    if target_id is not None:
-                        target_ids = (target_id,)
-                    plausible = imported.split(".", 1)[0] in local_prefixes
-                else:
-                    base = _relative_module(
+            is_package = PurePosixPath(path).name == "__init__.py"
+            for reference in scope_references:
+                self.work.checkpoint()
+                if reference.fact.node_kind == "import":
+                    self.bind_import_fact(
+                        path,
+                        owner_scope,
                         module_name,
                         is_package,
-                        fact.relative_level,
-                        _python_dotted_identifier(fact.import_module),
+                        reference.fact,
                     )
-                    if base is None:
-                        plausible = True
-                    else:
-                        submodule = f"{base}.{imported}" if base else imported
-                        submodule_id = module_nodes.get(submodule)
-                        choices = possible_definitions_by_module_name.get(
-                            (base, imported), []
-                        )
-                        base_path = module_paths.get(base)
-                        base_is_package = bool(
-                            base_path is not None
-                            and PurePosixPath(base_path).name == "__init__.py"
-                        )
-                        if base_path is not None and not base_is_package:
-                            if len(choices) == 1:
-                                target_ids = (choices[0],)
-                            elif choices:
-                                ambiguous = tuple(sorted(choices))
-                            elif submodule_id is not None:
-                                plausible = True
-                        elif submodule_id is not None and choices:
-                            ambiguous = tuple(sorted({submodule_id, *choices}))
-                        elif submodule_id is not None:
-                            target_module = submodule
-                            target_ids = (submodule_id,)
-                        elif base_path is not None and len(choices) == 1:
-                            target_ids = (choices[0],)
-                        elif choices:
-                            ambiguous = tuple(sorted(choices))
-                        plausible = (
-                            bool(base and base.split(".", 1)[0] in local_prefixes)
-                            or plausible
-                        )
-                        plausible = plausible or submodule in plausible_module_names
-                bindings[(path, owner_scope, bound_name)].append(
+
+    def bind_import_fact(
+        self,
+        path: str,
+        owner_scope: int | None,
+        module_name: str,
+        is_package: bool,
+        fact: StaticReference,
+    ) -> None:
+        wildcard = next(
+            (alias for alias in fact.import_aliases if alias.bound_name == "*"),
+            None,
+        )
+        if wildcard is not None:
+            base = _relative_module(
+                module_name,
+                is_package,
+                fact.relative_level,
+                _python_dotted_identifier(fact.import_module),
+            )
+            plausible = (
+                base.split(".", 1)[0] in self.local_prefixes
+                if base is not None
+                else True
+            )
+            if plausible:
+                self.bindings[(path, owner_scope, "*")].append(
                     _Binding(
-                        alias.source_order,
-                        "import",
-                        target_ids=target_ids,
-                        module_name=target_module,
-                        plausible_local=plausible,
-                        ambiguous_ids=ambiguous,
+                        wildcard.source_order,
+                        "shadow",
+                        plausible_local=True,
                         conditional=fact.conditional,
                     )
                 )
-
-    # Writes and parameters in the current lexical scope shadow an otherwise
-    # resolvable repository-local definition/import. Unknown arbitrary names
-    # remain outside the graph instead of being guessed as local.
-    shadow_rows: list[tuple[str, int | None, StaticBinding]] = []
-    for path, parsed in parsed_by_path.items():
-        shadow_rows.extend(
-            (path, fact.owner_scope_start_byte, fact)
-            for fact in parsed.static_bindings
-            if fact.kind not in {"definition", "import"}
-        )
-    locally_plausible_names = {
-        (path, name)
-        for (path, _owner, name), items in bindings.items()
-        if any(
-            item.target_ids or item.ambiguous_ids or item.plausible_local
-            for item in items
-        )
-    }
-    for path, owner_scope, binding_fact in shadow_rows:
-        binding_name = _python_identifier(binding_fact.name)
-        bindings[(path, owner_scope, binding_name)].append(
-            _Binding(
-                binding_fact.source_order,
-                "shadow",
-                plausible_local=(path, binding_name) in locally_plausible_names,
-                conditional=binding_fact.conditional,
+            return
+        for alias in fact.import_aliases:
+            self.work.checkpoint()
+            bound_name, binding = self.import_binding(
+                module_name,
+                is_package,
+                fact,
+                alias,
             )
+            self.bindings[(path, owner_scope, bound_name)].append(binding)
+
+    def import_binding(
+        self,
+        module_name: str,
+        is_package: bool,
+        fact: StaticReference,
+        alias: StaticImportAlias,
+    ) -> tuple[str, _Binding]:
+        bound_name = _python_identifier(alias.bound_name)
+        imported_parts = tuple(_python_identifier(part) for part in alias.imported)
+        imported = ".".join(imported_parts)
+        if fact.import_module is None and fact.relative_level == 0:
+            target_module = (
+                imported if bound_name != imported_parts[0] else imported.split(".")[0]
+            )
+            target_id = self.module_nodes.get(imported)
+            return bound_name, _Binding(
+                alias.source_order,
+                "import",
+                target_ids=(target_id,) if target_id is not None else (),
+                module_name=target_module,
+                plausible_local=imported.split(".", 1)[0] in self.local_prefixes,
+                conditional=fact.conditional,
+            )
+        base = _relative_module(
+            module_name,
+            is_package,
+            fact.relative_level,
+            _python_dotted_identifier(fact.import_module),
+        )
+        target_ids, resolved_module, ambiguous, plausible = self.from_import_target(
+            base,
+            imported,
+        )
+        return bound_name, _Binding(
+            alias.source_order,
+            "import",
+            target_ids=target_ids,
+            module_name=resolved_module,
+            plausible_local=plausible,
+            ambiguous_ids=ambiguous,
+            conditional=fact.conditional,
         )
 
-    # PEP 695 class type parameters are closure cells for methods, unlike
-    # ordinary class namespace names.  Preserve the existing rule that bare
-    # method names skip class attributes, but inject these parser-owned type
-    # parameter shadows into descendant function and nested-class scopes so
-    # lookup cannot climb to an unrelated module import.
-    class_scopes = {
-        (item.path, item.scope_start_byte)
-        for item in definitions
-        if item.node_kind == "class"
-    }
-    definitions_by_scope = {
-        (item.path, item.scope_start_byte): item for item in definitions
-    }
-    scopes_by_ancestor_class: dict[tuple[str, int], list[_Definition]] = defaultdict(
-        list
-    )
-    for definition in definitions:
-        work.charge()
-        parent = definition.parent_scope_start_byte
-        while parent is not None:
-            work.charge()
-            ancestor = definitions_by_scope.get((definition.path, parent))
-            if ancestor is None:
-                break
-            if ancestor.node_kind == "class":
-                scopes_by_ancestor_class[(definition.path, parent)].append(definition)
-            parent = ancestor.parent_scope_start_byte
-    for path, owner_scope, binding_fact in shadow_rows:
-        if binding_fact.kind != "parameter" or (path, owner_scope) not in class_scopes:
-            continue
-        assert owner_scope is not None
-        binding_name = _python_identifier(binding_fact.name)
-        for definition in scopes_by_ancestor_class.get((path, owner_scope), ()):
-            bindings[(path, definition.scope_start_byte, binding_name)].append(
-                _Binding(0, "shadow", plausible_local=True)
+    def from_import_target(
+        self,
+        base: str | None,
+        imported: str,
+    ) -> tuple[tuple[str, ...], str | None, tuple[str, ...], bool]:
+        if base is None:
+            return (), None, (), True
+        submodule = f"{base}.{imported}" if base else imported
+        submodule_id = self.module_nodes.get(submodule)
+        choices = self.possible_definitions_by_module_name.get((base, imported), [])
+        base_path = self.module_paths.get(base)
+        base_is_package = bool(
+            base_path is not None and PurePosixPath(base_path).name == "__init__.py"
+        )
+        target_ids: tuple[str, ...] = ()
+        target_module: str | None = None
+        ambiguous: tuple[str, ...] = ()
+        plausible = False
+        if base_path is not None and not base_is_package:
+            if len(choices) == 1:
+                target_ids = (choices[0],)
+            elif choices:
+                ambiguous = tuple(sorted(choices))
+            elif submodule_id is not None:
+                plausible = True
+        elif submodule_id is not None and choices:
+            ambiguous = tuple(sorted({submodule_id, *choices}))
+        elif submodule_id is not None:
+            target_module = submodule
+            target_ids = (submodule_id,)
+        elif base_path is not None and len(choices) == 1:
+            target_ids = (choices[0],)
+        elif choices:
+            ambiguous = tuple(sorted(choices))
+        plausible = (
+            bool(base and base.split(".", 1)[0] in self.local_prefixes) or plausible
+        )
+        plausible = plausible or submodule in self.plausible_module_names
+        return target_ids, target_module, ambiguous, plausible
+
+    def shadow_rows(self) -> list[tuple[str, int | None, StaticBinding]]:
+        rows: list[tuple[str, int | None, StaticBinding]] = []
+        for path, parsed in self.parsed_by_path.items():
+            self.work.checkpoint()
+            for fact in parsed.static_bindings:
+                self.work.checkpoint()
+                if fact.kind not in {"definition", "import"}:
+                    rows.append((path, fact.owner_scope_start_byte, fact))
+        return rows
+
+    def bind_shadows(
+        self,
+        shadow_rows: Sequence[tuple[str, int | None, StaticBinding]],
+    ) -> None:
+        locally_plausible_names: set[tuple[str, str]] = set()
+        for (path, _owner, name), items in self.bindings.items():
+            self.work.checkpoint()
+            if any(
+                item.target_ids or item.ambiguous_ids or item.plausible_local
+                for item in items
+            ):
+                locally_plausible_names.add((path, name))
+        for path, owner_scope, binding_fact in shadow_rows:
+            self.work.checkpoint()
+            binding_name = _python_identifier(binding_fact.name)
+            self.bindings[(path, owner_scope, binding_name)].append(
+                _Binding(
+                    binding_fact.source_order,
+                    "shadow",
+                    plausible_local=(path, binding_name) in locally_plausible_names,
+                    conditional=binding_fact.conditional,
+                )
             )
-    for (path, _class_scope), descendants in scopes_by_ancestor_class.items():
-        for definition in descendants:
-            if definition.node_kind not in {"function", "async-function"}:
+
+    def bind_closure_shadows(
+        self,
+        shadow_rows: Sequence[tuple[str, int | None, StaticBinding]],
+    ) -> None:
+        class_scopes: set[tuple[str, int]] = set()
+        for item in self.definitions:
+            self.work.checkpoint()
+            if item.node_kind == "class":
+                class_scopes.add((item.path, item.scope_start_byte))
+        descendants_by_class = self.descendant_scopes_by_class()
+        for path, owner_scope, binding_fact in shadow_rows:
+            self.work.checkpoint()
+            if (
+                binding_fact.kind != "parameter"
+                or (path, owner_scope) not in class_scopes
+            ):
                 continue
-            bindings[(path, definition.scope_start_byte, "__class__")].append(
-                _Binding(0, "shadow", plausible_local=True)
-            )
+            assert owner_scope is not None
+            binding_name = _python_identifier(binding_fact.name)
+            for definition in descendants_by_class.get((path, owner_scope), ()):
+                self.work.checkpoint()
+                self.bindings[(path, definition.scope_start_byte, binding_name)].append(
+                    _Binding(0, "shadow", plausible_local=True)
+                )
+        for path, descendants in (
+            (key[0], values) for key, values in descendants_by_class.items()
+        ):
+            self.work.checkpoint()
+            for definition in descendants:
+                self.work.checkpoint()
+                if definition.node_kind in {"function", "async-function"}:
+                    self.bindings[
+                        (path, definition.scope_start_byte, "__class__")
+                    ].append(_Binding(0, "shadow", plausible_local=True))
 
-    parent_scope: dict[tuple[str, int], int | None] = {}
-    for item in definitions:
-        parent = item.parent_scope_start_byte
-        while parent is not None:
-            parent_definition = definitions_by_scope.get((item.path, parent))
-            if parent_definition is None:
-                parent = None
+    def descendant_scopes_by_class(
+        self,
+    ) -> dict[tuple[str, int], list[_Definition]]:
+        result: dict[tuple[str, int], list[_Definition]] = defaultdict(list)
+        for definition in self.definitions:
+            self.work.charge()
+            parent = definition.parent_scope_start_byte
+            while parent is not None:
+                self.work.charge()
+                ancestor = self.definitions_by_scope.get((definition.path, parent))
+                if ancestor is None:
+                    break
+                if ancestor.node_kind == "class":
+                    result[(definition.path, parent)].append(definition)
+                parent = ancestor.parent_scope_start_byte
+        return result
+
+    def build_parent_scopes(self) -> None:
+        for definition in self.definitions:
+            self.work.checkpoint()
+            parent = definition.parent_scope_start_byte
+            while parent is not None:
+                self.work.checkpoint()
+                parent_definition = self.definitions_by_scope.get(
+                    (definition.path, parent)
+                )
+                if parent_definition is None:
+                    parent = None
+                    break
+                if parent_definition.node_kind == "class":
+                    parent = parent_definition.parent_scope_start_byte
+                    continue
                 break
-            if parent_definition.node_kind == "class":
-                parent = parent_definition.parent_scope_start_byte
-                continue
-            break
-        parent_scope[(item.path, item.scope_start_byte)] = parent
+            self.parent_scope[(definition.path, definition.scope_start_byte)] = parent
 
-    function_scopes = {
-        (item.path, item.scope_start_byte)
-        for item in definitions
-        if item.node_kind in {"function", "async-function"}
-    }
-
+    @staticmethod
     def uncertain_binding(items: Sequence[_Binding]) -> _Binding:
         possible_targets = {
             target
@@ -1120,209 +1300,310 @@ def _resolve_references(
         )
 
     def visible_binding(
-        path: str, owner_scope: int | None, name: str, source_order: int
+        self,
+        path: str,
+        owner_scope: int | None,
+        name: str,
+        source_order: int,
     ) -> _Binding | None:
         current = owner_scope
         direct_scope = True
         while True:
-            all_choices = bindings.get((path, current, name), [])
+            all_choices = self.bindings.get((path, current, name), [])
             if direct_scope:
-                choices = [
-                    item for item in all_choices if item.source_order <= source_order
-                ]
-                if choices:
-                    latest = max(
-                        choices,
-                        key=lambda item: (
-                            item.source_order,
-                            item.kind,
-                            item.target_ids,
-                            item.ambiguous_ids,
-                        ),
-                    )
-                    if latest.conditional:
-                        return uncertain_binding(choices)
-                    return latest
-                # A function determines locals for the whole body.  A later
-                # write/definition therefore blocks a lookup from climbing to
-                # a parent import even before that local binding executes.
-                if (path, current) in function_scopes and all_choices:
-                    return uncertain_binding(all_choices)
+                binding = self.direct_binding(
+                    path,
+                    current,
+                    all_choices,
+                    source_order,
+                )
+                if binding is not None:
+                    return binding
             elif all_choices:
-                # A child function observes a parent namespace at call time,
-                # not at the child's syntactic reference position.  Without
-                # execution order or branch identity, only one unconditional
-                # binding established before the child is stable enough to
-                # project as an exact static edge.
                 if (
                     len(all_choices) == 1
                     and not all_choices[0].conditional
                     and all_choices[0].source_order <= source_order
                 ):
                     return all_choices[0]
-                return uncertain_binding(all_choices)
+                return self.uncertain_binding(all_choices)
             if current is None:
                 return None
-            current = parent_scope.get((path, current))
+            current = self.parent_scope.get((path, current))
             direct_scope = False
 
+    def direct_binding(
+        self,
+        path: str,
+        current: int | None,
+        all_choices: Sequence[_Binding],
+        source_order: int,
+    ) -> _Binding | None:
+        choices = [item for item in all_choices if item.source_order <= source_order]
+        if choices:
+            latest = max(
+                choices,
+                key=lambda item: (
+                    item.source_order,
+                    item.kind,
+                    item.target_ids,
+                    item.ambiguous_ids,
+                ),
+            )
+            return self.uncertain_binding(choices) if latest.conditional else latest
+        if (path, current) in self.function_scopes and all_choices:
+            return self.uncertain_binding(all_choices)
+        return None
+
     def qualified_target(
-        module_name: str, parts: Sequence[str]
+        self,
+        module_name: str,
+        parts: Sequence[str],
     ) -> tuple[tuple[str, ...], tuple[str, ...], bool]:
         if not parts:
-            target = module_nodes.get(module_name)
+            target = self.module_nodes.get(module_name)
             return (
                 (target,) if target else (),
                 (),
-                module_name.split(".")[0] in local_prefixes,
+                module_name.split(".")[0] in self.local_prefixes,
             )
         for split in range(len(parts), -1, -1):
-            candidate_module = ".".join((module_name, *parts[:split]))
-            if candidate_module not in plausible_module_names:
-                continue
-            remaining = parts[split:]
-            if candidate_module not in module_paths:
-                ambiguous = (
-                    tuple(
-                        sorted(
-                            possible_definitions_by_module_name.get(
-                                (candidate_module, remaining[0]), []
-                            )
+            result = self.qualified_target_at_split(module_name, parts, split)
+            if result is not None:
+                return result
+        return (
+            (),
+            (),
+            module_name.split(".", 1)[0] in self.local_prefixes,
+        )
+
+    def qualified_target_at_split(
+        self,
+        module_name: str,
+        parts: Sequence[str],
+        split: int,
+    ) -> tuple[tuple[str, ...], tuple[str, ...], bool] | None:
+        candidate_module = ".".join((module_name, *parts[:split]))
+        if candidate_module not in self.plausible_module_names:
+            return None
+        remaining = parts[split:]
+        if candidate_module not in self.module_paths:
+            ambiguous = (
+                tuple(
+                    sorted(
+                        self.possible_definitions_by_module_name.get(
+                            (candidate_module, remaining[0]), []
                         )
                     )
-                    if len(remaining) == 1
-                    else ()
                 )
-                return ((), ambiguous, True)
-            if not remaining:
-                return ((module_nodes[candidate_module],), (), True)
-            choices = definitions_by_module_name.get(
-                (candidate_module, remaining[0]), []
+                if len(remaining) == 1
+                else ()
             )
-            if len(remaining) == 1:
-                if len(choices) == 1:
-                    return ((choices[0],), (), True)
-                return ((), tuple(sorted(choices)), True)
-            return ((), (), True)
-        return ((), (), module_name.split(".", 1)[0] in local_prefixes)
+            return (), ambiguous, True
+        if not remaining:
+            return ((self.module_nodes[candidate_module],), (), True)
+        choices = self.definitions_by_module_name.get(
+            (candidate_module, remaining[0]), []
+        )
+        if len(remaining) == 1:
+            if len(choices) == 1:
+                return ((choices[0],), (), True)
+            return ((), tuple(sorted(choices)), True)
+        return ((), (), True)
 
-    static_edges: set[tuple[str, str, str]] = {
-        ("enclosing_definition", node.owner_candidate_id, node.candidate_id)
-        for node in nodes.values()
-        if node.owner_candidate_id is not None
-    }
-    for reference in references:
+    def resolve_all_references(self) -> set[tuple[str, str, str]]:
+        static_edges: set[tuple[str, str, str]] = set()
+        for node in self.nodes.values():
+            self.work.checkpoint()
+            if node.owner_candidate_id is not None:
+                static_edges.add(
+                    ("enclosing_definition", node.owner_candidate_id, node.candidate_id)
+                )
+        for reference in self.references:
+            self.work.checkpoint()
+            resolution = self.resolve_reference(reference)
+            if resolution is None:
+                continue
+            self.materialize_reference(reference, resolution, static_edges)
+        return static_edges
+
+    def resolve_reference(
+        self,
+        reference: _Reference,
+    ) -> _ReferenceResolution | None:
+        if reference.fact.node_kind == "import":
+            resolution = self.resolve_import_reference(reference)
+        else:
+            resolution = self.resolve_named_reference(reference)
+        if (
+            not resolution.targets
+            and not resolution.ambiguous_targets
+            and not resolution.plausible
+        ):
+            return None
+        return resolution
+
+    def resolve_import_reference(
+        self,
+        reference: _Reference,
+    ) -> _ReferenceResolution:
+        all_targets: set[str] = set()
+        all_ambiguous: set[str] = set()
+        plausible = False
+        unresolved_local = False
+        for alias in reference.fact.import_aliases:
+            binding = self.visible_binding(
+                reference.path,
+                reference.fact.owner_scope_start_byte,
+                alias.bound_name,
+                alias.source_order,
+            )
+            if binding is None:
+                continue
+            all_targets.update(binding.target_ids)
+            all_ambiguous.update(binding.ambiguous_ids)
+            plausible = plausible or binding.plausible_local
+            if binding.ambiguous_ids or (
+                binding.plausible_local and len(binding.target_ids) != 1
+            ):
+                unresolved_local = True
+        return _ReferenceResolution(
+            targets=tuple(sorted(all_targets)),
+            ambiguous_targets=tuple(sorted(all_ambiguous)),
+            plausible=plausible,
+            unresolved_local=unresolved_local,
+            relation_kind="static_import",
+        )
+
+    def resolve_named_reference(
+        self,
+        reference: _Reference,
+    ) -> _ReferenceResolution:
+        fact = reference.fact
+        parts = (
+            tuple(_python_identifier(part) for part in fact.name_parts)
+            if fact.name_parts
+            else None
+        )
+        plausible = False
+        if fact.node_kind == "call" and parts in {
+            ("importlib", "import_module"),
+            ("__import__",),
+        }:
+            if fact.literal_argument is not None:
+                plausible = (
+                    fact.literal_argument.split(".", 1)[0] in self.local_prefixes
+                )
+            parts = None
+        elif fact.node_kind == "call" and parts in {
+            ("getattr",),
+            ("setattr",),
+        }:
+            attribute = (
+                fact.literal_arguments[1] if len(fact.literal_arguments) > 1 else None
+            )
+            if attribute in self.local_definition_names:
+                plausible = True
+            parts = None
+        resolution = (
+            self.resolve_name_parts(reference, parts, plausible)
+            if parts
+            else _ReferenceResolution(plausible=plausible)
+        )
+        return replace(
+            resolution,
+            relation_kind=(
+                "static_call" if fact.node_kind == "call" else "static_reference"
+            ),
+        )
+
+    def resolve_name_parts(
+        self,
+        reference: _Reference,
+        parts: tuple[str, ...],
+        plausible: bool,
+    ) -> _ReferenceResolution:
         fact = reference.fact
         targets: tuple[str, ...] = ()
         ambiguous_targets: tuple[str, ...] = ()
-        plausible = False
-        unresolved_local = False
-        relation_kind = "static_reference"
-        if fact.node_kind == "import":
-            all_targets: set[str] = set()
-            all_ambiguous: set[str] = set()
-            for alias in fact.import_aliases:
-                binding = visible_binding(
-                    reference.path,
-                    fact.owner_scope_start_byte,
-                    alias.bound_name,
-                    alias.source_order,
-                )
-                if binding is not None:
-                    all_targets.update(binding.target_ids)
-                    all_ambiguous.update(binding.ambiguous_ids)
-                    plausible = plausible or binding.plausible_local
-                    if binding.ambiguous_ids or (
-                        binding.plausible_local and len(binding.target_ids) != 1
-                    ):
-                        unresolved_local = True
-            targets = tuple(sorted(all_targets))
-            ambiguous_targets = tuple(sorted(all_ambiguous))
-            relation_kind = "static_import"
-        else:
-            parts = (
-                tuple(_python_identifier(part) for part in fact.name_parts)
-                if fact.name_parts
-                else None
+        binding = self.visible_binding(
+            reference.path,
+            fact.owner_scope_start_byte,
+            parts[0],
+            fact.source_order,
+        )
+        if binding is not None:
+            targets, ambiguous_targets, plausible = self.resolve_bound_name(
+                binding,
+                parts,
+                plausible,
             )
-            if fact.node_kind == "call" and parts in {
-                ("importlib", "import_module"),
-                ("__import__",),
-            }:
-                if fact.literal_argument is not None:
-                    plausible = fact.literal_argument.split(".", 1)[0] in local_prefixes
-                parts = None
-            elif fact.node_kind == "call" and parts in {
-                ("getattr",),
-                ("setattr",),
-            }:
-                attribute = (
-                    fact.literal_arguments[1]
-                    if len(fact.literal_arguments) > 1
-                    else None
-                )
-                if attribute in local_definition_names:
-                    plausible = True
-                parts = None
-            if parts:
-                binding = visible_binding(
-                    reference.path,
-                    fact.owner_scope_start_byte,
-                    parts[0],
-                    fact.source_order,
-                )
-                if binding is not None:
-                    plausible = binding.plausible_local
-                    if binding.kind == "shadow" and any(
-                        part in local_definition_names for part in parts[1:]
-                    ):
-                        plausible = True
-                    ambiguous_targets = binding.ambiguous_ids
-                    if binding.module_name is not None:
-                        targets, qualified_ambiguous, qualified_plausible = (
-                            qualified_target(binding.module_name, parts[1:])
-                        )
-                        ambiguous_targets = tuple(
-                            sorted({*ambiguous_targets, *qualified_ambiguous})
-                        )
-                        plausible = plausible or qualified_plausible
-                    elif len(parts) == 1:
-                        targets = binding.target_ids
-                    else:
-                        plausible = plausible or bool(binding.target_ids)
-                else:
-                    current_module = module_name_by_path[reference.path]
-                    if current_module is not None:
-                        targets, qualified_ambiguous, qualified_plausible = (
-                            qualified_target(parts[0], parts[1:])
-                        )
-                        ambiguous_targets = qualified_ambiguous
-                        plausible = qualified_plausible or parts[0] in local_prefixes
-                wildcard_binding = visible_binding(
-                    reference.path,
-                    fact.owner_scope_start_byte,
-                    "*",
-                    fact.source_order,
-                )
-                plausible = plausible or bool(
-                    wildcard_binding is not None and wildcard_binding.plausible_local
-                )
-                if fact.node_kind == "attribute" and not fact.is_load:
-                    plausible = plausible or bool(targets)
-                    targets = ()
-                if len(targets) > 1:
-                    ambiguous_targets = tuple(sorted(targets))
-                    targets = ()
-            relation_kind = (
-                "static_call" if fact.node_kind == "call" else "static_reference"
+        elif self.module_name_by_path[reference.path] is not None:
+            targets, ambiguous_targets, qualified_plausible = self.qualified_target(
+                parts[0], parts[1:]
             )
-        if not targets and not ambiguous_targets and not plausible:
-            continue
-        owner_node = nodes[reference.owner_candidate_id]
+            plausible = qualified_plausible or parts[0] in self.local_prefixes
+        wildcard_binding = self.visible_binding(
+            reference.path,
+            fact.owner_scope_start_byte,
+            "*",
+            fact.source_order,
+        )
+        plausible = plausible or bool(
+            wildcard_binding is not None and wildcard_binding.plausible_local
+        )
+        if fact.node_kind == "attribute" and not fact.is_load:
+            plausible = plausible or bool(targets)
+            targets = ()
+        if len(targets) > 1:
+            ambiguous_targets = tuple(sorted(targets))
+            targets = ()
+        return _ReferenceResolution(
+            targets=targets,
+            ambiguous_targets=ambiguous_targets,
+            plausible=plausible,
+        )
+
+    def resolve_bound_name(
+        self,
+        binding: _Binding,
+        parts: tuple[str, ...],
+        plausible: bool,
+    ) -> tuple[tuple[str, ...], tuple[str, ...], bool]:
+        plausible = binding.plausible_local
+        if binding.kind == "shadow" and any(
+            part in self.local_definition_names for part in parts[1:]
+        ):
+            plausible = True
+        ambiguous_targets = binding.ambiguous_ids
+        if binding.module_name is not None:
+            targets, qualified_ambiguous, qualified_plausible = self.qualified_target(
+                binding.module_name,
+                parts[1:],
+            )
+            ambiguous_targets = tuple(
+                sorted({*ambiguous_targets, *qualified_ambiguous})
+            )
+            plausible = plausible or qualified_plausible
+            return targets, ambiguous_targets, plausible
+        if len(parts) == 1:
+            return binding.target_ids, ambiguous_targets, plausible
+        return (), ambiguous_targets, plausible or bool(binding.target_ids)
+
+    def materialize_reference(
+        self,
+        reference: _Reference,
+        resolution: _ReferenceResolution,
+        static_edges: set[tuple[str, str, str]],
+    ) -> None:
+        fact = reference.fact
+        owner_node = self.nodes[reference.owner_candidate_id]
         exactly_resolved = (
-            bool(targets) and not ambiguous_targets and not unresolved_local
+            bool(resolution.targets)
+            and not resolution.ambiguous_targets
+            and not resolution.unresolved_local
             if fact.node_kind == "import"
-            else len(targets) == 1
+            else len(resolution.targets) == 1
         )
         kind: CandidateKind = (
             "static_reference" if exactly_resolved else "unresolved_reference"
@@ -1338,14 +1619,14 @@ def _resolve_references(
             end_line=owner_node.end_line,
             node_line=fact.line,
             locator=reference.locator,
-            raw=raw_by_path[reference.path],
-            work=work,
+            raw=self.raw_by_path[reference.path],
+            work=self.work,
             owner_candidate_id=reference.owner_candidate_id,
         )
-        candidate.ambiguous_targets = ambiguous_targets
-        if ambiguous_targets:
+        candidate.ambiguous_targets = resolution.ambiguous_targets
+        if resolution.ambiguous_targets:
             candidate.bases.add("ambiguous_relation")
-        nodes[candidate.candidate_id] = candidate
+        self.nodes[candidate.candidate_id] = candidate
         static_edges.add(
             (
                 "enclosing_definition",
@@ -1353,19 +1634,50 @@ def _resolve_references(
                 candidate.candidate_id,
             )
         )
-        for target in targets:
-            static_edges.add((relation_kind, candidate.candidate_id, target))
+        for target in resolution.targets:
+            self.work.checkpoint()
+            static_edges.add(
+                (
+                    resolution.relation_kind,
+                    candidate.candidate_id,
+                    target,
+                )
+            )
             candidate.closure_neighbors.add(target)
-            nodes[target].closure_neighbors.add(candidate.candidate_id)
-        for target in ambiguous_targets:
+            self.nodes[target].closure_neighbors.add(candidate.candidate_id)
+        for target in resolution.ambiguous_targets:
+            self.work.checkpoint()
             candidate.closure_neighbors.add(target)
-            nodes[target].closure_neighbors.add(candidate.candidate_id)
+            self.nodes[target].closure_neighbors.add(candidate.candidate_id)
 
-    # Stash the graph on nodes as a private trace flag encoding; projection
-    # converts it to closed relation rows after every candidate ID is known.
-    for relation_kind, source, target in static_edges:
-        nodes[source].trace_flags.add(f"static\0{relation_kind}\0{source}\0{target}")
-        nodes[target].trace_flags.add(f"static\0{relation_kind}\0{source}\0{target}")
+    def project_edges(self, static_edges: set[tuple[str, str, str]]) -> None:
+        for relation_kind, source, target in static_edges:
+            self.work.checkpoint()
+            encoded = f"static\0{relation_kind}\0{source}\0{target}"
+            self.nodes[source].trace_flags.add(encoded)
+            self.nodes[target].trace_flags.add(encoded)
+
+
+def _resolve_references(
+    references: Sequence[_Reference],
+    nodes: dict[str, _Node],
+    definitions: Sequence[_Definition],
+    parsed_by_path: Mapping[str, ParsedModule],
+    module_name_by_path: Mapping[str, str | None],
+    derived_module_names: Mapping[str, tuple[str, ...]],
+    raw_by_path: Mapping[str, bytes],
+    work: _WorkBudget,
+) -> None:
+    _ReferenceResolver(
+        references,
+        nodes,
+        definitions,
+        parsed_by_path,
+        module_name_by_path,
+        derived_module_names,
+        raw_by_path,
+        work,
+    ).resolve()
 
 
 def _require_obligation_source(
@@ -1793,6 +2105,84 @@ def _static_relations(
     }
 
 
+@dataclass(frozen=True, slots=True)
+class _CollapsedBridge:
+    """One private discovery-v2 hop; public relations remain uncollapsed."""
+
+    target_definition_id: str
+    orienting_reference_id: str
+
+
+def _is_collapsed_endpoint(node: _Node) -> bool:
+    return node.candidate_kind in {
+        "implementation_definition",
+        "test_definition",
+    } and not node.structural_locator.startswith(
+        ("python-module:", "python-module-path:")
+    )
+
+
+def _collapsed_bridge_index(
+    nodes: Mapping[str, _Node],
+    static_edges: Sequence[tuple[str, str, str]],
+    work: _WorkBudget,
+) -> dict[str, tuple[_CollapsedBridge, ...]]:
+    """Collapse owner-reference-target facts into symmetric definition hops."""
+
+    owners_by_reference: dict[str, set[str]] = defaultdict(set)
+    target_edges: list[tuple[str, str]] = []
+    for relation_kind, source, target in static_edges:
+        # [EVC-7.1]: constructing this per-obligation index inspects each raw
+        # edge exactly once. Pairing the already inspected facts below does not
+        # create another raw-edge charge.
+        work.charge()
+        target_node = nodes.get(target)
+        if target_node is None:
+            continue
+        if relation_kind == "enclosing_definition" and target_node.candidate_kind in {
+            "static_reference",
+            "unresolved_reference",
+        }:
+            owners_by_reference[target].add(source)
+        elif relation_kind in {
+            "static_import",
+            "static_call",
+            "static_reference",
+        }:
+            target_edges.append((source, target))
+
+    bridge_rows: dict[str, set[_CollapsedBridge]] = defaultdict(set)
+    for reference_id, target_id in target_edges:
+        work.checkpoint()
+        reference = nodes[reference_id]
+        resolved_target = nodes[target_id]
+        owners = owners_by_reference.get(reference_id, set())
+        if (
+            reference.candidate_kind != "static_reference"
+            or len(owners) != 1
+            or not _is_collapsed_endpoint(resolved_target)
+        ):
+            continue
+        owner_id = next(iter(owners))
+        owner = nodes[owner_id]
+        if not _is_collapsed_endpoint(owner):
+            continue
+        bridge_rows[owner_id].add(_CollapsedBridge(target_id, reference_id))
+        bridge_rows[target_id].add(_CollapsedBridge(owner_id, reference_id))
+    return {
+        candidate_id: tuple(
+            sorted(
+                rows,
+                key=lambda item: (
+                    item.target_definition_id,
+                    item.orienting_reference_id,
+                ),
+            )
+        )
+        for candidate_id, rows in bridge_rows.items()
+    }
+
+
 def _trace_state(node: _Node) -> TraceState:
     if "conflict" in node.trace_flags or "issue_conflict" in node.trace_flags:
         return "conflicted"
@@ -1960,11 +2350,7 @@ def _closure(
     for node in lexical:
         insert(node.candidate_id, "lexical_match")
 
-    adjacency: dict[str, set[str]] = defaultdict(set)
-    for _kind, source, target in static_edges:
-        work.charge()
-        adjacency[source].add(target)
-        adjacency[target].add(source)
+    bridges = _collapsed_bridge_index(nodes, static_edges, work)
 
     def expand_ambiguities(frontier_ids: Sequence[str]) -> list[str]:
         queue = sorted(set(frontier_ids))
@@ -1985,10 +2371,10 @@ def _closure(
     for _depth in range(settings.static_neighbor_depth):
         next_frontier: list[str] = []
         for candidate_id in sorted(frontier):
-            for neighbor in sorted(adjacency.get(candidate_id, ())):
-                added = insert(neighbor, "static_neighbor")
-                if added:
-                    next_frontier.append(neighbor)
+            for bridge in bridges.get(candidate_id, ()):
+                insert(bridge.orienting_reference_id, "static_neighbor")
+                if insert(bridge.target_definition_id, "static_neighbor"):
+                    next_frontier.append(bridge.target_definition_id)
         next_frontier.extend(expand_ambiguities(next_frontier))
         frontier = sorted(set(next_frontier))
         if not frontier:
@@ -2004,14 +2390,28 @@ def prepare_evidence_catalog(
     snapshot: RepositorySnapshot,
     profile: ProfileConfig,
     settings: ObligationSettings,
+    *,
+    progress: OperationProgress | None = None,
+    emit_progress: bool = True,
 ) -> PreparedEvidenceCatalog:
     """Parse one immutable snapshot once for a batch of obligation reads."""
 
-    work = _WorkBudget(settings.maximum_work_units)
-    _validate_semantic_utf8(snapshot, profile)
+    work = _WorkBudget(
+        settings.maximum_work_units,
+        progress=progress,
+        emit_progress=emit_progress,
+    )
+    work.enter(
+        "catalog",
+        current_identity=snapshot.snapshot_hash,
+        total_work_units=settings.maximum_work_units,
+    )
+    _validate_semantic_utf8(snapshot, profile, work)
     nodes, _definitions, _trees, _module_names, _raw = _catalog_python(
         snapshot, profile, settings, work
     )
+    for node in nodes.values():
+        node.lexical_tokens = _candidate_tokens(node)
     return PreparedEvidenceCatalog(
         snapshot_hash=snapshot.snapshot_hash,
         profile=profile,
@@ -2048,6 +2448,8 @@ def discover_evidence_candidates(
     obligation_search_text: str = "",
     *,
     prepared_catalog: PreparedEvidenceCatalog | None = None,
+    progress: OperationProgress | None = None,
+    emit_progress: bool = True,
 ) -> tuple[EvidenceCandidate, ...]:
     """Build the complete deterministic candidate universe for one obligation."""
 
@@ -2055,6 +2457,8 @@ def discover_evidence_candidates(
         snapshot,
         profile,
         settings,
+        progress=progress,
+        emit_progress=emit_progress,
     )
     if (
         catalog.snapshot_hash != snapshot.snapshot_hash
@@ -2062,7 +2466,17 @@ def discover_evidence_candidates(
         or catalog.settings != settings
     ):
         raise ValueError("prepared evidence catalog authority mismatch")
-    work = _WorkBudget(settings.maximum_work_units, used=catalog.base_work_units)
+    work = _WorkBudget(
+        settings.maximum_work_units,
+        progress=progress,
+        emit_progress=emit_progress,
+        used=catalog.base_work_units,
+    )
+    work.enter(
+        "relations",
+        current_identity=obligation.obligation_id,
+        total_work_units=settings.maximum_work_units,
+    )
     nodes = _catalog_nodes_for_obligation(catalog)
     conflict_issues = _add_issue_candidates(nodes, snapshot, report, obligation, work)
     if len(nodes) > settings.maximum_catalog_items:
@@ -2087,12 +2501,24 @@ def discover_evidence_candidates(
     static = _static_relations(nodes, static_edges, work)
     obligation_tokens = _obligation_tokens(obligation, obligation_search_text)
     for node in nodes.values():
-        shared = obligation_tokens.intersection(_candidate_tokens(node))
+        if node.lexical_tokens is None:
+            node.lexical_tokens = _candidate_tokens(node)
+        shared = obligation_tokens.intersection(node.lexical_tokens)
         node.lexical_score = (
             len(shared),
             sum(len(token.encode("ascii")) for token in shared),
         )
+    work.enter(
+        "closure",
+        current_identity=obligation.obligation_id,
+        total_work_units=settings.maximum_work_units,
+    )
     selected = _closure(nodes, static_edges, settings, work)
+    work.enter(
+        "candidate_detail",
+        current_identity=obligation.obligation_id,
+        total_work_units=settings.maximum_work_units,
+    )
 
     def closed_static_relations(
         relations: Sequence[CandidateRelation],
@@ -2114,38 +2540,42 @@ def discover_evidence_candidates(
             rows.append(relation)
         return tuple(rows)
 
-    candidates = [
-        EvidenceCandidate(
-            candidate_id=node.candidate_id,
-            candidate_kind=node.candidate_kind,
-            path=node.path,
-            owner=node.owner,
-            start_line=node.start_line,
-            end_line=node.end_line,
-            structural_locator=node.structural_locator,
-            receipt=node.receipt,
-            discovery_bases=tuple(
-                basis for basis in _BASIS_ORDER if basis in node.bases
-            ),
-            lexical_score=node.lexical_score,
-            static_relations=closed_static_relations(static.get(node.candidate_id, ())),
-            declared_relations=declared.get(node.candidate_id, ()),
-            trace_state=_trace_state(node),
-            suggested_trace_edits=_advice(
-                node,
-                obligation,
-                invariant_declarations,
-            ),
-            _raw_span=lf_slice(
-                snapshot.read_bytes(node.path),
-                node.start_line,
-                node.end_line,
-                policy="clamped",
-            ),
+    candidates: list[EvidenceCandidate] = []
+    for candidate_id in selected:
+        node = nodes[candidate_id]
+        work.checkpoint()
+        candidates.append(
+            EvidenceCandidate(
+                candidate_id=node.candidate_id,
+                candidate_kind=node.candidate_kind,
+                path=node.path,
+                owner=node.owner,
+                start_line=node.start_line,
+                end_line=node.end_line,
+                structural_locator=node.structural_locator,
+                receipt=node.receipt,
+                discovery_bases=tuple(
+                    basis for basis in _BASIS_ORDER if basis in node.bases
+                ),
+                lexical_score=node.lexical_score,
+                static_relations=closed_static_relations(
+                    static.get(node.candidate_id, ())
+                ),
+                declared_relations=declared.get(node.candidate_id, ()),
+                trace_state=_trace_state(node),
+                suggested_trace_edits=_advice(
+                    node,
+                    obligation,
+                    invariant_declarations,
+                ),
+                _raw_span=lf_slice(
+                    snapshot.read_bytes(node.path),
+                    node.start_line,
+                    node.end_line,
+                    policy="clamped",
+                ),
+            )
         )
-        for candidate_id in selected
-        if (node := nodes[candidate_id])
-    ]
     candidates.sort(key=candidate_order)
     return tuple(candidates)
 

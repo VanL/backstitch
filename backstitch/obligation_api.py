@@ -1,7 +1,8 @@
-"""Transport-neutral Backstitch obligation read envelopes.
+"""Typed Backstitch obligation reads and transport-neutral envelopes.
 
+Spec: docs/specs/02-backstitch-core.md [SC-5], [SC-17]
 Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-8], [EVC-8.4],
-[EVC-8.5]
+[EVC-8.5], [EVC-8.7]
 """
 
 from __future__ import annotations
@@ -9,27 +10,63 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import sys
+import time
 import unicodedata
 from collections.abc import Iterable
+from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
+from pathlib import Path
 from typing import Any, Literal, cast
 
 from backstitch.canonical import canonical_json_bytes
+from backstitch.config import ProfileConfig
 from backstitch.evidence_discovery import (
     CandidateNeighbor,
     CandidateSource,
     EvidenceCandidate,
+    EvidenceDiscoveryError,
     candidate_order,
+    get_candidate_by_id,
+    get_candidate_neighbors,
+    get_candidate_source,
 )
 from backstitch.evidence_summary import evidence_item_order
 from backstitch.grammar import candidate_ref_digest, is_sha256_hex
+from backstitch.markdown_specs import MarkdownParseMemo
+from backstitch.obligation_runtime import (
+    ObligationRuntime,
+    build_obligation_runtime_from_snapshot,
+    capture_obligation_snapshot,
+)
 from backstitch.obligations import (
+    AlignmentState,
+    BlockingReasonCode,
     CandidateCounts,
+    GateState,
     GuidanceCode,
     ObligationInventory,
+    ObligationKind,
     ObligationRecord,
     with_candidate_counts,
 )
-from backstitch.settings import ObligationSettings
+from backstitch.operation_progress import (
+    COOPERATIVE_TOLERANCE_MILLISECONDS,
+    DEADLINE_PHASES,
+    OperationDeadlineExceeded,
+    OperationProgress,
+    ProgressSink,
+)
+from backstitch.repository_snapshot import RepositorySnapshot, SnapshotCaptureError
+from backstitch.settings import BackstitchSettings, ObligationSettings
+
+ObligationOperation = Literal[
+    "obligation.list",
+    "obligation.get",
+    "obligation.summarize_evidence",
+    "obligation.find_evidence",
+    "obligation.get_candidate",
+]
 
 OperationProblemCode = Literal[
     "INVALID_INPUT",
@@ -42,6 +79,118 @@ OperationProblemCode = Literal[
     "DEADLINE_EXCEEDED",
     "INTERNAL_ERROR",
 ]
+
+
+@dataclass(frozen=True)
+class ObligationRequest:
+    """One normalized, transport-independent obligation read."""
+
+    operation: ObligationOperation
+    repo_root: Path
+    profile: ProfileConfig
+    settings: BackstitchSettings
+    obligation_id: str | None = None
+    candidate_id: str | None = None
+    cursor: str | None = None
+    limit: int | None = None
+    list_filters: ListFilters = dataclass_field(default_factory=lambda: ListFilters())
+
+
+_ALIGNMENT_STATE_ORDER: tuple[AlignmentState, ...] = (
+    "untraced",
+    "partial",
+    "complete",
+    "invalid",
+)
+_GATE_STATE_ORDER: tuple[GateState, ...] = ("not_executable", "executable")
+_KIND_ORDER: tuple[ObligationKind, ...] = ("section", "invariant", "suppression")
+_REASON_ORDER: tuple[BlockingReasonCode, ...] = (
+    "IMPLEMENTATION_UNTRACED",
+    "IMPLEMENTATION_PARTIAL",
+    "TEST_UNTRACED",
+    "TEST_PARTIAL",
+    "INVARIANT_TARGET_MISSING",
+    "BINDING_TEST_MISSING",
+    "TRACE_CONFLICT",
+    "OUT_OF_GATE_SCOPE",
+    "SKIPPED",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ListFilters:
+    """One normalized filter identity for list selection and pagination."""
+
+    active_only: bool = False
+    alignment_states: frozenset[AlignmentState] = frozenset()
+    gate_states: frozenset[GateState] = frozenset()
+    kinds: frozenset[ObligationKind] = frozenset()
+    reasons: frozenset[BlockingReasonCode] = frozenset()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.active_only, bool):
+            raise ValueError("active_only must be a boolean")
+        for values, allowed, label in (
+            (self.alignment_states, set(_ALIGNMENT_STATE_ORDER), "alignment state"),
+            (self.gate_states, set(_GATE_STATE_ORDER), "gate state"),
+            (self.kinds, set(_KIND_ORDER), "kind"),
+            (self.reasons, set(_REASON_ORDER), "reason"),
+        ):
+            if not isinstance(values, frozenset) or not values <= allowed:
+                raise ValueError(f"list filter has an invalid {label}")
+
+    @property
+    def active(self) -> bool:
+        return bool(
+            self.active_only
+            or self.alignment_states
+            or self.gate_states
+            or self.kinds
+            or self.reasons
+        )
+
+    def to_row(self) -> dict[str, object]:
+        return {
+            "active_only": self.active_only,
+            "alignment_states": [
+                value
+                for value in _ALIGNMENT_STATE_ORDER
+                if value in self.alignment_states
+            ],
+            "gate_states": [
+                value for value in _GATE_STATE_ORDER if value in self.gate_states
+            ],
+            "kinds": [value for value in _KIND_ORDER if value in self.kinds],
+            "reasons": [value for value in _REASON_ORDER if value in self.reasons],
+        }
+
+    def accepts(self, obligation: ObligationRecord) -> bool:
+        if self.active_only and not (
+            obligation.obligation_rung == "active"
+            and obligation.disposition == "evaluate"
+        ):
+            return False
+        if (
+            self.alignment_states
+            and obligation.alignment_state not in self.alignment_states
+        ):
+            return False
+        if self.gate_states and obligation.gate_state not in self.gate_states:
+            return False
+        if self.kinds and obligation.kind not in self.kinds:
+            return False
+        reason_codes = {item.code for item in obligation.blocking_reasons}
+        return not self.reasons or bool(self.reasons & reason_codes)
+
+
+@dataclass(frozen=True)
+class ObligationResult:
+    """One complete obligation envelope plus application failure state."""
+
+    envelope: dict[str, Any]
+    failed: bool
+    resolved_root: str
+
 
 _GUIDANCE: dict[GuidanceCode, tuple[str, str]] = {
     "ADD_OR_CONFIGURE_SPEC_INTENT": (
@@ -97,6 +246,7 @@ _CURSOR_KEYS = frozenset(
         "snapshot_hash",
         "obligation_id",
         "selector",
+        "filters",
         "limit",
         "after",
     }
@@ -109,7 +259,14 @@ _PROBLEM_DETAIL_KEYS: dict[OperationProblemCode, frozenset[str]] = {
     "SNAPSHOT_UNSTABLE": frozenset({"attempts"}),
     "SOURCE_UNREADABLE": frozenset({"path", "error_class"}),
     "BUDGET_EXHAUSTED": frozenset({"budget", "limit", "observed"}),
-    "DEADLINE_EXCEEDED": frozenset({"limit_milliseconds"}),
+    "DEADLINE_EXCEEDED": frozenset(
+        {
+            "limit_milliseconds",
+            "phase",
+            "configured_key",
+            "cooperative_tolerance_milliseconds",
+        }
+    ),
     "INTERNAL_ERROR": frozenset(),
 }
 _BUDGET_NAMES = frozenset(
@@ -129,6 +286,12 @@ class CursorError(ValueError):
     """A page cursor is malformed or does not address this exact query."""
 
 
+def _monotonic() -> float:
+    """Return the operation clock through one deterministic test seam."""
+
+    return time.monotonic()
+
+
 def encode_page_cursor(
     *,
     operation: str,
@@ -137,15 +300,17 @@ def encode_page_cursor(
     selector: str,
     limit: int,
     after: tuple[object, ...],
+    filters: dict[str, object] | None = None,
 ) -> str:
     """Encode the exact query context and last-row ordering tuple."""
 
     value = {
-        "cursor_version": 1,
+        "cursor_version": 2,
         "operation": operation,
         "snapshot_hash": snapshot_hash,
         "obligation_id": obligation_id,
         "selector": selector,
+        "filters": filters or {},
         "limit": limit,
         "after": list(after),
     }
@@ -162,6 +327,7 @@ def decode_page_cursor(
     obligation_id: str | None,
     selector: str,
     limit: int,
+    filters: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     """Validate one cursor against the complete current query context."""
 
@@ -194,7 +360,7 @@ def decode_page_cursor(
         or canonical_json_bytes(value) != raw
         or isinstance(value.get("cursor_version"), bool)
         or not isinstance(value.get("cursor_version"), int)
-        or value.get("cursor_version") != 1
+        or value.get("cursor_version") != 2
         or not isinstance(value.get("operation"), str)
         or not isinstance(value.get("snapshot_hash"), str)
         or (
@@ -202,6 +368,7 @@ def decode_page_cursor(
             and not isinstance(value.get("obligation_id"), str)
         )
         or not isinstance(value.get("selector"), str)
+        or not isinstance(value.get("filters"), dict)
         or isinstance(value.get("limit"), bool)
         or not isinstance(value.get("limit"), int)
         or value.get("limit", 0) < 1
@@ -213,6 +380,7 @@ def decode_page_cursor(
         "snapshot_hash": snapshot_hash,
         "obligation_id": obligation_id,
         "selector": selector,
+        "filters": filters or {},
         "limit": limit,
     }
     for field, expected_value in expected.items():
@@ -255,7 +423,13 @@ def problem_envelope(
         if len(line_value.encode("utf-8")) > 4096:
             raise ValueError(f"problem {field} exceeds its closed byte limit")
     for field, value in details.items():
-        if field in {"attempts", "limit", "observed", "limit_milliseconds"}:
+        if field in {
+            "attempts",
+            "limit",
+            "observed",
+            "limit_milliseconds",
+            "cooperative_tolerance_milliseconds",
+        }:
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"problem detail {field} must be nonnegative")
         elif (
@@ -273,9 +447,16 @@ def problem_envelope(
         "io",
     }:
         raise ValueError("problem error_class is not in the closed vocabulary")
+    if code == "DEADLINE_EXCEEDED" and (
+        details["phase"] not in DEADLINE_PHASES
+        or details["configured_key"] != "obligations.maximum_call_seconds"
+        or details["cooperative_tolerance_milliseconds"]
+        != COOPERATIVE_TOLERANCE_MILLISECONDS
+    ):
+        raise ValueError("deadline details are not in the closed vocabulary")
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "operation": operation,
         "snapshot": snapshot,
         "result": None,
@@ -418,13 +599,28 @@ def inventory_list_envelope(
     *,
     limit: int | None = None,
     cursor: str | None = None,
+    filters: ListFilters | None = None,
 ) -> dict[str, Any]:
     """Return the successful ``obligation.list`` core object."""
 
-    result = inventory.list_result()
+    applied = filters or ListFilters()
+    filtered_obligations = tuple(
+        item for item in inventory.obligations if applied.accepts(item)
+    )
+    filtered_inventory = replace(inventory, obligations=filtered_obligations)
+    result = filtered_inventory.list_result()
     entries_value = result["entries"]
     assert isinstance(entries_value, list)
+    if applied.active:
+        entries_value = [
+            item
+            for item in entries_value
+            if cast(dict[str, object], item)["entry_type"] == "obligation"
+        ]
     entries = sorted(entries_value, key=_list_ordering)
+    filtered_count = len(entries)
+    filter_row = applied.to_row()
+    selector = "list"
     if limit is not None:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
@@ -435,8 +631,9 @@ def inventory_list_envelope(
                 operation="obligation.list",
                 snapshot_hash=inventory.snapshot.snapshot_hash,
                 obligation_id=None,
-                selector="list",
+                selector=selector,
                 limit=limit,
+                filters=filter_row,
             )
             after_value = decoded["after"]
             if not _valid_list_after(after_value):
@@ -451,22 +648,70 @@ def inventory_list_envelope(
                 operation="obligation.list",
                 snapshot_hash=inventory.snapshot.snapshot_hash,
                 obligation_id=None,
-                selector="list",
+                selector=selector,
                 limit=limit,
                 after=_list_ordering(page[-1]),
+                filters=filter_row,
             )
         result = {
             "bootstrap_state": result["bootstrap_state"],
             "entries": page,
             "next_cursor": next_cursor,
         }
+    result = {
+        "bootstrap_state": result["bootstrap_state"],
+        "applied_filters": filter_row,
+        "readiness_summary": _readiness_summary(filtered_obligations),
+        "filtered_count": filtered_count,
+        "entries": result["entries"],
+        "next_cursor": result["next_cursor"],
+    }
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "operation": "obligation.list",
         "snapshot": inventory.snapshot.to_row(),
         "result": result,
         "guidance": guidance_rows(inventory.next_actions),
         "problems": [],
+    }
+
+
+def _readiness_summary(
+    obligations: tuple[ObligationRecord, ...],
+) -> dict[str, object]:
+    buckets = {
+        "executable": 0,
+        "skipped": 0,
+        "alignment_debt": 0,
+        "blocked": 0,
+        "out_of_scope": 0,
+    }
+    reason_counts = dict.fromkeys(_REASON_ORDER, 0)
+    active_evaluate = 0
+    for item in obligations:
+        for reason in item.blocking_reasons:
+            reason_counts[reason.code] += 1
+        if item.obligation_rung != "active":
+            buckets["out_of_scope"] += 1
+        elif item.disposition == "skipped":
+            buckets["skipped"] += 1
+        else:
+            active_evaluate += 1
+            if item.alignment_state == "invalid":
+                buckets["blocked"] += 1
+            elif item.gate_state == "executable":
+                buckets["executable"] += 1
+            else:
+                buckets["alignment_debt"] += 1
+    return {
+        "total": len(obligations),
+        "active_evaluate": active_evaluate,
+        **buckets,
+        "reason_counts": [
+            {"code": code, "count": reason_counts[code]}
+            for code in _REASON_ORDER
+            if reason_counts[code]
+        ],
     }
 
 
@@ -479,7 +724,7 @@ def inventory_get_envelope(
     if obligation is None:
         return None
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "operation": "obligation.get",
         "snapshot": inventory.snapshot.to_row(),
         "result": obligation.to_row(),
@@ -528,7 +773,7 @@ def evidence_summary_envelope(
             after=evidence_item_order(page[-1]),
         )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "operation": "obligation.summarize_evidence",
         "snapshot": inventory.snapshot.to_row(),
         "result": {
@@ -630,7 +875,7 @@ def find_evidence_envelope(
             after=candidate_order(page[-1]),
         )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "operation": "obligation.find_evidence",
         "snapshot": inventory.snapshot.to_row(),
         "result": {
@@ -657,7 +902,7 @@ def candidate_detail_envelope(
         key=lambda item: (item.relation_kind, item.direction, item.candidate_id),
     )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "operation": "obligation.get_candidate",
         "snapshot": inventory.snapshot.to_row(),
         "result": {
@@ -669,6 +914,505 @@ def candidate_detail_envelope(
         "guidance": _candidate_guidance(obligation, (candidate,)),
         "problems": [],
     }
+
+
+class _ObligationReader:
+    """Execute one normalized read against one accepted repository view."""
+
+    def __init__(
+        self,
+        request: ObligationRequest,
+        progress_sink: ProgressSink | None,
+    ) -> None:
+        self.request = request
+        self.progress_sink = progress_sink
+        self.progress: OperationProgress | None = None
+        self.snapshot: RepositorySnapshot | None = None
+        self.root = request.repo_root.resolve(strict=False)
+
+    def read(self) -> ObligationResult:
+        try:
+            self._validate_request()
+            markdown_parse_memo: MarkdownParseMemo = {}
+            self.progress = OperationProgress.start(
+                self.request.settings.obligations.maximum_call_seconds,
+                clock=_monotonic,
+                sink=self.progress_sink,
+            )
+            self.snapshot = capture_obligation_snapshot(
+                self.root,
+                self.request.profile,
+                self.request.settings,
+                markdown_parse_memo=markdown_parse_memo,
+                progress=self.progress,
+            )
+            runtime = build_obligation_runtime_from_snapshot(
+                self.snapshot,
+                self.root,
+                self.request.profile,
+                self.request.settings,
+                markdown_parse_memo=markdown_parse_memo,
+            )
+            envelope, failed = self._read_runtime(runtime)
+            self.progress.advance(
+                "packet_accounting",
+                current_identity=self.request.operation,
+            )
+            if not failed:
+                envelope, exhausted = apply_response_byte_budget(
+                    envelope, self.request.settings.obligations
+                )
+                failed = exhausted
+            self.progress.advance(
+                "complete",
+                current_identity=self.request.operation,
+            )
+            return self._result(envelope, failed=failed)
+        except OperationDeadlineExceeded as exc:
+            return self._deadline_failure(exc)
+        except SnapshotCaptureError as exc:
+            return self._snapshot_failure(exc)
+        except ValueError as exc:
+            if self.snapshot is not None:
+                return self._internal_failure()
+            return self._problem(
+                code="INVALID_INPUT",
+                message="The obligation request is invalid.",
+                action="Correct the named invocation or configuration value and retry.",
+                details={"field": "invocation", "reason": str(exc)},
+            )
+        except Exception:  # noqa: BLE001 -- closed [EVC-8.4] application failure.
+            return self._internal_failure()
+
+    def _validate_request(self) -> None:
+        request = self.request
+        limits = request.settings.obligations
+        if (
+            request.limit is not None
+            and not 1 <= request.limit <= limits.maximum_page_size
+        ):
+            raise ValueError(f"--limit must be in [1, {limits.maximum_page_size}]")
+        if request.operation == "obligation.list":
+            if request.obligation_id is not None or request.candidate_id is not None:
+                raise ValueError("obligation list does not accept a detail selector")
+            return
+        if request.list_filters.active:
+            raise ValueError("obligation list filters require `obligation list`")
+        if request.obligation_id is None:
+            raise ValueError("the selected obligation operation requires an identity")
+        if request.operation == "obligation.get_candidate":
+            if request.candidate_id is None:
+                raise ValueError(
+                    "candidate detail requires an exact candidate identity"
+                )
+        elif request.candidate_id is not None:
+            raise ValueError("--candidate requires the candidate-detail operation")
+        if request.operation not in {
+            "obligation.summarize_evidence",
+            "obligation.find_evidence",
+        } and (request.cursor is not None or request.limit is not None):
+            raise ValueError(
+                "--cursor and --limit require --summarize-evidence or --find-evidence"
+            )
+
+    def _read_runtime(self, runtime: ObligationRuntime) -> tuple[dict[str, Any], bool]:
+        if self.request.operation == "obligation.list":
+            return self._list(runtime)
+        return self._detail(runtime)
+
+    def _list(self, runtime: ObligationRuntime) -> tuple[dict[str, Any], bool]:
+        limit = self.request.limit or self.request.settings.obligations.page_size
+        try:
+            return (
+                inventory_list_envelope(
+                    runtime.inventory,
+                    limit=limit,
+                    cursor=self.request.cursor,
+                    filters=self.request.list_filters,
+                ),
+                False,
+            )
+        except CursorError as exc:
+            return (
+                problem_envelope(
+                    operation="obligation.list",
+                    snapshot=runtime.inventory.snapshot.to_row(),
+                    code="CURSOR_INVALID",
+                    message="The page cursor is invalid for this repository snapshot.",
+                    action="Restart pagination without a cursor.",
+                    details={"reason": str(exc)},
+                ),
+                True,
+            )
+
+    def _detail(self, runtime: ObligationRuntime) -> tuple[dict[str, Any], bool]:
+        obligation_id = self.request.obligation_id
+        assert obligation_id is not None
+        obligation = runtime.inventory.get(obligation_id)
+        if obligation is None:
+            return self._missing(runtime, obligation_id)
+        if obligation.kind == "suppression":
+            return self._suppression(runtime, obligation)
+        if self.request.operation == "obligation.summarize_evidence":
+            return self._summary(runtime, obligation)
+        unreadable = next(
+            (row for row in runtime.snapshot.files if row.state == "unreadable"),
+            None,
+        )
+        if unreadable is not None:
+            return (
+                problem_envelope(
+                    operation=self.request.operation,
+                    snapshot=runtime.inventory.snapshot.to_row(),
+                    code="SOURCE_UNREADABLE",
+                    message="Candidate discovery requires every semantic source input.",
+                    action="Make the named source readable and retry discovery.",
+                    details={
+                        "path": unreadable.path,
+                        "error_class": unreadable.error_class or "io",
+                    },
+                ),
+                True,
+            )
+        try:
+            candidates = runtime.discover_candidates(
+                obligation,
+                progress=self.progress,
+            )
+        except EvidenceDiscoveryError as exc:
+            source_unreadable = exc.code == "SOURCE_UNREADABLE"
+            return (
+                problem_envelope(
+                    operation=self.request.operation,
+                    snapshot=runtime.inventory.snapshot.to_row(),
+                    code=cast(OperationProblemCode, exc.code),
+                    message=(
+                        "Candidate discovery requires UTF-8 semantic source."
+                        if source_unreadable
+                        else "Candidate discovery exceeded its closed operation boundary."
+                    ),
+                    action=(
+                        "Correct the named semantic source encoding and retry."
+                        if source_unreadable
+                        else (
+                            "Raise the named deterministic budget or narrow "
+                            "configured roots."
+                        )
+                    ),
+                    details=exc.details,
+                ),
+                True,
+            )
+        obligation, inventory = self._with_candidate_counts(
+            runtime, obligation, candidates
+        )
+        if self.request.operation == "obligation.find_evidence":
+            limit = self.request.limit or self.request.settings.obligations.page_size
+            try:
+                return (
+                    find_evidence_envelope(
+                        inventory,
+                        obligation,
+                        candidates,
+                        limit=limit,
+                        cursor=self.request.cursor,
+                    ),
+                    False,
+                )
+            except CursorError as exc:
+                return (
+                    problem_envelope(
+                        operation="obligation.find_evidence",
+                        snapshot=inventory.snapshot.to_row(),
+                        code="CURSOR_INVALID",
+                        message=(
+                            "The page cursor is invalid for this repository snapshot."
+                        ),
+                        action="Restart pagination without a cursor.",
+                        details={"reason": str(exc)},
+                    ),
+                    True,
+                )
+        if self.request.operation == "obligation.get_candidate":
+            return self._candidate(runtime, inventory, obligation, candidates)
+        envelope = inventory_get_envelope(inventory, obligation.obligation_id)
+        assert envelope is not None
+        return envelope, False
+
+    def _suppression(
+        self,
+        runtime: ObligationRuntime,
+        obligation: ObligationRecord,
+    ) -> tuple[dict[str, Any], bool]:
+        if self.request.operation != "obligation.get":
+            return (
+                problem_envelope(
+                    operation=self.request.operation,
+                    snapshot=runtime.inventory.snapshot.to_row(),
+                    code="INVALID_INPUT",
+                    message="This operation is not available for suppression obligations.",
+                    action=(
+                        "Inspect the suppression obligation directly; its evidence is "
+                        "derived from the declaration and matched findings."
+                    ),
+                    details={
+                        "field": "operation",
+                        "reason": (
+                            "suppression obligations do not support evidence discovery "
+                            "or candidate selectors"
+                        ),
+                    },
+                ),
+                True,
+            )
+        envelope = inventory_get_envelope(
+            runtime.inventory,
+            obligation.obligation_id,
+        )
+        assert envelope is not None
+        return envelope, False
+
+    def _summary(
+        self,
+        runtime: ObligationRuntime,
+        obligation: ObligationRecord,
+    ) -> tuple[dict[str, Any], bool]:
+        limit = self.request.limit or self.request.settings.obligations.page_size
+        items = runtime.evidence_summary(obligation)
+        try:
+            return (
+                evidence_summary_envelope(
+                    runtime.inventory,
+                    obligation,
+                    items,
+                    limit=limit,
+                    cursor=self.request.cursor,
+                ),
+                False,
+            )
+        except CursorError as exc:
+            return (
+                problem_envelope(
+                    operation="obligation.summarize_evidence",
+                    snapshot=runtime.inventory.snapshot.to_row(),
+                    code="CURSOR_INVALID",
+                    message="The page cursor is invalid for this repository snapshot.",
+                    action="Restart pagination without a cursor.",
+                    details={"reason": str(exc)},
+                ),
+                True,
+            )
+
+    @staticmethod
+    def _with_candidate_counts(
+        runtime: ObligationRuntime,
+        obligation: ObligationRecord,
+        candidates: tuple[EvidenceCandidate, ...],
+    ) -> tuple[ObligationRecord, ObligationInventory]:
+        counts = CandidateCounts(
+            declared=sum(item.trace_state == "declared" for item in candidates),
+            partially_declared=sum(
+                item.trace_state == "partially_declared" for item in candidates
+            ),
+            untraced=sum(item.trace_state == "untraced" for item in candidates),
+            conflicted=sum(item.trace_state == "conflicted" for item in candidates),
+        )
+        obligation = with_candidate_counts(obligation, counts)
+        inventory = replace(
+            runtime.inventory,
+            obligations=tuple(
+                obligation if item.obligation_id == obligation.obligation_id else item
+                for item in runtime.inventory.obligations
+            ),
+        )
+        return obligation, inventory
+
+    def _candidate(
+        self,
+        runtime: ObligationRuntime,
+        inventory: ObligationInventory,
+        obligation: ObligationRecord,
+        candidates: tuple[EvidenceCandidate, ...],
+    ) -> tuple[dict[str, Any], bool]:
+        candidate_id = self.request.candidate_id
+        assert candidate_id is not None
+        try:
+            candidate = get_candidate_by_id(candidates, candidate_id)
+        except KeyError:
+            return (
+                problem_envelope(
+                    operation="obligation.get_candidate",
+                    snapshot=inventory.snapshot.to_row(),
+                    code="NOT_FOUND",
+                    message="The requested candidate does not exist in this snapshot.",
+                    action="Run --find-evidence and use an exact returned candidate ID.",
+                    details={"identity": candidate_id},
+                ),
+                True,
+            )
+        return (
+            candidate_detail_envelope(
+                inventory,
+                obligation,
+                candidate,
+                get_candidate_source(candidate),
+                get_candidate_neighbors(candidate, candidates),
+            ),
+            False,
+        )
+
+    def _missing(
+        self,
+        runtime: ObligationRuntime,
+        obligation_id: str,
+    ) -> tuple[dict[str, Any], bool]:
+        if len(obligation_id.encode("utf-8")) > 4096:
+            return (
+                problem_envelope(
+                    operation=self.request.operation,
+                    snapshot=runtime.inventory.snapshot.to_row(),
+                    code="INVALID_INPUT",
+                    message=(
+                        "The requested identity cannot be represented in a problem "
+                        "response."
+                    ),
+                    action="Use an exact identity returned by backstitch obligation list.",
+                    details={
+                        "field": "identity",
+                        "reason": (
+                            "requested identity exceeds the closed problem detail limit"
+                        ),
+                    },
+                ),
+                True,
+            )
+        return (
+            problem_envelope(
+                operation=self.request.operation,
+                snapshot=runtime.inventory.snapshot.to_row(),
+                code="NOT_FOUND",
+                message="The requested obligation does not exist in this snapshot.",
+                action=(
+                    "Run backstitch obligation list and use an exact returned identity."
+                ),
+                details={"identity": obligation_id},
+            ),
+            True,
+        )
+
+    def _snapshot_failure(self, exc: SnapshotCaptureError) -> ObligationResult:
+        if exc.kind == "unsupported_platform":
+            return self._problem(
+                code="UNSUPPORTED_PLATFORM",
+                message="This platform cannot capture a repository snapshot safely.",
+                action="Run Backstitch on a supported POSIX platform.",
+                details={"platform": sys.platform},
+            )
+        if exc.kind == "snapshot_unstable":
+            return self._problem(
+                code="SNAPSHOT_UNSTABLE",
+                message="The repository changed during bounded snapshot capture.",
+                action="Retry after concurrent repository writes have stopped.",
+                details={"attempts": exc.attempts or 0},
+            )
+        if exc.kind == "budget_exceeded":
+            return self._problem(
+                code="BUDGET_EXHAUSTED",
+                message="Repository snapshot capture exceeded a configured budget.",
+                action="Raise the named deterministic budget or narrow configured roots.",
+                details={
+                    "budget": exc.budget or "snapshot_files",
+                    "limit": exc.limit or 0,
+                    "observed": exc.observed or 0,
+                },
+            )
+        field = "repo_root" if exc.kind == "invalid_root" else "path"
+        reason = {
+            "invalid_root": "repository root is not an existing readable directory",
+            "invalid_path": "repository path configuration is invalid",
+            "symlink": "repository input cannot be a symlink",
+            "not_regular": "repository input must be a regular file or directory",
+        }.get(exc.kind, "repository input is invalid")
+        return self._problem(
+            code="INVALID_INPUT",
+            message="Repository input is not valid for safe snapshot capture.",
+            action="Correct the repository root, path, or source object and retry.",
+            details={"field": field, "reason": reason},
+        )
+
+    def _internal_failure(self) -> ObligationResult:
+        return self._problem(
+            code="INTERNAL_ERROR",
+            message="Backstitch could not complete the obligation request.",
+            action="Retry and report the failure if it persists.",
+            details={},
+        )
+
+    def _deadline_failure(
+        self,
+        exc: OperationDeadlineExceeded,
+    ) -> ObligationResult:
+        return self._problem(
+            code="DEADLINE_EXCEEDED",
+            message="The obligation operation exceeded its configured deadline.",
+            action=(
+                "Retry with `backstitch obligation list --repo-root . "
+                "--option obligations.maximum_call_seconds 30`."
+            ),
+            details={
+                "limit_milliseconds": exc.limit_milliseconds,
+                "phase": exc.phase,
+                "configured_key": "obligations.maximum_call_seconds",
+                "cooperative_tolerance_milliseconds": (
+                    exc.cooperative_tolerance_milliseconds
+                ),
+            },
+        )
+
+    def _problem(
+        self,
+        *,
+        code: OperationProblemCode,
+        message: str,
+        action: str,
+        details: dict[str, object],
+    ) -> ObligationResult:
+        snapshot = None
+        if self.snapshot is not None:
+            snapshot = {
+                "snapshot_hash": self.snapshot.snapshot_hash,
+                "file_count": self.snapshot.file_count,
+                "byte_count": self.snapshot.byte_count,
+                "unreadable_count": self.snapshot.unreadable_count,
+            }
+        return self._result(
+            problem_envelope(
+                operation=self.request.operation,
+                snapshot=snapshot,
+                code=code,
+                message=message,
+                action=action,
+                details=details,
+            ),
+            failed=True,
+        )
+
+    def _result(self, envelope: dict[str, Any], *, failed: bool) -> ObligationResult:
+        return ObligationResult(
+            envelope=envelope,
+            failed=failed,
+            resolved_root=self.root.as_posix(),
+        )
+
+
+def read_obligation(
+    request: ObligationRequest,
+    *,
+    progress_sink: ProgressSink | None = None,
+) -> ObligationResult:
+    """Run one obligation operation without presentation or process-exit policy."""
+
+    return _ObligationReader(request, progress_sink).read()
 
 
 def render_envelope_json(envelope: dict[str, Any]) -> str:
@@ -703,6 +1447,15 @@ def render_envelope_text(envelope: dict[str, Any], *, resolved_root: str) -> str
     operation = envelope["operation"]
     if operation == "obligation.list":
         lines.append(f"bootstrap: {result['bootstrap_state']}")
+        lines.append(
+            "filters: "
+            + canonical_json_bytes(result["applied_filters"]).decode("utf-8")
+        )
+        lines.append(
+            "readiness: "
+            + canonical_json_bytes(result["readiness_summary"]).decode("utf-8")
+        )
+        lines.append(f"filtered_count: {result['filtered_count']}")
         entries = result["entries"]
         assert isinstance(entries, list)
         for entry in entries:

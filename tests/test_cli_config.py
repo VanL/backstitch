@@ -14,6 +14,20 @@ from pathlib import Path
 
 import pytest
 
+CAPABILITY_CONFIG_LINES = (
+    "capability_schema_version = 1",
+    'capability_revision = "controlled-test-v1"',
+    "maximum_input_bytes = 10000000",
+    (
+        "request_constraints = { "
+        'json_mode = { presence = "required", allowed_values = ["require", "off"] }, '
+        'temperature = { presence = "required", allowed_values = [0.0] }, '
+        'seed = { presence = "required", minimum = 0, maximum = 2147483647 }, '
+        'max_tokens = { presence = "required", minimum = 1, maximum = 16384 }'
+        " }"
+    ),
+)
+
 
 def run_cli(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -186,6 +200,7 @@ def test_bare_default_analyze_preserves_deterministic_preflight(
                 'plugin_distribution_name = "llm"',
                 'model = "never-called"',
                 'model_revision = "never-called-revision"',
+                *CAPABILITY_CONFIG_LINES,
                 "input_cost_microusd_per_million_tokens = 0",
                 "output_cost_microusd_per_million_tokens = 0",
                 "input_token_overhead = 256",
@@ -201,13 +216,17 @@ def test_bare_default_analyze_preserves_deterministic_preflight(
     bare_model = run_cli("--model", "never-called", cwd=tmp_path)
     explicit = run_cli("analyze", "--repo-root", ".", cwd=tmp_path)
 
-    assert bare.returncode == explicit.returncode == 1
+    assert bare.returncode == explicit.returncode == 2
     assert bare.stdout == explicit.stdout
     assert bare.stderr == explicit.stderr
     assert bare_path.returncode == bare_model.returncode == explicit.returncode
     assert bare_path.stdout == bare_model.stdout == explicit.stdout
     assert bare_path.stderr == bare_model.stderr == explicit.stderr
-    assert "MAPPING_PATH_MISSING" in bare.stdout
+    assert bare.stdout == ""
+    assert "analysis preflight blocked" in bare.stderr
+    assert "selected command: analyze" in bare.stderr
+    assert f"config: {tmp_path / '.backstitch.toml'}" in bare.stderr
+    assert "IMPLEMENTATION_PARTIAL" in bare.stderr
 
 
 def test_bare_no_config_reports_missing_command_without_dispatch(
@@ -380,6 +399,7 @@ def test_config_show_projects_service_purl_and_adapter_model_id(
                 'plugin_distribution_name = "llm"',
                 'model = "legacy-model"',
                 'model_revision = "legacy-revision"',
+                *CAPABILITY_CONFIG_LINES,
                 "input_cost_microusd_per_million_tokens = 0",
                 "output_cost_microusd_per_million_tokens = 0",
                 "input_token_overhead = 256",
@@ -391,6 +411,7 @@ def test_config_show_projects_service_purl_and_adapter_model_id(
                 'plugin_id = "openai"',
                 'plugin_distribution_name = "llm"',
                 'model_revision = "gpt-5.4-mini-2026-03-17"',
+                *CAPABILITY_CONFIG_LINES,
                 "input_cost_microusd_per_million_tokens = 750000",
                 "output_cost_microusd_per_million_tokens = 4500000",
                 "input_token_overhead = 256",

@@ -868,17 +868,68 @@ def _first_identifier(node: Node | None) -> Node | None:
     return None
 
 
-def _static_syntax_facts(
-    root: Node,
-    owners: Sequence[_OwnerNodeEntry],
-    line_index: _LineIndex,
-) -> tuple[tuple[StaticReference, ...], tuple[StaticBinding, ...]]:
-    """Materialize parser-owned reference and binding facts as plain values."""
+class _StaticSyntaxCollector:
+    """Collect plain reference and binding facts in parser traversal order."""
 
-    references: list[StaticReference] = []
-    bindings: list[StaticBinding] = []
+    def __init__(
+        self,
+        owners: Sequence[_OwnerNodeEntry],
+        line_index: _LineIndex,
+    ) -> None:
+        self.owners = owners
+        self.line_index = line_index
+        self.references: list[StaticReference] = []
+        self.bindings: list[StaticBinding] = []
+
+    def collect(
+        self,
+        root: Node,
+    ) -> tuple[tuple[StaticReference, ...], tuple[StaticBinding, ...]]:
+        self.visit_reference(root, None)
+        self.visit_bindings(root, None)
+        for owner in self.owners:
+            self.collect_owner(owner)
+        self.references.sort(key=lambda item: (item.source_order, item.node_kind))
+        self.bindings.sort(
+            key=lambda item: (
+                (
+                    -1
+                    if item.owner_scope_start_byte is None
+                    else item.owner_scope_start_byte
+                ),
+                item.source_order,
+                item.name,
+                item.kind,
+            )
+        )
+        owner_by_scope = {item.scope_start_byte: item for item in self.owners}
+        assert set(owner_by_scope) == {item.scope_start_byte for item in self.owners}
+        return tuple(self.references), tuple(self.bindings)
+
+    def collect_owner(self, owner: _OwnerNodeEntry) -> None:
+        body = owner.definition.child_by_field_name("body")
+        if body is not None:
+            self.visit_reference(body, owner)
+            self.visit_bindings(body, owner)
+        parameters = owner.definition.child_by_field_name("parameters")
+        type_parameters = owner.definition.child_by_field_name("type_parameters")
+        for name in (
+            *_parameter_identifiers(parameters),
+            *_type_parameter_identifiers(type_parameters),
+        ):
+            self.bindings.append(
+                StaticBinding(
+                    owner.scope_start_byte,
+                    owner.qualname,
+                    _node_text(name),
+                    0,
+                    "parameter",
+                    False,
+                )
+            )
 
     def add_reference(
+        self,
         node: Node,
         node_kind: Literal["import", "call", "name", "attribute"],
         owner: _OwnerNodeEntry | None,
@@ -889,7 +940,7 @@ def _static_syntax_facts(
     ) -> None:
         module, relative_level = _import_module(node)
         literal_arguments = _literal_call_arguments(node) if node_kind == "call" else ()
-        references.append(
+        self.references.append(
             StaticReference(
                 owner_scope_start_byte=(
                     owner.scope_start_byte if owner is not None else None
@@ -897,7 +948,7 @@ def _static_syntax_facts(
                 owner_qualname=owner.qualname if owner is not None else None,
                 node_kind=node_kind,
                 source_order=node.start_byte,
-                line=_start_line(node, line_index),
+                line=_start_line(node, self.line_index),
                 name_parts=name_parts,
                 import_module=module,
                 relative_level=relative_level,
@@ -910,6 +961,7 @@ def _static_syntax_facts(
         )
 
     def visit_reference(
+        self,
         node: Node,
         owner: _OwnerNodeEntry | None,
         conditional: bool = False,
@@ -920,72 +972,27 @@ def _static_syntax_facts(
         if node.type in {"global_statement", "nonlocal_statement"}:
             return
         if node.type in {"import_statement", "import_from_statement"}:
-            add_reference(node, "import", owner, conditional=conditional)
+            self.add_reference(node, "import", owner, conditional=conditional)
             return
         if node.type == "type_alias_statement":
-            # The alias name binds in the surrounding scope, while its value
-            # and type parameters execute in a distinct annotation scope.
-            # Omitting that annotation-only subgraph is conservative.
             return
         if node.type in {"assignment", "annotated_assignment"}:
-            right = node.child_by_field_name("right") or node.child_by_field_name(
-                "value"
-            )
-            if right is not None:
-                visit_reference(right, owner, conditional)
-            left = node.child_by_field_name("left")
-            if left is not None and left.type == "attribute":
-                add_reference(
-                    left,
-                    "attribute",
-                    owner,
-                    name_parts=_name_parts(left) or (),
-                    is_load=False,
-                    conditional=conditional,
-                )
-                object_node = left.child_by_field_name("object")
-                if object_node is not None:
-                    visit_reference(object_node, owner, conditional)
+            self.visit_assignment_reference(node, owner, conditional)
             return
         if node.type == "augmented_assignment":
-            left = node.child_by_field_name("left")
-            right = node.child_by_field_name("right")
-            if left is not None:
-                visit_reference(left, owner, conditional)
-            if right is not None:
-                visit_reference(right, owner, conditional)
+            self.visit_fields(node, owner, conditional, ("left", "right"))
             return
         if node.type == "delete_statement":
-            for child in _named_children(node):
-                if child.type == "attribute":
-                    add_reference(
-                        child,
-                        "attribute",
-                        owner,
-                        name_parts=_name_parts(child) or (),
-                        is_load=False,
-                        conditional=conditional,
-                    )
-                    object_node = child.child_by_field_name("object")
-                    if object_node is not None:
-                        visit_reference(object_node, owner, conditional)
+            self.visit_delete_reference(node, owner, conditional)
             return
         if node.type == "named_expression":
-            value = node.child_by_field_name("value")
-            if value is not None:
-                visit_reference(value, owner, conditional)
+            self.visit_fields(node, owner, conditional, ("value",))
             return
         if node.type == "as_pattern":
-            for index, child in enumerate(node.children):
-                if child.is_named and node.field_name_for_child(index) != "alias":
-                    visit_reference(child, owner, conditional)
+            self.visit_pattern_value(node, owner, conditional)
             return
         if node.type == "for_in_clause":
-            right = node.child_by_field_name("right")
-            if right is not None:
-                visit_reference(right, owner, conditional)
-            for condition in _field_children(node, "condition"):
-                visit_reference(condition, owner, conditional)
+            self.visit_for_clause(node, owner, conditional)
             return
         if node.type in {
             "case_pattern",
@@ -1000,51 +1007,19 @@ def _static_syntax_facts(
         }:
             return
         if node.type in {"for_statement", "while_statement"}:
-            right = node.child_by_field_name("right")
-            condition_node = node.child_by_field_name("condition")
-            for item in (right, condition_node):
-                if item is not None:
-                    visit_reference(item, owner, conditional)
-            for field in ("body", "alternative"):
-                for item in _field_children(node, field):
-                    visit_reference(item, owner, conditional)
+            self.visit_loop_reference(node, owner, conditional)
             return
-        if node.type == "with_item":
-            value = node.child_by_field_name("value")
-            if value is not None:
-                visit_reference(value, owner, conditional)
-            return
-        if node.type == "keyword_argument":
-            value = node.child_by_field_name("value")
-            if value is not None:
-                visit_reference(value, owner, conditional)
+        if node.type in {"with_item", "keyword_argument"}:
+            self.visit_fields(node, owner, conditional, ("value",))
             return
         if node.type == "call":
-            function = node.child_by_field_name("function")
-            add_reference(
-                node,
-                "call",
-                owner,
-                name_parts=_name_parts(function) or (),
-                conditional=conditional,
-            )
-            for child in _named_children(node):
-                visit_reference(child, owner, conditional)
+            self.visit_call_reference(node, owner, conditional)
             return
         if node.type == "attribute":
-            add_reference(
-                node,
-                "attribute",
-                owner,
-                name_parts=_name_parts(node) or (),
-                conditional=conditional,
-            )
-            object_node = node.child_by_field_name("object")
-            if object_node is not None:
-                visit_reference(object_node, owner, conditional)
+            self.visit_attribute_reference(node, owner, conditional)
             return
         if node.type == "identifier":
-            add_reference(
+            self.add_reference(
                 node,
                 "name",
                 owner,
@@ -1052,12 +1027,141 @@ def _static_syntax_facts(
                 conditional=conditional,
             )
             return
-        for child in _named_children(node):
-            visit_reference(child, owner, conditional)
+        self.visit_named_children(node, owner, conditional)
 
-    owner_by_scope = {item.scope_start_byte: item for item in owners}
+    def visit_assignment_reference(
+        self,
+        node: Node,
+        owner: _OwnerNodeEntry | None,
+        conditional: bool,
+    ) -> None:
+        right = node.child_by_field_name("right") or node.child_by_field_name("value")
+        if right is not None:
+            self.visit_reference(right, owner, conditional)
+        left = node.child_by_field_name("left")
+        if left is None or left.type != "attribute":
+            return
+        self.add_reference(
+            left,
+            "attribute",
+            owner,
+            name_parts=_name_parts(left) or (),
+            is_load=False,
+            conditional=conditional,
+        )
+        object_node = left.child_by_field_name("object")
+        if object_node is not None:
+            self.visit_reference(object_node, owner, conditional)
+
+    def visit_delete_reference(
+        self,
+        node: Node,
+        owner: _OwnerNodeEntry | None,
+        conditional: bool,
+    ) -> None:
+        for child in _named_children(node):
+            if child.type != "attribute":
+                continue
+            self.add_reference(
+                child,
+                "attribute",
+                owner,
+                name_parts=_name_parts(child) or (),
+                is_load=False,
+                conditional=conditional,
+            )
+            object_node = child.child_by_field_name("object")
+            if object_node is not None:
+                self.visit_reference(object_node, owner, conditional)
+
+    def visit_pattern_value(
+        self,
+        node: Node,
+        owner: _OwnerNodeEntry | None,
+        conditional: bool,
+    ) -> None:
+        for index, child in enumerate(node.children):
+            if child.is_named and node.field_name_for_child(index) != "alias":
+                self.visit_reference(child, owner, conditional)
+
+    def visit_for_clause(
+        self,
+        node: Node,
+        owner: _OwnerNodeEntry | None,
+        conditional: bool,
+    ) -> None:
+        right = node.child_by_field_name("right")
+        if right is not None:
+            self.visit_reference(right, owner, conditional)
+        for condition in _field_children(node, "condition"):
+            self.visit_reference(condition, owner, conditional)
+
+    def visit_loop_reference(
+        self,
+        node: Node,
+        owner: _OwnerNodeEntry | None,
+        conditional: bool,
+    ) -> None:
+        self.visit_fields(node, owner, conditional, ("right", "condition"))
+        for field in ("body", "alternative"):
+            for item in _field_children(node, field):
+                self.visit_reference(item, owner, conditional)
+
+    def visit_call_reference(
+        self,
+        node: Node,
+        owner: _OwnerNodeEntry | None,
+        conditional: bool,
+    ) -> None:
+        self.add_reference(
+            node,
+            "call",
+            owner,
+            name_parts=_name_parts(node.child_by_field_name("function")) or (),
+            conditional=conditional,
+        )
+        self.visit_named_children(node, owner, conditional)
+
+    def visit_attribute_reference(
+        self,
+        node: Node,
+        owner: _OwnerNodeEntry | None,
+        conditional: bool,
+    ) -> None:
+        self.add_reference(
+            node,
+            "attribute",
+            owner,
+            name_parts=_name_parts(node) or (),
+            conditional=conditional,
+        )
+        object_node = node.child_by_field_name("object")
+        if object_node is not None:
+            self.visit_reference(object_node, owner, conditional)
+
+    def visit_fields(
+        self,
+        node: Node,
+        owner: _OwnerNodeEntry | None,
+        conditional: bool,
+        fields: Sequence[str],
+    ) -> None:
+        for field_name in fields:
+            child = node.child_by_field_name(field_name)
+            if child is not None:
+                self.visit_reference(child, owner, conditional)
+
+    def visit_named_children(
+        self,
+        node: Node,
+        owner: _OwnerNodeEntry | None,
+        conditional: bool,
+    ) -> None:
+        for child in _named_children(node):
+            self.visit_reference(child, owner, conditional)
 
     def add_binding(
+        self,
         name: Node,
         kind: Literal["parameter", "import", "definition", "assignment", "delete"],
         owner: _OwnerNodeEntry | None,
@@ -1065,7 +1169,7 @@ def _static_syntax_facts(
         *,
         source_order: int | None = None,
     ) -> None:
-        bindings.append(
+        self.bindings.append(
             StaticBinding(
                 owner.scope_start_byte if owner is not None else None,
                 owner.qualname if owner is not None else None,
@@ -1077,6 +1181,7 @@ def _static_syntax_facts(
         )
 
     def visit_bindings(
+        self,
         node: Node,
         owner: _OwnerNodeEntry | None,
         conditional: bool = False,
@@ -1086,58 +1191,84 @@ def _static_syntax_facts(
         if definition is not None:
             name = definition.child_by_field_name("name")
             if name is not None:
-                add_binding(name, "definition", owner, conditional)
+                self.add_binding(name, "definition", owner, conditional)
             return
         if node.type in {"import_statement", "import_from_statement"}:
-            for alias in _import_aliases(node):
-                bindings.append(
-                    StaticBinding(
-                        owner.scope_start_byte if owner is not None else None,
-                        owner.qualname if owner is not None else None,
-                        alias.bound_name,
-                        alias.source_order,
-                        "import",
-                        conditional,
-                    )
-                )
+            self.bind_imports(node, owner, conditional)
             return
         if node.type == "type_alias_statement":
             name = _first_identifier(node.child_by_field_name("left"))
             if name is not None:
-                add_binding(name, "assignment", owner, conditional)
+                self.add_binding(name, "assignment", owner, conditional)
             return
-        if node.type in {
+        self.bind_comprehension_targets(node, owner)
+        binding_fields = self.binding_fields(node)
+        self.bind_pattern(node, owner, conditional)
+        self.bind_target_fields(node, binding_fields, owner, conditional)
+        self.bind_deletes(node, owner, conditional)
+        for child in _named_children(node):
+            self.visit_bindings(child, owner, conditional)
+
+    def bind_imports(
+        self,
+        node: Node,
+        owner: _OwnerNodeEntry | None,
+        conditional: bool,
+    ) -> None:
+        for alias in _import_aliases(node):
+            self.bindings.append(
+                StaticBinding(
+                    owner.scope_start_byte if owner is not None else None,
+                    owner.qualname if owner is not None else None,
+                    alias.bound_name,
+                    alias.source_order,
+                    "import",
+                    conditional,
+                )
+            )
+
+    def bind_comprehension_targets(
+        self,
+        node: Node,
+        owner: _OwnerNodeEntry | None,
+    ) -> None:
+        if node.type not in {
             "dictionary_comprehension",
             "generator_expression",
             "list_comprehension",
             "set_comprehension",
         }:
-            # The result expression precedes its ``for`` target in source but
-            # executes after that target is bound in the comprehension's
-            # implicit scope.  Project the shadow from the comprehension start
-            # so source-order lookup cannot climb to an outer import.
-            for clause in (
-                child
-                for child in _named_children(node)
-                if child.type == "for_in_clause"
-            ):
-                for target in _field_children(clause, "left"):
-                    for name in _target_identifiers(target):
-                        add_binding(
-                            name,
-                            "assignment",
-                            owner,
-                            True,
-                            source_order=node.start_byte,
-                        )
-        binding_fields: tuple[str, ...] = ()
+            return
+        for clause in (
+            child for child in _named_children(node) if child.type == "for_in_clause"
+        ):
+            for target in _field_children(clause, "left"):
+                for name in _target_identifiers(target):
+                    self.add_binding(
+                        name,
+                        "assignment",
+                        owner,
+                        True,
+                        source_order=node.start_byte,
+                    )
+
+    @staticmethod
+    def binding_fields(node: Node) -> tuple[str, ...]:
         if node.type in {"assignment", "annotated_assignment", "named_expression"}:
-            binding_fields = ("name" if node.type == "named_expression" else "left",)
-        elif node.type == "augmented_assignment":
-            binding_fields = ("left",)
-        elif node.type in {"for_statement", "for_in_clause"}:
-            binding_fields = ("left",)
-        elif node.type == "as_pattern":
+            return ("name" if node.type == "named_expression" else "left",)
+        if node.type == "augmented_assignment":
+            return ("left",)
+        if node.type in {"for_statement", "for_in_clause"}:
+            return ("left",)
+        return ()
+
+    def bind_pattern(
+        self,
+        node: Node,
+        owner: _OwnerNodeEntry | None,
+        conditional: bool,
+    ) -> None:
+        if node.type == "as_pattern":
             pattern_alias = node.child_by_field_name("alias") or next(
                 (
                     child
@@ -1147,74 +1278,66 @@ def _static_syntax_facts(
                 None,
             )
             if pattern_alias is not None:
-                add_binding(pattern_alias, "assignment", owner, conditional)
+                self.add_binding(pattern_alias, "assignment", owner, conditional)
         elif node.type == "splat_pattern":
             for name in _target_identifiers(node):
-                add_binding(name, "assignment", owner, conditional)
+                self.add_binding(name, "assignment", owner, conditional)
         elif node.type == "case_pattern":
-            dotted = next(
-                (
-                    child
-                    for child in _named_children(node)
-                    if child.type == "dotted_name"
-                ),
-                None,
-            )
-            if dotted is not None:
-                names = [
-                    child
-                    for child in _named_children(dotted)
-                    if child.type == "identifier" and _node_text(child) != "_"
-                ]
-                if len(names) == 1:
-                    name = names[0]
-                    add_binding(name, "assignment", owner, conditional)
+            self.bind_case_pattern(node, owner, conditional)
+
+    def bind_case_pattern(
+        self,
+        node: Node,
+        owner: _OwnerNodeEntry | None,
+        conditional: bool,
+    ) -> None:
+        dotted = next(
+            (child for child in _named_children(node) if child.type == "dotted_name"),
+            None,
+        )
+        if dotted is None:
+            return
+        names = [
+            child
+            for child in _named_children(dotted)
+            if child.type == "identifier" and _node_text(child) != "_"
+        ]
+        if len(names) == 1:
+            self.add_binding(names[0], "assignment", owner, conditional)
+
+    def bind_target_fields(
+        self,
+        node: Node,
+        binding_fields: Sequence[str],
+        owner: _OwnerNodeEntry | None,
+        conditional: bool,
+    ) -> None:
         for field_name in binding_fields:
             for target in _field_children(node, field_name):
                 for name in _target_identifiers(target):
-                    add_binding(name, "assignment", owner, conditional)
-        if node.type == "delete_statement":
-            for target in _named_children(node):
-                for name in _target_identifiers(target):
-                    add_binding(name, "delete", owner, conditional)
-        for child in _named_children(node):
-            visit_bindings(child, owner, conditional)
+                    self.add_binding(name, "assignment", owner, conditional)
 
-    visit_reference(root, None)
-    visit_bindings(root, None)
-    for item in owners:
-        body = item.definition.child_by_field_name("body")
-        if body is not None:
-            visit_reference(body, item)
-            visit_bindings(body, item)
-        parameters = item.definition.child_by_field_name("parameters")
-        type_parameters = item.definition.child_by_field_name("type_parameters")
-        for name in (
-            *_parameter_identifiers(parameters),
-            *_type_parameter_identifiers(type_parameters),
-        ):
-            bindings.append(
-                StaticBinding(
-                    item.scope_start_byte,
-                    item.qualname,
-                    _node_text(name),
-                    0,
-                    "parameter",
-                    False,
-                )
-            )
+    def bind_deletes(
+        self,
+        node: Node,
+        owner: _OwnerNodeEntry | None,
+        conditional: bool,
+    ) -> None:
+        if node.type != "delete_statement":
+            return
+        for target in _named_children(node):
+            for name in _target_identifiers(target):
+                self.add_binding(name, "delete", owner, conditional)
 
-    references.sort(key=lambda item: (item.source_order, item.node_kind))
-    bindings.sort(
-        key=lambda item: (
-            -1 if item.owner_scope_start_byte is None else item.owner_scope_start_byte,
-            item.source_order,
-            item.name,
-            item.kind,
-        )
-    )
-    assert set(owner_by_scope) == {item.scope_start_byte for item in owners}
-    return tuple(references), tuple(bindings)
+
+def _static_syntax_facts(
+    root: Node,
+    owners: Sequence[_OwnerNodeEntry],
+    line_index: _LineIndex,
+) -> tuple[tuple[StaticReference, ...], tuple[StaticBinding, ...]]:
+    """Materialize parser-owned reference and binding facts as plain values."""
+
+    return _StaticSyntaxCollector(owners, line_index).collect(root)
 
 
 def _doc_candidates(

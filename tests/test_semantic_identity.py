@@ -13,11 +13,18 @@ from typing import Any, cast
 import pytest
 
 from backstitch.semantic_identity import (
+    CapabilityDescriptor,
+    EffectiveRequest,
     ProviderIdentity,
+    RequestConstraints,
+    RequestFieldConstraint,
     RequestIdentity,
+    ResolvedInference,
     build_analysis_identities,
+    build_capability_provenance,
     build_inference_identity,
     build_review_identity,
+    resolve_inference,
 )
 from backstitch.semantic_packets import semantic_packet_hash
 
@@ -39,6 +46,57 @@ def _packet() -> dict[str, object]:
     }
     packet["packet_hash"] = semantic_packet_hash(packet)
     return packet
+
+
+def _provider() -> ProviderIdentity:
+    return ProviderIdentity(
+        "llm",
+        "openai",
+        "pkg:service/openai.com/test",
+        "test-2026-07-29",
+        "backstitch.llm",
+        2,
+        "0.31",
+        "llm",
+        "0.31",
+    )
+
+
+def _capability(
+    *,
+    temperature: RequestFieldConstraint | None = None,
+) -> CapabilityDescriptor:
+    return CapabilityDescriptor(
+        1,
+        "test-v1",
+        _provider().model_id,
+        _provider().model_revision,
+        RequestConstraints(
+            json_mode=RequestFieldConstraint("required", ("require",), None, None),
+            temperature=temperature
+            or RequestFieldConstraint("optional", (0.0,), None, None),
+            seed=RequestFieldConstraint("required", None, 0, 100),
+            max_tokens=RequestFieldConstraint("required", None, 1, 1024),
+        ),
+        1_000_000,
+    )
+
+
+def _resolve(
+    request: EffectiveRequest,
+    capability: CapabilityDescriptor,
+) -> ResolvedInference:
+    return resolve_inference(
+        provider_identity=_provider(),
+        adapter_model_id="raw-test-model",
+        requested=request,
+        capability=capability,
+        capability_provenance=build_capability_provenance(
+            capability,
+            source="packaged:test",
+        ),
+        key_prefix="analyze",
+    )
 
 
 def test_inference_identity_is_the_hash_of_the_closed_offline_contract() -> None:
@@ -109,6 +167,103 @@ def test_request_identity_rejects_noncanonical_runtime_values(
     values.update(kwargs)
     with pytest.raises(ValueError):
         RequestIdentity(**values)
+
+
+def test_capability_presence_is_resolved_before_request_identity() -> None:
+    optional_absent = _resolve(
+        EffectiveRequest("require", None, 42, 512),
+        _capability(),
+    )
+    assert optional_absent.effective_request.to_dict() == {
+        "json_mode": "require",
+        "seed": 42,
+        "max_tokens": 512,
+    }
+    assert optional_absent.request_identity.to_dict() == (
+        optional_absent.effective_request.to_dict()
+    )
+
+    with pytest.raises(ValueError, match=r"analyze\.temperature is forbidden"):
+        _resolve(
+            EffectiveRequest("require", 0.0, 42, 512),
+            _capability(
+                temperature=RequestFieldConstraint("forbidden", None, None, None)
+            ),
+        )
+    with pytest.raises(ValueError, match=r"analyze\.seed is required"):
+        _resolve(
+            EffectiveRequest("require", None, None, 512),
+            _capability(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("effective", "message"),
+    (
+        (
+            EffectiveRequest("off", None, 42, 512),
+            r"analyze\.json_mode must be one of",
+        ),
+        (
+            EffectiveRequest("require", 0.5, 42, 512),
+            r"analyze\.temperature must be one of",
+        ),
+        (
+            EffectiveRequest("require", None, 101, 512),
+            r"analyze\.seed must be from",
+        ),
+        (
+            EffectiveRequest("require", None, 42, 1025),
+            r"analyze\.max_tokens must be from",
+        ),
+    ),
+)
+def test_capability_value_failures_name_the_dotted_setting(
+    effective: EffectiveRequest,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _resolve(effective, _capability())
+
+
+def test_raw_alias_change_preserves_all_semantic_identity_bytes() -> None:
+    first = _resolve(
+        EffectiveRequest("require", 0.0, 42, 512),
+        _capability(),
+    )
+    second = resolve_inference(
+        provider_identity=first.provider_identity,
+        adapter_model_id="new-raw-alias",
+        requested=first.effective_request,
+        capability=first.capability,
+        capability_provenance=first.capability_provenance,
+        key_prefix="analyze",
+    )
+
+    first_identity = build_inference_identity(
+        _packet(), first.provider_identity, first.request_identity
+    )
+    second_identity = build_inference_identity(
+        _packet(), second.provider_identity, second.request_identity
+    )
+    assert first_identity.contract_bytes == second_identity.contract_bytes
+    assert first_identity.analysis_key == second_identity.analysis_key
+
+
+def test_resolved_inference_rejects_capability_provenance_mismatch() -> None:
+    capability = _capability()
+    with pytest.raises(ValueError, match="provenance does not match"):
+        resolve_inference(
+            provider_identity=_provider(),
+            adapter_model_id="raw-test-model",
+            requested=EffectiveRequest("require", 0.0, 42, 512),
+            capability=capability,
+            capability_provenance=replace(
+                build_capability_provenance(capability, source="packaged:test"),
+                source_sha256="f" * 64,
+            ),
+            key_prefix="analyze",
+        )
 
 
 def test_provider_and_contract_identity_reject_noncanonical_types() -> None:

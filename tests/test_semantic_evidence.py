@@ -142,6 +142,78 @@ def _suppression_packet() -> dict[str, Any]:
     return packet
 
 
+def _model_response(
+    packet: dict[str, Any],
+    *,
+    classification: str = "ok",
+    evidence: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    return {
+        "packet_id": packet["packet_id"],
+        "classification": classification,
+        "confidence": 0.5,
+        "rationale": "bounded evidence",
+        "summary": "Reviewed.",
+        "evidence": evidence or [],
+    }
+
+
+def test_model_result_rejects_wrong_packet_identity() -> None:
+    packet = _section_packet()
+    response = _model_response(packet)
+    response["packet_id"] = "docs/specs/99-wrong.md#WRONG-1"
+
+    with pytest.raises(SemanticResultError, match="packet_id does not match"):
+        normalize_model_result(packet, response, analysis_key="a" * 64)
+
+
+@pytest.mark.parametrize(
+    ("packet_factory", "classification"),
+    [
+        (_section_packet, "weak_binding"),
+        (_invariant_packet, "missing_trace"),
+    ],
+)
+def test_model_result_rejects_classification_from_another_packet_kind(
+    packet_factory: Any,
+    classification: str,
+) -> None:
+    packet = packet_factory()
+
+    with pytest.raises(SemanticResultError, match="invalid for the packet kind"):
+        normalize_model_result(
+            packet,
+            _model_response(packet, classification=classification),
+            analysis_key="a" * 64,
+        )
+
+
+def test_invariant_ok_without_test_evidence_downgrades_to_weak_binding() -> None:
+    packet = _invariant_packet()
+
+    result = normalize_model_result(
+        packet,
+        _model_response(
+            packet,
+            evidence=[_INVARIANT_REQUIREMENT, _INVARIANT_IMPLEMENTATION],
+        ),
+        analysis_key="a" * 64,
+    )
+
+    assert result.classification == "weak_binding"
+
+
+def test_invariant_ok_without_binding_or_implementation_evidence_is_rejected() -> None:
+    packet = _invariant_packet()
+
+    with pytest.raises(SemanticResultError, match="invariant ok requires"):
+        normalize_model_result(
+            packet,
+            _model_response(packet, evidence=[_INVARIANT_REQUIREMENT]),
+            analysis_key="a" * 64,
+        )
+
+
 def test_mismatch_evidence_is_reconstructed_from_exact_packet_spans() -> None:
     packet = _section_packet()
     result = normalize_model_result(

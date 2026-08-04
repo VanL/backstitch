@@ -12,6 +12,7 @@ Plans:
 - `docs/plans/2026-07-15-agent-guided-evidence-cases-plan.md`
 - `docs/plans/2026-07-27-semantic-analysis-lifecycle-plan.md`
 - `docs/plans/2026-07-28-documented-suppression-governance-plan.md`
+- `docs/plans/2026-07-29-architecture-quality-remediation-plan.md`
 
 Backstitch turns aligned intent into an executable gate in two stages. The
 deterministic stage identifies executable obligations and builds a closed,
@@ -36,21 +37,52 @@ No component may silently acquire authority owned by another layer:
 | `obligation_runtime.py` | One accepted repository snapshot and the obligation/readiness inventory derived from it | Fail the current operation; never rebuild only part of the inventory |
 | `evidence_discovery.py` | Complete deterministic candidate catalog, graph closure, receipts, budgets, and obligation-local derivation | Fail closed on budget or catalog-authority mismatch; never truncate candidates |
 | `analysis_packets.py` | Current mixed schema-3/schema-4 packet and schema-3 packet-report construction from the accepted snapshot | Publish neither artifact when required evidence, counterevidence, or an artifact byte ceiling fails |
+| `packet_application.py` | Provider-free packet-command runtime, deterministic precedence, packet/report assembly, and ordered publication | Return typed failures with no partial output except the exact finals reported by the publication owner |
 | `semantic_packets.py` | Canonical model-visible projection, prompt identity, and historical packet validation | Change packet or prompt identity whenever model-visible input changes |
 | `semantic_identity.py` | Offline provider and request fingerprint before adapter construction | Use a new identity for any inference-affecting change |
+| `semantic_verification_contract.py` | Verifier prompt metadata and cache-independent immutable claim, request, identity, and work records | Change the closed verifier contract or prompt identity whenever verifier-visible input changes; import no cache or analysis runtime |
 | `analysis_llm.py` | Provider request construction and wire adaptation | Preserve the logical request identity; reject unsupported or malformed provider behavior |
 | `analysis_results.py` and `semantic_evidence.py` | Closed output normalization and packet-local evidence reconstruction | Reject malformed output; never repair JSON or widen evidence |
-| `semantic_cache.py` | Immutable untrusted cache, single flight, and audited lock cleanup | Treat corrupt, stale, conflicting, or incomplete objects as exit `2`; keep cache state disposable and non-authoritative |
+| `semantic_cache.py` | Immutable untrusted cache, shared analyzer/review/verifier ownership coordination, and audited lock cleanup | Treat corrupt, stale, conflicting, or incomplete objects as exit `2`; keep cache state disposable and non-authoritative |
 | `semantic_verification.py` | Blinded adversarial verification over a reason-free claim projection | Keep the verifier result evidence-bound and replayable; model identity need not differ from the analyzer |
 | `semantic_policy.py` | Stable diagnostics, exact selectors, dispositions, and effective policy | Keep findings advisory unless an allowed verification state and qualification grant authority |
-| `semantic_analysis.py` | Capture/recapture, completeness, budgets, execution, policy projection, publication, and 0/1/2 truth | Publish only against an unchanged current snapshot |
-| `semantic_reports.py` | Closed analysis sidecars and cross-field validation | Reject unknown fields and forged authority at every read boundary |
-| `semantic_eval.py` and `semantic_eval_reports.py` | Schema-3 corpus execution, source-authoritative metrics, replay, and qualification | Keep gold outside model requests and require source-derived observed facts for authoritative loading |
+| `semantic_budget.py` | Shared positive-cost contract, exact per-request ceiling arithmetic, and provider/cache-free cold analyzer projection | Never read cache state, rebuild request bytes, project verifier work before findings, or supply a provider price |
+| `semantic_analysis.py` | Completeness, cache-aware execution budgets, provider/cache execution, policy projection, report bytes, historical writes, and 0/1/2 truth | Keep cache/provider and semantic-policy mechanics independent of CLI presentation; consume the shared cost owner |
+| `semantic_application.py` | Current/historical input validation, current readiness and packetization, schema-2 preflight projection, semantic-run invocation, currentness recapture, and ordered current publication | Publish current artifacts only after recapture proves the accepted source image is unchanged |
+| `artifact_publication.py` | Generic same-directory staging, durability, ordered replacement, and partial-publication context | Stage every final before currentness validation; clean only staging paths created by the invocation |
+| `semantic_reports.py` | Ordered closed-shape phases and authoritative cross-field validation for packet and analysis sidecars | Reject unknown fields in contract order, then reject forged counts, identities, hashes, or authority at every read boundary |
+| `semantic_eval_identity.py` | Closed analyze/verify effective-epoch derivation | Accept only the two named domains and bind base epoch, corpus digest, and trial with the stable one-separator encoding |
+| `semantic_eval_observation.py` | Provider-free fixture materialization and source-authoritative observed facts | Derive obligations, evidence, candidates, packets, and eligibility through production deterministic owners; never trust report claims as observed facts |
+| `semantic_eval.py` | Schema-3 provider execution, cache-only replay, metrics, and qualification production | Keep gold outside model requests and use the shared epoch owner for every trial |
+| `semantic_eval_reports.py` | Ordered closed corpus/fixture validation, closed eval-report validation, and authoritative identity/metric recomputation | Preserve validation-phase and first-error order; recompute epoch and source-derived facts independently; reject stored values that do not match |
 | `semantic-refresh.yml` | Exact trusted-main tool/config identity, disposable cache-service transfer, and fresh report retention | Restore/save only immutable cache trees; keep cache persistence failure separate from analysis |
 | `semantic-pr-report.yml` and `resolve_semantic_pr.py` | Exact API-confirmed PR identity and the trusted-tool/hostile-target execution boundary | Fail closed on identity movement or unreadable heads; never install or execute target-controlled bytes |
 
-`cli.py` orchestrates these owners. It is not a second semantic pipeline.
+`semantic_application.py` orchestrates the repository and historical workflows.
+`cli.py` owns argument parsing, lazy provider-factory construction,
+presentation, and exit mapping; it is not a second semantic pipeline.
 Deterministic commands still cannot import `llm`.
+
+Preflight budget facts follow that same ownership split. `PacketPlan` retains
+the exact model-request bytes and counts. Current execution passes that
+complete plan into `SemanticAnalysisRequest`; one ordered retained-byte
+sequence supplies prompt and capability bounds, cost math, cache selection,
+and provider dispatch for both exact-inference and evidence-stable reuse.
+Missing, incomplete, reordered, or identity-mismatched current plans fail
+before cache or provider work. Historical replay has no current preparation,
+so it composes its ordered request bytes once from the validated historical
+packets and frozen inference identities.
+
+`semantic_budget.py` applies the same reviewed cost validation and per-request
+ceiling sum used by execution. `semantic_application.py` joins those facts to
+configured limits in the closed schema-2 document. The CLI only renders the
+typed result; blocked text also names the selected command and config source.
+The projection is conservative and cache-free: read-write overages require
+cache hits, off-mode overages are exact blockers, and require mode reports its
+cache dependence without inspecting cache entries. A missing packet plan
+keeps the combined status `unavailable`, even when verifier work is deferred.
+Verifier calls and cost otherwise remain unknown until analyzer findings own
+the future verification work.
 
 ## Current Source And Packet Boundary
 

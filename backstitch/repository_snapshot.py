@@ -4,11 +4,12 @@ Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-8.2], [EVC-8.3.1]
 Spec: docs/specs/05-backstitch-invariants.md [INV-11]
 Plan: docs/plans/2026-07-15-agent-guided-evidence-cases-plan.md Slice 1
 
-This module is the sole filesystem-read owner for an EVC operation.  It keeps
-the public surface small: callers provide resolved semantic settings and get a
-frozen byte view whose identity is independent of the clone's absolute path.
-Parsers and resolvers should consume :class:`RepositorySnapshot`, never reopen
-the addressed source paths.
+This module is the sole whole-capture lifecycle owner for an EVC operation.
+Generic stable reads and stat identity live in ``filesystem_io``; this module
+owns inventory, retry, immutable-view, and snapshot-identity policy. Callers
+provide resolved semantic settings and get a frozen byte view whose identity
+is independent of the clone's absolute path. Parsers and resolvers consume
+:class:`RepositorySnapshot` and never reopen addressed source paths.
 """
 
 from __future__ import annotations
@@ -25,7 +26,9 @@ from pathlib import Path
 from typing import Literal, NoReturn
 
 from backstitch.canonical import canonical_json_bytes, canonical_repository_path
-from backstitch.settings import is_excluded
+from backstitch.filesystem_io import file_stat_identity
+from backstitch.operation_progress import OperationProgress
+from backstitch.scan_exclusions import is_excluded
 
 UnreadableClass = Literal["permission", "not_regular", "io"]
 CatalogPathKind = Literal["directory", "regular_file"]
@@ -66,10 +69,6 @@ class SnapshotCaptureError(Exception):
         self.budget = budget
         self.limit = limit
         self.observed = observed
-
-
-class StableReadError(Exception):
-    """A bounded no-follow read could not prove one stable regular file."""
 
 
 class _TornCapture(Exception):
@@ -384,18 +383,6 @@ def _file_stat(value: os.stat_result) -> FileStat:
     )
 
 
-def _file_stat_identity(value: os.stat_result) -> tuple[int, ...]:
-    row = _file_stat(value)
-    return (
-        row.st_dev,
-        row.st_ino,
-        row.file_type_and_permission_mode,
-        row.st_size,
-        row.st_mtime_ns,
-        row.st_ctime_ns,
-    )
-
-
 def _read_descriptor_bounded(descriptor: int, limit: int) -> bytes:
     chunks: list[bytes] = []
     observed = 0
@@ -410,8 +397,11 @@ def _read_descriptor_bounded(descriptor: int, limit: int) -> bytes:
 
 def _validate_config_sources(
     config_sources: tuple[SnapshotConfigSource, ...],
+    progress: OperationProgress | None,
 ) -> None:
     for source in config_sources:
+        if progress is not None:
+            progress.checkpoint("snapshot")
         try:
             before = source.path.lstat()
             if not stat.S_ISREG(before.st_mode):
@@ -428,13 +418,15 @@ def _validate_config_sources(
         except OSError:
             raise _TornCapture from None
         if (
-            _file_stat_identity(before) != source.stat_identity
-            or _file_stat_identity(before) != _file_stat_identity(opened)
-            or _file_stat_identity(opened) != _file_stat_identity(after)
-            or _file_stat_identity(after) != _file_stat_identity(repeated)
+            file_stat_identity(before) != source.stat_identity
+            or file_stat_identity(before) != file_stat_identity(opened)
+            or file_stat_identity(opened) != file_stat_identity(after)
+            or file_stat_identity(after) != file_stat_identity(repeated)
             or raw != source.raw_bytes
         ):
             raise _TornCapture
+        if progress is not None:
+            progress.checkpoint("snapshot")
 
 
 def _normalize_address(
@@ -644,7 +636,10 @@ def _inventory_directory(
     exclusions: tuple[str, ...],
     source_rows: dict[str, _SourceInput],
     catalog_rows: dict[str, _CatalogInput],
+    progress: OperationProgress | None,
 ) -> None:
+    if progress is not None:
+        progress.checkpoint("snapshot")
     directory_fd = _open_directory(root_fd, root_address.native)
     try:
         _record_catalog_path(
@@ -657,6 +652,7 @@ def _inventory_directory(
             exclusions,
             source_rows,
             catalog_rows,
+            progress,
         )
     finally:
         os.close(directory_fd)
@@ -669,7 +665,10 @@ def _inventory_open_directory(
     exclusions: tuple[str, ...],
     source_rows: dict[str, _SourceInput],
     catalog_rows: dict[str, _CatalogInput],
+    progress: OperationProgress | None,
 ) -> None:
+    if progress is not None:
+        progress.checkpoint("snapshot")
     try:
         names = os.listdir(directory_fd)
     except OSError as exc:
@@ -683,6 +682,8 @@ def _inventory_open_directory(
     for name in sorted(
         names, key=lambda value: (unicodedata.normalize("NFC", value), value)
     ):
+        if progress is not None:
+            progress.checkpoint("snapshot")
         if not name or name in (".", "..") or "\\" in name or "\x00" in name:
             raise SnapshotCaptureError(
                 "invalid_path", f"invalid repository path component: {name!r}"
@@ -737,6 +738,7 @@ def _inventory_open_directory(
                     exclusions,
                     source_rows,
                     catalog_rows,
+                    progress,
                 )
             finally:
                 os.close(child_fd)
@@ -761,6 +763,7 @@ def _inventory(
     config_paths: tuple[str, ...],
     additional_paths: tuple[str, ...],
     operational_exclusions: tuple[str, ...],
+    progress: OperationProgress | None,
 ) -> _Inventory:
     exclusions = tuple(
         sorted(
@@ -803,11 +806,14 @@ def _inventory(
                 exclusions,
                 source_rows,
                 catalog_rows,
+                progress,
             )
         except FileNotFoundError:
             missing_roots.append(canonical_root)
 
     for raw in config_paths:
+        if progress is not None:
+            progress.checkpoint("snapshot")
         address = _normalize_address(repo_root, raw)
         try:
             value = _lstat_path(root_fd, address.native)
@@ -824,6 +830,8 @@ def _inventory(
         _record_catalog_path(catalog_rows, address, config_stat, "regular_file")
 
     for raw in additional_paths:
+        if progress is not None:
+            progress.checkpoint("snapshot")
         normalized = canonical_repository_path(raw)
         if normalized is None:
             raise SnapshotCaptureError(
@@ -895,67 +903,6 @@ def _open_file(root_fd: int, path: str) -> int:
         os.close(parent_fd)
 
 
-def read_regular_nofollow(
-    root: Path,
-    relative: str,
-    *,
-    expected_stat: os.stat_result | None = None,
-    maximum_bytes: int | None = None,
-) -> tuple[bytes, os.stat_result]:
-    """Read one stable regular file without following any path component."""
-
-    required = ("O_DIRECTORY", "O_NONBLOCK", "O_NOFOLLOW", "O_CLOEXEC")
-    if (
-        os.name != "posix"
-        or any(not hasattr(os, name) for name in required)
-        or not _OPEN_SUPPORTS_DIR_FD
-        or not _STAT_SUPPORTS_DIR_FD
-    ):
-        raise StableReadError("POSIX no-follow descriptors are unavailable")
-    root_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    root_fd: int | None = None
-    file_fd: int | None = None
-    try:
-        root_fd = os.open(root, root_flags)
-        file_fd = _open_file(root_fd, relative)
-        before = os.fstat(file_fd)
-        if not stat.S_ISREG(before.st_mode):
-            raise StableReadError("path is not a regular non-symlink file")
-        if expected_stat is not None and _file_stat_identity(
-            expected_stat
-        ) != _file_stat_identity(before):
-            raise StableReadError("file changed before its bounded read")
-        limit = before.st_size if maximum_bytes is None else maximum_bytes
-        raw = _read_descriptor_bounded(file_fd, limit)
-        if len(raw) > limit:
-            raise StableReadError("file exceeds its bounded read limit")
-        after = os.fstat(file_fd)
-        repeated = _lstat_path(root_fd, relative)
-        if (
-            _file_stat_identity(before) != _file_stat_identity(after)
-            or _file_stat_identity(after) != _file_stat_identity(repeated)
-            or len(raw) != after.st_size
-        ):
-            raise StableReadError("file changed during its bounded read")
-        return raw, before
-    except StableReadError:
-        raise
-    except OSError as exc:
-        reason = (
-            "symlink or non-regular path"
-            if exc.errno in {errno.ENOTDIR, errno.ELOOP, errno.EISDIR, errno.ENXIO}
-            else str(exc)
-        )
-        raise StableReadError(reason) from exc
-    except SnapshotCaptureError as exc:
-        raise StableReadError(str(exc)) from exc
-    finally:
-        if file_fd is not None:
-            os.close(file_fd)
-        if root_fd is not None:
-            os.close(root_fd)
-
-
 def _validate_expected_lstat(root_fd: int, path: str, expected: FileStat) -> None:
     try:
         current = _file_stat(_lstat_path(root_fd, path))
@@ -970,7 +917,10 @@ def _bounded_read_attempt(
     path: str,
     expected: FileStat,
     maximum_file_bytes: int,
+    progress: OperationProgress | None,
 ) -> tuple[bytes | None, OSError | None]:
+    if progress is not None:
+        progress.checkpoint("snapshot")
     try:
         file_fd = _open_file(root_fd, path)
     except SnapshotCaptureError:
@@ -987,9 +937,13 @@ def _bounded_read_attempt(
             chunks: list[bytes] = []
             byte_count = 0
             while True:
+                if progress is not None:
+                    progress.checkpoint("snapshot")
                 chunk = os.read(
                     file_fd, min(65536, maximum_file_bytes + 1 - byte_count)
                 )
+                if progress is not None:
+                    progress.checkpoint("snapshot")
                 if not chunk:
                     break
                 byte_count += len(chunk)
@@ -1017,16 +971,17 @@ def _read_file(
     path: str,
     expected: FileStat,
     maximum_file_bytes: int,
+    progress: OperationProgress | None,
 ) -> tuple[bytes | None, UnreadableClass | None]:
     raw, first_error = _bounded_read_attempt(
-        root_fd, path, expected, maximum_file_bytes
+        root_fd, path, expected, maximum_file_bytes, progress
     )
     if first_error is None:
         assert raw is not None
         return raw, None
     first_class = _classify_open_error(first_error)
     repeated_raw, second_error = _bounded_read_attempt(
-        root_fd, path, expected, maximum_file_bytes
+        root_fd, path, expected, maximum_file_bytes, progress
     )
     if second_error is None or repeated_raw is not None:
         raise _TornCapture
@@ -1076,6 +1031,7 @@ def _capture_attempt(
     operational_exclusions: tuple[str, ...],
     attempt: int,
     hooks: SnapshotCaptureHooks | None,
+    progress: OperationProgress | None,
 ) -> tuple[tuple[SnapshotFile, ...], tuple[SnapshotPath, ...], tuple[str, ...]]:
     initial = _inventory(
         root_fd,
@@ -1084,22 +1040,39 @@ def _capture_attempt(
         config_paths,
         additional_paths,
         operational_exclusions,
+        progress,
     )
     if hooks is not None and hooks.after_initial_inventory is not None:
         hooks.after_initial_inventory(attempt, repo_root)
 
     rows: list[SnapshotFile] = []
     byte_count = 0
-    for path in sorted(initial.source_rows):
+    source_paths = sorted(initial.source_rows)
+    for index, path in enumerate(source_paths):
         source_input = initial.source_rows[path]
+        if progress is not None:
+            progress.advance(
+                "snapshot",
+                completed_work_units=index,
+                total_work_units=len(source_paths),
+                current_identity=path,
+            )
         raw, error_class = _read_file(
             root_fd,
             source_input.native_path,
             source_input.file_stat,
             config.maximum_file_bytes,
+            progress,
         )
         if hooks is not None and hooks.after_file_read is not None:
             hooks.after_file_read(attempt, path, repo_root)
+        if progress is not None:
+            progress.advance(
+                "snapshot",
+                completed_work_units=index + 1,
+                total_work_units=len(source_paths),
+                current_identity=path,
+            )
         if raw is None:
             rows.append(
                 SnapshotFile(
@@ -1140,6 +1113,7 @@ def _capture_attempt(
             config_paths,
             additional_paths,
             operational_exclusions,
+            progress,
         )
     except SnapshotCaptureError as exc:
         if exc.kind in ("symlink", "not_regular", "budget_exceeded"):
@@ -1177,6 +1151,7 @@ def capture_repository_snapshot(
     capture_attempts: int = 3,
     hooks: SnapshotCaptureHooks | None = None,
     additional_paths_deriver: AdditionalPathsDeriver | None = None,
+    progress: OperationProgress | None = None,
 ) -> RepositorySnapshot:
     """Capture one accepted source view or raise a structured fatal problem."""
 
@@ -1241,11 +1216,13 @@ def capture_repository_snapshot(
             f"cannot open repository root `{repo_root}`: {exc}",
             path=str(repo_root),
         ) from None
+    if progress is not None:
+        progress.advance("snapshot", current_identity=canonical_root.as_posix())
     try:
         converged_additional_paths = additional_paths
         for attempt in range(1, capture_attempts + 1):
             try:
-                _validate_config_sources(config_sources)
+                _validate_config_sources(config_sources, progress)
                 files, path_catalog, missing_roots = _capture_attempt(
                     root_fd,
                     canonical_root,
@@ -1255,8 +1232,9 @@ def capture_repository_snapshot(
                     operational_exclusions,
                     attempt,
                     hooks,
+                    progress,
                 )
-                _validate_config_sources(config_sources)
+                _validate_config_sources(config_sources, progress)
             except _TornCapture:
                 continue
             observed_file_count = len(files) + len(external_config_sources)

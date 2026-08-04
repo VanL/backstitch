@@ -280,6 +280,16 @@ def parse_traceability_directive_line(
         mechanism = match.group("mechanism").lower()
         body = (match.group("body") or "").strip()
         declaration: str | None = None
+        starts_with_declaration = body.startswith("because ")
+        if re.match(r"because\s+", body, re.IGNORECASE) and not starts_with_declaration:
+            return None, [
+                _suppression_diagnostic(
+                    "SUPPRESSION_INVALID_SYNTAX",
+                    f"declaration delimiter must be lowercase `because ` in {location}",
+                    path=path,
+                    line=line,
+                )
+            ]
         if re.search(r"\s+because\s+", body, re.IGNORECASE) and " because " not in body:
             return None, [
                 _suppression_diagnostic(
@@ -289,7 +299,31 @@ def parse_traceability_directive_line(
                     line=line,
                 )
             ]
-        if " because " in body:
+        if mechanism == "meta" and starts_with_declaration:
+            declaration = body.removeprefix("because ").strip()
+            body = ""
+            if match.re is TRACEABILITY_DIRECTIVE_RE and not match.group("close"):
+                return None, [
+                    _suppression_diagnostic(
+                        "SUPPRESSION_INVALID_SYNTAX",
+                        (
+                            "underscore declaration form requires one closing `_` "
+                            f"in {location}"
+                        ),
+                        path=path,
+                        line=line,
+                    )
+                ]
+            if not is_valid_suppression_reference(declaration):
+                return None, [
+                    _suppression_diagnostic(
+                        "SUPPRESSION_INVALID_SYNTAX",
+                        f"invalid suppression declaration reference in {location}",
+                        path=path,
+                        line=line,
+                    )
+                ]
+        elif " because " in body:
             if body.count(" because ") != 1:
                 return None, [
                     _suppression_diagnostic(

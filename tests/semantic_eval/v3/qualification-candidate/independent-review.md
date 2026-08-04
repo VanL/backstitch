@@ -130,3 +130,38 @@ Provider-free verification observed:
 - focused source-derivation and anti-Goodhart tests: PASS
 - Ruff: PASS
 - full corpus test: PASS after the review-record and frozen-identity refresh
+
+## 2026-07-29: discovery-v2 mechanical migration review
+
+Scope: provider-free migration of the generated gold projection after
+discovery algorithm version 2 made module records ineligible as closure
+endpoints. Fixture sources, semantic labels, and policy authority were outside
+the mechanical migration.
+
+**Disposition: PASS for the discovery-v2 mechanical migration. The existing
+historical-provenance and anti-Goodhart prompt blockers remain unchanged.**
+
+All 25 cases, 50 source variants, fixture paths, tree identities,
+deterministic configuration, control tags, critical flags, reviewed historical
+rows, source references, expected codes, and expected classifications are
+unchanged. All 50 obligations and 50 declared-evidence rows are byte-identical.
+The migration removes exactly 50 untraced `python-module:feature` candidates:
+one from each clean and misaligned variant. No candidate was added. The 150
+retained definition candidates are byte-identical after ignoring their
+mechanically shifted ordinal `gold_id`.
+
+Historical case 15 is the only expected finding whose required counterevidence
+ordinal changes. It moves from `misaligned-candidate-04` to
+`misaligned-candidate-03`; both names resolve to the same fallback definition,
+candidate identity, receipt, trace state, and source region. Expanded required
+declared and counterevidence semantics are otherwise identical.
+
+Verification:
+
+```text
+uv run python tests/semantic_eval/v3/generate_qualification_candidate.py
+uv run pytest tests/test_semantic_eval_corpus_v3.py -q
+```
+
+The generator drift check passed. The corpus tests passed after refreshing the
+frozen manifest and review identities. No provider was constructed or called.

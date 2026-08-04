@@ -26,21 +26,26 @@ Quick pointers to the key guidance documents in this repository.
 | `backstitch/models.py` | Frozen section, invariant, bind, graph, and issue datatypes; compatibility diagnostic inventories derived from the registry ([SC-6], [SC-11], [INV-4]) |
 | `backstitch/artifact_contracts.py` | Mixed section/invariant/suppression packet JSONL, hash, and deterministic-report validation at trust boundaries ([SC-6], [SC-13], [INV-5], [EVC-4]) |
 | `backstitch/config.py` | `ProfileConfig` and paired code/test-root overrides ([SC-3], [CFG-6]) |
-| `backstitch/profiles.py` | Built-in `backstitch-style-v1` profile ([SC-3]) |
+| `backstitch/profiles.py` | Built-in `backstitch-style-v1` profile and shared resolved-settings projection ([SC-3], [SC-5]) |
 | `backstitch/markdown_specs.py` | Traceability layer over `markdown-it-py` CommonMark tokens: sections, mappings, suppression declarations, exclusions, and invariant declarations ([SC-4], [EXC-4], [INV-3]) |
 | `backstitch/code_parser.py` | Runtime-independent `tree-sitter-python` seam: owner spans, doc blocks, comments, statement spans ([SC-4], [SC-10]) |
 | `backstitch/python_refs.py` | Python traceability interpretation over the parser seam: backlinks, noqa spans, invariant declarations, and test bindings ([SC-4], [EXC-5], [INV-3]) |
 | `backstitch/resolver.py` | Pure section/invariant `resolve()` plus accepted-snapshot artifact projection; the former live repository scan entry points are removed ([SC-4], [SC-9], [INV-4]) |
 | `backstitch/check_pipeline.py` | Shared accepted-snapshot, policy, suppression, and audit pipeline for deterministic command consumers ([SC-5], [SC-15], [EXC-6], [EXC-7]) |
-| `backstitch/repository_snapshot.py` | Immutable no-follow source/config capture, path catalog, target convergence, and clone-independent snapshot identity ([EVC-8.2]) |
-| `backstitch/obligation_runtime.py` | Shared snapshot/config orchestration for deterministic obligation and check reads ([EVC-8.2]) |
+| `backstitch/check_application.py` | Typed deterministic-check application seam: capture, report construction, warnings, and effective gate classification ([SC-5], [EVC-8.2], [EVC-8.7]) |
+| `backstitch/filesystem_io.py` | Generic bounded no-follow regular-file reads and exact six-field stat identity ([CFG-5.1], [EVC-8.2], [INV-11]) |
+| `backstitch/scan_exclusions.py` | Pure component-aware scan-exclusion matching shared by current and historical source adapters ([EVC-8.2], [INV-11]) |
+| `backstitch/repository_snapshot.py` | Immutable whole-capture lifecycle: no-follow inventory, path catalog, target convergence, retry, and clone-independent snapshot identity ([EVC-8.2]) |
+| `backstitch/operation_progress.py` | Discrete absolute-deadline and ordered best-effort progress state machine shared by snapshot, discovery, and packet owners ([SC-5], [EVC-8.4]) |
+| `backstitch/obligation_runtime.py` | Reusable accepted-snapshot, check-pipeline, obligation-inventory, summary, and candidate-discovery domain runtime ([EVC-8.2]) |
 | `backstitch/obligations.py` | Source-derived section, invariant, and suppression obligation inventory, readiness, disposition, blockers, and bootstrap entries ([EVC-2], [EVC-8.3]) |
 | `backstitch/evidence_summary.py` | Exact declared-evidence rows, reciprocity, source spans, and receipts from the accepted snapshot ([EVC-4.1], [EVC-8.3]) |
 | `backstitch/evidence_discovery.py` | Deterministic structural/lexical candidate discovery, conservative Python relations, trace states, receipts, and review guidance ([EVC-7]) |
 | `backstitch/intent_coverage.py` | Pure canonical-definition classification, exemptions, reverse requirement coverage, exact floors, and triage order ([COV-3], [COV-4], [COV-6]) |
 | `backstitch/intent_coverage_reporting.py` | Closed content-bound schema-1 intent-coverage report and consistency validation ([COV-3], [COV-9]) |
 | `backstitch/git_baseline.py` | Bounded shell-free Git baseline, ratchet, drift, acknowledgment, and stale-history fact owner ([COV-5], [COV-8]) |
-| `backstitch/obligation_api.py` | Transport-neutral obligation envelopes, canonical-core response-byte enforcement, closed problems/guidance, and content-bound pagination ([EVC-8.4]) |
+| `backstitch/coverage_application.py` | Typed coverage application seam: accepted repository state, historical projection, ratchet, report construction, gate classification, and durable publication ([SC-5], [COV-3], [COV-5], [COV-9]) |
+| `backstitch/obligation_api.py` | Typed obligation application seam: snapshot/domain orchestration, deterministic failure precedence, transport-neutral envelopes, response-byte enforcement, and content-bound pagination ([SC-5], [EVC-8.4], [EVC-8.7]) |
 | `backstitch/alignment_guide.py` | Installed versioned alignment quick start shared by public agent and human workflows ([EVC-8.1]) |
 | `backstitch/alignment_eval.py` | Closed Phase A/B product preregistration, authoritative product identities, independently source-bound gold, and result recomputation ([EVC-10.2]) |
 | `backstitch/reporting.py` | Text/JSON rendering, suppressed view ([SC-6], [EXC-7]) |
@@ -48,20 +53,27 @@ Quick pointers to the key guidance documents in this repository.
 | `backstitch/exclusions.py` | Canonical documented-suppression rule engine and decisions ([EXC-*]) |
 | `backstitch/target_roots.py` | Worktree-safe sibling discovery ([SC-12]) |
 | `backstitch/analysis_packets.py` | Sole source-aligned packet producer over one immutable obligation runtime; the former `generate_packets` path is removed ([SC-6], [SC-7], [EVC-9.1], [INV-5]) |
+| `backstitch/packet_application.py` | Typed packet-command application seam: runtime construction, deterministic precedence, packet/report assembly, and ordered publication ([SC-5], [SC-7], [SEM-7], [EVC-8.7]) |
 | `backstitch/analysis_results.py` | Discriminated section/invariant/suppression result JSONL validation and kind-separated summaries ([SC-6], [INV-5]) |
-| `backstitch/analysis_llm.py` | Lazy-`llm` adapter, evidence-locality, and weak-binding normalization boundary ([SC-7], [SC-8], [INV-5]) |
+| `backstitch/analysis_llm.py` | Lazy-`llm` provider request construction, schema-constrained wire adaptation, and trusted provenance capture ([SC-7], [SC-8], [SEM-3]) |
 | `backstitch/semantic_packets.py` | Canonical schema-3 section/invariant and schema-4 suppression projections, exact model-visible evidence regions, and code-owned prompt descriptors ([SEM-3], [EVC-9.1]) |
 | `backstitch/semantic_identity.py` | Offline provider-sensitive inference identity, provider-independent review identity, and their content-addressed keys ([SEM-3]) |
+| `backstitch/semantic_verification_contract.py` | Cache-independent verifier prompt metadata and immutable claim, request, identity, and work records ([SEM-3], [EVC-3.1]) |
 | `backstitch/semantic_evidence.py` | Closed model-result normalization and trusted packet-local excerpt reconstruction ([SEM-5]) |
-| `backstitch/semantic_cache.py` | Immutable exact results and evidence-stable first-writer baselines, run-wide lexical review locks, single flight, no-replace publication, and audited lock cleanup ([SEM-4]) |
+| `backstitch/semantic_cache.py` | Shared analyzer/review/verifier ownership coordination, immutable exact results and evidence-stable first-writer baselines, run-wide lexical review locks, no-replace publication, and audited lock cleanup ([SEM-4]) |
 | `backstitch/semantic_policy.py` | Semantic finding identity, dispositions, policy provenance, and diagnostic projection ([SEM-2], [SEM-6]) |
-| `backstitch/semantic_reports.py` | Closed packet/analysis reports, schema-5 producer/source reconciliation, and staged publication of complete packet/result/report artifact sets ([SEM-7]) |
+| `backstitch/artifact_publication.py` | Generic same-directory staged publication, file/directory durability, ordered replacement, and partial-publication context ([EVC-5.1], [SEM-7], [COV-9]) |
+| `backstitch/semantic_reports.py` | Closed packet/analysis reports and schema-5 producer/source reconciliation ([SEM-7]) |
 | `backstitch/semantic_analysis.py` | Unified exact/evidence-stable selection, late qualification, completeness, budget, policy, publication, and exit-code runner ([SEM-1], [SEM-7]) |
-| `backstitch/semantic_eval.py` | Closed mutation/control corpus runner, metrics, Wilson intervals, and qualification ([SEM-8]) |
-| `backstitch/semantic_eval_reports.py` | Closed eval-report validation, cross-field consistency, and self-acceptance loading ([SEM-8], [SC-13]) |
+| `backstitch/semantic_budget.py` | Shared positive-cost contract, per-request ceiling arithmetic, and cache-free conservative analyzer call/cost projection ([SC-5], [SEM-7]) |
+| `backstitch/semantic_application.py` | Typed current/historical semantic application seam: input validation, readiness and packetization, schema-2 preflight budget projection, analysis invocation, recapture, and ordered current publication ([SC-5], [SC-7], [SEM-1], [SEM-7], [EVC-9]) |
+| `backstitch/semantic_eval_identity.py` | Closed analyze/verify qualification epoch derivation shared by producer and authoritative validator ([EVC-10.1]) |
+| `backstitch/semantic_eval_observation.py` | Provider-free fixture materialization, production source derivation, evidence eligibility, and observed-fact projection ([SEM-8], [EVC-10.1]) |
+| `backstitch/semantic_eval.py` | Closed mutation/control corpus provider execution, replay, metrics, and qualification production ([SEM-8]) |
+| `backstitch/semantic_eval_reports.py` | Ordered closed corpus/fixture validation, closed eval-report validation, independent identity/metric recomputation, and self-acceptance loading ([SEM-8], [SC-13], [EVC-10.1]) |
 | `backstitch/prompts/` | Packaged section, invariant, and suppression semantic-review prompts ([SC-7], [INV-5]) |
 | `backstitch/doctor.py` | Environment doctor checks ([SC-14]) |
-| `backstitch/cli.py` | Parser/dispatch, fixed bare `check`/`analyze` delegation, one-shot settings resolution and injection, command option normalization, output writes, and exit-code mapping ([SC-5], [SC-5.1], [CFG-5.1], [CFG-7]) |
+| `backstitch/cli.py` | Parser/dispatch, fixed bare `check`/`analyze` delegation, one-shot settings resolution and injection, argument validation, presentation, remaining direct output writes, and exit-code mapping ([SC-5], [SC-5.1], [CFG-5.1], [CFG-7]) |
 | `tests/acceptance/` | Black-box [SC-10] probes, including invariant and suppression lifecycle dogfood and artifact compatibility |
 | `tests/semantic_eval/v1/` | Historical analyzer-only mutation corpus retained for migration tests ([SEM-8]) |
 | `tests/semantic_eval/v3/` | Current schema-3 runner smoke corpus and non-authoritative qualification candidate ([EVC-10.1]) |

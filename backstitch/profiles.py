@@ -5,7 +5,7 @@ Spec: docs/specs/02-backstitch-core.md [SC-3]
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Protocol
 
 from backstitch.config import ProfileConfig
 from backstitch.diagnostics import load_default_config_raw
@@ -38,6 +38,41 @@ _PROFILES: dict[str, ProfileConfig] = {
 }
 
 
+class ProfileOverridesView(Protocol):
+    """Profile override values consumed by the profile projector."""
+
+    @property
+    def spec_roots(self) -> tuple[str, ...] | None: ...
+
+    @property
+    def plan_roots(self) -> tuple[str, ...] | None: ...
+
+    @property
+    def code_roots(self) -> tuple[str, ...] | None: ...
+
+    @property
+    def test_roots(self) -> tuple[str, ...] | None: ...
+
+    @property
+    def planned_spec_globs(self) -> tuple[str, ...] | None: ...
+
+    @property
+    def exploratory_spec_globs(self) -> tuple[str, ...] | None: ...
+
+    @property
+    def meta_spec_globs(self) -> tuple[str, ...] | None: ...
+
+
+class ProfileSettingsView(Protocol):
+    """Resolved settings fields needed to construct one scan profile."""
+
+    @property
+    def profile(self) -> str | None: ...
+
+    @property
+    def profile_overrides(self) -> ProfileOverridesView: ...
+
+
 def get_profile(name: str) -> ProfileConfig:
     """Return a built-in profile by name.
 
@@ -49,3 +84,29 @@ def get_profile(name: str) -> ProfileConfig:
         return _PROFILES[name]
     except KeyError:
         raise ValueError(f"unknown profile: {name!r}") from None
+
+
+def configured_profile(
+    settings: ProfileSettingsView,
+    *,
+    name: str | None = None,
+) -> ProfileConfig:
+    """Project immutable resolved settings onto one built-in profile."""
+
+    profile = get_profile(name or settings.profile or "backstitch-style-v1")
+    config_overrides: dict[str, tuple[str, ...]] = {}
+    for field in (
+        "spec_roots",
+        "plan_roots",
+        "code_roots",
+        "test_roots",
+        "planned_spec_globs",
+        "exploratory_spec_globs",
+        "meta_spec_globs",
+    ):
+        value = getattr(settings.profile_overrides, field)
+        if value is not None:
+            config_overrides[field] = value
+    if config_overrides:
+        profile = profile.with_overrides(**config_overrides)
+    return profile

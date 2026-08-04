@@ -17,13 +17,16 @@ import pytest
 from backstitch.alignment_eval import (
     AlignmentEvalError,
     AlignmentEvalPlan,
+    _AlignmentSessionEvaluator,
     _apply_revision,
     _candidate_artifact_value,
     _declaration_projection,
     _fixture_snapshot,
     _FixtureTree,
+    _load_alignment_result_preamble,
     _production_fixture_view,
     _required_declaration_set,
+    _TaskValidator,
     _validate_tree,
     load_alignment_eval_plan,
     load_alignment_eval_result,
@@ -734,9 +737,18 @@ def test_phase_a_and_b_results_recompute_from_closed_artifacts(tmp_path: Path) -
     loaded = load_alignment_eval_result(
         CORPUS, phase_b, prior_phase_result_path=phase_a
     )
-    assert loaded.passed
-    assert loaded.metrics["eligible_gold_candidate_count"] == 61
-    assert loaded.metrics["captured_eligible_gold_candidate_count"] == 60
+    assert not loaded.passed
+    assert json.loads(phase_b.read_text())["failure_reasons"] == [
+        "minimum_candidate_capture_rate",
+        "require_all_critical_candidates",
+    ]
+    assert loaded.metrics["eligible_gold_candidate_count"] == 62
+    assert loaded.metrics["captured_eligible_gold_candidate_count"] == 49
+    assert loaded.metrics["candidate_capture_rate"] == 49 / 62
+    assert loaded.metrics["critical_candidate_count"] == 30
+    assert loaded.metrics["critical_candidate_captured_count"] == 23
+    assert loaded.metrics["surfaced_candidate_count"] == 50
+    assert loaded.metrics["captured_trace_state_correct_count"] == 50
     assert loaded.metrics["irrelevant_candidate_count"] == 1
 
 
@@ -761,7 +773,9 @@ def test_phase_b_binds_human_accepted_projection_as_task_input(
     row["passed"] = False
     row["failure_reasons"] = [
         "INVALID_OBSERVATION",
+        "minimum_candidate_capture_rate",
         "minimum_first_diff_correct_rate",
+        "require_all_critical_candidates",
     ]
     phase_b.write_bytes(_canonical(row))
 
@@ -943,7 +957,11 @@ def test_phase_b_independent_trace_label_can_fail_precision_without_invalidating
     phase_b = _phase_b_result(root, plan, phase_a)
 
     result = json.loads(phase_b.read_text())
-    assert result["failure_reasons"] == ["minimum_trace_state_precision"]
+    assert result["failure_reasons"] == [
+        "minimum_candidate_capture_rate",
+        "minimum_trace_state_precision",
+        "require_all_critical_candidates",
+    ]
     loaded = load_alignment_eval_result(
         manifest, phase_b, prior_phase_result_path=phase_a
     )
@@ -1007,7 +1025,10 @@ def test_phase_b_absent_eligible_gold_can_fail_capture_without_invalidating(
     phase_b = _phase_b_result(root, plan, phase_a)
 
     result = json.loads(phase_b.read_text())
-    assert result["failure_reasons"] == ["minimum_candidate_capture_rate"]
+    assert result["failure_reasons"] == [
+        "minimum_candidate_capture_rate",
+        "require_all_critical_candidates",
+    ]
     loaded = load_alignment_eval_result(
         manifest, phase_b, prior_phase_result_path=phase_a
     )
@@ -1026,7 +1047,7 @@ def test_phase_b_absent_critical_gold_can_fail_critical_capture_cleanly(
     gold = next(
         row
         for row in fixture["gold_candidates"]
-        if row["gold_id"] == "implementation-definition-untraced-824fc83bedfb"
+        if row["gold_id"] == "implementation-definition-untraced-d0213ac482c5"
     )
     gold["critical"] = True
     _rehash_phase_b(manifest, phase)
@@ -1037,7 +1058,10 @@ def test_phase_b_absent_critical_gold_can_fail_critical_capture_cleanly(
     phase_b = _phase_b_result(root, plan, phase_a)
 
     result = json.loads(phase_b.read_text())
-    assert result["failure_reasons"] == ["require_all_critical_candidates"]
+    assert result["failure_reasons"] == [
+        "minimum_candidate_capture_rate",
+        "require_all_critical_candidates",
+    ]
     loaded = load_alignment_eval_result(
         manifest, phase_b, prior_phase_result_path=phase_a
     )
@@ -1589,26 +1613,39 @@ def test_phase_b_task_must_bind_the_canonical_find_evidence_run(
     phase_b = _phase_b_result(root, plan, phase_a)
     row = json.loads(phase_b.read_text())
     task = row["sessions"][0]["tasks"][0]
-    arbitrary = {
-        "schema_version": 1,
-        "operation": "obligation.get",
-        "snapshot": _snapshot(),
-        "result": _detail("docs/specs/01-core.md#CAND-1"),
-        "guidance": _guidance("RUN_CURRENT_ANALYSIS"),
-        "problems": [],
-    }
-    output_path, output_hash = _write_json(
-        root, "outputs/arbitrary-get.json", arbitrary
+    fixture = plan._phase_b.fixtures[0]
+    output_argv, output_path, output_hash = _run_obligation(
+        fixture.tree.root,
+        root,
+        "outputs/arbitrary-get.json",
+        cast(str, fixture.task_obligation_id),
     )
+    task["backstitch_calls"][0]["argv"] = output_argv
+    task["cli_observations"][0]["argv"] = output_argv
     task["cli_observations"][0]["output_path"] = output_path
     task["cli_observations"][0]["output_sha256"] = output_hash
     phase_b.write_bytes(_canonical(row))
 
+    preamble = _load_alignment_result_preamble(
+        plan,
+        phase_b,
+        prior_phase_result_path=phase_a,
+        require_current_product=False,
+    )
+    evaluator = _AlignmentSessionEvaluator(preamble)
+    evaluator.validate_candidate_runs()
     with pytest.raises(
         AlignmentEvalError,
-        match="find_evidence|candidate run|metrics does not recompute",
+        match="final observation must be obligation.find_evidence",
     ):
-        load_alignment_eval_result(CORPUS, phase_b, prior_phase_result_path=phase_a)
+        _TaskValidator(
+            result_base=preamble.result_base,
+            fixture=fixture,
+            value=task,
+            phase="B",
+            context="candidate-run task",
+            candidate_run=evaluator.candidate_bindings[fixture.fixture_id],
+        ).validate()
 
 
 def test_phase_b_task_paths_bind_the_canonical_candidate_run(tmp_path: Path) -> None:
@@ -1624,14 +1661,22 @@ def test_phase_b_task_paths_bind_the_canonical_candidate_run(tmp_path: Path) -> 
     duplicate.write_bytes(original.read_bytes())
     observation["source_tree_manifest_path"] = duplicate.relative_to(root).as_posix()
     row["passed"] = False
-    row["failure_reasons"] = ["INVALID_OBSERVATION"]
+    row["failure_reasons"] = [
+        "INVALID_OBSERVATION",
+        "minimum_candidate_capture_rate",
+        "require_all_critical_candidates",
+    ]
     phase_b.write_bytes(_canonical(row))
 
     loaded = load_alignment_eval_result(
         CORPUS, phase_b, prior_phase_result_path=phase_a
     )
     assert not loaded.passed
-    assert row["failure_reasons"] == ["INVALID_OBSERVATION"]
+    assert row["failure_reasons"] == [
+        "INVALID_OBSERVATION",
+        "minimum_candidate_capture_rate",
+        "require_all_critical_candidates",
+    ]
 
 
 def test_phase_b_task_rejects_extra_public_observations(tmp_path: Path) -> None:

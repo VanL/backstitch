@@ -10,16 +10,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
-import secrets
-import tempfile
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
 from backstitch import __version__
+from backstitch.analysis_packets import PacketPlan
 from backstitch.artifact_contracts import ValidatedSemanticPacket, load_packets_bytes
 from backstitch.canonical import canonical_json_bytes, lf_line_count, lf_split
 from backstitch.contract_validation import make_validators
@@ -446,136 +444,6 @@ class AnalysisReportError(ValueError):
 
 _PACKET_VALIDATORS = make_validators(PacketReportError)
 _ANALYSIS_VALIDATORS = make_validators(AnalysisReportError)
-
-
-def _fsync_directory(path: Path) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    descriptor = os.open(path, flags)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def atomic_replace_bytes(path: Path, content: bytes) -> None:
-    """Publish bytes through a same-directory fsynced temporary and replace."""
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    temporary = Path(temporary_name)
-    try:
-        handle = os.fdopen(descriptor, "wb", closefd=True)
-        descriptor = -1
-        with handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
-
-
-def stage_artifact_bytes(path: Path, content: bytes) -> Path:
-    """Write and fsync one same-directory staging file without publishing it."""
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = -1
-    temporary: Path | None = None
-    for _ in range(10):
-        candidate = path.parent / (
-            f".{path.name}.{os.getpid()}.{secrets.token_hex(16)}.tmp"
-        )
-        try:
-            descriptor = os.open(
-                candidate,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                0o600,
-            )
-        except FileExistsError:
-            continue
-        temporary = candidate
-        break
-    if temporary is None:
-        raise FileExistsError("could not allocate a unique artifact staging path")
-    try:
-        with os.fdopen(descriptor, "wb", closefd=True) as handle:
-            descriptor = -1
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        return temporary
-    except BaseException:
-        if descriptor >= 0:
-            os.close(descriptor)
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
-        raise
-
-
-def publish_staged_artifact(path: Path, staged: Path) -> None:
-    """Atomically replace one final path with a completed adjacent staging file."""
-
-    os.replace(staged, path)
-    _fsync_directory(path.parent)
-
-
-class ArtifactPublicationError(OSError):
-    """A staged artifact set failed with exact partial-publication context."""
-
-    def __init__(
-        self,
-        failed_path: Path,
-        published_paths: tuple[Path, ...],
-        cause: OSError,
-    ) -> None:
-        super().__init__(str(cause))
-        self.failed_path = failed_path
-        self.published_paths = published_paths
-        self.__cause__ = cause
-
-
-def publish_artifact_set(
-    ordered_items: Sequence[tuple[Path, bytes]],
-    *,
-    before_publish: Callable[[], None] | None = None,
-) -> None:
-    """Stage all artifacts, validate currentness, then publish in order."""
-
-    staged: list[tuple[Path, Path]] = []
-    try:
-        for final_path, content in ordered_items:
-            try:
-                staged_path = stage_artifact_bytes(final_path, content)
-            except OSError as exc:
-                raise ArtifactPublicationError(final_path, (), exc) from exc
-            staged.append((final_path, staged_path))
-        if before_publish is not None:
-            before_publish()
-        published: list[Path] = []
-        for final_path, staged_path in staged:
-            try:
-                publish_staged_artifact(final_path, staged_path)
-            except OSError as exc:
-                raise ArtifactPublicationError(
-                    final_path, tuple(published), exc
-                ) from exc
-            published.append(final_path)
-    finally:
-        for _, staged_path in staged:
-            try:
-                staged_path.unlink()
-            except FileNotFoundError:
-                pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -1524,7 +1392,11 @@ def _validate_analysis_alignment_projection(
 
 
 def _validate_verification_contract(value: object) -> dict[str, Any]:
-    from backstitch.semantic_identity import ProviderIdentity, RequestIdentity
+    from backstitch.semantic_identity import (
+        ProviderIdentity,
+        RequestIdentity,
+        request_identity_dict,
+    )
     from backstitch.semantic_verification import VERIFY_CONTRACT_VERSION
 
     row = _exact_record(value, _VERIFICATION_CONTRACT_FIELDS, "verification.contract")
@@ -1562,13 +1434,15 @@ def _validate_verification_contract(value: object) -> dict[str, Any]:
         if field != "adapter_version"
     ):
         raise AnalysisReportError("verification.provider is not canonical and nonblank")
-    request = _exact_record(
-        row["request"],
-        frozenset({"json_mode", "temperature", "seed", "max_tokens"}),
-        "verification.request",
-    )
+    request_value = row["request"]
+    request_fields = frozenset({"json_mode", "temperature", "seed", "max_tokens"})
+    if not isinstance(request_value, dict) or not set(request_value) <= request_fields:
+        raise AnalysisReportError(
+            "verification.request has invalid closed request shape"
+        )
+    request = request_value
     try:
-        normalized_request = asdict(RequestIdentity(**request))
+        normalized_request = request_identity_dict(RequestIdentity(**request))
     except (TypeError, ValueError) as exc:
         raise AnalysisReportError(f"verification.request is invalid: {exc}") from None
     if request != normalized_request:
@@ -1896,28 +1770,16 @@ def _validate_analysis_provider(value: object, name: str) -> dict[str, Any]:
 
 
 def _validate_analysis_request(value: object, name: str) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != _ANALYSIS_REQUEST_FIELDS:
+    from backstitch.semantic_identity import RequestIdentity, request_identity_dict
+
+    if not isinstance(value, dict) or not set(value) <= _ANALYSIS_REQUEST_FIELDS:
         raise AnalysisReportError(f"{name} has invalid closed request shape")
-    if value["json_mode"] not in {"require", "off"}:
-        raise AnalysisReportError(f"{name}.json_mode is invalid")
-    temperature = value["temperature"]
-    if (
-        isinstance(temperature, bool)
-        or not isinstance(temperature, (int, float))
-        or not math.isfinite(temperature)
-        or not 0 <= temperature <= 2
-    ):
-        raise AnalysisReportError(f"{name}.temperature is invalid")
-    seed = value["seed"]
-    max_tokens = value["max_tokens"]
-    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
-        raise AnalysisReportError(f"{name}.seed is invalid")
-    if (
-        isinstance(max_tokens, bool)
-        or not isinstance(max_tokens, int)
-        or max_tokens < 1
-    ):
-        raise AnalysisReportError(f"{name}.max_tokens is invalid")
+    try:
+        normalized = request_identity_dict(RequestIdentity(**value))
+    except (TypeError, ValueError) as exc:
+        raise AnalysisReportError(f"{name} is invalid: {exc}") from None
+    if value != normalized:
+        raise AnalysisReportError(f"{name} is not canonical")
     return value
 
 
@@ -2077,9 +1939,21 @@ def _validate_analysis_report_v5_shape(
             )
 
 
-def _validate_analysis_report_source_shape(
+@dataclass(frozen=True, slots=True)
+class _AnalysisReportSourceState:
+    schema_version: int
+    current: bool
+    counts: dict[str, int]
+    analysis_counts: dict[str, int]
+    normalized_kind_counts: dict[str, dict[str, int]] | None
+    semantic_status: str
+    status: str
+    exit_code: int
+
+
+def _analysis_report_source_state(
     value: Mapping[str, Any],
-) -> dict[str, Any]:
+) -> _AnalysisReportSourceState:
     schema_version = value.get("schema_version")
     current = schema_version in {4, 5} and not isinstance(schema_version, bool)
     expected_fields = {
@@ -2224,6 +2098,29 @@ def _validate_analysis_report_source_shape(
                 raise AnalysisReportError(
                     f"kind_counts.{population} does not equal {aggregate}"
                 )
+    return _AnalysisReportSourceState(
+        schema_version=cast(int, schema_version),
+        current=current,
+        counts=counts,
+        analysis_counts=analysis_counts,
+        normalized_kind_counts=normalized_kind_counts,
+        semantic_status=cast(str, semantic_status),
+        status=cast(str, status),
+        exit_code=cast(int, exit_code),
+    )
+
+
+def _validate_analysis_report_source_shape(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    state = _analysis_report_source_state(value)
+    current = state.current
+    counts = state.counts
+    analysis_counts = state.analysis_counts
+    normalized_kind_counts = state.normalized_kind_counts
+    semantic_status = state.semantic_status
+    status = state.status
+    exit_code = state.exit_code
     if analysis_counts["packet_count"] != counts["selected"]:
         raise AnalysisReportError("packet_count must equal alignment_summary.selected")
     if analysis_counts["result_count"] > analysis_counts["packet_count"]:
@@ -2799,7 +2696,16 @@ def _packet_report_issue_error(
     return None
 
 
-def _packet_report_source_shape(value: Mapping[str, Any]) -> dict[str, Any]:
+@dataclass(frozen=True, slots=True)
+class _PacketReportSourceState:
+    current: bool
+    packet_count: int
+    normalized_counts: dict[str, int]
+
+
+def _packet_report_source_state(
+    value: Mapping[str, Any],
+) -> _PacketReportSourceState:
     schema_version = value.get("schema_version")
     current = schema_version == 3
     expected_fields = _PACKET_REPORT_V3_FIELDS if current else _PACKET_REPORT_V2_FIELDS
@@ -2917,7 +2823,19 @@ def _packet_report_source_shape(value: Mapping[str, Any]) -> dict[str, Any]:
         or normalized_counts["active"] != normalized_counts["skipped"]
     ):
         raise PacketReportError("all-skipped packet report counts are invalid")
+    return _PacketReportSourceState(
+        current=current,
+        packet_count=packet_count,
+        normalized_counts=normalized_counts,
+    )
 
+
+def _validate_packet_report_audit(
+    value: Mapping[str, Any],
+    state: _PacketReportSourceState,
+) -> list[dict[str, Any]]:
+    current = state.current
+    normalized_counts = state.normalized_counts
     audit = value.get("alignment_audit")
     audit_fields = {
         "obligation_id",
@@ -3039,7 +2957,14 @@ def _packet_report_source_shape(value: Mapping[str, Any]) -> dict[str, Any]:
         raise PacketReportError(
             "packet report readiness counts do not recompute from alignment_audit"
         )
+    return audit
 
+
+def _packet_report_source_shape(value: Mapping[str, Any]) -> dict[str, Any]:
+    state = _packet_report_source_state(value)
+    current = state.current
+    packet_count = state.packet_count
+    audit = _validate_packet_report_audit(value, state)
     issue_fields = {
         "issue_identity",
         "code",
@@ -3236,13 +3161,14 @@ def _issue_obligation_id(runtime: ObligationRuntime, issue: Any) -> str | None:
 def build_source_packet_report(
     runtime: ObligationRuntime,
     *,
-    packet_jsonl: bytes,
+    packet_plan: PacketPlan,
     created_at: str | None = None,
 ) -> PacketReport:
     """Build the complete schema-3 current source packet report."""
 
-    if not isinstance(packet_jsonl, bytes):
-        raise PacketReportError("packet_jsonl must be exact bytes")
+    if not packet_plan.complete:
+        raise PacketReportError("current packet report requires a complete packet plan")
+    packet_jsonl = packet_plan.packet_jsonl
     if len(packet_jsonl) > runtime.settings.obligations.maximum_packet_bytes:
         raise PacketReportError("packet JSONL exceeds maximum_packet_bytes")
     if any(
@@ -3251,18 +3177,6 @@ def build_source_packet_report(
     ):
         raise PacketReportError(
             "current packet report cannot publish a failing deterministic run"
-        )
-    from backstitch.analysis_packets import (
-        generate_source_aligned_packets,
-        render_packets_jsonl,
-    )
-
-    regenerated = render_packets_jsonl(generate_source_aligned_packets(runtime)).encode(
-        "utf-8"
-    )
-    if packet_jsonl != regenerated:
-        raise PacketReportError(
-            "packet JSONL does not byte-match the captured source derivation"
         )
     packets = load_packets_bytes(packet_jsonl, source="generated packet JSONL")
     if any(not packet.semantic_eligible for packet in packets):

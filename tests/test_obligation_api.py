@@ -1,5 +1,6 @@
 """Transport-neutral obligation response envelope tests.
 
+Spec: docs/specs/02-backstitch-core.md [SC-10]
 Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-8.4]
 """
 
@@ -9,7 +10,7 @@ import base64
 import hashlib
 import json
 from dataclasses import replace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -27,6 +28,7 @@ from backstitch.models import (
 )
 from backstitch.obligation_api import (
     CursorError,
+    ListFilters,
     OperationProblemCode,
     apply_response_byte_budget,
     candidate_detail_envelope,
@@ -41,6 +43,7 @@ from backstitch.obligation_api import (
     render_envelope_text,
 )
 from backstitch.obligations import (
+    BlockingReason,
     CandidateCounts,
     EvidenceCounts,
     ObligationInventory,
@@ -49,12 +52,13 @@ from backstitch.obligations import (
     SuppressionObligationDetail,
     UnaddressableIntent,
 )
+from backstitch.operation_progress import DEADLINE_PHASES
 from backstitch.settings import BackstitchSettings
 
 
 def test_response_budget_uses_exact_canonical_core_json_for_every_adapter() -> None:
     envelope = {
-        "schema_version": 1,
+        "schema_version": 2,
         "operation": "obligation.list",
         "snapshot": None,
         "result": {"entries": []},
@@ -63,7 +67,7 @@ def test_response_budget_uses_exact_canonical_core_json_for_every_adapter() -> N
     }
     golden = (
         b'{"guidance":[],"operation":"obligation.list","problems":[],'
-        b'"result":{"entries":[]},"schema_version":1,"snapshot":null}'
+        b'"result":{"entries":[]},"schema_version":2,"snapshot":null}'
     )
     assert canonical_json_bytes(envelope) == golden
     limits = replace(
@@ -100,7 +104,7 @@ def test_empty_inventory_has_one_closed_bootstrap_guidance_row() -> None:
     envelope = inventory_list_envelope(inventory)
 
     assert envelope == {
-        "schema_version": 1,
+        "schema_version": 2,
         "operation": "obligation.list",
         "snapshot": {
             "snapshot_hash": "a" * 64,
@@ -110,6 +114,24 @@ def test_empty_inventory_has_one_closed_bootstrap_guidance_row() -> None:
         },
         "result": {
             "bootstrap_state": "no_intent",
+            "applied_filters": {
+                "active_only": False,
+                "alignment_states": [],
+                "gate_states": [],
+                "kinds": [],
+                "reasons": [],
+            },
+            "readiness_summary": {
+                "total": 0,
+                "active_evaluate": 0,
+                "executable": 0,
+                "skipped": 0,
+                "alignment_debt": 0,
+                "blocked": 0,
+                "out_of_scope": 0,
+                "reason_counts": [],
+            },
+            "filtered_count": 0,
             "entries": [],
             "next_cursor": None,
         },
@@ -126,6 +148,122 @@ def test_empty_inventory_has_one_closed_bootstrap_guidance_row() -> None:
     assert rendered.endswith("\n")
     assert json.loads(rendered) == envelope
     assert rendered == render_envelope_json(envelope)
+
+
+def test_list_filters_precede_pagination_and_bind_cursor_identity() -> None:
+    snapshot = SnapshotIdentity("a" * 64, 4, 80, 0)
+
+    def obligation(
+        identity: str,
+        *,
+        kind: str,
+        alignment: str,
+        disposition: str = "evaluate",
+        rung: str = "active",
+        gate: str = "not_executable",
+        reasons: tuple[BlockingReason, ...] = (),
+    ) -> ObligationRecord:
+        return ObligationRecord(
+            obligation_id=f"docs/specs/a.md#{identity}",
+            kind=cast(Any, kind),
+            path="docs/specs/a.md",
+            start_line=int(identity.rsplit("-", 1)[1]),
+            end_line=int(identity.rsplit("-", 1)[1]),
+            title=identity,
+            intent_state="identified",
+            alignment_state=cast(Any, alignment),
+            disposition=cast(Any, disposition),
+            obligation_rung=cast(Any, rung),
+            gate_state=cast(Any, gate),
+            required_roles=("implementation",),
+            evidence_counts=EvidenceCounts(),
+            candidate_counts=CandidateCounts(),
+            blocking_reasons=reasons,
+            next_actions=("RUN_DETERMINISTIC_CHECK",),
+        )
+
+    partial = BlockingReason(
+        "IMPLEMENTATION_PARTIAL",
+        "implementation",
+        "spec_mapping",
+        None,
+    )
+    skipped = BlockingReason("SKIPPED", None, None, None)
+    inventory = ObligationInventory(
+        snapshot,
+        (
+            obligation("A-1", kind="section", alignment="complete", gate="executable"),
+            obligation(
+                "A-2",
+                kind="invariant",
+                alignment="partial",
+                reasons=(partial,),
+            ),
+            obligation(
+                "A-3",
+                kind="suppression",
+                alignment="complete",
+                disposition="skipped",
+                reasons=(skipped,),
+            ),
+            obligation(
+                "A-4",
+                kind="section",
+                alignment="complete",
+                rung="planned",
+            ),
+        ),
+        (),
+        ("RUN_DETERMINISTIC_CHECK",),
+    )
+    filters = ListFilters(
+        active_only=True,
+        gate_states=frozenset({"not_executable"}),
+        reasons=frozenset({"IMPLEMENTATION_PARTIAL", "TRACE_CONFLICT"}),
+    )
+
+    envelope = inventory_list_envelope(
+        inventory,
+        limit=1,
+        filters=filters,
+    )
+
+    assert envelope["result"]["applied_filters"] == {
+        "active_only": True,
+        "alignment_states": [],
+        "gate_states": ["not_executable"],
+        "kinds": [],
+        "reasons": ["IMPLEMENTATION_PARTIAL", "TRACE_CONFLICT"],
+    }
+    assert envelope["result"]["filtered_count"] == 1
+    assert [item["obligation_id"] for item in envelope["result"]["entries"]] == [
+        "docs/specs/a.md#A-2"
+    ]
+    assert envelope["result"]["readiness_summary"] == {
+        "total": 1,
+        "active_evaluate": 1,
+        "executable": 0,
+        "skipped": 0,
+        "alignment_debt": 1,
+        "blocked": 0,
+        "out_of_scope": 0,
+        "reason_counts": [{"code": "IMPLEMENTATION_PARTIAL", "count": 1}],
+    }
+
+    two_sections = inventory_list_envelope(
+        inventory,
+        limit=1,
+        filters=ListFilters(kinds=frozenset({"section"})),
+    )
+    cursor = two_sections["result"]["next_cursor"]
+    assert isinstance(cursor, str)
+    with pytest.raises(CursorError, match="filters"):
+        inventory_list_envelope(
+            inventory,
+            limit=1,
+            cursor=cursor,
+            filters=ListFilters(kinds=frozenset({"invariant"})),
+        )
 
 
 def test_suppression_get_projects_declaration_rules_and_matched_count() -> None:
@@ -228,7 +366,15 @@ def test_not_found_problem_has_null_result_and_no_success_guidance() -> None:
             "BUDGET_EXHAUSTED",
             {"budget": "work_units", "limit": 10, "observed": 11},
         ),
-        ("DEADLINE_EXCEEDED", {"limit_milliseconds": 1000}),
+        (
+            "DEADLINE_EXCEEDED",
+            {
+                "limit_milliseconds": 1000,
+                "phase": "candidate_detail",
+                "configured_key": "obligations.maximum_call_seconds",
+                "cooperative_tolerance_milliseconds": 100,
+            },
+        ),
         ("INTERNAL_ERROR", {}),
     ),
 )
@@ -245,6 +391,25 @@ def test_every_closed_problem_detail_shape_fires(
     )
 
     assert envelope["problems"][0]["code"] == code
+
+
+@pytest.mark.parametrize("phase", DEADLINE_PHASES)
+def test_every_deadline_phase_fires_in_the_closed_problem_shape(phase: str) -> None:
+    envelope = problem_envelope(
+        operation="obligation.get",
+        snapshot=None,
+        code="DEADLINE_EXCEEDED",
+        message="Operation exceeded its deadline.",
+        action="Raise obligations.maximum_call_seconds and retry.",
+        details={
+            "limit_milliseconds": 1000,
+            "phase": phase,
+            "configured_key": "obligations.maximum_call_seconds",
+            "cooperative_tolerance_milliseconds": 100,
+        },
+    )
+
+    assert envelope["problems"][0]["details"]["phase"] == phase
 
 
 def test_problem_envelope_rejects_open_or_malformed_detail_shapes() -> None:
@@ -320,6 +485,8 @@ def test_page_cursor_is_content_addressed_and_context_bound() -> None:
         "obligation",
         "docs/specs/a.md#A-1",
     ]
+    assert decoded["cursor_version"] == 2
+    assert decoded["filters"] == {}
     with pytest.raises(CursorError, match="digest"):
         decode_page_cursor(
             token[:-1] + ("0" if token[-1] != "0" else "1"),
@@ -363,6 +530,7 @@ def test_page_cursor_is_content_addressed_and_context_bound() -> None:
         "snapshot_hash": "a" * 64,
         "obligation_id": None,
         "selector": "list",
+        "filters": {},
         "limit": 25,
         "after": ["docs/specs/a.md", 3, 1, "docs/specs/a.md#A-1"],
     }
@@ -488,6 +656,7 @@ def test_list_uses_closed_entry_type_order_and_rejects_typed_cursor_drift() -> N
         selector="list",
         limit=1,
         after=("docs/specs/a.md", "3", 0, unaddressable.entry_identity),
+        filters=ListFilters().to_row(),
     )
     with pytest.raises(CursorError, match="ordering tuple"):
         inventory_list_envelope(inventory, limit=1, cursor=malformed)

@@ -17,6 +17,7 @@ import pytest
 from backstitch.analysis_packets import (
     SourceAlignedPacketError,
     generate_source_aligned_packets,
+    plan_source_aligned_packets,
     render_packets_jsonl,
 )
 from backstitch.artifact_contracts import load_packets_bytes
@@ -33,6 +34,11 @@ from backstitch.models import (
     issue_sort_key,
 )
 from backstitch.obligation_runtime import build_obligation_runtime
+from backstitch.operation_progress import (
+    OperationDeadlineExceeded,
+    OperationProgress,
+    ProgressEvent,
+)
 from backstitch.profiles import get_profile
 from backstitch.semantic_evidence import SemanticResultError, normalize_model_result
 from backstitch.semantic_packets import (
@@ -110,7 +116,8 @@ def _mixed_suppression_packets(
     )
 
     runtime = build_obligation_runtime(repo_root, profile, settings)
-    packets = generate_source_aligned_packets(runtime)
+    packet_plan = plan_source_aligned_packets(runtime)
+    packets = list(packet_plan.packets)
 
     assert [packet["kind"] for packet in packets] == ["section", "suppression"]
     return {cast(str, packet["kind"]): packet for packet in packets}
@@ -151,7 +158,8 @@ def test_compile_source_aligned_packet_uses_runtime_authority_and_v3_shape(
     )
     runtime = build_obligation_runtime(tmp_path, profile, BackstitchSettings())
 
-    packets = generate_source_aligned_packets(runtime)
+    packet_plan = plan_source_aligned_packets(runtime)
+    packets = list(packet_plan.packets)
 
     assert len(packets) == 1
     packet = packets[0]
@@ -202,7 +210,7 @@ def test_compile_source_aligned_packet_uses_runtime_authority_and_v3_shape(
     packet_jsonl = render_packets_jsonl(packets).encode("utf-8")
     report = build_source_packet_report(
         runtime,
-        packet_jsonl=packet_jsonl,
+        packet_plan=packet_plan,
         created_at="2026-07-16T12:00:00Z",
     )
     report_row = report.to_dict()
@@ -304,15 +312,10 @@ def test_compile_source_aligned_packet_uses_runtime_authority_and_v3_shape(
     with pytest.raises(ValueError, match="maximally merged"):
         load_packets_bytes(render_packets_jsonl([forged]).encode("utf-8"))
 
-    source_forged = deepcopy(packet)
-    source_forged["requirement"]["text"] = source_forged["requirement"]["text"].replace(
-        "returns one", "returns two"
-    )
-    source_forged["packet_hash"] = semantic_packet_hash(source_forged)
-    with pytest.raises(PacketReportError, match="byte-match"):
+    with pytest.raises(PacketReportError, match="complete packet plan"):
         build_source_packet_report(
             runtime,
-            packet_jsonl=render_packets_jsonl([source_forged]).encode("utf-8"),
+            packet_plan=replace(packet_plan, complete=False, status="over_budget"),
         )
     counter_region = next(
         item for item in packet["evidence_regions"] if item["role"] == "counterevidence"
@@ -395,7 +398,8 @@ def test_used_declaration_emits_complete_schema4_suppression_packet(
     )
 
     runtime = build_obligation_runtime(tmp_path, profile, settings)
-    packets = generate_source_aligned_packets(runtime)
+    packet_plan = plan_source_aligned_packets(runtime)
+    packets = list(packet_plan.packets)
 
     obligation = runtime.inventory.get("suppression::docs/specs/01-core.md#SUP-1")
     assert obligation is not None
@@ -454,6 +458,26 @@ def test_used_declaration_emits_complete_schema4_suppression_packet(
     with pytest.raises(ValueError, match="invalid suppression origin"):
         load_packets_bytes(render_packets_jsonl([forged]).encode("utf-8"))
 
+    inline_meta = deepcopy(suppression)
+    inline_meta["suppression_rules"][0].update(
+        {
+            "mechanism": "meta",
+            "provenance": "inline_spec",
+            "sections": ["CORE-1"],
+            "codes": [],
+        }
+    )
+    inline_meta["suppression_rules"][0]["origin"] = {
+        "source": "docs/specs/01-core.md",
+        "position": None,
+        "line": 3,
+    }
+    inline_meta["packet_hash"] = semantic_packet_hash(inline_meta)
+    [loaded_inline_meta] = load_packets_bytes(
+        render_packets_jsonl([inline_meta]).encode("utf-8")
+    )
+    assert loaded_inline_meta.to_dict() == inline_meta
+
     forged = deepcopy(suppression)
     forged["requirement"]["text"] = "A changed rationale."
     with pytest.raises(ValueError, match="packet_hash does not recompute"):
@@ -461,7 +485,7 @@ def test_used_declaration_emits_complete_schema4_suppression_packet(
 
     report = build_source_packet_report(
         runtime,
-        packet_jsonl=render_packets_jsonl(packets).encode("utf-8"),
+        packet_plan=packet_plan,
         created_at="2026-07-28T12:00:00Z",
     )
     row = report.to_dict()
@@ -829,6 +853,114 @@ def test_source_aligned_invariant_packet_sorts_and_deduplicates_module_evidence(
     ] == ["implementation", "test", "binding_test"]
 
 
+def test_discovery_v2_renders_declared_source_region_once_across_roles(
+    tmp_path: Path,
+) -> None:
+    """A different receipt locator must not duplicate the same visible bytes."""
+
+    (tmp_path / "docs/specs").mkdir(parents=True)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "docs/specs/01-x.md").write_text(
+        "## Contract [X-1]\n\n"
+        "The module owns the complete behavior.\n\n"
+        "_Implementation mapping_:\n\n"
+        "- `pkg/mod.py`\n",
+        encoding="utf-8",
+    )
+    source = tmp_path / "pkg/mod.py"
+    source.write_text(
+        '"""Spec: docs/specs/01-x.md [X-1]"""\n\ndef run() -> int:\n    return 1\n',
+        encoding="utf-8",
+    )
+    profile = get_profile("backstitch-style-v1").with_overrides(
+        spec_roots=("docs/specs",),
+        plan_roots=(),
+        code_roots=("pkg",),
+        test_roots=(),
+    )
+    runtime = build_obligation_runtime(tmp_path, profile, BackstitchSettings())
+    [obligation] = runtime.inventory.obligations
+    candidates = runtime.discover_candidates(obligation)
+    module_candidate = next(
+        item
+        for item in candidates
+        if item.path == "pkg/mod.py"
+        and item.structural_locator.startswith("python-module:")
+    )
+
+    [packet] = generate_source_aligned_packets(runtime)
+
+    [declared] = [
+        item for item in packet["declared_evidence"] if item["path"] == "pkg/mod.py"
+    ]
+    assert (
+        declared["start_line"],
+        declared["end_line"],
+    ) == (
+        module_candidate.start_line,
+        module_candidate.end_line,
+    )
+    assert not any(
+        item["path"] == module_candidate.path
+        and item["start_line"] == module_candidate.start_line
+        and item["end_line"] == module_candidate.end_line
+        for item in packet["counterevidence"]
+    )
+    implementation_counts = next(
+        item
+        for item in packet["trace_summary"]["candidate_counts"]
+        if item["candidate_kind"] == "implementation_definition"
+    )
+    assert (
+        sum(
+            implementation_counts[state]
+            for state in ("declared", "partially_declared", "untraced", "conflicted")
+        )
+        >= 1
+    )
+    assert module_candidate.receipt.raw_sha256
+    assert packet["schema_version"] == 3
+    assert packet["packet_hash"] == semantic_packet_hash(packet)
+
+
+def test_discovery_v2_keeps_all_candidates_when_counter_text_merges(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "docs/specs").mkdir(parents=True)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "docs/specs/01-x.md").write_text(
+        "## Runner behavior [X-1]\n\n"
+        "The runner reports unresolved local calls for review.\n\n"
+        "_Implementation mapping_:\n\n"
+        "- `pkg/mod.py::run`\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pkg/mod.py").write_text(
+        "def run() -> None:\n"
+        '    """Spec: docs/specs/01-x.md [X-1]"""\n'
+        "    return None\n\n"
+        "def first_target() -> None:\n"
+        "    return None\n\n"
+        "def second_target() -> None:\n"
+        "    return None\n\n"
+        "def runner_review() -> None:\n"
+        "    first_target()\n"
+        "    second_target()\n",
+        encoding="utf-8",
+    )
+    profile = get_profile("backstitch-style-v1").with_overrides(
+        spec_roots=("docs/specs",),
+        plan_roots=(),
+        code_roots=("pkg",),
+        test_roots=(),
+    )
+    runtime = build_obligation_runtime(tmp_path, profile, BackstitchSettings())
+
+    [packet] = generate_source_aligned_packets(runtime)
+
+    assert any(len(region["candidates"]) >= 2 for region in packet["counterevidence"])
+
+
 def test_cli_packets_fails_fatally_on_packet_budget_without_publication(
     tmp_path: Path,
 ) -> None:
@@ -893,6 +1025,184 @@ def test_cli_packets_fails_fatally_on_packet_budget_without_publication(
     assert result.returncode == 2
     assert "PACKET_BUDGET_EXHAUSTED" in result.stderr
     assert not output.exists()
+
+
+def test_packet_plan_stops_at_first_prompt_crossing_and_labels_prefix(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "docs/specs").mkdir(parents=True)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "docs/specs/01-x.md").write_text(
+        "## First [X-1]\n\n"
+        "First behavior.\n\n"
+        "_Implementation mapping_:\n\n"
+        "- `pkg/mod.py::first`\n\n"
+        "## Second [X-2]\n\n"
+        "Second behavior.\n\n"
+        "_Implementation mapping_:\n\n"
+        "- `pkg/mod.py::second`\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pkg/mod.py").write_text(
+        'def first() -> int:\n    """Spec: docs/specs/01-x.md [X-1]"""\n'
+        "    return 1\n\n"
+        'def second() -> int:\n    """Spec: docs/specs/01-x.md [X-2]"""\n'
+        "    return 2\n",
+        encoding="utf-8",
+    )
+    profile = get_profile("backstitch-style-v1").with_overrides(
+        spec_roots=("docs/specs",),
+        plan_roots=(),
+        code_roots=("pkg",),
+        test_roots=(),
+    )
+    runtime = build_obligation_runtime(tmp_path, profile, BackstitchSettings())
+
+    plan = plan_source_aligned_packets(runtime, maximum_prompt_bytes=1)
+
+    assert plan.complete is False
+    assert plan.crossed_ceiling == "maximum_prompt_bytes"
+    assert plan.measured_packet_count == 1
+    assert plan.unmeasured_packet_count == 1
+    assert plan.first_crossing_packet_id == "docs/specs/01-x.md#X-1"
+    summary = plan.to_summary()
+    assert summary["measured_prompt_bytes"] == plan.measured_prompt_bytes
+    assert summary["unmeasured_packet_count"] == 1
+    assert summary["top_measured_contributors"] == [
+        {
+            "packet_id": "docs/specs/01-x.md#X-1",
+            "kind": "section",
+            "packet_byte_count": plan.contributions[0].packet_byte_count,
+            "request_byte_count": plan.contributions[0].request_byte_count,
+        }
+    ]
+    with pytest.raises(SourceAlignedPacketError, match="cannot be replayed"):
+        _ = plan.packet_jsonl
+
+
+def test_complete_packet_plan_retains_the_bytes_it_measured(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "docs/specs").mkdir(parents=True)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "docs/specs/01-x.md").write_text(
+        "## Contract [X-1]\n\n"
+        "The behavior returns one.\n\n"
+        "_Implementation mapping_:\n\n"
+        "- `pkg/mod.py::run`\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pkg/mod.py").write_text(
+        'def run() -> int:\n    """Spec: docs/specs/01-x.md [X-1]"""\n    return 1\n',
+        encoding="utf-8",
+    )
+    profile = get_profile("backstitch-style-v1").with_overrides(
+        spec_roots=("docs/specs",),
+        plan_roots=(),
+        code_roots=("pkg",),
+        test_roots=(),
+    )
+    runtime = build_obligation_runtime(tmp_path, profile, BackstitchSettings())
+
+    plan = plan_source_aligned_packets(runtime)
+
+    assert plan.complete is True
+    assert plan.packet_jsonl == render_packets_jsonl(list(plan.packets)).encode()
+    assert plan.measured_packet_bytes == len(plan.packet_jsonl)
+    assert plan.measured_prompt_bytes == sum(
+        len(item.model_request_bytes) for item in plan.contributions
+    )
+    assert plan.maximum_request_bytes == max(
+        len(item.model_request_bytes) for item in plan.contributions
+    )
+
+
+@pytest.mark.parametrize(
+    "deadline_phase",
+    ("packet_materialization", "packet_accounting"),
+)
+def test_packet_plan_deadline_table_cancels_in_each_real_phase(
+    tmp_path: Path,
+    deadline_phase: str,
+) -> None:
+    (tmp_path / "docs/specs").mkdir(parents=True)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "docs/specs/01-x.md").write_text(
+        "## Contract [X-1]\n\n"
+        "The behavior returns one.\n\n"
+        "_Implementation mapping_:\n\n"
+        "- `pkg/mod.py::run`\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pkg/mod.py").write_text(
+        'def run() -> int:\n    """Spec: docs/specs/01-x.md [X-1]"""\n    return 1\n',
+        encoding="utf-8",
+    )
+    profile = get_profile("backstitch-style-v1").with_overrides(
+        spec_roots=("docs/specs",),
+        plan_roots=(),
+        code_roots=("pkg",),
+        test_roots=(),
+    )
+    runtime = build_obligation_runtime(tmp_path, profile, BackstitchSettings())
+    now = [0.0]
+
+    def expire_in_phase(event: ProgressEvent) -> None:
+        if event.phase == deadline_phase:
+            now[0] = 1.001
+
+    progress = OperationProgress.start(
+        1.0,
+        clock=lambda: now[0],
+        sink=expire_in_phase,
+    )
+    progress.advance("snapshot", current_identity=runtime.snapshot.snapshot_hash)
+
+    with pytest.raises(OperationDeadlineExceeded) as raised:
+        plan_source_aligned_packets(runtime, progress=progress)
+
+    assert raised.value.phase == deadline_phase
+
+
+def test_packet_plan_emits_ordered_noncanonical_progress(tmp_path: Path) -> None:
+    (tmp_path / "docs/specs").mkdir(parents=True)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "docs/specs/01-x.md").write_text(
+        "## Contract [X-1]\n\n"
+        "The behavior returns one.\n\n"
+        "_Implementation mapping_:\n\n"
+        "- `pkg/mod.py::run`\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pkg/mod.py").write_text(
+        'def run() -> int:\n    """Spec: docs/specs/01-x.md [X-1]"""\n    return 1\n',
+        encoding="utf-8",
+    )
+    profile = get_profile("backstitch-style-v1").with_overrides(
+        spec_roots=("docs/specs",),
+        plan_roots=(),
+        code_roots=("pkg",),
+        test_roots=(),
+    )
+    runtime = build_obligation_runtime(tmp_path, profile, BackstitchSettings())
+    events: list[ProgressEvent] = []
+    progress = OperationProgress.start(
+        1.0,
+        clock=lambda: 0.0,
+        sink=events.append,
+    )
+    progress.advance("snapshot", current_identity=runtime.snapshot.snapshot_hash)
+
+    plan_source_aligned_packets(runtime, progress=progress)
+
+    collapsed = tuple(dict.fromkeys(event.phase for event in events))
+    assert collapsed == (
+        "snapshot",
+        "catalog",
+        "relations",
+        "packet_materialization",
+        "packet_accounting",
+    )
 
 
 def test_wrapped_invariant_requirement_keeps_its_true_span_through_packet_load(

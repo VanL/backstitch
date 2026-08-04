@@ -88,10 +88,10 @@ constructs an analyzer or verifier.
 ## Frozen identities
 
 - manifest canonical object:
-  `sha256:ae71bdc532281ac26d6c36899ed91cf8cc4cf7cc94a7bacd30e18c087322e9e3`
+  `sha256:6fde500ae56042ab4c8c0c9fda3d53c966e00b4e41f684a782b2b1e4b5926dd6`
 - manifest raw file (one final LF):
-  `sha256:285c1578cb3d4b9d42164fa5111d07b565c0520adf6eb392e1d4c28551ce9e56`
+  `sha256:32d8bf777dcb89384e9e25832a27c6667b67b04689a96ac1b77dd11ee897e814`
 - independent source review raw file:
-  `sha256:cf123c7875086c64127bd2f4df142373f662afdc4ae22e10a94b0515aee2853e`
+  `sha256:864a110055b3eae553988bb67826bd116d39e97b98fb3ede46c305adea098fa6`
 - deterministic generator raw file:
   `sha256:2a5ad15022bec043805b2c38d629c2b557c72886f17504b305e91ec52d3de9fe`

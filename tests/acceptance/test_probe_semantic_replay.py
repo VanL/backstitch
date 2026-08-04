@@ -57,6 +57,33 @@ class ReplayCorpus:
     clean_packet_report: Path
 
 
+def _analyzer_descriptor_lines(revision: str) -> list[str]:
+    return [
+        'adapter_model_id = "acceptance-controlled-model"',
+        "capability_schema_version = 1",
+        f'capability_revision = "{revision}"',
+        "maximum_input_bytes = 1000000",
+        "",
+        "[analyze.request_constraints.json_mode]",
+        'presence = "required"',
+        'allowed_values = ["require"]',
+        "",
+        "[analyze.request_constraints.temperature]",
+        'presence = "required"',
+        "allowed_values = [0.0]",
+        "",
+        "[analyze.request_constraints.seed]",
+        'presence = "required"',
+        "minimum = 0",
+        "maximum = 2147483647",
+        "",
+        "[analyze.request_constraints.max_tokens]",
+        'presence = "required"',
+        "minimum = 1",
+        "maximum = 16384",
+    ]
+
+
 def _packet(section_id: str, *, implementation: str) -> dict[str, Any]:
     return semantic_packet(
         f"docs/specs/01-replay.md#{section_id}",
@@ -90,7 +117,7 @@ def _base_config(cache_path: Path) -> str:
                 'backend_id = "llm"',
                 'plugin_id = "openai"',
                 'plugin_distribution_name = "llm"',
-                'model = "acceptance-controlled-model"',
+                'model = "pkg:service/example.com/acceptance-controlled-model@2026-07-14"',
                 'model_revision = "2026-07-14"',
                 "input_cost_microusd_per_million_tokens = 0",
                 "output_cost_microusd_per_million_tokens = 0",
@@ -108,6 +135,7 @@ def _base_config(cache_path: Path) -> str:
                 'finding_handling = "report"',
                 "maximum_provider_calls = 0",
                 "maximum_runtime_seconds = 60",
+                *_analyzer_descriptor_lines("2026-07-14"),
             ]
         )
         + "\n"
@@ -268,7 +296,7 @@ def _analyze(
         "--packet-report",
         str(packet_report),
         "--model",
-        "acceptance-controlled-model",
+        "pkg:service/example.com/acceptance-controlled-model@2026-07-14",
         "--config",
         str(config),
         "--output",
@@ -427,7 +455,7 @@ def test_probe_19_public_cli_cache_lifecycle_is_rebuildable_and_fail_closed(
                     'backend_id = "llm"',
                     'plugin_id = "openai"',
                     'plugin_distribution_name = "llm"',
-                    'model = "acceptance-controlled-model"',
+                    'model = "pkg:service/example.com/acceptance-controlled-model@2026-07-27"',
                     'model_revision = "2026-07-27"',
                     "input_cost_microusd_per_million_tokens = 0",
                     "output_cost_microusd_per_million_tokens = 0",
@@ -443,6 +471,7 @@ def test_probe_19_public_cli_cache_lifecycle_is_rebuildable_and_fail_closed(
                     "maximum_packets = 2",
                     f"maximum_provider_calls = {0 if mode == 'require' else 2}",
                     "maximum_runtime_seconds = 60",
+                    *_analyzer_descriptor_lines("2026-07-27"),
                 ]
             )
             + "\n",
@@ -644,7 +673,7 @@ def _write_trusted_hostile_target_config(
                 'backend_id = "llm"',
                 'plugin_id = "openai"',
                 'plugin_distribution_name = "llm"',
-                'model = "acceptance-controlled-model"',
+                'model = "pkg:service/example.com/acceptance-controlled-model@2026-07-27"',
                 'model_revision = "2026-07-27"',
                 "input_cost_microusd_per_million_tokens = 0",
                 "output_cost_microusd_per_million_tokens = 0",
@@ -655,6 +684,7 @@ def _write_trusted_hostile_target_config(
                 f'cache_mode = "{cache_mode}"',
                 'search_epoch = "hostile-target-v1"',
                 f"maximum_provider_calls = {maximum_provider_calls}",
+                *_analyzer_descriptor_lines("2026-07-27"),
             ]
         )
         + "\n",

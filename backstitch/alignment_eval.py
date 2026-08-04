@@ -37,6 +37,11 @@ from backstitch.evidence_discovery import (
     catalog_python,
     discover_evidence_candidates,
 )
+from backstitch.filesystem_io import (
+    StableReadError,
+    file_stat_identity,
+    read_regular_nofollow,
+)
 from backstitch.grammar import candidate_ref, candidate_ref_digest, is_sha256_hex
 from backstitch.models import Report
 from backstitch.obligation_runtime import (
@@ -45,11 +50,6 @@ from backstitch.obligation_runtime import (
     capture_obligation_snapshot,
 )
 from backstitch.obligations import SnapshotIdentity, build_obligation_inventory
-from backstitch.repository_snapshot import (
-    StableReadError,
-    _file_stat_identity,
-    read_regular_nofollow,
-)
 from backstitch.settings import BackstitchSettings, resolve_config
 
 
@@ -304,7 +304,7 @@ _CACHE_FILE_SUFFIXES = (".pyc", ".pyo")
 
 
 def _authoritative_stat_identity(value: os.stat_result) -> tuple[int, ...]:
-    return _file_stat_identity(value)
+    return file_stat_identity(value)
 
 
 def _authoritative_regular_input(
@@ -2399,8 +2399,8 @@ def _public_envelope(
 ) -> tuple[dict[str, Any], bytes]:
     value, raw, _ = _canonical_artifact(base, path, digest, context)
     envelope = _object(value, _PUBLIC_ENVELOPE_KEYS, context)
-    if envelope["schema_version"] != 1:
-        raise AlignmentEvalError(f"{context}.schema_version must be 1")
+    if envelope["schema_version"] != 2:
+        raise AlignmentEvalError(f"{context}.schema_version must be 2")
     if envelope["operation"] not in {
         "obligation.list",
         "obligation.get",
@@ -2512,12 +2512,46 @@ def _recompute_bootstrap_outcome(
             raise AlignmentEvalError(f"{context} diagnosis must use obligation.list")
         listed = _object(
             result,
-            {"bootstrap_state", "entries", "next_cursor"},
+            {
+                "bootstrap_state",
+                "applied_filters",
+                "readiness_summary",
+                "filtered_count",
+                "entries",
+                "next_cursor",
+            },
             f"{context}.result",
         )
         entries = listed["entries"]
         if not isinstance(entries, list):
             raise AlignmentEvalError(f"{context}.result.entries must be an array")
+        if listed["applied_filters"] != {
+            "active_only": False,
+            "alignment_states": [],
+            "gate_states": [],
+            "kinds": [],
+            "reasons": [],
+        }:
+            raise AlignmentEvalError(
+                f"{context}.result.applied_filters must be the unfiltered view"
+            )
+        if listed["filtered_count"] != len(entries):
+            raise AlignmentEvalError(
+                f"{context}.result.filtered_count does not recompute"
+            )
+        if not entries and listed["readiness_summary"] != {
+            "total": 0,
+            "active_evaluate": 0,
+            "executable": 0,
+            "skipped": 0,
+            "alignment_debt": 0,
+            "blocked": 0,
+            "out_of_scope": 0,
+            "reason_counts": [],
+        }:
+            raise AlignmentEvalError(
+                f"{context}.result.readiness_summary does not recompute"
+            )
         if listed["next_cursor"] is not None:
             raise AlignmentEvalError(f"{context}.result.next_cursor must be null")
         blocking: list[str] = []
@@ -3030,79 +3064,137 @@ def _validate_recorded_backstitch_argv(argv: tuple[str, ...], context: str) -> N
     raise AlignmentEvalError(f"{context}.argv command is not read-only dogfood")
 
 
-def _validate_task(
-    *,
-    result_base: Path,
-    fixture: _FixtureDefinition,
-    value: object,
-    phase: str,
-    context: str,
-    candidate_run: _CandidateRunBinding | None = None,
-) -> tuple[str | None, bool]:
-    task = _object(value, _TASK_KEYS, context)
-    if task["fixture_id"] != fixture.fixture_id:
-        raise AlignmentEvalError(f"{context}.fixture_id is out of order")
-    accepted_value = task["human_accepted_candidate_ids"]
-    if not isinstance(accepted_value, list) or any(
-        not isinstance(item, str) or not item.strip() for item in accepted_value
-    ):
-        raise AlignmentEvalError(
-            f"{context}.human_accepted_candidate_ids must be an array of IDs"
-        )
-    accepted_candidate_ids = cast(list[str], accepted_value)
-    if accepted_candidate_ids != sorted(set(accepted_candidate_ids)):
-        raise AlignmentEvalError(
-            f"{context}.human_accepted_candidate_ids must be unique and sorted"
-        )
-    expected_accepted_candidate_ids = (
-        []
-        if phase == "A"
-        else sorted(
-            cast(str, candidate["candidate_id"])
-            for candidate in fixture.gold_candidates
-            if candidate["disposition_label"] == "accepted"
-        )
-    )
-    if accepted_candidate_ids != expected_accepted_candidate_ids:
-        raise AlignmentEvalError(
-            f"{context}.human_accepted_candidate_ids do not match frozen human disposition"
-        )
-    for name in (
-        "elapsed_milliseconds",
-        "backstitch_call_count",
-        "reviewed_diff_attempt_count",
-        "review_round_count",
-        "changed_source_line_count",
-    ):
-        _nonnegative_integer(task[name], f"{context}.{name}")
-    revisions = task["source_revisions"]
-    if not isinstance(revisions, list):
-        raise AlignmentEvalError(f"{context}.source_revisions must be an array")
-    if task["reviewed_diff_attempt_count"] != len(revisions):
-        raise AlignmentEvalError(
-            f"{context}.reviewed_diff_attempt_count does not recompute"
-        )
+@dataclass(frozen=True, slots=True)
+class _TaskRevisionState:
+    roots: dict[int, Path]
+    tree_hashes: dict[int, str]
+    settings_by_root: dict[Path, BackstitchSettings]
+    first_diff_correct: bool
+    final_paths: list[str]
+    final_line_count: int
 
-    revision_roots: dict[int, Path] = {}
-    revision_tree_hashes: dict[int, str] = {}
-    base_settings = resolve_config(fixture.tree.root, environment={})
-    settings_by_root: dict[Path, BackstitchSettings] = {
-        fixture.tree.root: base_settings
-    }
-    first_diff_correct = False
-    final_paths: list[str] = []
-    final_line_count = 0
-    temporaries: list[tempfile.TemporaryDirectory[str]] = []
-    try:
-        for index, item in enumerate(revisions, start=1):
-            revision_context = f"{context}.source_revisions[{index - 1}]"
+
+@dataclass(frozen=True, slots=True)
+class _TaskObservationState:
+    rows: list[dict[str, Any]]
+    envelopes: list[dict[str, Any]]
+    raw_outputs: list[bytes]
+    revision_ordinals: list[int | None]
+
+
+class _TaskValidator:
+    """Validate one task through revision, call, observation, and phase gates."""
+
+    def __init__(
+        self,
+        *,
+        result_base: Path,
+        fixture: _FixtureDefinition,
+        value: object,
+        phase: str,
+        context: str,
+        candidate_run: _CandidateRunBinding | None,
+    ) -> None:
+        self.result_base = result_base
+        self.fixture = fixture
+        self.value = value
+        self.phase = phase
+        self.context = context
+        self.candidate_run = candidate_run
+        self.task: dict[str, Any] = {}
+        self.revisions: list[object] = []
+        self.temporaries: list[tempfile.TemporaryDirectory[str]] = []
+
+    def validate(self) -> tuple[str | None, bool]:
+        self.validate_header()
+        base_settings = resolve_config(self.fixture.tree.root, environment={})
+        settings_by_root = {self.fixture.tree.root: base_settings}
+        try:
+            revision_state = self.validate_revisions(
+                base_settings,
+                settings_by_root,
+            )
+            self.validate_changed_sources(revision_state)
+            recorded_calls = self.validate_recorded_calls(revision_state.roots)
+            observations = self.validate_observations(revision_state)
+            self.validate_observation_proof(recorded_calls, observations)
+            if self.phase == "A":
+                outcome = self.validate_phase_a(revision_state, observations)
+                return outcome, revision_state.first_diff_correct
+            self.validate_phase_b(revision_state, observations)
+            return None, revision_state.first_diff_correct
+        finally:
+            for temporary in self.temporaries:
+                temporary.cleanup()
+
+    def validate_header(self) -> None:
+        task = _object(self.value, _TASK_KEYS, self.context)
+        self.task = task
+        if task["fixture_id"] != self.fixture.fixture_id:
+            raise AlignmentEvalError(f"{self.context}.fixture_id is out of order")
+        accepted_value = task["human_accepted_candidate_ids"]
+        if not isinstance(accepted_value, list) or any(
+            not isinstance(item, str) or not item.strip() for item in accepted_value
+        ):
+            raise AlignmentEvalError(
+                f"{self.context}.human_accepted_candidate_ids must be an array of IDs"
+            )
+        accepted_candidate_ids = cast(list[str], accepted_value)
+        if accepted_candidate_ids != sorted(set(accepted_candidate_ids)):
+            raise AlignmentEvalError(
+                f"{self.context}.human_accepted_candidate_ids must be unique and sorted"
+            )
+        expected_ids = (
+            []
+            if self.phase == "A"
+            else sorted(
+                cast(str, candidate["candidate_id"])
+                for candidate in self.fixture.gold_candidates
+                if candidate["disposition_label"] == "accepted"
+            )
+        )
+        if accepted_candidate_ids != expected_ids:
+            raise AlignmentEvalError(
+                f"{self.context}.human_accepted_candidate_ids do not match frozen human disposition"
+            )
+        for name in (
+            "elapsed_milliseconds",
+            "backstitch_call_count",
+            "reviewed_diff_attempt_count",
+            "review_round_count",
+            "changed_source_line_count",
+        ):
+            _nonnegative_integer(task[name], f"{self.context}.{name}")
+        revisions = task["source_revisions"]
+        if not isinstance(revisions, list):
+            raise AlignmentEvalError(
+                f"{self.context}.source_revisions must be an array"
+            )
+        self.revisions = revisions
+        if task["reviewed_diff_attempt_count"] != len(revisions):
+            raise AlignmentEvalError(
+                f"{self.context}.reviewed_diff_attempt_count does not recompute"
+            )
+
+    def validate_revisions(
+        self,
+        base_settings: BackstitchSettings,
+        settings_by_root: dict[Path, BackstitchSettings],
+    ) -> _TaskRevisionState:
+        roots: dict[int, Path] = {}
+        tree_hashes: dict[int, str] = {}
+        first_diff_correct = False
+        final_paths: list[str] = []
+        final_line_count = 0
+        for index, item in enumerate(self.revisions, start=1):
+            revision_context = f"{self.context}.source_revisions[{index - 1}]"
             revision = _object(item, _REVISION_KEYS, revision_context)
             if revision["ordinal"] != index:
                 raise AlignmentEvalError(
                     f"{revision_context}.ordinal is not contiguous"
                 )
             diff, _ = _artifact_bytes(
-                result_base,
+                self.result_base,
                 revision["diff_path"],
                 revision["diff_sha256"],
                 f"{revision_context} diff",
@@ -3116,76 +3208,101 @@ def _validate_task(
                 obligation_executable,
                 revision_settings,
             ) = _apply_revision(
-                fixture,
+                self.fixture,
                 diff,
-                result_base,
+                self.result_base,
                 revision["result_tree_manifest_path"],
                 revision["result_tree_manifest_sha256"],
                 revision_context,
-                obligation_id=cast(str, fixture.task_obligation_id),
-                gold_candidates=fixture.gold_candidates,
+                obligation_id=cast(str, self.fixture.task_obligation_id),
+                gold_candidates=self.fixture.gold_candidates,
                 original_settings=base_settings,
             )
-            temporaries.append(temporary)
-            stored_declarations = _validate_declarations(
-                revision["observed_trace_declarations"],
-                f"{revision_context}.observed_trace_declarations",
-                gold_ids=frozenset(
-                    cast(str, candidate["gold_id"])
-                    for candidate in fixture.gold_candidates
-                ),
-            )
-            if stored_declarations != derived:
-                raise AlignmentEvalError(
-                    f"{revision_context}.observed_trace_declarations do not recompute"
-                )
-            revision_roots[index] = root
+            self.temporaries.append(temporary)
+            self.validate_revision_declarations(revision, derived, revision_context)
+            roots[index] = root
             settings_by_root[root] = revision_settings
-            revision_tree_hashes[index] = cast(
-                str, revision["result_tree_manifest_sha256"]
-            )
+            tree_hashes[index] = cast(str, revision["result_tree_manifest_sha256"])
             if index == 1:
                 first_diff_correct = (
-                    derived == fixture.required_trace_declarations
+                    derived == self.fixture.required_trace_declarations
                     and obligation_executable
                 )
-            if index == len(revisions):
+            if index == len(self.revisions):
                 final_paths = paths
                 final_line_count = changed_lines
+        return _TaskRevisionState(
+            roots,
+            tree_hashes,
+            settings_by_root,
+            first_diff_correct,
+            final_paths,
+            final_line_count,
+        )
 
-        changed_paths_value = task["changed_source_paths"]
+    def validate_revision_declarations(
+        self,
+        revision: dict[str, Any],
+        derived: tuple[dict[str, Any], ...],
+        revision_context: str,
+    ) -> None:
+        stored = _validate_declarations(
+            revision["observed_trace_declarations"],
+            f"{revision_context}.observed_trace_declarations",
+            gold_ids=frozenset(
+                cast(str, candidate["gold_id"])
+                for candidate in self.fixture.gold_candidates
+            ),
+        )
+        if stored != derived:
+            raise AlignmentEvalError(
+                f"{revision_context}.observed_trace_declarations do not recompute"
+            )
+
+    def validate_changed_sources(self, state: _TaskRevisionState) -> None:
+        changed_paths_value = self.task["changed_source_paths"]
         if not isinstance(changed_paths_value, list):
-            raise AlignmentEvalError(f"{context}.changed_source_paths must be an array")
+            raise AlignmentEvalError(
+                f"{self.context}.changed_source_paths must be an array"
+            )
         changed_paths = [
-            _unicode_text(item, f"{context}.changed_source_paths[{index}]")
+            _unicode_text(item, f"{self.context}.changed_source_paths[{index}]")
             for index, item in enumerate(changed_paths_value)
         ]
         for index, path in enumerate(changed_paths):
             _relative_path(
-                fixture.tree.root, path, f"{context}.changed_source_paths[{index}]"
+                self.fixture.tree.root,
+                path,
+                f"{self.context}.changed_source_paths[{index}]",
             )
         if changed_paths != sorted(set(changed_paths)):
             raise AlignmentEvalError(
-                f"{context}.changed_source_paths must be unique and sorted"
+                f"{self.context}.changed_source_paths must be unique and sorted"
             )
         if (
-            changed_paths != final_paths
-            or task["changed_source_line_count"] != final_line_count
+            changed_paths != state.final_paths
+            or self.task["changed_source_line_count"] != state.final_line_count
         ):
             raise AlignmentEvalError(
-                f"{context} changed-source fields do not recompute"
+                f"{self.context} changed-source fields do not recompute"
             )
 
-        calls = task["backstitch_calls"]
+    def validate_recorded_calls(
+        self,
+        revision_roots: dict[int, Path],
+    ) -> list[tuple[tuple[str, ...], int | None]]:
+        calls = self.task["backstitch_calls"]
         if not isinstance(calls, list) or not calls:
-            raise AlignmentEvalError(f"{context}.backstitch_calls must be nonempty")
-        if task["backstitch_call_count"] != len(calls):
             raise AlignmentEvalError(
-                f"{context}.backstitch_call_count does not recompute"
+                f"{self.context}.backstitch_calls must be nonempty"
             )
-        recorded_calls: list[tuple[tuple[str, ...], int | None]] = []
+        if self.task["backstitch_call_count"] != len(calls):
+            raise AlignmentEvalError(
+                f"{self.context}.backstitch_call_count does not recompute"
+            )
+        recorded: list[tuple[tuple[str, ...], int | None]] = []
         for index, item in enumerate(calls, start=1):
-            call_context = f"{context}.backstitch_calls[{index - 1}]"
+            call_context = f"{self.context}.backstitch_calls[{index - 1}]"
             call = _object(item, _BACKSTITCH_CALL_KEYS, call_context)
             if call["ordinal"] != index:
                 raise AlignmentEvalError(f"{call_context}.ordinal is not contiguous")
@@ -3206,161 +3323,223 @@ def _validate_task(
                 raise AlignmentEvalError(
                     f"{call_context}.source_revision_ordinal does not resolve"
                 )
-            recorded_calls.append((normalized_argv, revision_ordinal))
+            recorded.append((normalized_argv, revision_ordinal))
+        return recorded
 
-        observations = task["cli_observations"]
+    def validate_observations(
+        self,
+        state: _TaskRevisionState,
+    ) -> _TaskObservationState:
+        observations = self.task["cli_observations"]
         if not isinstance(observations, list) or not observations:
-            raise AlignmentEvalError(f"{context}.cli_observations must be nonempty")
-        observed_envelopes: list[dict[str, Any]] = []
-        observed_raw: list[bytes] = []
-        observed_revision_ordinals: list[int | None] = []
-        original_rows, _ = _fixture_snapshot(fixture.tree.root, context)
+            raise AlignmentEvalError(
+                f"{self.context}.cli_observations must be nonempty"
+            )
+        rows = cast(list[dict[str, Any]], observations)
+        envelopes: list[dict[str, Any]] = []
+        raw_outputs: list[bytes] = []
+        revision_ordinals: list[int | None] = []
+        original_rows, _ = _fixture_snapshot(self.fixture.tree.root, self.context)
         for index, item in enumerate(observations, start=1):
-            observation_context = f"{context}.cli_observations[{index - 1}]"
-            observation = _object(item, _OBSERVATION_KEYS, observation_context)
-            if observation["ordinal"] != index:
+            envelope, output_raw, revision_ordinal = self.validate_observation(
+                item,
+                index,
+                state,
+                original_rows,
+            )
+            envelopes.append(envelope)
+            raw_outputs.append(output_raw)
+            revision_ordinals.append(revision_ordinal)
+        return _TaskObservationState(
+            rows,
+            envelopes,
+            raw_outputs,
+            revision_ordinals,
+        )
+
+    def validate_observation(
+        self,
+        item: object,
+        index: int,
+        state: _TaskRevisionState,
+        original_rows: list[dict[str, object]],
+    ) -> tuple[dict[str, Any], bytes, int | None]:
+        observation_context = f"{self.context}.cli_observations[{index - 1}]"
+        observation = _object(item, _OBSERVATION_KEYS, observation_context)
+        if observation["ordinal"] != index:
+            raise AlignmentEvalError(f"{observation_context}.ordinal is not contiguous")
+        argv = observation["argv"]
+        if not isinstance(argv, list) or not argv:
+            raise AlignmentEvalError(f"{observation_context}.argv must be nonempty")
+        for arg_index, arg in enumerate(argv):
+            _nonblank(arg, f"{observation_context}.argv[{arg_index}]")
+        revision_ordinal = observation["source_revision_ordinal"]
+        if revision_ordinal is None:
+            expected_root = self.fixture.tree.root
+            expected_hash = _canonical_sha256(
+                {
+                    "schema_version": 1,
+                    "artifact": "backstitch-eval-fixture-tree",
+                    "files": original_rows,
+                }
+            )
+        else:
+            if (
+                isinstance(revision_ordinal, bool)
+                or not isinstance(revision_ordinal, int)
+                or revision_ordinal not in state.roots
+            ):
                 raise AlignmentEvalError(
-                    f"{observation_context}.ordinal is not contiguous"
+                    f"{observation_context}.source_revision_ordinal does not resolve"
                 )
-            argv = observation["argv"]
-            if not isinstance(argv, list) or not argv:
-                raise AlignmentEvalError(f"{observation_context}.argv must be nonempty")
-            for arg_index, arg in enumerate(argv):
-                _nonblank(arg, f"{observation_context}.argv[{arg_index}]")
-            revision_ordinal = observation["source_revision_ordinal"]
-            if revision_ordinal is None:
-                expected_root = fixture.tree.root
-                expected_hash = _canonical_sha256(
-                    {
-                        "schema_version": 1,
-                        "artifact": "backstitch-eval-fixture-tree",
-                        "files": original_rows,
-                    }
-                )
-            else:
-                if (
-                    isinstance(revision_ordinal, bool)
-                    or not isinstance(revision_ordinal, int)
-                    or revision_ordinal not in revision_roots
-                ):
-                    raise AlignmentEvalError(
-                        f"{observation_context}.source_revision_ordinal does not resolve"
-                    )
-                expected_root = revision_roots[revision_ordinal]
-                expected_hash = revision_tree_hashes[revision_ordinal]
-            if observation["source_tree_manifest_sha256"] != expected_hash:
-                raise AlignmentEvalError(
-                    f"{observation_context} source tree hash is incorrect"
-                )
-            _tree_rows_from_artifact(
-                result_base,
-                observation["source_tree_manifest_path"],
-                observation["source_tree_manifest_sha256"],
-                expected_root,
-                f"{observation_context} source tree",
+            expected_root = state.roots[revision_ordinal]
+            expected_hash = state.tree_hashes[revision_ordinal]
+        if observation["source_tree_manifest_sha256"] != expected_hash:
+            raise AlignmentEvalError(
+                f"{observation_context} source tree hash is incorrect"
             )
-            expected_snapshot = _snapshot_row(
-                expected_root,
-                fixture.tree.profile,
-                settings_by_root[expected_root],
+        _tree_rows_from_artifact(
+            self.result_base,
+            observation["source_tree_manifest_path"],
+            observation["source_tree_manifest_sha256"],
+            expected_root,
+            f"{observation_context} source tree",
+        )
+        expected_snapshot = _snapshot_row(
+            expected_root,
+            self.fixture.tree.profile,
+            state.settings_by_root[expected_root],
+        )
+        envelope, output_raw = _public_envelope(
+            self.result_base,
+            observation["output_path"],
+            observation["output_sha256"],
+            f"{observation_context} output",
+            expected_snapshot=expected_snapshot,
+        )
+        canonical_argv = _public_argv(
+            cast(str, envelope["operation"]),
+            self.fixture.task_obligation_id,
+        )
+        if argv != canonical_argv:
+            raise AlignmentEvalError(
+                f"{observation_context}.argv is not the exact public command"
             )
-            envelope, output_raw = _public_envelope(
-                result_base,
-                observation["output_path"],
-                observation["output_sha256"],
-                f"{observation_context} output",
-                expected_snapshot=expected_snapshot,
-            )
-            canonical_argv = _public_argv(
-                cast(str, envelope["operation"]),
-                fixture.task_obligation_id,
-            )
-            if argv != canonical_argv:
-                raise AlignmentEvalError(
-                    f"{observation_context}.argv is not the exact public command"
-                )
-            _rerun_public_command(
-                canonical_argv,
-                expected_root,
-                output_raw,
-                observation_context,
-            )
-            observed_envelopes.append(envelope)
-            observed_raw.append(output_raw)
-            observed_revision_ordinals.append(cast(int | None, revision_ordinal))
+        _rerun_public_command(
+            canonical_argv,
+            expected_root,
+            output_raw,
+            observation_context,
+        )
+        return envelope, output_raw, cast(int | None, revision_ordinal)
+
+    def validate_observation_proof(
+        self,
+        recorded_calls: list[tuple[tuple[str, ...], int | None]],
+        observations: _TaskObservationState,
+    ) -> None:
         proof_calls = Counter(
-            (tuple(cast(list[str], observation["argv"])), revision_ordinal)
-            for observation, revision_ordinal in zip(
-                cast(list[dict[str, Any]], observations),
-                observed_revision_ordinals,
+            (tuple(cast(list[str], row["argv"])), revision_ordinal)
+            for row, revision_ordinal in zip(
+                observations.rows,
+                observations.revision_ordinals,
                 strict=True,
             )
         )
         if proof_calls - Counter(recorded_calls):
             raise AlignmentEvalError(
-                f"{context}.cli_observations must be included in backstitch_calls"
+                f"{self.context}.cli_observations must be included in backstitch_calls"
             )
-        last_envelope = observed_envelopes[-1]
-        if phase == "A":
-            incomplete = fixture.initial_state in {"partial", "untraced", "skipped"}
-            if incomplete:
-                if not revisions:
-                    raise AlignmentEvalError(
-                        f"{context} incomplete Phase A task needs a source revision"
-                    )
-                if observed_envelopes[0]["operation"] != "obligation.list":
-                    raise AlignmentEvalError(
-                        f"{context} first observation must record initial production state"
-                    )
-                if observed_revision_ordinals[0] is not None:
-                    raise AlignmentEvalError(
-                        f"{context} first observation must bind the original tree"
-                    )
-                if observed_revision_ordinals[-1] != len(revisions):
-                    raise AlignmentEvalError(
-                        f"{context} final observation must bind the final revision"
-                    )
-            elif revisions:
-                raise AlignmentEvalError(
-                    f"{context} complete/no-intent Phase A task cannot add revisions"
-                )
-            if fixture.initial_state == "no_intent":
-                if last_envelope["operation"] != "obligation.list":
-                    raise AlignmentEvalError(
-                        f"{context} no-intent outcome must use obligation.list"
-                    )
-            elif last_envelope["operation"] != "obligation.get":
-                raise AlignmentEvalError(
-                    f"{context} final authoring observation must use obligation.get"
-                )
-            outcome = _recompute_bootstrap_outcome(fixture, last_envelope, context)
-            if task["bootstrap_outcome"] != outcome:
-                raise AlignmentEvalError(
-                    f"{context}.bootstrap_outcome does not recompute"
-                )
-            return outcome, first_diff_correct
-        if candidate_run is None:
-            raise AlignmentEvalError(f"{context} has no canonical candidate run")
-        if len(observed_envelopes) != 1:
+
+    def validate_phase_a(
+        self,
+        revisions: _TaskRevisionState,
+        observations: _TaskObservationState,
+    ) -> str:
+        incomplete = self.fixture.initial_state in {
+            "partial",
+            "untraced",
+            "skipped",
+        }
+        if incomplete:
+            self.validate_incomplete_phase_a(revisions, observations)
+        elif self.revisions:
             raise AlignmentEvalError(
-                f"{context} Phase B task must record exactly one candidate run"
+                f"{self.context} complete/no-intent Phase A task cannot add revisions"
             )
-        if task["bootstrap_outcome"] is not None:
+        last_envelope = observations.envelopes[-1]
+        if self.fixture.initial_state == "no_intent":
+            if last_envelope["operation"] != "obligation.list":
+                raise AlignmentEvalError(
+                    f"{self.context} no-intent outcome must use obligation.list"
+                )
+        elif last_envelope["operation"] != "obligation.get":
             raise AlignmentEvalError(
-                f"{context}.bootstrap_outcome must be null for Phase B"
+                f"{self.context} final authoring observation must use obligation.get"
             )
-        if fixture.first_diff_required != bool(revisions):
+        outcome = _recompute_bootstrap_outcome(
+            self.fixture,
+            last_envelope,
+            self.context,
+        )
+        if self.task["bootstrap_outcome"] != outcome:
             raise AlignmentEvalError(
-                f"{context} source revisions do not match first-diff preregistration"
+                f"{self.context}.bootstrap_outcome does not recompute"
             )
+        return outcome
+
+    def validate_incomplete_phase_a(
+        self,
+        revisions: _TaskRevisionState,
+        observations: _TaskObservationState,
+    ) -> None:
+        if not self.revisions:
+            raise AlignmentEvalError(
+                f"{self.context} incomplete Phase A task needs a source revision"
+            )
+        if observations.envelopes[0]["operation"] != "obligation.list":
+            raise AlignmentEvalError(
+                f"{self.context} first observation must record initial production state"
+            )
+        if observations.revision_ordinals[0] is not None:
+            raise AlignmentEvalError(
+                f"{self.context} first observation must bind the original tree"
+            )
+        if observations.revision_ordinals[-1] != len(self.revisions):
+            raise AlignmentEvalError(
+                f"{self.context} final observation must bind the final revision"
+            )
+
+    def validate_phase_b(
+        self,
+        revisions: _TaskRevisionState,
+        observations: _TaskObservationState,
+    ) -> None:
+        if self.candidate_run is None:
+            raise AlignmentEvalError(f"{self.context} has no canonical candidate run")
+        if len(observations.envelopes) != 1:
+            raise AlignmentEvalError(
+                f"{self.context} Phase B task must record exactly one candidate run"
+            )
+        if self.task["bootstrap_outcome"] is not None:
+            raise AlignmentEvalError(
+                f"{self.context}.bootstrap_outcome must be null for Phase B"
+            )
+        if self.fixture.first_diff_required != bool(self.revisions):
+            raise AlignmentEvalError(
+                f"{self.context} source revisions do not match first-diff preregistration"
+            )
+        last_envelope = observations.envelopes[-1]
         if last_envelope["operation"] != "obligation.find_evidence":
             raise AlignmentEvalError(
-                f"{context} final observation must be obligation.find_evidence"
+                f"{self.context} final observation must be obligation.find_evidence"
             )
-        if observed_revision_ordinals[-1] is not None:
+        if observations.revision_ordinals[-1] is not None:
             raise AlignmentEvalError(
-                f"{context} candidate observation must bind the original fixture tree"
+                f"{self.context} candidate observation must bind the original fixture tree"
             )
+        observation = observations.rows[-1]
+        candidate_run = self.candidate_run
         if (
             cast(str, last_envelope["result"]["obligation_id"])
             != candidate_run.obligation_id
@@ -3369,16 +3548,31 @@ def _validate_task(
             or observation["source_tree_manifest_sha256"]
             != candidate_run.source_tree_manifest_sha256
             or observation["output_path"] != candidate_run.output_path
-            or observed_raw[-1] != candidate_run.output_raw
+            or observations.raw_outputs[-1] != candidate_run.output_raw
             or observation["output_sha256"] != candidate_run.output_sha256
         ):
             raise AlignmentEvalError(
-                f"{context} output does not match the canonical candidate run"
+                f"{self.context} output does not match the canonical candidate run"
             )
-        return None, first_diff_correct
-    finally:
-        for temporary in temporaries:
-            temporary.cleanup()
+
+
+def _validate_task(
+    *,
+    result_base: Path,
+    fixture: _FixtureDefinition,
+    value: object,
+    phase: str,
+    context: str,
+    candidate_run: _CandidateRunBinding | None = None,
+) -> tuple[str | None, bool]:
+    return _TaskValidator(
+        result_base=result_base,
+        fixture=fixture,
+        value=value,
+        phase=phase,
+        context=context,
+        candidate_run=candidate_run,
+    ).validate()
 
 
 def _validate_candidate_runs(
@@ -3596,13 +3790,38 @@ def _expected_checks(phase: str, metrics: dict[str, object]) -> list[dict[str, o
     return rows
 
 
-def _load_alignment_eval_result(
+@dataclass(frozen=True, slots=True)
+class _AlignmentResultPreamble:
+    result: dict[str, Any]
+    raw_bytes: bytes
+    phase_name: str
+    phase: _PhaseManifest
+    result_base: Path
+    qualification_sha256: str
+    distribution_sha256: str
+    guide_sha256: str
+    skill_sha256: str
+    expected_session_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class _AlignmentSessionEvaluation:
+    sessions: list[dict[str, Any]]
+    bootstrap_success_count: int
+    authority_pass_count: int
+    first_diff_correct_count: int
+    invalid_observation: bool
+    surfaced: list[tuple[str, dict[str, Any], dict[str, Any]]]
+    captured: set[tuple[str, str]]
+
+
+def _load_alignment_result_preamble(
     plan: AlignmentEvalPlan,
     result_path: Path,
     *,
     prior_phase_result_path: Path | None,
     require_current_product: bool,
-) -> AlignmentEvalResult:
+) -> _AlignmentResultPreamble:
     raw, raw_bytes = _json_file(result_path, "alignment evaluation result")
     if raw_bytes != canonical_json_bytes(raw):
         raise AlignmentEvalError(
@@ -3626,7 +3845,8 @@ def _load_alignment_eval_result(
     if result["phase_qualification_sha256"] != qualification_sha256:
         raise AlignmentEvalError("result phase qualification identity does not match")
     distribution = _sha256(
-        result["tested_distribution_sha256"], "tested_distribution_sha256"
+        result["tested_distribution_sha256"],
+        "tested_distribution_sha256",
     )
     guide = _sha256(result["guide_sha256"], "guide_sha256")
     skill = _sha256(result["skill_sha256"], "skill_sha256")
@@ -3638,63 +3858,134 @@ def _load_alignment_eval_result(
         raise AlignmentEvalError(
             "result product identities do not match the qualification manifest"
         )
+    expected_session_count = _validate_prior_phase_result(
+        plan,
+        result,
+        cast(str, phase_name),
+        distribution,
+        guide,
+        skill,
+        prior_phase_result_path=prior_phase_result_path,
+        require_current_product=require_current_product,
+    )
+    return _AlignmentResultPreamble(
+        result,
+        raw_bytes,
+        cast(str, phase_name),
+        phase,
+        result_base,
+        qualification_sha256,
+        distribution,
+        guide,
+        skill,
+        expected_session_count,
+    )
 
+
+def _validate_prior_phase_result(
+    plan: AlignmentEvalPlan,
+    result: dict[str, Any],
+    phase_name: str,
+    distribution: str,
+    guide: str,
+    skill: str,
+    *,
+    prior_phase_result_path: Path | None,
+    require_current_product: bool,
+) -> int:
     if phase_name == "A":
         if result["prior_phase_result_sha256"] is not None:
             raise AlignmentEvalError("Phase A prior_phase_result_sha256 must be null")
         if prior_phase_result_path is not None:
             raise AlignmentEvalError("Phase A cannot be given a prior result")
-        expected_session_count = plan.phase_a_sessions
-    else:
-        prior_hash = _sha256(
-            result["prior_phase_result_sha256"], "prior_phase_result_sha256"
+        return plan.phase_a_sessions
+    prior_hash = _sha256(
+        result["prior_phase_result_sha256"],
+        "prior_phase_result_sha256",
+    )
+    if prior_phase_result_path is None:
+        raise AlignmentEvalError("Phase B requires its bound Phase A result")
+    prior = _load_alignment_eval_result(
+        plan,
+        prior_phase_result_path,
+        prior_phase_result_path=None,
+        require_current_product=require_current_product,
+    )
+    if prior.phase != "A" or not prior.passed:
+        raise AlignmentEvalError(
+            "Phase B prior result must be a passing Phase A result"
         )
-        if prior_phase_result_path is None:
-            raise AlignmentEvalError("Phase B requires its bound Phase A result")
-        prior = _load_alignment_eval_result(
-            plan,
-            prior_phase_result_path,
-            prior_phase_result_path=None,
-            require_current_product=require_current_product,
-        )
-        if prior.phase != "A" or not prior.passed:
-            raise AlignmentEvalError(
-                "Phase B prior result must be a passing Phase A result"
-            )
-        if prior.result_sha256 != prior_hash:
-            raise AlignmentEvalError("Phase B prior result hash does not match")
-        if (
-            prior.phase_qualification_sha256 != plan.phase_a_qualification_sha256
-            or prior.tested_distribution_sha256 != distribution
-            or prior.guide_sha256 != guide
-            or prior.skill_sha256 != skill
-        ):
-            raise AlignmentEvalError("Phase B prior result identities do not match")
-        expected_session_count = plan.phase_b_sessions
+    if prior.result_sha256 != prior_hash:
+        raise AlignmentEvalError("Phase B prior result hash does not match")
+    if (
+        prior.phase_qualification_sha256 != plan.phase_a_qualification_sha256
+        or prior.tested_distribution_sha256 != distribution
+        or prior.guide_sha256 != guide
+        or prior.skill_sha256 != skill
+    ):
+        raise AlignmentEvalError("Phase B prior result identities do not match")
+    return plan.phase_b_sessions
 
-    sessions = result["sessions"]
-    if not isinstance(sessions, list) or len(sessions) != expected_session_count:
-        raise AlignmentEvalError("result session count does not match preregistration")
-    session_ids: set[str] = set()
-    participant_ids: set[str] = set()
-    bootstrap_success_count = 0
-    authority_pass_count = 0
-    first_diff_correct_count = 0
-    invalid_observation = False
-    surfaced: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
-    captured: set[tuple[str, str]] = set()
-    candidate_bindings: dict[str, _CandidateRunBinding] = {}
-    if phase_name == "A":
-        if result["candidate_runs"] != []:
-            raise AlignmentEvalError("Phase A candidate_runs must be empty")
-    else:
+
+class _AlignmentSessionEvaluator:
+    """Recompute session observations while retaining invalid-task semantics."""
+
+    def __init__(self, preamble: _AlignmentResultPreamble) -> None:
+        self.preamble = preamble
+        self.result = preamble.result
+        self.sessions: list[dict[str, Any]] = []
+        self.session_ids: set[str] = set()
+        self.participant_ids: set[str] = set()
+        self.bootstrap_success_count = 0
+        self.authority_pass_count = 0
+        self.first_diff_correct_count = 0
+        self.invalid_observation = False
+        self.surfaced: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+        self.captured: set[tuple[str, str]] = set()
+        self.candidate_bindings: dict[str, _CandidateRunBinding] = {}
+
+    def evaluate(self) -> _AlignmentSessionEvaluation:
+        sessions = self.result["sessions"]
+        if (
+            not isinstance(sessions, list)
+            or len(sessions) != self.preamble.expected_session_count
+        ):
+            raise AlignmentEvalError(
+                "result session count does not match preregistration"
+            )
+        self.sessions = cast(list[dict[str, Any]], sessions)
+        self.validate_candidate_runs()
+        for session_index, item in enumerate(sessions):
+            self.validate_session(item, session_index)
+        return _AlignmentSessionEvaluation(
+            self.sessions,
+            self.bootstrap_success_count,
+            self.authority_pass_count,
+            self.first_diff_correct_count,
+            self.invalid_observation,
+            self.surfaced,
+            self.captured,
+        )
+
+    def validate_candidate_runs(self) -> None:
+        if self.preamble.phase_name == "A":
+            if self.result["candidate_runs"] != []:
+                raise AlignmentEvalError("Phase A candidate_runs must be empty")
+            return
         try:
-            surfaced, captured, candidate_bindings = _validate_candidate_runs(
-                result_base, phase, result["candidate_runs"]
+            (
+                self.surfaced,
+                self.captured,
+                self.candidate_bindings,
+            ) = _validate_candidate_runs(
+                self.preamble.result_base,
+                self.preamble.phase,
+                self.result["candidate_runs"],
             )
         except AlignmentEvalError:
-            invalid_observation = True
-    for session_index, item in enumerate(sessions):
+            self.invalid_observation = True
+
+    def validate_session(self, item: object, session_index: int) -> None:
         context = f"sessions[{session_index}]"
         session = _object(item, _SESSION_KEYS, context)
         session_id = _nonblank(session["session_id"], f"{context}.session_id")
@@ -3702,131 +3993,189 @@ def _load_alignment_eval_result(
             session["participant_identity_sha256"],
             f"{context}.participant_identity_sha256",
         )
-        if session_id in session_ids:
+        if session_id in self.session_ids:
             raise AlignmentEvalError("session IDs must be unique")
-        if participant_id in participant_ids:
+        if participant_id in self.participant_ids:
             raise AlignmentEvalError("participant hashes must be unique within a phase")
-        session_ids.add(session_id)
-        participant_ids.add(participant_id)
+        self.session_ids.add(session_id)
+        self.participant_ids.add(participant_id)
         if session["participant_kind"] not in {"human", "agent"}:
             raise AlignmentEvalError(f"{context}.participant_kind is invalid")
         if session["public_help_only"] is not True:
             raise AlignmentEvalError(f"{context}.public_help_only must be true")
+        self.validate_tasks(session, context)
+        self.validate_authority_answers(session, context)
+
+    def validate_tasks(self, session: dict[str, Any], context: str) -> None:
         tasks = session["tasks"]
-        if not isinstance(tasks, list) or len(tasks) != len(phase.fixtures):
+        if not isinstance(tasks, list) or len(tasks) != len(
+            self.preamble.phase.fixtures
+        ):
             raise AlignmentEvalError(f"{context} must run every fixture exactly once")
         for task_index, (task, fixture) in enumerate(
-            zip(tasks, phase.fixtures, strict=True)
+            zip(tasks, self.preamble.phase.fixtures, strict=True)
         ):
             try:
                 outcome, first_diff_correct = _validate_task(
-                    result_base=result_base,
+                    result_base=self.preamble.result_base,
                     fixture=fixture,
                     value=task,
-                    phase=cast(str, phase_name),
+                    phase=self.preamble.phase_name,
                     context=f"{context}.tasks[{task_index}]",
-                    candidate_run=candidate_bindings.get(fixture.fixture_id),
+                    candidate_run=self.candidate_bindings.get(fixture.fixture_id),
                 )
             except AlignmentEvalError:
-                invalid_observation = True
+                self.invalid_observation = True
                 outcome = None
                 first_diff_correct = False
-            if phase_name == "A" and outcome == fixture.expected_bootstrap_outcome:
-                bootstrap_success_count += 1
-            if phase_name == "B" and fixture.first_diff_required and first_diff_correct:
-                first_diff_correct_count += 1
+            if (
+                self.preamble.phase_name == "A"
+                and outcome == fixture.expected_bootstrap_outcome
+            ):
+                self.bootstrap_success_count += 1
+            if (
+                self.preamble.phase_name == "B"
+                and fixture.first_diff_required
+                and first_diff_correct
+            ):
+                self.first_diff_correct_count += 1
+
+    def validate_authority_answers(
+        self,
+        session: dict[str, Any],
+        context: str,
+    ) -> None:
         authority = session["authority_answers"]
         if not isinstance(authority, list):
             raise AlignmentEvalError(f"{context}.authority_answers must be an array")
-        if phase_name == "A":
-            if len(authority) != len(_AUTHORITY_RUBRIC):
-                raise AlignmentEvalError(
-                    f"{context} must answer all authority propositions"
-                )
-            correct = True
-            for answer_index, (answer, rubric) in enumerate(
-                zip(authority, _AUTHORITY_RUBRIC, strict=True)
-            ):
-                proposition, expected_answer = rubric
-                row = _object(
-                    answer,
-                    {"proposition", "answer"},
-                    f"{context}.authority_answers[{answer_index}]",
-                )
-                if row["proposition"] != proposition or not isinstance(
-                    row["answer"], bool
-                ):
-                    raise AlignmentEvalError(
-                        f"{context}.authority_answers do not match the frozen rubric"
-                    )
-                correct = correct and row["answer"] is expected_answer
-            if correct:
-                authority_pass_count += 1
+        if self.preamble.phase_name == "A":
+            if self.authority_answers_are_correct(authority, context):
+                self.authority_pass_count += 1
         elif authority:
             raise AlignmentEvalError(
                 f"{context}.authority_answers must be empty for Phase B"
             )
 
-    if phase_name == "A":
+    @staticmethod
+    def authority_answers_are_correct(
+        authority: list[object],
+        context: str,
+    ) -> bool:
+        if len(authority) != len(_AUTHORITY_RUBRIC):
+            raise AlignmentEvalError(
+                f"{context} must answer all authority propositions"
+            )
+        correct = True
+        for answer_index, (answer, rubric) in enumerate(
+            zip(authority, _AUTHORITY_RUBRIC, strict=True)
+        ):
+            proposition, expected_answer = rubric
+            row = _object(
+                answer,
+                {"proposition", "answer"},
+                f"{context}.authority_answers[{answer_index}]",
+            )
+            if row["proposition"] != proposition or not isinstance(row["answer"], bool):
+                raise AlignmentEvalError(
+                    f"{context}.authority_answers do not match the frozen rubric"
+                )
+            correct = correct and row["answer"] is expected_answer
+        return correct
+
+
+def _alignment_result_metrics(
+    preamble: _AlignmentResultPreamble,
+    evaluation: _AlignmentSessionEvaluation,
+) -> tuple[dict[str, object], set[str]]:
+    sessions = evaluation.sessions
+    phase = preamble.phase
+    if preamble.phase_name == "A":
         task_count = len(sessions) * len(phase.fixtures)
-        metrics: dict[str, object] = {
-            "bootstrap_task_count": task_count,
-            "bootstrap_success_count": bootstrap_success_count,
-            "authority_session_count": len(sessions),
-            "authority_session_pass_count": authority_pass_count,
-            "bootstrap_completion_rate": _rate(bootstrap_success_count, task_count),
-            "authority_comprehension_rate": _rate(authority_pass_count, len(sessions)),
-        }
-        metric_keys = _PHASE_A_METRIC_KEYS
-    else:
-        gold_by_identity = {
-            (fixture.fixture_id, cast(str, gold["gold_id"])): gold
-            for fixture in phase.fixtures
-            for gold in fixture.gold_candidates
-        }
-        eligible = {
-            identity
-            for identity, gold in gold_by_identity.items()
-            if gold["disposition_label"] in {"accepted", "rejected"}
-        }
-        critical = {
-            identity for identity, gold in gold_by_identity.items() if gold["critical"]
-        }
-        captured_eligible = captured & eligible
-        captured_critical = captured & critical
-        trace_correct = sum(
-            projection["trace_state"] == gold["trace_state"]
-            for _, projection, gold in surfaced
+        return (
+            {
+                "bootstrap_task_count": task_count,
+                "bootstrap_success_count": evaluation.bootstrap_success_count,
+                "authority_session_count": len(sessions),
+                "authority_session_pass_count": evaluation.authority_pass_count,
+                "bootstrap_completion_rate": _rate(
+                    evaluation.bootstrap_success_count,
+                    task_count,
+                ),
+                "authority_comprehension_rate": _rate(
+                    evaluation.authority_pass_count,
+                    len(sessions),
+                ),
+            },
+            _PHASE_A_METRIC_KEYS,
         )
-        irrelevant_count = sum(
-            gold["disposition_label"] == "irrelevant" for _, _, gold in surfaced
-        )
-        required_diff_count = len(sessions) * sum(
-            fixture.first_diff_required for fixture in phase.fixtures
-        )
-        metrics = {
+    gold_by_identity = {
+        (fixture.fixture_id, cast(str, gold["gold_id"])): gold
+        for fixture in phase.fixtures
+        for gold in fixture.gold_candidates
+    }
+    eligible = {
+        identity
+        for identity, gold in gold_by_identity.items()
+        if gold["disposition_label"] in {"accepted", "rejected"}
+    }
+    critical = {
+        identity for identity, gold in gold_by_identity.items() if gold["critical"]
+    }
+    captured_eligible = evaluation.captured & eligible
+    captured_critical = evaluation.captured & critical
+    trace_correct = sum(
+        projection["trace_state"] == gold["trace_state"]
+        for _, projection, gold in evaluation.surfaced
+    )
+    irrelevant_count = sum(
+        gold["disposition_label"] == "irrelevant" for _, _, gold in evaluation.surfaced
+    )
+    required_diff_count = len(sessions) * sum(
+        fixture.first_diff_required for fixture in phase.fixtures
+    )
+    return (
+        {
             "eligible_gold_candidate_count": len(eligible),
             "captured_eligible_gold_candidate_count": len(captured_eligible),
             "captured_trace_state_correct_count": trace_correct,
-            "surfaced_candidate_count": len(surfaced),
+            "surfaced_candidate_count": len(evaluation.surfaced),
             "irrelevant_candidate_count": irrelevant_count,
             "first_diff_required_count": required_diff_count,
-            "first_diff_correct_count": first_diff_correct_count,
+            "first_diff_correct_count": evaluation.first_diff_correct_count,
             "critical_candidate_count": len(critical),
             "critical_candidate_captured_count": len(captured_critical),
             "candidate_capture_rate": _rate(len(captured_eligible), len(eligible)),
-            "trace_state_precision": _rate(trace_correct, len(surfaced)),
-            "irrelevant_candidate_rate": _rate(irrelevant_count, len(surfaced)),
+            "trace_state_precision": _rate(
+                trace_correct,
+                len(evaluation.surfaced),
+            ),
+            "irrelevant_candidate_rate": _rate(
+                irrelevant_count,
+                len(evaluation.surfaced),
+            ),
             "first_diff_correct_rate": _rate(
-                first_diff_correct_count, required_diff_count
+                evaluation.first_diff_correct_count,
+                required_diff_count,
             ),
             "all_critical_candidates_captured": bool(critical)
             and len(captured_critical) == len(critical),
-        }
-        metric_keys = _PHASE_B_METRIC_KEYS
+        },
+        _PHASE_B_METRIC_KEYS,
+    )
 
+
+def _finish_alignment_eval_result(
+    plan: AlignmentEvalPlan,
+    preamble: _AlignmentResultPreamble,
+    evaluation: _AlignmentSessionEvaluation,
+    metrics: dict[str, object],
+    metric_keys: set[str],
+    *,
+    require_current_product: bool,
+) -> AlignmentEvalResult:
+    result = preamble.result
     _validate_stored_metrics(result["metrics"], metrics, metric_keys, "metrics")
-    expected_checks = _expected_checks(cast(str, phase_name), metrics)
+    expected_checks = _expected_checks(preamble.phase_name, metrics)
     checks = result["checks"]
     if not isinstance(checks, list):
         raise AlignmentEvalError("checks must be an array")
@@ -3834,10 +4183,10 @@ def _load_alignment_eval_result(
         _object(check, _CHECK_KEYS, f"checks[{index}]")
     if checks != expected_checks:
         raise AlignmentEvalError("checks do not recompute")
-    failure_reasons = (["INVALID_OBSERVATION"] if invalid_observation else []) + [
-        cast(str, check["name"]) for check in expected_checks if not check["passed"]
-    ]
-    passed = not invalid_observation and not any(
+    failure_reasons = (
+        ["INVALID_OBSERVATION"] if evaluation.invalid_observation else []
+    ) + [cast(str, check["name"]) for check in expected_checks if not check["passed"]]
+    passed = not evaluation.invalid_observation and not any(
         not cast(bool, check["passed"]) for check in expected_checks
     )
     if result["passed"] is not passed:
@@ -3853,14 +4202,39 @@ def _load_alignment_eval_result(
             "authoritative product inputs changed while loading the result"
         )
     return AlignmentEvalResult(
-        result_sha256="sha256:" + hashlib.sha256(raw_bytes).hexdigest(),
-        phase=cast(str, phase_name),
+        result_sha256="sha256:" + hashlib.sha256(preamble.raw_bytes).hexdigest(),
+        phase=preamble.phase_name,
         passed=passed,
         metrics=metrics,
-        phase_qualification_sha256=qualification_sha256,
-        tested_distribution_sha256=distribution,
-        guide_sha256=guide,
-        skill_sha256=skill,
+        phase_qualification_sha256=preamble.qualification_sha256,
+        tested_distribution_sha256=preamble.distribution_sha256,
+        guide_sha256=preamble.guide_sha256,
+        skill_sha256=preamble.skill_sha256,
+    )
+
+
+def _load_alignment_eval_result(
+    plan: AlignmentEvalPlan,
+    result_path: Path,
+    *,
+    prior_phase_result_path: Path | None,
+    require_current_product: bool,
+) -> AlignmentEvalResult:
+    preamble = _load_alignment_result_preamble(
+        plan,
+        result_path,
+        prior_phase_result_path=prior_phase_result_path,
+        require_current_product=require_current_product,
+    )
+    evaluation = _AlignmentSessionEvaluator(preamble).evaluate()
+    metrics, metric_keys = _alignment_result_metrics(preamble, evaluation)
+    return _finish_alignment_eval_result(
+        plan,
+        preamble,
+        evaluation,
+        metrics,
+        metric_keys,
+        require_current_product=require_current_product,
     )
 
 

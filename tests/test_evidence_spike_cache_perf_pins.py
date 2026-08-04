@@ -771,11 +771,11 @@ def test_live_scan_and_legacy_packet_twins_have_no_production_owner() -> None:
 def test_response_budget_decision_has_one_core_owner_outside_cli() -> None:
     """Reproduce D8's adapter-dependent response-budget ownership.
 
-    Today `_run_obligation` reads `maximum_response_bytes`, measures whichever
-    renderer the CLI selected, and synthesizes `BUDGET_EXHAUSTED` itself. That
-    makes transport text load-bearing. Slice 5b must leave no response-budget
-    decision owner in `cli.py` and exactly one owner in `obligation_api.py`, where
-    the decision is made from canonical core JSON before adapter rendering.
+    Before the Slice 5 application seam, `_run_obligation` read
+    `maximum_response_bytes` and synthesized `BUDGET_EXHAUSTED` in the CLI.
+    The completed seam leaves no response-budget decision owner in `cli.py`
+    and exactly one owner in `obligation_api.py`, where the decision is made
+    from canonical core JSON before adapter rendering.
     """
 
     response_budget_owners = [

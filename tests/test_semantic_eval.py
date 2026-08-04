@@ -41,7 +41,7 @@ from backstitch.settings import VerifyEvalSettings
 
 CORPUS = Path(__file__).parent / "semantic_eval/v3/manifest.json"
 CORPUS_SHA256 = (
-    "sha256:b5cbed195b945b5f3951faca69c2e9ee2c75cc66b563dd57ea206bc73d0f6027"
+    "sha256:3084db03ea667e2f24ad3d5c7830996d1bcb6ca8b12091ce7c7c1c7b28b1bc5a"
 )
 PROVIDER = ProviderIdentity(
     backend_id="test",

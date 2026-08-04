@@ -22,14 +22,12 @@ from typing import Any
 import pytest
 
 import backstitch
-from backstitch.analysis_llm import analyze_packets
 from backstitch.analysis_packets import (
     generate_source_aligned_packets,
     render_packets_jsonl,
 )
 from backstitch.artifact_contracts import load_packets_bytes
 from backstitch.canonical import canonical_repository_path, lf_slice
-from backstitch.evidence_discovery import EvidenceDiscoveryError
 from backstitch.markdown_specs import parse_markdown_spec_bytes
 from backstitch.obligation_runtime import build_obligation_runtime
 from backstitch.profiles import get_profile
@@ -629,12 +627,9 @@ def test_packets_maps_typed_repository_failures_without_internal_error(
 ) -> None:
     """Reproduce finding #8 at the packets command's two typed seams.
 
-    Build a clean reciprocal repository, then inject either
-    ``SnapshotCaptureError(snapshot_unstable)`` from runtime construction or
-    ``EvidenceDiscoveryError(BUDGET_EXHAUSTED)`` from packet discovery. Calling
-    ``cli.main([packets, ...])`` must exit 2 with a specific one-line diagnostic
-    and no ``internal error`` label. Before Slice 3 both typed exceptions reach
-    the command-level catch-all and are mislabeled internal.
+    Build a clean reciprocal repository, then inject snapshot instability or
+    configure a real discovery-catalog overflow. Calling ``packets`` must exit
+    2 with a specific one-line diagnostic and no ``internal error`` label.
     """
 
     _write_repo(tmp_path, mapping_token="pkg/x.py::run")
@@ -642,7 +637,7 @@ def test_packets_maps_typed_repository_failures_without_internal_error(
         'def run() -> int:\n    """Spec: docs/specs/01-x.md [X-1]"""\n    return 1\n',
         encoding="utf-8",
     )
-    from backstitch import analysis_packets, obligation_runtime
+    from backstitch import obligation_runtime
     from backstitch.cli import main
 
     if failure_kind == "snapshot":
@@ -659,16 +654,19 @@ def test_packets_maps_typed_repository_failures_without_internal_error(
         )
         expected = "SNAPSHOT_UNSTABLE"
     else:
-
-        def fail_discovery(*_args: object, **_kwargs: object) -> Any:
-            raise EvidenceDiscoveryError(
-                "BUDGET_EXHAUSTED",
-                "discovery exceeded candidate_items",
-                {"budget": "candidate_items", "limit": 1, "observed": 2},
-            )
-
-        monkeypatch.setattr(
-            analysis_packets, "generate_source_aligned_packets", fail_discovery
+        with tmp_path.joinpath(".backstitch.toml").open(
+            "a", encoding="utf-8"
+        ) as config:
+            config.write("\n[obligations]\nmaximum_candidate_items = 1\n")
+        tmp_path.joinpath("pkg/x.py").write_text(
+            "def run() -> int:\n"
+            '    """Spec: docs/specs/01-x.md [X-1]"""\n'
+            "    return 1\n\n"
+            "def nearby_candidate_one() -> int:\n"
+            "    return 1\n\n"
+            "def nearby_candidate_two() -> int:\n"
+            "    return 1\n",
+            encoding="utf-8",
         )
         expected = "candidate_items"
 
@@ -733,17 +731,13 @@ def test_packets_partial_publication_reports_failed_and_prior_paths(
 
 def test_current_analyze_maps_discovery_failure_without_internal_error(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Reproduce finding #8 on current-repository analyze packet discovery.
 
-    Build a clean reciprocal repository and inject
-    ``EvidenceDiscoveryError(BUDGET_EXHAUSTED)`` from the source-aligned packet
-    producer before any provider call. ``cli.main([analyze, --repo-root, ...])``
-    must exit 2 with a specific candidate-items diagnostic and no ``internal
-    error`` label. Before Slice 3 the typed discovery error reaches the generic
-    catch-all and is mislabeled internal.
+    Build a clean reciprocal repository and exhaust the real candidate catalog
+    before any provider call. JSON analysis must return one structured
+    preparation failure on stdout.
     """
 
     _write_repo(tmp_path, mapping_token="pkg/x.py::run")
@@ -751,31 +745,33 @@ def test_current_analyze_maps_discovery_failure_without_internal_error(
         'def run() -> int:\n    """Spec: docs/specs/01-x.md [X-1]"""\n    return 1\n',
         encoding="utf-8",
     )
-    from backstitch import analysis_packets
     from backstitch.cli import main
 
-    def fail_discovery(*_args: object, **_kwargs: object) -> Any:
-        raise EvidenceDiscoveryError(
-            "BUDGET_EXHAUSTED",
-            "discovery exceeded candidate_items",
-            {"budget": "candidate_items", "limit": 1, "observed": 2},
-        )
-
-    monkeypatch.setattr(
-        analysis_packets, "generate_source_aligned_packets", fail_discovery
+    with tmp_path.joinpath(".backstitch.toml").open("a", encoding="utf-8") as config:
+        config.write("\n[obligations]\nmaximum_candidate_items = 1\n")
+    tmp_path.joinpath("pkg/x.py").write_text(
+        "def run() -> int:\n"
+        '    """Spec: docs/specs/01-x.md [X-1]"""\n'
+        "    return 1\n\n"
+        "def nearby_candidate_one() -> int:\n"
+        "    return 1\n\n"
+        "def nearby_candidate_two() -> int:\n"
+        "    return 1\n",
+        encoding="utf-8",
     )
 
     exit_code = main(["analyze", "--repo-root", str(tmp_path), "--format", "json"])
     captured = capsys.readouterr()
 
     assert exit_code == 2
-    assert "internal error" not in captured.err
-    assert "candidate_items" in captured.err
+    assert captured.err == ""
+    failure = json.loads(captured.out)
+    assert [problem["code"] for problem in failure["problems"]] == ["BUDGET_EXHAUSTED"]
+    assert failure["problems"][0]["details"]["budget"] == "candidate_items"
 
 
-@pytest.mark.parametrize("command", ("packets", "analyze"))
-def test_deterministic_debt_exit_one_renders_the_report(
-    tmp_path: Path, command: str
+def test_packets_deterministic_debt_exit_one_renders_the_report(
+    tmp_path: Path,
 ) -> None:
     """Reproduce finding #9 for both current-repository semantic commands.
 
@@ -788,11 +784,13 @@ def test_deterministic_debt_exit_one_renders_the_report(
     """
 
     _write_repo(tmp_path, mapping_token="pkg/missing.py::run")
-    args = [command, "--repo-root", str(tmp_path)]
-    if command == "packets":
-        args.extend(("--output", str(tmp_path / "packets.jsonl")))
-    else:
-        args.extend(("--format", "json"))
+    args = [
+        "packets",
+        "--repo-root",
+        str(tmp_path),
+        "--output",
+        str(tmp_path / "packets.jsonl"),
+    ]
 
     completed = _run_cli(*args)
 
@@ -800,6 +798,31 @@ def test_deterministic_debt_exit_one_renders_the_report(
     assert "MAPPING_PATH_MISSING" in completed.stdout
     assert "docs/specs/01-x.md" in completed.stdout
     assert "pkg/missing.py::run" in completed.stdout
+
+
+def test_analyze_deterministic_debt_stops_at_structured_preflight(
+    tmp_path: Path,
+) -> None:
+    """Current analysis reports readiness before packet generation."""
+
+    _write_repo(tmp_path, mapping_token="pkg/missing.py::run")
+
+    completed = _run_cli(
+        "analyze",
+        "--repo-root",
+        str(tmp_path),
+        "--format",
+        "json",
+    )
+
+    assert completed.returncode == 2
+    assert completed.stderr == ""
+    preflight = json.loads(completed.stdout)
+    assert preflight["operation"] == "analysis.preflight"
+    assert [problem["code"] for problem in preflight["problems"]] == ["ALIGNMENT_DEBT"]
+    assert preflight["problems"][0]["details"]["obligation_ids"] == [
+        "docs/specs/01-x.md#X-1"
+    ]
 
 
 def _legacy_packet(packet_id: str) -> dict[str, Any]:
@@ -826,38 +849,6 @@ def _legacy_packet(packet_id: str) -> dict[str, Any]:
     }
     packet["packet_hash"] = semantic_packet_hash(packet)
     return packet
-
-
-def test_analyze_packets_contains_identity_failure_per_packet() -> None:
-    """Reproduce NM1 at the controlled-adapter library seam.
-
-    Pass ``analyze_packets`` two rows in order: ``{"kind": "section"}``, which
-    lacks ``packet_id``, followed by one complete schema-2 section packet. The
-    adapter returns a valid ``ok`` response for the complete packet. Analysis
-    must return that successful row plus one problem naming the missing packet
-    ID. Before Slice 3 the pre-loop identity dictionary indexes
-    ``packet["packet_id"]`` and raises KeyError before either row is contained.
-    """
-
-    valid = _legacy_packet("docs/specs/01-x.md#X-1")
-
-    def adapter(_prompt: str) -> str:
-        return json.dumps(
-            {
-                "packet_id": valid["packet_id"],
-                "classification": "ok",
-                "confidence": 0.9,
-                "rationale": "The implementation matches.",
-                "summary": "The obligation is supported.",
-                "evidence": [],
-            }
-        )
-
-    rows, problems = analyze_packets([{"kind": "section"}, valid], adapter)
-
-    assert [row["packet_id"] for row in rows] == [valid["packet_id"]]
-    assert len(problems) == 1
-    assert "missing packet_id" in problems[0]
 
 
 def test_nonsemantic_unreadable_additional_path_does_not_poison_discovery(

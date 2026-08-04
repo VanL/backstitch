@@ -22,6 +22,8 @@ import urllib.request
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from backstitch.semantic_identity import ResolvedInference
+
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Surface 3xx as its raw HTTPError instead of following it ([SC-14])."""
@@ -61,6 +63,7 @@ def run_doctor(
     *,
     model_source: str,
     probe: bool,
+    inference: ResolvedInference | None = None,
 ) -> list[CheckResult]:
     """Run every [SC-14] check in contract order and return the results.
 
@@ -78,7 +81,7 @@ def run_doctor(
     results.append(model_result)
 
     results.append(_check_credential(resolved_model))
-    results.append(_check_json_mode(resolved_model))
+    results.append(_check_json_mode(resolved_model, inference))
     results.append(_check_memory())
     results.append(_check_endpoint(resolved_model, probe))
 
@@ -210,10 +213,37 @@ def _check_credential(model: Any | None) -> CheckResult:
     )
 
 
-def _check_json_mode(model: Any | None) -> CheckResult:
+def _check_json_mode(
+    model: Any | None,
+    inference: ResolvedInference | None = None,
+) -> CheckResult:
     if model is None:
         return CheckResult("json-mode", "skip", "not evaluated: model unresolved")
     option_fields = getattr(getattr(model, "Options", None), "model_fields", {})
+    if inference is not None:
+        exact_request = inference.effective_request.to_dict()
+        required_options: set[str] = {
+            name
+            for name in ("temperature", "seed", "max_tokens")
+            if name in exact_request
+        }
+        if exact_request.get("json_mode") == "require":
+            required_options.add("json_object")
+        missing = sorted(required_options - set(option_fields))
+        if missing:
+            return CheckResult(
+                "json-mode",
+                "fail",
+                "resolved model wrapper disagrees with capability descriptor; "
+                f"missing request options: {', '.join(missing)}",
+                "update the committed capability descriptor or provider plugin",
+            )
+        return CheckResult(
+            "json-mode",
+            "pass",
+            "resolved model accepts the exact frozen request described by "
+            f"capability {inference.capability.capability_revision}",
+        )
     if "json_object" in option_fields:
         return CheckResult(
             "json-mode",

@@ -119,14 +119,32 @@ def test_obligation_list_bootstraps_empty_repository(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     envelope = json.loads(result.stdout)
-    assert envelope["schema_version"] == 1
+    assert envelope["schema_version"] == 2
     assert envelope["operation"] == "obligation.list"
     assert envelope["snapshot"]["file_count"] == 1
     assert envelope["snapshot"]["unreadable_count"] == 0
     assert envelope["result"] == {
+        "applied_filters": {
+            "active_only": False,
+            "alignment_states": [],
+            "gate_states": [],
+            "kinds": [],
+            "reasons": [],
+        },
         "bootstrap_state": "no_intent",
         "entries": [],
+        "filtered_count": 0,
         "next_cursor": None,
+        "readiness_summary": {
+            "active_evaluate": 0,
+            "alignment_debt": 0,
+            "blocked": 0,
+            "executable": 0,
+            "out_of_scope": 0,
+            "reason_counts": [],
+            "skipped": 0,
+            "total": 0,
+        },
     }
     assert [item["code"] for item in envelope["guidance"]] == [
         "ADD_OR_CONFIGURE_SPEC_INTENT"

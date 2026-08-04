@@ -24,6 +24,8 @@ from backstitch.obligations import (
     CandidateCounts,
     SnapshotIdentity,
     build_obligation_inventory,
+    mapping_test_only_issues,
+    resolve_evidence_atom,
 )
 
 PROFILE = ProfileConfig(
@@ -192,7 +194,7 @@ def test_one_sided_mapping_is_partial_and_points_to_missing_backlink() -> None:
     )
 
 
-def test_same_line_resolved_and_missing_mappings_remain_partial() -> None:
+def test_one_complete_mapping_satisfies_role_despite_extra_missing_mapping() -> None:
     resolved = _mapping(line=8)
     missing = _mapping(path="pkg/missing.py", line=8)
     inventory = build_obligation_inventory(
@@ -210,16 +212,14 @@ def test_same_line_resolved_and_missing_mappings_remain_partial() -> None:
 
     obligation = inventory.get("docs/specs/01-x.md#X-1")
     assert obligation is not None
-    assert obligation.alignment_state == "partial"
-    assert obligation.gate_state == "not_executable"
+    assert obligation.alignment_state == "complete"
+    assert obligation.gate_state == "executable"
     assert obligation.evidence_counts.to_row() == {
         "implementation": 2,
         "test": 0,
         "binding_test": 0,
     }
-    assert [reason.code for reason in obligation.blocking_reasons] == [
-        "IMPLEMENTATION_PARTIAL"
-    ]
+    assert obligation.blocking_reasons == ()
 
 
 def test_one_sided_backlink_is_partial_and_points_to_missing_mapping() -> None:
@@ -367,6 +367,115 @@ def test_test_root_relation_satisfies_only_the_test_role() -> None:
         "test": 1,
         "binding_test": 0,
     }
+
+
+def test_resolved_evidence_atom_classifies_test_roots_once() -> None:
+    atom = resolve_evidence_atom(
+        path="tests/test_x.py",
+        symbol="test_run",
+        relation_kinds=("code_backlink", "spec_mapping", "spec_mapping"),
+        reciprocity_state="complete",
+        test_roots=PROFILE.test_roots,
+    )
+
+    assert atom.to_row() == {
+        "source_role": "test",
+        "model_role": "test",
+        "source_identity": (
+            "source:sha256:"
+            "417ebb2216ed48e7bb8f8d275d27ec1abf69cc1fd80cb47ce39473b99d8f928c"
+        ),
+        "relation_kinds": ["spec_mapping", "code_backlink"],
+        "reciprocity_state": "complete",
+        "eligibility": "test",
+        "reason": None,
+    }
+
+
+def test_test_only_mapping_warning_uses_resolved_targets_only() -> None:
+    test_edge = _edge(
+        "mapping",
+        path="tests/test_x.py",
+        symbol="test_run",
+        line=9,
+    )
+    test_mapping = _mapping(
+        path="tests/test_x.py",
+        symbol="test_run",
+        line=9,
+    )
+    unresolved_production = _mapping(path="pkg/missing.py", line=10)
+
+    [issue] = mapping_test_only_issues(
+        _report(
+            sections=(_section(),),
+            mappings=(test_mapping, unresolved_production),
+            edges=(test_edge,),
+        ),
+        profile=PROFILE,
+        section_meta=frozenset(),
+        meta_spec_globs=(),
+    )
+
+    assert issue.code == "SPEC_MAPPING_TEST_ONLY"
+    assert issue.short_code == "BSC009"
+    assert issue.severity == "warning"
+    assert issue.path == "docs/specs/01-x.md"
+    assert issue.line == 9
+    assert issue.section_id == "X-1"
+
+
+def test_production_mapping_clears_test_only_mapping_warning() -> None:
+    issues = mapping_test_only_issues(
+        _report(
+            sections=(_section(),),
+            mappings=(
+                _mapping(),
+                _mapping(path="tests/test_x.py", symbol="test_run", line=9),
+            ),
+            edges=(
+                _edge("mapping"),
+                _edge(
+                    "mapping",
+                    path="tests/test_x.py",
+                    symbol="test_run",
+                    line=9,
+                ),
+            ),
+        ),
+        profile=PROFILE,
+        section_meta=frozenset(),
+        meta_spec_globs=(),
+    )
+
+    assert issues == ()
+
+
+@pytest.mark.parametrize(
+    ("path", "section_meta"),
+    [
+        ("docs/specs/planned-x.md", frozenset()),
+        ("docs/specs/exploratory-x.md", frozenset()),
+        ("docs/specs/meta-x.md", frozenset()),
+        ("docs/specs/01-x.md", frozenset({("docs/specs/01-x.md", "X-1")})),
+    ],
+)
+def test_non_active_mapping_does_not_fire_test_only_warning(
+    path: str,
+    section_meta: frozenset[tuple[str, str]],
+) -> None:
+    issues = mapping_test_only_issues(
+        _report(
+            sections=(_section(path=path),),
+            mappings=(_mapping(spec_path=path, path="tests/test_x.py"),),
+            edges=(_edge("mapping", spec_path=path, path="tests/test_x.py"),),
+        ),
+        profile=PROFILE,
+        section_meta=section_meta,
+        meta_spec_globs=PROFILE.meta_spec_globs,
+    )
+
+    assert issues == ()
 
 
 @pytest.mark.parametrize(
@@ -589,6 +698,66 @@ def test_spec_invariant_needs_a_resolved_section_target_and_binding_test() -> No
     assert [reason.code for reason in mixed.blocking_reasons] == [
         "INVARIANT_TARGET_MISSING"
     ]
+
+
+def test_test_mapping_neither_satisfies_nor_poisons_spec_invariant_target() -> None:
+    section = _section("S-1")
+    declaration = InvariantDeclaration(
+        "INV.X.TEST.1",
+        "Always stable",
+        "required",
+        "spec",
+        section.path,
+        6,
+        None,
+        section.section_id,
+    )
+    production_mapping = _mapping("S-1")
+    test_mapping = _mapping(
+        "S-1",
+        path="tests/test_x.py",
+        symbol="test_run",
+        line=9,
+    )
+    bind = InvariantBind(
+        "INV.X.TEST.1",
+        "tests/test_x.py",
+        "test_run",
+        4,
+        3,
+        5,
+    )
+
+    obligation = build_obligation_inventory(
+        _report(
+            sections=(section,),
+            mappings=(production_mapping, test_mapping),
+            edges=(
+                _edge("mapping", "S-1", line=8),
+                _edge(
+                    "mapping",
+                    "S-1",
+                    path="tests/test_x.py",
+                    symbol="test_run",
+                    line=9,
+                ),
+            ),
+            invariants=(declaration,),
+            binds=(bind,),
+        ),
+        profile=PROFILE,
+        snapshot=SNAPSHOT,
+        atomic_invariant_targets=frozenset({("pkg/x.py", "run")}),
+    ).get("invariant::INV.X.TEST.1")
+
+    assert obligation is not None
+    assert obligation.alignment_state == "complete"
+    assert obligation.gate_state == "executable"
+    assert obligation.evidence_counts.to_row() == {
+        "implementation": 1,
+        "test": 0,
+        "binding_test": 1,
+    }
 
 
 def test_spec_invariant_with_no_target_or_binding_test_is_untraced() -> None:

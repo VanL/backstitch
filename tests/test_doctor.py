@@ -34,6 +34,15 @@ from backstitch.doctor import (
     render_text,
     run_doctor,
 )
+from backstitch.semantic_identity import (
+    CapabilityDescriptor,
+    EffectiveRequest,
+    ProviderIdentity,
+    RequestConstraints,
+    RequestFieldConstraint,
+    build_capability_provenance,
+    resolve_inference,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -152,6 +161,58 @@ def test_all_pass_for_keyless_api_base_model(
     assert "06-choosing-a-local-model.md" in by_name["memory"].detail
     assert by_name["endpoint"].status == "skip"
     assert doctor_exit_code(results) == 0
+
+
+def test_doctor_checks_wrapper_against_frozen_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_llm(monkeypatch, _fake_model())
+    provider = ProviderIdentity(
+        "llm",
+        "openai",
+        "pkg:service/openai.com/fake",
+        "fake-v1",
+        "backstitch.llm",
+        2,
+        "0.31",
+        "llm",
+        "0.31",
+    )
+    capability = CapabilityDescriptor(
+        1,
+        "fake-v1",
+        provider.model_id,
+        provider.model_revision,
+        RequestConstraints(
+            RequestFieldConstraint("required", ("require",), None, None),
+            RequestFieldConstraint("required", (0.0,), None, None),
+            RequestFieldConstraint("required", None, 0, 100),
+            RequestFieldConstraint("required", None, 1, 1024),
+        ),
+        1_000_000,
+    )
+    inference = resolve_inference(
+        provider_identity=provider,
+        adapter_model_id="fake-model",
+        requested=EffectiveRequest("require", 0.0, 42, 512),
+        capability=capability,
+        capability_provenance=build_capability_provenance(
+            capability,
+            source="packaged:test",
+        ),
+        key_prefix="analyze",
+    )
+
+    results = run_doctor(
+        "fake-model",
+        model_source="test",
+        probe=False,
+        inference=inference,
+    )
+
+    compatibility = _by_name(results)["json-mode"]
+    assert compatibility.status == "fail"
+    assert "temperature" in compatibility.detail
 
 
 def test_unresolvable_model_fails_and_dependents_skip(

@@ -1,11 +1,12 @@
-"""Packet-report creation and trust-boundary validation."""
+"""Packet-report creation and trust-boundary validation.
+
+Spec: docs/specs/06-semantic-gates.md [SEM-7]
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
-import os
-import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -29,15 +30,13 @@ from backstitch.semantic_packets import (
 from backstitch.semantic_reports import (
     AnalysisReport,
     AnalysisReportError,
-    ArtifactPublicationError,
     PacketReportError,
-    atomic_replace_bytes,
+    _packet_report_source_shape,
+    _validate_analysis_report_source_shape,
     build_packet_report,
     load_analysis_report,
     load_packet_report,
     load_packet_report_bytes,
-    publish_artifact_set,
-    stage_artifact_bytes,
     validate_analysis_report,
     validate_packet_report,
 )
@@ -97,68 +96,6 @@ def _identities(
     *rows: dict[str, object],
 ) -> tuple[InferenceIdentity, ...]:
     return tuple(build_inference_identity(row, _PROVIDER, _REQUEST) for row in rows)
-
-
-def test_staged_artifact_name_binds_process_and_128_bits_of_randomness(
-    tmp_path: Path,
-) -> None:
-    target = tmp_path / "analysis.json"
-
-    staged = stage_artifact_bytes(target, b"complete bytes")
-
-    try:
-        assert staged.parent == target.parent
-        assert staged.read_bytes() == b"complete bytes"
-        assert re.fullmatch(
-            rf"\.analysis\.json\.{os.getpid()}\.[0-9a-f]{{32}}\.tmp",
-            staged.name,
-        )
-        assert staged.is_file()
-        assert not staged.is_symlink()
-    finally:
-        staged.unlink(missing_ok=True)
-
-
-def test_artifact_set_stages_all_before_callback_and_cleans_on_abort(
-    tmp_path: Path,
-) -> None:
-    first = tmp_path / "first.json"
-    second = tmp_path / "second.json"
-    first.write_bytes(b"old-first")
-    second.write_bytes(b"old-second")
-
-    def reject() -> None:
-        assert first.read_bytes() == b"old-first"
-        assert second.read_bytes() == b"old-second"
-        assert len(tuple(tmp_path.glob(".*.tmp"))) == 2
-        raise RuntimeError("currentness rejected")
-
-    with pytest.raises(RuntimeError, match="currentness rejected"):
-        publish_artifact_set(
-            ((first, b"new-first"), (second, b"new-second")),
-            before_publish=reject,
-        )
-
-    assert first.read_bytes() == b"old-first"
-    assert second.read_bytes() == b"old-second"
-    assert tuple(tmp_path.glob(".*.tmp")) == ()
-
-
-def test_artifact_set_reports_failed_path_and_prior_publications(
-    tmp_path: Path,
-) -> None:
-    first = tmp_path / "first.json"
-    second = tmp_path / "second.json"
-    second.mkdir()
-
-    with pytest.raises(ArtifactPublicationError) as raised:
-        publish_artifact_set(((first, b"first"), (second, b"second")))
-
-    assert raised.value.failed_path == second
-    assert raised.value.published_paths == (first,)
-    assert first.read_bytes() == b"first"
-    assert second.is_dir()
-    assert tuple(tmp_path.glob(".*.tmp")) == ()
 
 
 def _current_packet() -> dict[str, Any]:
@@ -583,17 +520,6 @@ def test_packet_report_rejects_duplicate_packet_ids() -> None:
     report["eligible_counts"] = {"section": 2, "invariant": 0}
     with pytest.raises(PacketReportError, match="duplicate"):
         validate_packet_report(report)
-
-
-def test_atomic_replace_bytes_publishes_exact_content_and_cleans_temp(
-    tmp_path: Path,
-) -> None:
-    target = tmp_path / "nested" / "artifact.json"
-
-    atomic_replace_bytes(target, b"new bytes\n")
-
-    assert target.read_bytes() == b"new bytes\n"
-    assert list(target.parent.glob(f".{target.name}.*.tmp")) == []
 
 
 def _analysis_report() -> tuple[dict[str, Any], bytes]:
@@ -1121,6 +1047,141 @@ def _analysis_report_v5() -> tuple[
         ],
     )
     return report, result_jsonl, packet_report, (result_object,), (event,)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        (
+            "shape",
+            "packet report schema 2 does not match its closed shape",
+        ),
+        ("identity", "packet report source identity is invalid"),
+        ("counts", "packet report readiness counts do not balance"),
+        ("audit", "packet report alignment_audit count is invalid"),
+        (
+            "issues",
+            "packet report deterministic_issues must be an array",
+        ),
+        ("packets", "packet report packets count is invalid"),
+        ("content", "packet_report_content_sha256 does not recompute"),
+        ("created", "created_at must be RFC 3339"),
+    ],
+)
+def test_packet_report_source_shape_preserves_first_error_priority(
+    mutation: str,
+    expected: str,
+) -> None:
+    report = _v2_report()
+    if mutation == "shape":
+        report["extra"] = True
+        report["artifact"] = "invalid"
+    elif mutation == "identity":
+        report["artifact"] = "invalid"
+        report["deterministic_issues"] = None
+    elif mutation == "counts":
+        report["readiness_counts"]["total"] = 0
+        report["alignment_audit"] = None
+    elif mutation == "audit":
+        report["alignment_audit"] = None
+        report["deterministic_issues"] = None
+    elif mutation == "issues":
+        report["deterministic_issues"] = None
+        report["packets"] = None
+    elif mutation == "packets":
+        report["packets"] = []
+        report["packet_report_content_sha256"] = "0" * 64
+    elif mutation == "content":
+        report["packet_report_content_sha256"] = "0" * 64
+        report["created_at"] = "invalid"
+    else:
+        report["created_at"] = "invalid"
+
+    with pytest.raises(PacketReportError) as raised:
+        _packet_report_source_shape(report)
+
+    assert str(raised.value) == expected
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        (
+            "shape",
+            "analysis report schema 3 does not match closed shape",
+        ),
+        ("artifact", "analysis report artifact is invalid"),
+        ("scope", "analysis report scope is invalid"),
+        ("semantic_status", "current semantic_status is invalid"),
+        (
+            "currentness",
+            "current report currentness/provenance is invalid",
+        ),
+        ("status", "analysis report status is invalid"),
+        ("packet_count", "packet_count must equal alignment_summary.selected"),
+        (
+            "warnings",
+            "packet warning count and debt must be zero and empty for schema 3",
+        ),
+        ("finding_debt", "finding_debt must be a list"),
+        ("diagnostics", "semantic_diagnostics must be a list"),
+        ("problems", "problems must be a list"),
+    ],
+)
+def test_analysis_report_source_shape_preserves_first_error_priority(
+    mutation: str,
+    expected: str,
+) -> None:
+    report, _result_jsonl, _packet_report = _analysis_report_v3()
+    if mutation == "shape":
+        report["extra"] = True
+        report["artifact"] = "invalid"
+    elif mutation == "artifact":
+        report["artifact"] = "invalid"
+        report["scope"] = "invalid"
+    elif mutation == "scope":
+        report["scope"] = "invalid"
+        report["status"] = "invalid"
+    elif mutation == "semantic_status":
+        report["semantic_status"] = "invalid"
+        report["source_snapshot"] = None
+    elif mutation == "currentness":
+        report["artifact_currentness"] = "stale"
+        report["status"] = "invalid"
+    elif mutation == "status":
+        report["status"] = "invalid"
+        report["packet_count"] = 0
+    elif mutation == "packet_count":
+        report["packet_count"] = 0
+        report["packet_warning_count"] = 1
+    elif mutation == "warnings":
+        report["packet_warning_count"] = 1
+        report["finding_debt"] = None
+    elif mutation == "finding_debt":
+        report["finding_debt"] = None
+        report["semantic_diagnostics"] = None
+    elif mutation == "diagnostics":
+        report["semantic_diagnostics"] = None
+        report["problems"] = None
+    else:
+        report["problems"] = None
+        report["verification"] = None
+
+    with pytest.raises(AnalysisReportError) as raised:
+        _validate_analysis_report_source_shape(report)
+
+    assert str(raised.value) == expected
+
+
+def test_current_report_source_shapes_preserve_canonical_output() -> None:
+    analysis, _result_jsonl, packet = _analysis_report_v4()
+
+    assert _packet_report_source_shape(packet) == json.loads(
+        canonical_json_bytes(packet)
+    )
+    assert _validate_analysis_report_source_shape(analysis) == json.loads(
+        canonical_json_bytes(analysis)
+    )
 
 
 def test_analysis_report_v5_source_class_uses_operational_event_oracle() -> None:

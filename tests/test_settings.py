@@ -15,8 +15,9 @@ from pathlib import Path
 
 import pytest
 
-import backstitch.repository_snapshot as repository_snapshot
+import backstitch.filesystem_io as filesystem_io
 import backstitch.settings as settings_module
+from backstitch.scan_exclusions import is_excluded
 from backstitch.settings import (
     DEFAULT_EXCLUDES,
     ConfigLoadError,
@@ -24,8 +25,8 @@ from backstitch.settings import (
     CoverageFloor,
     discover_config_path,
     expand_path_value,
-    is_excluded,
     resolve_config,
+    resolve_repository_config_from_blobs,
     settings_to_json,
 )
 
@@ -39,6 +40,7 @@ def _descriptor_lines(model: str, *, revision: str | None = None) -> list[str]:
         'plugin_distribution_name = "test-dist"',
         f'model = "{model}"',
         f'model_revision = "{revision or model + "-revision"}"',
+        *_capability_descriptor_lines(),
         "input_cost_microusd_per_million_tokens = 0",
         "output_cost_microusd_per_million_tokens = 0",
         "input_token_overhead = 256",
@@ -55,10 +57,28 @@ def _catalog_lines(selector: str) -> list[str]:
         'plugin_id = "test-plugin"',
         'plugin_distribution_name = "test-dist"',
         f'model_revision = "{selector}-revision"',
+        *_capability_descriptor_lines(),
         "input_cost_microusd_per_million_tokens = 0",
         "output_cost_microusd_per_million_tokens = 0",
         "input_token_overhead = 256",
         'cost_rate_source = "test fixture rates, reviewed 2026-07-28"',
+    ]
+
+
+def _capability_descriptor_lines() -> list[str]:
+    return [
+        "capability_schema_version = 1",
+        'capability_revision = "test-capability-v1"',
+        "maximum_input_bytes = 1000000",
+        (
+            "request_constraints = { "
+            'json_mode = { presence = "required", '
+            'allowed_values = ["require", "off"] }, '
+            'temperature = { presence = "required", allowed_values = [0.0, 1.0] }, '
+            'seed = { presence = "required", minimum = 0, maximum = 2147483647 }, '
+            'max_tokens = { presence = "required", minimum = 1, maximum = 16384 }'
+            " }"
+        ),
     ]
 
 
@@ -1487,7 +1507,7 @@ direct = 0.5
     )
 
     settings = resolve_config(tmp_path, environment={})
-    by_key = {}
+    by_key: dict[str, set[str]] = {}
     for item in settings.ratchet_policy_provenance:
         by_key.setdefault(item.key, set()).add(item.source_kind)
 
@@ -1538,6 +1558,89 @@ def test_profile_test_root_outside_code_roots_is_invalid(tmp_path: Path) -> None
     )
     with pytest.raises(ConfigLoadError, match="test root 'qa'"):
         resolve_config(tmp_path, explicit=config)
+
+
+def test_profile_root_containment_is_lexical_not_symlink_resolved(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (tmp_path / "alias").symlink_to(package, target_is_directory=True)
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(
+        '[profile]\ncode_roots = ["pkg"]\ntest_roots = ["alias/tests"]\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigLoadError, match="test root 'alias/tests'"):
+        resolve_config(tmp_path, explicit=config, environment={})
+
+
+def test_blob_config_runs_final_test_root_containment(tmp_path: Path) -> None:
+    blobs = {
+        ".backstitch.toml": (
+            b'[profile]\ncode_roots = ["src"]\ntest_roots = ["tests"]\n'
+        )
+    }
+
+    with pytest.raises(ConfigLoadError, match="test root 'tests'"):
+        resolve_repository_config_from_blobs(
+            tmp_path,
+            ".backstitch.toml",
+            blobs,
+        )
+
+
+def test_blob_config_matches_current_behavioral_settings(tmp_path: Path) -> None:
+    body = (
+        '[profile]\ncode_roots = ["src", "tests"]\n'
+        'test_roots = ["tests"]\n'
+        "[coverage]\ninherited_counts = true\n"
+    )
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(body, encoding="utf-8")
+
+    current = resolve_config(
+        tmp_path,
+        explicit=config,
+        environment={},
+    )
+    historical = resolve_repository_config_from_blobs(
+        tmp_path,
+        ".backstitch.toml",
+        {".backstitch.toml": body.encode()},
+    )
+
+    assert historical.profile_overrides == current.profile_overrides
+    assert historical.coverage == current.coverage
+    assert historical.default_command == current.default_command
+    assert historical.diagnostics == current.diagnostics
+
+
+def test_blob_config_path_normalization_never_resolves_filesystem(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_resolve(_path: Path, *args: object, **kwargs: object) -> Path:
+        raise AssertionError("historical config consulted Path.resolve")
+
+    def reject_cwd() -> Path:
+        raise AssertionError("historical config consulted Path.cwd")
+
+    monkeypatch.setattr(Path, "resolve", reject_resolve)
+    monkeypatch.setattr(Path, "cwd", staticmethod(reject_cwd))
+
+    resolved = resolve_repository_config_from_blobs(
+        tmp_path,
+        ".backstitch.toml",
+        {
+            ".backstitch.toml": (
+                b'[profile]\ncode_roots = ["src", "tests"]\ntest_roots = ["tests"]\n'
+            )
+        },
+    )
+
+    assert resolved.profile_overrides.test_roots == ("tests",)
 
 
 def test_profile_table_name_loads(tmp_path: Path) -> None:
@@ -1882,7 +1985,7 @@ def test_extend_chain_retains_exact_identities_and_reads_each_layer_once(
     child.write_bytes(child_bytes)
     expected_paths = {parent.resolve(), child.resolve()}
     read_counts = dict.fromkeys(expected_paths, 0)
-    real_read = repository_snapshot.read_regular_nofollow
+    real_read = filesystem_io.read_regular_nofollow
 
     def counting_read(root: Path, relative: str, **kwargs: object) -> object:
         path = (root / relative).resolve()
@@ -1890,7 +1993,7 @@ def test_extend_chain_retains_exact_identities_and_reads_each_layer_once(
             read_counts[path] += 1
         return real_read(root, relative, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(repository_snapshot, "read_regular_nofollow", counting_read)
+    monkeypatch.setattr(filesystem_io, "read_regular_nofollow", counting_read)
 
     settings = resolve_config(tmp_path, explicit=child)
 
@@ -1950,14 +2053,14 @@ def test_unreadable_config_is_a_config_load_error(
 ) -> None:
     config = tmp_path / "config.toml"
     config.write_text('[profile]\nname = "backstitch-style-v1"\n', encoding="utf-8")
-    real_read = repository_snapshot.read_regular_nofollow
+    real_read = filesystem_io.read_regular_nofollow
 
     def unreadable_read(root: Path, relative: str, **kwargs: object) -> object:
         if (root / relative).resolve() == config.resolve():
-            raise repository_snapshot.StableReadError("denied")
+            raise filesystem_io.StableReadError("denied")
         return real_read(root, relative, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(repository_snapshot, "read_regular_nofollow", unreadable_read)
+    monkeypatch.setattr(filesystem_io, "read_regular_nofollow", unreadable_read)
 
     with pytest.raises(ConfigLoadError, match="could not read config"):
         resolve_config(tmp_path, explicit=config)
@@ -1969,16 +2072,14 @@ def test_config_changed_during_its_read_is_a_config_load_error(
 ) -> None:
     config = tmp_path / "config.toml"
     config.write_text('[profile]\nname = "backstitch-style-v1"\n', encoding="utf-8")
-    real_read = repository_snapshot.read_regular_nofollow
+    real_read = filesystem_io.read_regular_nofollow
 
     def changed_read(root: Path, relative: str, **kwargs: object) -> object:
         if (root / relative).resolve() == config.resolve():
-            raise repository_snapshot.StableReadError(
-                "file changed during its bounded read"
-            )
+            raise filesystem_io.StableReadError("file changed during its bounded read")
         return real_read(root, relative, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(repository_snapshot, "read_regular_nofollow", changed_read)
+    monkeypatch.setattr(filesystem_io, "read_regular_nofollow", changed_read)
 
     with pytest.raises(ConfigLoadError, match="changed during its bounded read"):
         resolve_config(tmp_path, explicit=config)

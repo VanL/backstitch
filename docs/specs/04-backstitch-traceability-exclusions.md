@@ -558,6 +558,8 @@ _Implementation mapping_:
 
 ## 9. Verification Expectations [EXC-9]
 
+<!-- backstitch: meta because docs/specs/04-backstitch-traceability-exclusions.md#SUP-VERIFICATION-META -->
+
 Required proof:
 
 - meta file suppresses `SPEC_SECTION_UNMAPPED` but not `SPEC_SECTION_MISSING`
@@ -595,12 +597,9 @@ required declaration leaves the original finding active. A firing
 configuration test proves the new bool changes behavior and a no-op test
 fails if its runtime consultation is removed.
 
-_Implementation mapping_:
-
-- `tests/test_exclusions.py`
-- `tests/test_python_noqa.py`
-
 ## 10. Documentation [EXC-10]
+
+<!-- backstitch: meta because docs/specs/04-backstitch-traceability-exclusions.md#SUP-DOCUMENTATION-META -->
 
 Update on implementation:
 
@@ -623,13 +622,11 @@ _Traceability: suppression-declaration [SUP-EVC-PROCESS] "The EVC purpose and co
 
 _Traceability: suppression-declaration [SUP-EVC-DEFERRED-MCP] "The optional local MCP adapter is explicitly deferred and has no implementation mapping until that product phase is promoted."_
 
-_Traceability: suppression-declaration [SUP-COV-INFLIGHT] "Intent coverage is active while its implementation lands section by section; exact unmapped sections remain visible and temporarily non-failing until each production owner, mapping, and reciprocal backlink lands together."_
-
 _Traceability: suppression-declaration [SUP-TEST-CITATIONS] "Tests cite contracts as verification evidence but are not general implementation owners; test-only unmapped backlinks and reciprocal-mapping findings are retained as audited noise."_
 
-_Implementation mapping_:
+_Traceability: suppression-declaration [SUP-VERIFICATION-META] "Verification sections define proof obligations and test policy rather than runtime implementation behavior, so tests remain reciprocal evidence without being claimed as production implementation owners."_
 
-- `docs/implementation/04-backstitch-style-traceability.md`
+_Traceability: suppression-declaration [SUP-DOCUMENTATION-META] "Documentation-maintenance sections govern synchronized spec and implementation prose rather than a runtime implementation owner, so they remain addressable meta obligations."_
 
 ## Related Plans
 

@@ -30,6 +30,9 @@ Product identity — the boundary rule, evidence-class rule, the two lanes and
 policy layer, the metric identity rule, and the contract-coverage matrix — is
 stated in `02-backstitch-core.md` [SC-16]; feature debates test against it
 first.
+Internal module direction, application/CLI seams, single shipping
+orchestration, and the production complexity ceiling are governed by
+`02-backstitch-core.md` [SC-17].
 Diagnostic identity, short codes, default policy, and the packaged defaults
 layer are governed by `02-backstitch-core.md` [SC-11]/[SC-15] and
 `03-backstitch-configuration.md` [CFG-5]/[CFG-6].

@@ -19,11 +19,12 @@ import pytest
 import backstitch.alignment_eval as alignment_eval
 import backstitch.canonical as canonical_module
 import backstitch.diagnostics as diagnostics
+import backstitch.scan_exclusions as scan_exclusions
 import backstitch.semantic_cache as semantic_cache
 import backstitch.semantic_eval_reports as semantic_eval_reports
 import backstitch.semantic_reports as semantic_reports
 import backstitch.settings as settings_module
-from backstitch.repository_snapshot import _file_stat_identity
+from backstitch.filesystem_io import file_stat_identity
 
 PACKAGE_ROOT = Path(__file__).parents[1] / "backstitch"
 _UNRESOLVED = object()
@@ -441,7 +442,6 @@ CANONICAL_JSON_DISPLAY_EXEMPTION_REASONS = {
 CANONICAL_JSON_DISPLAY_EXEMPTIONS = frozenset(CANONICAL_JSON_DISPLAY_EXEMPTION_REASONS)
 
 SLICE7_PROMPT_CONSUMERS = (
-    Site("backstitch.analysis_llm", "build_prompt", "prompt_resource_read"),
     Site(
         "backstitch.semantic_analysis",
         "_packet_report_preflight",
@@ -467,7 +467,6 @@ SLICE7_PROMPT_CONSUMERS = (
 HISTORICAL_SLICE_0_CANONICAL_JSON = frozenset(
     {
         Site("backstitch.alignment_guide", "render_alignment_guide", "canonical_json"),
-        Site("backstitch.analysis_llm", "render_results_jsonl", "canonical_json"),
         Site(
             "backstitch.artifact_contracts", "invariant_content_hash", "canonical_json"
         ),
@@ -583,8 +582,6 @@ HISTORICAL_SLICE_0_LINE_SITES = frozenset(
         Site("backstitch.alignment_eval", "_candidate_projection", "splitlines"),
         Site("backstitch.alignment_eval", "_tree_delta_stats", "splitlines"),
         Site("backstitch.alignment_eval", "_validate_gold", "splitlines"),
-        Site("backstitch.analysis_llm", "_packet_evidence_bounds", "splitlines"),
-        Site("backstitch.analysis_llm", "_snippet_evidence_bounds", "splitlines"),
         Site("backstitch.analysis_packets", "_generate_section_packets", "splitlines"),
         Site(
             "backstitch.analysis_packets", "_invariant_declaration_record", "splitlines"
@@ -668,19 +665,20 @@ def test_slice_1_closed_owner_inventories_match_the_live_tree() -> None:
         {Site("backstitch.models", "issue_sort_key", "issue_sort_key")}
     )
     assert {item.module for item in _sites("no_follow_read")} == {
-        "backstitch.repository_snapshot"
+        "backstitch.filesystem_io",
+        "backstitch.repository_snapshot",
     }
     assert _sites("stat_identity") == frozenset(
         {
             Site(
-                "backstitch.repository_snapshot",
-                "_file_stat_identity",
+                "backstitch.filesystem_io",
+                "file_stat_identity",
                 "stat_identity",
             )
         }
     )
     assert _sites("exclusion_matcher") == frozenset(
-        {Site("backstitch.settings", "is_excluded", "exclusion_matcher")}
+        {Site("backstitch.scan_exclusions", "is_excluded", "exclusion_matcher")}
     )
     assert frozenset(
         item
@@ -863,9 +861,17 @@ def test_strict_span_policy_matrix(
 
 
 def test_prompt_resources_are_read_only_by_identity_freeze_owners() -> None:
-    """Slice 7.0 pin: downstream consumers receive frozen prompt bytes."""
+    """The packet-plan owner freezes prompt resources into exact request bytes."""
 
-    assert _sites("prompt_resource_read") == frozenset()
+    assert _sites("prompt_resource_read") == frozenset(
+        {
+            Site(
+                "backstitch.analysis_packets",
+                "_packet_contribution",
+                "prompt_resource_read",
+            )
+        }
+    )
 
 
 @pytest.mark.parametrize(
@@ -917,20 +923,22 @@ def test_issue_sort_key_has_one_production_owner() -> None:
 def test_no_follow_read_and_stat_identity_have_one_owner_module() -> None:
     """Tests-invariant: [INV.CANON.1]
 
-    Slice-1 pin: all low-level stable-read primitives belong to snapshot.
+    The generic stable-read owner is a leaf. Snapshot keeps only its
+    domain-specific whole-capture descriptor walk and retry policy.
     """
 
     assert {item.module for item in _sites("no_follow_read")} == {
-        "backstitch.repository_snapshot"
+        "backstitch.filesystem_io",
+        "backstitch.repository_snapshot",
     }
     assert {item.module for item in _sites("stat_identity")} == {
-        "backstitch.repository_snapshot"
+        "backstitch.filesystem_io"
     }
 
 
 def test_exclusion_matcher_has_one_production_owner() -> None:
     assert _sites("exclusion_matcher") == frozenset(
-        {Site("backstitch.settings", "is_excluded", "exclusion_matcher")}
+        {Site("backstitch.scan_exclusions", "is_excluded", "exclusion_matcher")}
     )
 
 
@@ -958,7 +966,7 @@ def test_semantic_cache_uses_the_shared_six_field_stat_identity(tmp_path: Path) 
     path = tmp_path / "object.json"
     path.write_bytes(b"{}")
     observed = path.lstat()
-    expected = _file_stat_identity(observed)
+    expected = file_stat_identity(observed)
     assert alignment_eval._authoritative_stat_identity(observed) == expected
     assert settings_module._config_stat_identity(observed) == expected
     assert semantic_cache._lstat_identity(observed) == expected
@@ -1102,10 +1110,10 @@ def test_d5_relative_path_and_boolean_policies_preserve_return_types(
         semantic_eval_reports._boolean(1, "flag")
 
 
-def test_settings_exclusion_matcher_normalizes_backslashes() -> None:
+def test_scan_exclusion_matcher_normalizes_backslashes() -> None:
     """D9 characterization for the behavior missing from the snapshot twin."""
 
-    assert settings_module.is_excluded("src\\generated\\item.py", ("src/generated/**",))
+    assert scan_exclusions.is_excluded("src\\generated\\item.py", ("src/generated/**",))
 
 
 def test_os_stat_fixture_exposes_all_shared_identity_fields(tmp_path: Path) -> None:
@@ -1114,7 +1122,7 @@ def test_os_stat_fixture_exposes_all_shared_identity_fields(tmp_path: Path) -> N
     path = tmp_path / "identity"
     path.write_text("identity", encoding="utf-8")
     observed = os.lstat(path)
-    identity = _file_stat_identity(observed)
+    identity = file_stat_identity(observed)
     assert len(identity) == 6
     assert identity[0] == observed.st_dev
     assert identity[1] == observed.st_ino

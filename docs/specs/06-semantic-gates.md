@@ -27,6 +27,7 @@ evidence-bound and replayable without being mechanically true.
 _Implementation mapping_:
 
 - `backstitch/semantic_analysis.py`
+- `backstitch/semantic_application.py`
 
 ## 2. Mental Model And Layering [SEM-2]
 
@@ -309,6 +310,119 @@ response ID, and token usage are opaque provenance only. They never change the
 pre-call key and are not compared to declared aliases unless a future keyed
 adapter contract defines an exact comparator.
 
+Inference resolution has one immutable owner. A resolved analyzer or verifier
+selection contains:
+
+- the stable `ProviderIdentity` above, whose `model_id` is the selected
+  canonical Model Monster PURL;
+- the analyzer or verifier raw `adapter_model_id` used only as the transport
+  selector;
+- one frozen `EffectiveRequest`;
+- the `RequestIdentity` derived from that exact effective request; and
+- the selected trusted capability descriptor and its provenance.
+
+A composed analyzer/verifier selection retains the analyzer and verifier raw
+transport selectors separately. A stable PURL is never sent as the raw model
+selector merely because both values identify the same model, and a raw
+selector never replaces `provider.model_id` in an inference, review, report,
+or cache identity. The adapter receives the resolved selection and may only
+serialize its frozen effective request plus the already-resolved raw selector
+where the transport protocol requires one. It may not add, remove, correct, or
+renormalize an inference-affecting request field after `RequestIdentity` is
+derived.
+
+`EffectiveRequest` makes a presence decision for every known request field:
+`json_mode`, `temperature`, `seed`, and `max_tokens`. A present field carries
+its canonical validated value. An absent optional or forbidden field is
+recorded as absent by the immutable resolved value and is omitted from both the
+transport body and the closed `RequestIdentity` JSON projection. Because the
+field vocabulary is closed, omission is an unambiguous identity decision, not
+an adapter default. The request projection for an existing logical request
+whose four fields remain present is byte-for-byte the request object shown
+above. A protocol-required constant is present in `EffectiveRequest`,
+`RequestIdentity`, and the transport body.
+
+Capability authority is a trusted committed descriptor selected before
+inference resolution. Its closed shape is:
+
+```text
+{
+  capability_schema_version: 1,
+  capability_revision,
+  provider: {model_id, model_revision},
+  request_constraints: {
+    json_mode:  {presence, allowed_values, minimum, maximum},
+    temperature:{presence, allowed_values, minimum, maximum},
+    seed:       {presence, allowed_values, minimum, maximum},
+    max_tokens: {presence, allowed_values, minimum, maximum}
+  },
+  maximum_input_bytes
+}
+```
+
+`capability_revision`, provider values, and `model_id` are nonblank;
+`model_id` is the canonical Model Monster PURL and `maximum_input_bytes` is a
+positive integer. Every field rule contains exactly the four shown members.
+`presence` is `required`, `optional`, or `forbidden`; `allowed_values` is null
+or a nonempty canonical list in the field's existing value domain; and
+`minimum`/`maximum` are both null or form valid inclusive numeric bounds.
+Allowed values and bounds cannot coexist. A forbidden rule requires the other
+three members to be null. Descriptor provenance is the separately resolved
+closed object `{source, source_sha256}`, where `source` is either the committed
+repository-relative descriptor source or a nonblank `packaged:` source
+identifier and `source_sha256` hashes its exact defining bytes. A descriptor
+cannot omit a known field rule, admit an unknown request field, or disagree
+with its provenance bytes.
+
+The resolved effective request must satisfy every rule before adapter
+construction, credential access, cache work, or provider work. Backstitch
+reports the exact dotted configuration key for an incompatible configured
+value; it does not silently correct that value. The complete model-request byte
+length must not exceed the descriptor's `maximum_input_bytes`.
+
+Mutable provider metadata, local wrapper introspection, and live qualification
+receipts are not capability authority. A local wrapper may be constructed to
+check the committed descriptor only when doing so is provider-free: it may not
+read or transmit a credential, perform network traffic, mutate cache state, or
+publish an artifact. A descriptor change is reviewed committed input. If it
+changes any effective request byte or stable provider identity field, the
+ordinary inference-identity rules re-key the request; validation-only
+descriptor revision or provenance does not enter `RequestIdentity`,
+`analysis_key`, or `review_key`.
+
+A live capability qualification receipt is release evidence, not semantic
+input. Its closed shape is:
+
+```text
+{
+  schema_version: 1,
+  artifact: "backstitch-capability-qualification",
+  stable_model_id,
+  model_revision,
+  adapter_model_id,
+  capability_revision,
+  descriptor_provenance: {source, source_sha256},
+  runtime: {
+    llm_distribution_version,
+    plugin_distribution_name,
+    plugin_distribution_version
+  },
+  request_identity,
+  outcome: "compatible" | "incompatible" | "unavailable",
+  observed_at_utc,
+  details
+}
+```
+
+All identifier, version, path, timestamp, and detail strings are nonblank;
+hashes are canonical lowercase SHA-256; `request_identity` is the exact closed
+identity attempted by the lane; and `details` is a bounded operator-facing
+observation, not provider authority. A receipt never edits or overrides a
+descriptor and never enters packet, prompt, request, inference, review, cache,
+result, report, or finding identity. Refreshing only the receipt therefore
+cannot create a cache miss or relabel a historical result. The protected live
+qualification and maximum receipt age are [SEM-9]/[SC-10].
+
 `backend_id`, `plugin_id`, `model_id`, and `model_revision` must be nonblank in
 `read-write` and `require` modes. They may be blank in `off` mode, where no
 cache identity is promised. In off mode a blank `plugin_distribution_name`
@@ -369,6 +483,7 @@ _Implementation mapping_:
 
 - `backstitch/semantic_packets.py`
 - `backstitch/semantic_identity.py`
+- `backstitch/semantic_verification_contract.py`
 - `backstitch/analysis_llm.py`
 
 ### 4. Immutable Semantic Cache [SEM-4]
@@ -505,6 +620,14 @@ their respective paths and key member in the otherwise corresponding closed
 audit object. `analyze.lock_wait_timeout_seconds` governs analysis and review
 waits; `verify.lock_wait_timeout_seconds` governs verifier waits. Stale age
 remains an explicit cleanup-command input rather than repository config.
+
+Analyzer, evidence-stable review, and verifier single-flight use one
+parameterized internal ownership coordinator. It owns guard acquisition, lock
+creation and validation, ownership tokens, waiting, completion, reincarnation
+handling, cleanup, and timeout. Family adapters supply only key/object types,
+paths, completion loading/publication, and their closed object validation. The
+shared implementation does not change family object bytes, paths, lexical lock
+order, audit records, cleanup behavior, or failure priority.
 
 For the review-key substitution, the completion object polled by waiters is
 `baselines/<review_key>.json`, not a result path. The owner still publishes and
@@ -671,6 +794,9 @@ process identity live only in operational reports.
 _Implementation mapping_:
 
 - `backstitch/semantic_cache.py`
+- `tests/test_semantic_cache.py`
+- `tests/test_semantic_cache_coordinator.py`
+- `tests/test_semantic_verification.py`
 
 ### 5. Evidence And Verification State [SEM-5]
 
@@ -952,6 +1078,42 @@ backstitch analyze --packets packets.jsonl \
 Current analysis instead accepts `backstitch analyze --repo-root PATH` and
 derives packet/report bytes inside [EVC-5.1]'s capture/recapture boundary.
 
+Current repository analysis has one preparation/execution lifecycle.
+`prepare_analysis` resolves configuration and inference, captures the accepted
+source snapshot, derives readiness, and produces the authoritative complete
+packet plan with the exact canonical packet and model-request bytes retained
+for execution. It is provider-free and has no semantic side effects: no
+provider call, credential read, cache read or mutation, output temporary,
+result/report publication, or partial packet/report publication is permitted.
+`analyze --preflight` renders this same preparation and stops. Ordinary
+`analyze` calls `prepare_analysis` once and passes the returned immutable value
+to `execute_prepared_analysis`; it does not rebuild readiness, packets,
+prompts, request identity, or budget facts through another path.
+
+Execution performs two currentness recaptures against the preparation's source
+snapshot and derivation identity. The first occurs before any semantic cache
+lookup, cache mutation, adapter/provider work, or semantic output temporary.
+A mismatch exits `2` with zero such work. The second occurs after all selected
+results are available and immediately before current result/report
+publication. A mismatch there exits `2` and publishes no current result or
+report; immutable cache objects already completed by the attempted analysis
+remain disposable historical acceleration state and gain no current-source
+authority. The final publication uses only the canonical packet,
+model-request, result, and report bytes derived from or joined to the accepted
+preparation. Neither recapture reparses a prepared packet or changes an
+identity.
+
+Preparation is also the sole budget authority for the current corpus.
+`analyze.maximum_prompt_bytes` retains its existing aggregate meaning:
+`prompt_byte_count` is the sum of exact `model_request_bytes` over every
+selected packet, regardless of cache-hit expectation. It is never a
+per-request or per-packet ceiling. Independently, each complete selected
+`model_request_bytes` value must fit the trusted capability descriptor's
+`maximum_input_bytes`. The same retained bytes are counted, keyed, and sent.
+A failure of the aggregate prompt ceiling or any per-request capability
+ceiling exits `2` before cache or provider work; no second materialization may
+produce different bytes after the check.
+
 The resolved analysis output and non-null report paths must be distinct.
 Equality is invalid input and exits `2` before temporary creation, cache work,
 adapter construction, provider work, or publication.
@@ -962,8 +1124,8 @@ readiness counts, byte counts, and derivation identities must satisfy
 [EVC-9.1] before cache or provider work. Packet-schema-2 input remains bounded
 historical validation/presentation only and cannot produce this report.
 
-The current analysis report is the closed schema 5 contract in [EVC-9.1];
-historical analysis retains the closed schema 3 and 4 readers. The current contract
+The current analysis report is the closed schema 6 contract in [EVC-9.1];
+historical analysis retains the closed schema 3, 4, and 5 readers. The current contract
 retains the following analyzer fields from schema 3 and the former schema-1
 report while adding scope, semantic status, artifact integrity/currentness,
 source provenance/snapshot, packet-report content hash, alignment summary and
@@ -994,9 +1156,9 @@ packet report and exits `2` before adapter construction. A required
 suppressions is vacuously complete so deleting the last suppression does not
 break CI.
 
-Packet-report schema 3 and analysis-report schema 5 are the current producer
+Packet-report schema 3 and analysis-report schema 6 are the current producer
 contracts. Readers retain exact packet-report schema 2 and analysis-report
-schema 3 and 4 support. Compatibility readers never invent result-reuse
+schema 3, 4, and 5 support. Compatibility readers never invent result-reuse
 metadata or reinterpret an old row as a suppression row.
 Analysis-report schema 4 added `packet_schema_versions` from packet-report
 schema 3 and `kind_counts`; schema 5 retains both. `kind_counts` contains exactly `eligible`,
@@ -1006,11 +1168,16 @@ integers. Eligible/emitted copy the packet report. Results and work counts
 recompute from canonical rows and operational events; each nested total
 equals the corresponding existing aggregate count.
 
-Schema 5 adds `result_reuse`, `selected_inference`, `exact_cache_hits`,
+Schema 5 added `result_reuse`, `selected_inference`, `exact_cache_hits`,
 `carried_results`, `result_sources`, and `result_providers`. `result_reuse` is
-the resolved [SEM-4] enum. `selected_inference` contains exactly `provider`,
-`request`, `analysis_contract_version`, `search_epoch`, and `prompts`. Its
-first four members have their exact [SEM-3] inference-contract shapes.
+the resolved [SEM-4] enum. Schema 6 retains those fields and adds
+`selected_inference.adapter_model_id`. Its `selected_inference` contains
+exactly `provider`, `adapter_model_id`, `request`,
+`analysis_contract_version`, `search_epoch`, and `prompts`. The raw adapter
+model ID is the nonblank analyzer transport selector selected for this run; it
+is operational provenance and is excluded when reconstructing
+`analysis_key` or `review_key`. The provider, request, and contract members
+have their exact [SEM-3] inference-contract shapes.
 `prompts` is in canonical packet-kind order and each row contains exactly
 `kind` plus that kind's code-owned `id`, `version`, and `sha256` prompt
 descriptor. It supplies the selected-provider preimage needed to reconstruct
@@ -1182,9 +1349,18 @@ Exit precedence is:
 Tool and completeness failures take precedence over target findings. Policy
 cannot convert them to exit `0` or `1`.
 
+Report trust boundaries validate the closed top-level shape and ordered
+field domains before recomputing alignment, count, identity, and content-hash
+claims. A report with multiple defects fails at the first invalid contract
+phase; later defects cannot mask or reorder that error.
+
 _Implementation mapping_:
 
+- `backstitch/artifact_publication.py`
+- `backstitch/packet_application.py`
 - `backstitch/semantic_analysis.py`
+- `backstitch/semantic_application.py`
+- `backstitch/semantic_budget.py`
 - `backstitch/semantic_reports.py`
 - `backstitch/cli.py`
 
@@ -1501,6 +1677,7 @@ positive units.
 _Implementation mapping_:
 
 - `backstitch/semantic_eval.py`
+- `backstitch/semantic_eval_observation.py`
 - `backstitch/semantic_eval_reports.py`
 - `backstitch/cli.py`
 
@@ -1573,6 +1750,26 @@ config sets every shown analyze key explicitly. Every `[verify]` and
 `[verify.eval]` key is strict and closed; the disabled packaged verify table
 supplies no implicit provider or qualification value.
 
+The stable/raw split is also a cache-compatibility invariant. Given unchanged
+packet and prompt bytes, analysis contract version, stable provider identity,
+effective request, and search epoch, inference and review contract bytes and
+their keys remain byte-for-byte unchanged by this resolution refactor. A
+change to any inference-affecting effective-request field, including a field's
+presence, must miss the old analysis and review identities. Changing only the
+raw analyzer or verifier transport alias for the same stable model PURL and
+model revision does not change `RequestIdentity`, `analysis_key`,
+`review_key`, or any immutable cache object path. The call uses the newly
+selected raw alias, while a reused result retains the stable identity and
+observed provenance that produced it.
+
+This split does not change packet, result, report, inference-contract, review,
+or cache-object schema versions. An implementation that cannot preserve the
+existing canonical bytes for an unchanged logical request must stop for an
+explicit versioned migration; it may not probe a new key and fall back to an
+old key. Analyzer and verifier raw aliases remain independently selected and
+must each satisfy their trusted capability descriptor before their effective
+request identity is frozen.
+
 The normative value contract is:
 
 | Keys | Type and range |
@@ -1641,6 +1838,18 @@ runtime overlays in [SEM-9.1]. A clean checkout may therefore miss in the
 zero-call profile until a validated external cache has been restored; this is
 an honest availability failure, not a reason to commit cache objects.
 
+Protected scheduled qualification and every release candidate exercise one
+bounded accepted request for the committed default model and one for the
+committed override through their production stable/raw selections and
+capability descriptors. Each successful call is immediately replayed from
+immutable cache with zero provider calls. The resulting qualification receipt
+is valid for seven days from its UTC observation time. Release evidence must
+contain a compatible receipt for each selection that is no older than seven
+days; provider unavailability is recorded distinctly from request
+incompatibility and satisfies neither selection. These receipts remain
+non-normative evidence under [SEM-3] and cannot update descriptors or semantic
+identity.
+
 For required kinds, `suppression` follows `invariant` in canonical order. A
 valid current packet report already proves that every eligible suppression
 has been emitted. Zero eligible suppressions is vacuously complete.
@@ -1704,6 +1913,7 @@ _Implementation mapping_:
 - `backstitch/settings.py`
 - `backstitch/cli.py`
 - `.github/scripts/resolve_semantic_pr.py`
+- `tests/acceptance/test_probe_full_dogfood.py`
 - `tests/test_release_workflow.py`
 
 ### 9.1 Trusted Runtime Overrides [SEM-9.1]
@@ -1781,6 +1991,7 @@ remain unchanged.
 
 _Implementation mapping_:
 
+- `backstitch/settings.py`
 - `pyproject.toml`
 - `.github/workflows/semantic-refresh.yml`
 - `.github/workflows/semantic-pr-report.yml`
@@ -1791,6 +2002,28 @@ _Implementation mapping_:
 
 Executable gates cover:
 
+- stable PURL and raw analyzer/verifier selector separation through the public
+  resolver and adapter seam; a raw-alias-only change preserves every
+  inference/review/cache key, while each stable identity and effective-request
+  mutation misses
+- every capability field presence state and every allowed-value/bounds failure
+  fires before credential, cache, or provider work; the adapter sends exactly
+  the frozen effective request, including omission of each absent field
+- unchanged four-present-field request fixtures retain byte-identical
+  request, inference, review, and cache identity bytes without a schema or
+  compatibility fallback
+- `analyze --preflight` and ordinary current analysis consume one preparation
+  identity; preflight has zero provider, credential, cache, temporary, and
+  publication effects
+- source mutation before execution performs zero cache/provider work, while
+  mutation during execution publishes no current result/report; both
+  currentness recaptures have firing race tests
+- the aggregate `maximum_prompt_bytes` ceiling fires only on the sum across
+  selected requests, each descriptor `maximum_input_bytes` ceiling fires on
+  one complete request, and the exact measured bytes are the bytes sent
+- qualification receipts fire for compatible, incompatible, unavailable,
+  current, and older-than-seven-days cases; receipt-only mutation leaves all
+  semantic and cache identities unchanged
 - mutation matrices proving every model-visible semantic-projection field
   changes `packet_hash`, code-owned prompt instructions change prompt identity
   and `analysis_key` without changing packet hash, and policy/render/
@@ -1898,13 +2131,24 @@ exercises at least one real suppression packet.
 
 _Implementation mapping_:
 
+- `backstitch/semantic_cache.py`
 - `tests/acceptance/test_probe_analysis.py`
+- `tests/acceptance/test_probe_full_dogfood.py`
 - `tests/acceptance/test_probe_semantic_replay.py`
+- `tests/test_semantic_cache.py`
+- `tests/test_semantic_cache_coordinator.py`
 - `tests/test_semantic_eval.py`
 - `tests/test_release_workflow.py`
+- `tests/test_semantic_verification.py`
 
 ## Related Plans
 
+- `docs/plans/2026-08-04-semantic-preparation-performance-plan.md`
+  (implementation plan; [SEM-10])
+- `docs/plans/2026-07-29-usability-remediation-plan.md`
+  (active implementation plan; [SEM-3], [SEM-7], and [SEM-9])
+- `docs/plans/2026-07-29-architecture-quality-remediation-plan.md`
+  (active implementation plan; [SEM-3], [SEM-4], [SEM-8], and [SEM-10])
 - `docs/plans/2026-07-28-intent-coverage-implementation-plan.md`
   (active implementation plan; [COV-7]/[SEM-8] anti-Goodhart corpus)
 - `docs/plans/2026-07-28-evidence-stable-semantic-result-reuse-plan.md`

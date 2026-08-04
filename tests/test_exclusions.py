@@ -65,6 +65,22 @@ def test_inline_forms_preserve_valid_declaration_references() -> None:
     assert noqa[0].line == 7
 
 
+@pytest.mark.parametrize(
+    "marker",
+    (
+        "_Traceability: meta because docs/specs/01-x.md#SUP-X_",
+        "<!-- backstitch: meta because docs/specs/01-x.md#SUP-X -->",
+    ),
+)
+def test_meta_forms_preserve_valid_declaration_references(marker: str) -> None:
+    directive, diagnostics = parse_traceability_directive_line(marker)
+
+    assert diagnostics == []
+    assert directive is not None
+    assert directive.mechanism == "meta"
+    assert directive.declaration == "docs/specs/01-x.md#SUP-X"
+
+
 def test_clause_bearing_inline_form_rejects_invalid_reference_under_hatch() -> None:
     directive, diagnostics = parse_traceability_directive_line(
         "_Traceability: ignore BSS007 because ../outside.md#SUP-X_",
@@ -94,6 +110,23 @@ def test_meta_glob_suppresses_unmapped_but_not_missing() -> None:
         _issue("SPEC_SECTION_MISSING", severity="error"), index
     )
     assert not suppressed and reason is None
+
+
+def test_test_only_mapping_warning_is_ordinary_suppressible_policy() -> None:
+    index = build_suppression_index(
+        meta_spec_globs=(),
+        lint=LintSettings(
+            per_section_ignores={"docs/specs/01-x.md::X-1": ("SPEC_MAPPING_TEST_ONLY",)}
+        ),
+    )
+
+    suppressed, reason = should_suppress(
+        _issue("SPEC_MAPPING_TEST_ONLY", severity="warning"),
+        index,
+    )
+
+    assert suppressed
+    assert reason is SuppressionReason.CONFIG_SECTION
 
 
 def test_legacy_meta_and_inline_rules_do_not_gain_unused_diagnostics() -> None:

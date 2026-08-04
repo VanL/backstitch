@@ -38,6 +38,8 @@ ObligationRung = Literal["active", "planned", "exploratory", "meta"]
 GateState = Literal["not_executable", "executable"]
 ObligationKind = Literal["section", "invariant", "suppression"]
 EvidenceRole = Literal["implementation", "test", "binding_test"]
+ModelEvidenceRole = Literal["implementation", "test"]
+EvidenceEligibility = Literal["implementation", "test", "binding_test", "invalid"]
 ReciprocityState = Literal["complete", "one_sided"]
 RelationKind = Literal[
     "spec_mapping",
@@ -45,6 +47,11 @@ RelationKind = Literal[
     "invariant_declaration",
     "invariant_bind",
     "binding_test",
+    "static_import",
+    "static_call",
+    "static_reference",
+    "enclosing_definition",
+    "issue_target",
 ]
 GuidanceCode = Literal[
     "ADD_OR_CONFIGURE_SPEC_INTENT",
@@ -384,39 +391,121 @@ class ObligationInventory:
 
 
 @dataclass(frozen=True, slots=True)
-class _EvidenceFact:
-    role: Literal["implementation", "test"]
-    path: str
-    symbol: str | None
-    relation_kinds: tuple[Literal["spec_mapping", "code_backlink"], ...]
+class ResolvedEvidenceAtom:
+    """One canonical role, relation, and eligibility decision ([EVC-2.2])."""
+
+    source_role: EvidenceRole
+    model_role: ModelEvidenceRole
+    source_identity: str
+    relation_kinds: tuple[RelationKind, ...]
     reciprocity_state: ReciprocityState
+    eligibility: EvidenceEligibility
+    reason: str | None
+
+    def __post_init__(self) -> None:
+        if not self.source_identity.strip():
+            raise ValueError("source_identity must be nonblank")
+        if not self.relation_kinds:
+            raise ValueError("relation_kinds must be nonempty")
+        if self.eligibility == "invalid":
+            if self.reason is None or not self.reason.strip():
+                raise ValueError("invalid evidence requires a nonblank reason")
+        elif self.reason is not None:
+            raise ValueError("eligible evidence cannot carry a blocking reason")
+
+    def to_row(self) -> dict[str, object]:
+        return {
+            "source_role": self.source_role,
+            "model_role": self.model_role,
+            "source_identity": self.source_identity,
+            "relation_kinds": list(self.relation_kinds),
+            "reciprocity_state": self.reciprocity_state,
+            "eligibility": self.eligibility,
+            "reason": self.reason,
+        }
+
+
+_RELATION_ORDER: tuple[RelationKind, ...] = (
+    "spec_mapping",
+    "code_backlink",
+    "invariant_declaration",
+    "invariant_bind",
+    "binding_test",
+    "static_import",
+    "static_call",
+    "static_reference",
+    "enclosing_definition",
+    "issue_target",
+)
+
+
+def resolved_source_identity(path: str, symbol: str | None) -> str:
+    """Return the canonical graph-level identity for one resolved source."""
+
+    identity = canonical_json_bytes(
+        {
+            "path": path,
+            "symbol": symbol,
+            "source_identity_version": 1,
+        }
+    )
+    return f"source:sha256:{hashlib.sha256(identity).hexdigest()}"
+
+
+def resolve_evidence_atom(
+    *,
+    path: str,
+    symbol: str | None,
+    relation_kinds: Sequence[RelationKind],
+    reciprocity_state: ReciprocityState,
+    test_roots: Sequence[str],
+    source_identity: str | None = None,
+    binding_test: bool = False,
+    valid: bool = True,
+    reason: str | None = None,
+) -> ResolvedEvidenceAtom:
+    """Resolve evidence once so consumers never reclassify it from a path."""
+
+    if binding_test:
+        source_role: EvidenceRole = "binding_test"
+    else:
+        source_role = "test" if _is_under(path, test_roots) else "implementation"
+    ordered_relations = tuple(
+        relation
+        for relation in _RELATION_ORDER
+        if relation in frozenset(relation_kinds)
+    )
+    return ResolvedEvidenceAtom(
+        source_role=source_role,
+        model_role="implementation" if source_role == "implementation" else "test",
+        source_identity=source_identity or resolved_source_identity(path, symbol),
+        relation_kinds=ordered_relations,
+        reciprocity_state=reciprocity_state,
+        eligibility=source_role if valid else "invalid",
+        reason=reason if not valid else None,
+    )
 
 
 @dataclass(frozen=True, slots=True)
 class _SectionEvidence:
-    facts: tuple[_EvidenceFact, ...]
+    facts: tuple[ResolvedEvidenceAtom, ...]
 
     def for_role(
         self, role: Literal["implementation", "test"]
-    ) -> tuple[_EvidenceFact, ...]:
-        return tuple(item for item in self.facts if item.role == role)
+    ) -> tuple[ResolvedEvidenceAtom, ...]:
+        return tuple(item for item in self.facts if item.source_role == role)
 
     def role_complete(self, role: Literal["implementation", "test"]) -> bool:
         facts = self.for_role(role)
-        return bool(facts) and all(
-            item.reciprocity_state == "complete" for item in facts
+        return any(
+            item.eligibility == role and item.reciprocity_state == "complete"
+            for item in facts
         )
 
 
 def _is_under(path: str, roots: Sequence[str]) -> bool:
     pure = PurePosixPath(path)
     return any(pure.is_relative_to(PurePosixPath(root)) for root in roots)
-
-
-def _evidence_role(
-    path: str, test_roots: Sequence[str]
-) -> Literal["implementation", "test"]:
-    return "test" if _is_under(path, test_roots) else "implementation"
 
 
 def _mapping_covers(mapping: Edge, backlink: Edge) -> bool:
@@ -524,7 +613,7 @@ def _section_evidence(
     declaration_indexes = associate_mapping_declaration_indexes(
         source_mappings, mapping_edges
     )
-    facts: dict[tuple[str, str, str | None], _EvidenceFact] = {}
+    facts: dict[tuple[str, str, str | None], ResolvedEvidenceAtom] = {}
 
     matched_mapping_edge_indexes: set[int] = set()
     matched_backlink_edges: set[Edge] = set()
@@ -538,29 +627,33 @@ def _section_evidence(
             continue
         matched_backlink_edges.add(backlink)
         matched_mapping_edge_indexes.update(matching)
-        role = _evidence_role(backlink.code_path, test_roots)
-        facts[(role, backlink.code_path, backlink.code_symbol)] = _EvidenceFact(
-            role,
-            backlink.code_path,
-            backlink.code_symbol,
-            ("spec_mapping", "code_backlink"),
-            "complete",
+        atom = resolve_evidence_atom(
+            path=backlink.code_path,
+            symbol=backlink.code_symbol,
+            relation_kinds=("spec_mapping", "code_backlink"),
+            reciprocity_state="complete",
+            test_roots=test_roots,
         )
+        facts[(atom.source_role, backlink.code_path, backlink.code_symbol)] = atom
 
     for edge_index, mapping_edge in enumerate(mapping_edges):
         if edge_index in matched_mapping_edge_indexes:
             continue
-        role = _evidence_role(mapping_edge.code_path, test_roots)
-        fact_key = (role, mapping_edge.code_path, mapping_edge.code_symbol)
+        atom = resolve_evidence_atom(
+            path=mapping_edge.code_path,
+            symbol=mapping_edge.code_symbol,
+            relation_kinds=("spec_mapping",),
+            reciprocity_state="one_sided",
+            test_roots=test_roots,
+        )
+        fact_key = (
+            atom.source_role,
+            mapping_edge.code_path,
+            mapping_edge.code_symbol,
+        )
         facts.setdefault(
             fact_key,
-            _EvidenceFact(
-                role,
-                mapping_edge.code_path,
-                mapping_edge.code_symbol,
-                ("spec_mapping",),
-                "one_sided",
-            ),
+            atom,
         )
 
     resolved_mapping_indexes = {
@@ -570,37 +663,35 @@ def _section_evidence(
         if mapping_index in resolved_mapping_indexes:
             continue
         path = spec_mapping.target_path or spec_mapping.target
-        role = (
-            _evidence_role(path, test_roots)
-            if spec_mapping.target_path
-            else "implementation"
+        atom = resolve_evidence_atom(
+            path=path,
+            symbol=spec_mapping.target_symbol,
+            relation_kinds=("spec_mapping",),
+            reciprocity_state="one_sided",
+            test_roots=test_roots if spec_mapping.target_path else (),
+            valid=False,
+            reason="mapping target did not resolve",
         )
-        fact_key = (role, path, spec_mapping.target_symbol)
+        fact_key = (atom.source_role, path, spec_mapping.target_symbol)
         facts.setdefault(
             fact_key,
-            _EvidenceFact(
-                role,
-                path,
-                spec_mapping.target_symbol,
-                ("spec_mapping",),
-                "one_sided",
-            ),
+            atom,
         )
 
     for backlink in backlink_edges:
         if backlink in matched_backlink_edges:
             continue
-        role = _evidence_role(backlink.code_path, test_roots)
-        fact_key = (role, backlink.code_path, backlink.code_symbol)
+        atom = resolve_evidence_atom(
+            path=backlink.code_path,
+            symbol=backlink.code_symbol,
+            relation_kinds=("code_backlink",),
+            reciprocity_state="one_sided",
+            test_roots=test_roots,
+        )
+        fact_key = (atom.source_role, backlink.code_path, backlink.code_symbol)
         facts.setdefault(
             fact_key,
-            _EvidenceFact(
-                role,
-                backlink.code_path,
-                backlink.code_symbol,
-                ("code_backlink",),
-                "one_sided",
-            ),
+            atom,
         )
 
     return _SectionEvidence(
@@ -608,9 +699,8 @@ def _section_evidence(
             sorted(
                 facts.values(),
                 key=lambda item: (
-                    0 if item.role == "implementation" else 1,
-                    item.path,
-                    item.symbol or "",
+                    0 if item.source_role == "implementation" else 1,
+                    item.source_identity,
                     item.relation_kinds,
                 ),
             )
@@ -644,6 +734,62 @@ def _rung_for_section(
     ):
         return "exploratory"
     return "active"
+
+
+def mapping_test_only_issues(
+    report: Report,
+    *,
+    profile: ProfileConfig,
+    section_meta: frozenset[tuple[str, str]],
+    meta_spec_globs: tuple[str, ...],
+) -> tuple[Issue, ...]:
+    """Emit one BSC009 warning for each active test-only mapping ([SC-11])."""
+
+    mapping_edges: dict[tuple[str, str], list[Edge]] = {}
+    for edge in report.edges:
+        if edge.kind == "mapping":
+            mapping_edges.setdefault((edge.spec_path, edge.section_id), []).append(edge)
+    issues: list[Issue] = []
+    for section in report.spec_sections:
+        if (
+            _rung_for_section(section, profile, section_meta, meta_spec_globs)
+            != "active"
+        ):
+            continue
+        edges = mapping_edges.get((section.path, section.section_id), [])
+        atoms = tuple(
+            (
+                edge,
+                resolve_evidence_atom(
+                    path=edge.code_path,
+                    symbol=edge.code_symbol,
+                    relation_kinds=("spec_mapping",),
+                    reciprocity_state="one_sided",
+                    test_roots=profile.test_roots,
+                ),
+            )
+            for edge in edges
+        )
+        test_edges = [edge for edge, atom in atoms if atom.source_role == "test"]
+        if not test_edges or any(
+            atom.source_role == "implementation" for _edge, atom in atoms
+        ):
+            continue
+        first = min(test_edges, key=lambda edge: (edge.line, edge.code_path))
+        issues.append(
+            Issue(
+                code="SPEC_MAPPING_TEST_ONLY",
+                severity="warning",
+                path=section.path,
+                line=first.line,
+                message=(
+                    f"section [{section.section_id}] maps implementation only"
+                    " to configured test roots"
+                ),
+                section_id=section.section_id,
+            )
+        )
+    return tuple(issues)
 
 
 def _rung_for_invariant(
@@ -859,19 +1005,38 @@ def _invariant_targets(
     declaration_indexes = associate_mapping_declaration_indexes(
         source_mappings, mapping_edges
     )
+    production_mapping_indexes = {
+        index
+        for index, mapping in enumerate(source_mappings)
+        if resolve_evidence_atom(
+            path=mapping.target_path or mapping.target,
+            symbol=mapping.target_symbol,
+            relation_kinds=("invariant_bind",),
+            reciprocity_state="one_sided",
+            test_roots=test_roots if mapping.target_path is not None else (),
+        ).source_role
+        == "implementation"
+    }
     valid_indexes: set[int] = set()
     resolved_targets: set[tuple[str, str | None]] = set()
     for edge, mapping_index in zip(mapping_edges, declaration_indexes, strict=True):
         target = (edge.code_path, edge.code_symbol)
+        atom = resolve_evidence_atom(
+            path=edge.code_path,
+            symbol=edge.code_symbol,
+            relation_kinds=("invariant_bind",),
+            reciprocity_state="one_sided",
+            test_roots=test_roots,
+        )
         if (
             mapping_index is None
-            or _is_under(edge.code_path, test_roots)
+            or atom.source_role != "implementation"
             or target not in atomic_targets
         ):
             continue
         valid_indexes.add(mapping_index)
         resolved_targets.add(target)
-    broken_count = len(source_mappings) - len(valid_indexes)
+    broken_count = len(production_mapping_indexes - valid_indexes)
     return (
         tuple(sorted(resolved_targets, key=lambda item: (item[0], item[1] or ""))),
         broken_count,

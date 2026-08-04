@@ -8,8 +8,16 @@ from pathlib import Path
 
 import pytest
 
+import backstitch.obligation_api as obligation_api
 from backstitch import cli
-from backstitch.obligation_api import encode_page_cursor
+from backstitch.obligation_api import (
+    ObligationRequest,
+    encode_page_cursor,
+    read_obligation,
+    render_envelope_json,
+)
+from backstitch.profiles import configured_profile
+from backstitch.settings import BackstitchSettings
 
 
 def _write_discovery_repo(root: Path) -> str:
@@ -25,6 +33,80 @@ def _write_discovery_repo(root: Path) -> str:
         encoding="utf-8",
     )
     return obligation_id
+
+
+def test_application_list_result_is_byte_equivalent_to_cli(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    for relative in ("docs/specs", "docs/plans", "backstitch", "tests"):
+        (tmp_path / relative).mkdir(parents=True, exist_ok=True)
+    settings = BackstitchSettings()
+
+    application = read_obligation(
+        ObligationRequest(
+            operation="obligation.list",
+            repo_root=tmp_path,
+            profile=configured_profile(settings),
+            settings=settings,
+        )
+    )
+    exit_code = cli.main(
+        (
+            "obligation",
+            "list",
+            "--repo-root",
+            str(tmp_path),
+            "--no-config",
+            "--format",
+            "json",
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert application.failed is False
+    assert exit_code == 0
+    assert render_envelope_json(application.envelope) == captured.out
+    assert captured.err == ""
+
+
+def test_application_cursor_failure_is_byte_equivalent_to_cli(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    for relative in ("docs/specs", "docs/plans", "backstitch", "tests"):
+        (tmp_path / relative).mkdir(parents=True, exist_ok=True)
+    settings = BackstitchSettings()
+
+    application = read_obligation(
+        ObligationRequest(
+            operation="obligation.list",
+            repo_root=tmp_path,
+            profile=configured_profile(settings),
+            settings=settings,
+            cursor="not-a-cursor",
+        )
+    )
+    exit_code = cli.main(
+        (
+            "obligation",
+            "list",
+            "--cursor",
+            "not-a-cursor",
+            "--repo-root",
+            str(tmp_path),
+            "--no-config",
+            "--format",
+            "json",
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert application.failed is True
+    assert application.envelope["problems"][0]["code"] == "CURSOR_INVALID"
+    assert exit_code == 2
+    assert render_envelope_json(application.envelope) == captured.out
+    assert captured.err == ""
 
 
 def test_limit_error_quotes_effective_configured_bound(
@@ -54,6 +136,64 @@ def test_limit_error_quotes_effective_configured_bound(
     assert exit_code == 2
     envelope = json.loads(captured.out)
     assert envelope["problems"][0]["details"]["reason"] == ("--limit must be in [1, 3]")
+
+
+def test_list_filters_are_public_and_detail_rejects_them(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    obligation_id = _write_discovery_repo(tmp_path)
+
+    exit_code = cli.main(
+        (
+            "obligation",
+            "list",
+            "--repo-root",
+            str(tmp_path),
+            "--no-config",
+            "--active-only",
+            "--alignment-state",
+            "untraced",
+            "--gate-state",
+            "not_executable",
+            "--kind",
+            "section",
+            "--reason",
+            "IMPLEMENTATION_UNTRACED",
+            "--format",
+            "json",
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0, captured.out + captured.err
+    result = json.loads(captured.out)["result"]
+    assert result["applied_filters"] == {
+        "active_only": True,
+        "alignment_states": ["untraced"],
+        "gate_states": ["not_executable"],
+        "kinds": ["section"],
+        "reasons": ["IMPLEMENTATION_UNTRACED"],
+    }
+    assert [item["obligation_id"] for item in result["entries"]] == [obligation_id]
+    assert result["filtered_count"] == 1
+
+    detail_exit = cli.main(
+        (
+            "obligation",
+            obligation_id,
+            "--repo-root",
+            str(tmp_path),
+            "--no-config",
+            "--active-only",
+            "--format",
+            "json",
+        )
+    )
+    detail = json.loads(capsys.readouterr().out)
+    assert detail_exit == 2
+    assert detail["problems"][0]["code"] == "INVALID_INPUT"
+    assert "filters require" in detail["problems"][0]["details"]["reason"]
 
 
 def test_find_evidence_and_candidate_detail_use_one_public_discovery_model(
@@ -281,8 +421,10 @@ def test_operation_deadline_discards_the_complete_success(
 ) -> None:
     for relative in ("docs/specs", "docs/plans", "backstitch", "tests"):
         (tmp_path / relative).mkdir(parents=True, exist_ok=True)
-    ticks = iter((0.0, 11.0))
-    monkeypatch.setattr(cli.time, "monotonic", lambda: next(ticks))
+    # The empty four-root fixture crosses every snapshot inventory checkpoint
+    # before the final response-accounting phase.
+    ticks = iter((*([0.0] * 19), 11.0))
+    monkeypatch.setattr(obligation_api, "_monotonic", lambda: next(ticks))
 
     exit_code = cli.main(
         (
@@ -299,10 +441,20 @@ def test_operation_deadline_discards_the_complete_success(
     captured = capsys.readouterr()
     assert exit_code == 2
     envelope = json.loads(captured.out)
+    assert envelope["schema_version"] == 2
     assert envelope["operation"] == "obligation.list"
     assert envelope["result"] is None
     assert envelope["problems"][0]["code"] == "DEADLINE_EXCEEDED"
-    assert envelope["problems"][0]["details"] == {"limit_milliseconds": 10000}
+    assert envelope["problems"][0]["details"] == {
+        "limit_milliseconds": 10000,
+        "phase": "packet_accounting",
+        "configured_key": "obligations.maximum_call_seconds",
+        "cooperative_tolerance_milliseconds": 100,
+    }
+    assert (
+        "--option obligations.maximum_call_seconds 30"
+        in envelope["problems"][0]["action"]
+    )
     assert captured.err == ""
 
 

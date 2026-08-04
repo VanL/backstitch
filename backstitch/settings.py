@@ -2,10 +2,11 @@
 
 Spec: docs/specs/03-backstitch-configuration.md [CFG-1], [CFG-2], [CFG-3], [CFG-4],
 [CFG-5], [CFG-5.1], [CFG-6], [CFG-6.6], [CFG-8]
-Spec: docs/specs/02-backstitch-core.md [SC-5.1]
+Spec: docs/specs/02-backstitch-core.md [SC-5.1], [SC-17]
 Spec: docs/specs/04-backstitch-traceability-exclusions.md [EXC-3], [EXC-6]
 Spec: docs/specs/02-backstitch-core.md [SC-13]
 Spec: docs/specs/06-semantic-gates.md [SEM-9]
+Spec: docs/specs/06-semantic-gates.md [SEM-9.1]
 Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-8.2], [EVC-8.3.1]
 Spec: docs/specs/05-backstitch-invariants.md [INV-11]
 """
@@ -24,13 +25,13 @@ import tomllib
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
-from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, cast
 from urllib.parse import quote, unquote_to_bytes
 
+from backstitch import filesystem_io
 from backstitch.canonical import canonical_repository_path
-from backstitch.config import uncontained_test_root
+from backstitch.config import lexical_absolute_path, uncontained_test_root
 from backstitch.diagnostics import (
     DiagnosticConfigError,
     DiagnosticsSettings,
@@ -50,6 +51,10 @@ from backstitch.grammar import (
     is_valid_suppression_reference,
 )
 from backstitch.models import SuppressionOrigin, SuppressionRule
+from backstitch.semantic_identity import (
+    RequestConstraints,
+    RequestFieldConstraint,
+)
 
 DEFAULT_EXCLUDES: tuple[str, ...] = tuple(load_default_config_raw()["exclude"])
 PACKAGED_DEFAULTS_LAYER = "packaged:backstitch/defaults.toml"
@@ -156,6 +161,10 @@ _ANALYZE_REQUIRED_FLAT_DESCRIPTOR_KEYS = frozenset(
         "plugin_distribution_name",
         "model",
         "model_revision",
+        "capability_schema_version",
+        "capability_revision",
+        "request_constraints",
+        "maximum_input_bytes",
         "input_cost_microusd_per_million_tokens",
         "output_cost_microusd_per_million_tokens",
         "input_token_overhead",
@@ -208,6 +217,10 @@ _ANALYZE_KEYS = frozenset(
         "model",
         "adapter_model_id",
         "model_revision",
+        "capability_schema_version",
+        "capability_revision",
+        "request_constraints",
+        "maximum_input_bytes",
         "concurrency",
         "json_mode",
         "temperature",
@@ -266,7 +279,12 @@ _VERIFY_PROVIDER_KEYS = frozenset(
         "plugin_id",
         "plugin_distribution_name",
         "model",
+        "adapter_model_id",
         "model_revision",
+        "capability_schema_version",
+        "capability_revision",
+        "request_constraints",
+        "maximum_input_bytes",
         "input_cost_microusd_per_million_tokens",
         "output_cost_microusd_per_million_tokens",
         "input_token_overhead",
@@ -364,7 +382,6 @@ _GENERIC_OPTION_LEAVES = frozenset(
             for key in _VERIFY_KEYS
             if key not in {"enabled", "provider", "eval"}
         },
-        *{f"verify.provider.{key}" for key in _VERIFY_PROVIDER_KEYS},
         *{f"verify.eval.{key}" for key in _VERIFY_EVAL_KEYS},
         *{f"obligations.{key}" for key in _OBLIGATION_KEYS},
         *{f"target_roots.{key}" for key in _TARGET_ROOT_KEYS},
@@ -545,6 +562,10 @@ class AnalyzeModelDescriptor:
     plugin_id: str
     plugin_distribution_name: str
     model_revision: str
+    capability_schema_version: Literal[1]
+    capability_revision: str
+    request_constraints: RequestConstraints
+    maximum_input_bytes: int
     input_cost_microusd_per_million_tokens: int
     output_cost_microusd_per_million_tokens: int
     input_token_overhead: int
@@ -559,6 +580,19 @@ class AnalyzeSettings:
     model: str = ""
     adapter_model_id: str = ""
     model_revision: str = ""
+    capability_schema_version: Literal[1] = 1
+    capability_revision: str = "packaged-compatible-v1"
+    request_constraints: RequestConstraints = field(
+        default_factory=lambda: RequestConstraints(
+            json_mode=RequestFieldConstraint(
+                "required", ("require", "off"), None, None
+            ),
+            temperature=RequestFieldConstraint("required", None, 0.0, 2.0),
+            seed=RequestFieldConstraint("required", None, 0, 2**63 - 1),
+            max_tokens=RequestFieldConstraint("required", None, 1, 2**31 - 1),
+        )
+    )
+    maximum_input_bytes: int = 10_000_000
     concurrency: int = 1
     json_mode: str = "prefer"
     temperature: float = 0.0
@@ -599,7 +633,12 @@ class VerifyProviderSettings:
     plugin_id: str
     plugin_distribution_name: str
     model: str
+    adapter_model_id: str
     model_revision: str
+    capability_schema_version: Literal[1]
+    capability_revision: str
+    request_constraints: RequestConstraints
+    maximum_input_bytes: int
     input_cost_microusd_per_million_tokens: int
     output_cost_microusd_per_million_tokens: int
     input_token_overhead: int
@@ -797,95 +836,83 @@ def _require_regular_config(path: Path, *, missing_message: str | None = None) -
         raise ConfigLoadError(f"config is not a regular file: {path}")
 
 
-def resolve_config(
-    anchor: Path,
+def _assemble_settings(
+    repo_root: Path,
     *,
-    home: Path | None = None,
-    explicit: Path | None = None,
-    use_repo_config: bool = True,
-    environment: Mapping[str, str] | None = None,
+    config_path: Path | None,
+    repository_layers: tuple[tuple[_ConfigLayer, ConfigSourceKind], ...],
+    environment: Mapping[str, str],
     cli_options: Sequence[tuple[str, str]] = (),
     cli_overrides: Mapping[str, Any] | None = None,
     cli_overrides_by_command: Mapping[str, Mapping[str, Any]] | None = None,
     invocation_command: str | None | object = _INVOCATION_COMMAND_UNSET,
+    resolve_symlinks: bool = True,
 ) -> BackstitchSettings:
-    """Resolve one immutable invocation-scoped settings snapshot ([CFG-5.1])."""
+    """Merge, project provenance, parse, and validate every config source."""
 
     raw = copy.deepcopy(load_default_config_raw())
-    _expand_raw_paths(raw, PACKAGED_DEFAULTS_PATH.parent)
+    _expand_raw_paths(
+        raw,
+        PACKAGED_DEFAULTS_PATH.parent,
+        resolve_symlinks=resolve_symlinks,
+    )
+    packaged_raw = copy.deepcopy(raw)
     provenance_layers: list[tuple[dict[str, Any], str, ConfigSourceKind]] = [
-        (copy.deepcopy(raw), PACKAGED_DEFAULTS_LAYER, "packaged")
+        (copy.deepcopy(packaged_raw), PACKAGED_DEFAULTS_LAYER, "packaged")
     ]
     layers = [PACKAGED_DEFAULTS_LAYER]
-    packaged_rules = _raw_policy_rules(raw)
     policy_origins = [
         PolicyRuleOrigin(source=PACKAGED_DEFAULTS_LAYER, position=index)
-        for index in range(len(packaged_rules))
+        for index in range(len(_raw_policy_rules(packaged_raw)))
     ]
     suppression_rule_source = PACKAGED_DEFAULTS_LAYER
     config_layer_identities: list[ConfigLayerIdentity] = []
     explicit_analyze_keys: set[str] = set()
     analyze_model_source = "llm default model"
-    config_path: Path | None = None
-    if use_repo_config:
-        budget = _ConfigReadBudget()
-        preloaded: dict[Path, _ConfigSource] = {}
-        config_path = _discover_config_path(
-            anchor,
-            home=home,
-            explicit=explicit,
-            budget=budget,
-            preloaded=preloaded,
+
+    if repository_layers:
+        repo_raw: dict[str, Any] = {}
+        for layer, _source_kind in repository_layers:
+            repo_raw = _merge_config_layers(repo_raw, layer.body, file_layer=True)
+        repo_raw.pop("extend", None)
+        assert config_path is not None
+        _validate_config_layers(
+            repo_raw,
+            tuple(layer for layer, _source_kind in repository_layers),
+            config_path,
         )
-        if config_path is not None:
-            repo_raw, warnings, repo_layers = _load_config_chain(
-                config_path,
-                set(),
-                budget,
-                preloaded,
+        raw = _merge_config_layers(raw, repo_raw, file_layer=True)
+        for layer, source_kind in repository_layers:
+            source = str(layer.path)
+            provenance_layers.append((copy.deepcopy(layer.body), source, source_kind))
+            layers.append(source)
+            config_layer_identities.append(
+                ConfigLayerIdentity(
+                    path=source,
+                    raw_sha256=layer.raw_sha256,
+                    raw_bytes=layer.raw_bytes,
+                    stat_identity=layer.stat_identity,
+                )
             )
-            for warning in warnings:
-                print(f"warning: {warning}", file=sys.stderr)
-            _validate_config_layers(repo_raw, repo_layers, config_path)
-            raw = _merge_config_layers(raw, repo_raw, file_layer=True)
-            for layer in repo_layers:
-                source = str(layer.path)
-                source_kind: ConfigSourceKind = (
-                    "repository_candidate"
-                    if _path_is_within(layer.path, anchor.resolve())
-                    else "external_file"
-                )
-                provenance_layers.append(
-                    (copy.deepcopy(layer.body), source, source_kind)
-                )
-                layers.append(source)
-                config_layer_identities.append(
-                    ConfigLayerIdentity(
-                        path=source,
-                        raw_sha256=layer.raw_sha256,
-                        raw_bytes=layer.raw_bytes,
-                        stat_identity=layer.stat_identity,
-                    )
-                )
-                analyze = layer.body.get("analyze")
-                if isinstance(analyze, dict):
-                    explicit_analyze_keys.update(analyze)
-                    if "model" in analyze:
-                        analyze_model_source = "config [analyze].model"
-                policy_origins.extend(
-                    PolicyRuleOrigin(source=source, position=index)
-                    for index in range(len(_raw_policy_rules(layer.body)))
-                )
-                lint_layer = layer.body.get("lint")
-                if isinstance(lint_layer, dict) and "suppressions" in lint_layer:
-                    suppression_rule_source = source
+            analyze = layer.body.get("analyze")
+            if isinstance(analyze, dict):
+                explicit_analyze_keys.update(analyze)
+                if "model" in analyze:
+                    analyze_model_source = "config [analyze].model"
+            policy_origins.extend(
+                PolicyRuleOrigin(source=source, position=index)
+                for index in range(len(_raw_policy_rules(layer.body)))
+            )
+            lint_layer = layer.body.get("lint")
+            if isinstance(lint_layer, dict) and "suppressions" in lint_layer:
+                suppression_rule_source = source
+
     source_path = config_path or PACKAGED_DEFAULTS_PATH
     default_command = _parse_default_command(raw, source_path=source_path)
     selected_command: str | None
-    environment_values = os.environ if environment is None else environment
     if invocation_command is _INVOCATION_COMMAND_UNSET:
         selected_command = None
-        scoped_environment = environment_values
+        scoped_environment = environment
     else:
         if invocation_command is not None and (
             not isinstance(invocation_command, str)
@@ -899,10 +926,11 @@ def resolve_config(
         )
         scoped_environment = {
             key: value
-            for key, value in environment_values.items()
+            for key, value in environment.items()
             if key == "BACKSTITCH_WEFT_ROOT"
             or (key == "LLM_MODEL" and selected_command in _MODEL_ENVIRONMENT_COMMANDS)
         }
+
     effective_cli_overrides = dict(cli_overrides or {})
     if cli_overrides_by_command is not None:
         unknown_commands = sorted(set(cli_overrides_by_command) - {"check", "analyze"})
@@ -919,6 +947,7 @@ def resolve_config(
             effective_cli_overrides.update(
                 cli_overrides_by_command.get(selected_command, {})
             )
+
     environment_overlay = _environment_config_overlay(scoped_environment)
     cli_overlay = _cli_config_overlay(
         cli_options,
@@ -935,8 +964,12 @@ def resolve_config(
         (environment_overlay, "environment"),
         (cli_overlay, "cli"),
     ):
-        _expand_raw_paths(overlay, Path.cwd())
         if overlay:
+            _expand_raw_paths(
+                overlay,
+                Path.cwd(),
+                resolve_symlinks=resolve_symlinks,
+            )
             provenance_layers.append(
                 (
                     copy.deepcopy(overlay),
@@ -953,6 +986,7 @@ def resolve_config(
             PolicyRuleOrigin(source=source, position=index)
             for index in range(len(_raw_policy_rules(overlay)))
         )
+
     available_models, selected_catalog_descriptor = _select_analyze_model_descriptor(
         raw,
         configured_model=configured_model,
@@ -961,7 +995,7 @@ def resolve_config(
         explicit_analyze_keys.update(_ANALYZE_REQUIRED_FLAT_DESCRIPTOR_KEYS)
     settings = _parse_settings(
         raw,
-        source_path=config_path or PACKAGED_DEFAULTS_PATH,
+        source_path=source_path,
         effective_config_path=config_path,
         config_layers=tuple(layers),
         config_layer_identities=tuple(config_layer_identities),
@@ -973,26 +1007,85 @@ def resolve_config(
         default_command=default_command,
         available_models=available_models,
         ratchet_policy_provenance=_ratchet_policy_provenance(provenance_layers),
+        resolve_symlinks=resolve_symlinks,
     )
     invalid_test_root = uncontained_test_root(
-        anchor.resolve(),
+        repo_root,
         settings.profile_overrides.code_roots or (),
         settings.profile_overrides.test_roots or (),
     )
     if invalid_test_root is not None:
-        msg = (
+        raise ConfigLoadError(
             f"test root {invalid_test_root!r} must be equal to or nested under a"
             " final effective code root"
         )
-        raise ConfigLoadError(msg)
-    if selected_command == "coverage" and settings.coverage.mode == "ratchet":
+    return settings
+
+
+def resolve_config(
+    anchor: Path,
+    *,
+    home: Path | None = None,
+    explicit: Path | None = None,
+    use_repo_config: bool = True,
+    environment: Mapping[str, str] | None = None,
+    cli_options: Sequence[tuple[str, str]] = (),
+    cli_overrides: Mapping[str, Any] | None = None,
+    cli_overrides_by_command: Mapping[str, Mapping[str, Any]] | None = None,
+    invocation_command: str | None | object = _INVOCATION_COMMAND_UNSET,
+) -> BackstitchSettings:
+    """Resolve one immutable invocation-scoped settings snapshot ([CFG-5.1])."""
+
+    resolved_anchor = anchor.resolve()
+    config_path: Path | None = None
+    repository_layers: tuple[tuple[_ConfigLayer, ConfigSourceKind], ...] = ()
+    if use_repo_config:
+        budget = _ConfigReadBudget()
+        preloaded: dict[Path, _ConfigSource] = {}
+        config_path = _discover_config_path(
+            anchor,
+            home=home,
+            explicit=explicit,
+            budget=budget,
+            preloaded=preloaded,
+        )
+        if config_path is not None:
+            warnings, loaded_layers = _load_config_chain(
+                config_path,
+                set(),
+                budget,
+                preloaded,
+            )
+            for warning in warnings:
+                print(f"warning: {warning}", file=sys.stderr)
+            repository_layers = tuple(
+                (
+                    layer,
+                    "repository_candidate"
+                    if _path_is_within(layer.path, resolved_anchor)
+                    else "external_file",
+                )
+                for layer in loaded_layers
+            )
+
+    settings = _assemble_settings(
+        resolved_anchor,
+        config_path=config_path,
+        repository_layers=repository_layers,
+        environment=os.environ if environment is None else environment,
+        cli_options=cli_options,
+        cli_overrides=cli_overrides,
+        cli_overrides_by_command=cli_overrides_by_command,
+        invocation_command=invocation_command,
+    )
+    if invocation_command == "coverage" and settings.coverage.mode == "ratchet":
         _validate_ratchet_invocation_sources(
             settings,
-            root=anchor.resolve(),
+            root=resolved_anchor,
             explicit=explicit,
             use_repo_config=use_repo_config,
             cli_options=cli_options,
-            cli_overrides=effective_cli_overrides,
+            cli_overrides=dict(cli_overrides or {}),
         )
     return settings
 
@@ -1009,14 +1102,16 @@ def resolve_repository_config_from_blobs(
     layers present in the supplied object-database snapshot.
     """
 
-    root = repo_root.resolve()
+    if not repo_root.is_absolute():
+        raise ConfigLoadError("historical repository root must be absolute")
+    root = lexical_absolute_path(repo_root, base_dir=repo_root)
     canonical = canonical_repository_path(config_path)
     if canonical is None or canonical.canonical != config_path:
         raise ConfigLoadError("historical config path is not repository-relative")
     seen: set[str] = set()
     budget = _ConfigReadBudget()
 
-    def load_chain(path: str) -> tuple[dict[str, Any], tuple[_ConfigLayer, ...]]:
+    def load_chain(path: str) -> tuple[_ConfigLayer, ...]:
         if path in seen:
             raise ConfigLoadError(f"Circular extend chain detected at {path}")
         seen.add(path)
@@ -1042,10 +1137,14 @@ def resolve_repository_config_from_blobs(
             raw_bytes=raw,
             stat_identity=(0, 0, 0, len(raw), 0, 0),
         )
-        _expand_raw_paths(body, display_path.parent)
+        _expand_raw_paths(
+            body,
+            display_path.parent,
+            resolve_symlinks=False,
+        )
         extend = body.get("extend")
         if extend is None:
-            return body, (layer,)
+            return (layer,)
         if not isinstance(extend, str) or not extend.strip():
             raise ConfigLoadError(f"Invalid extend value in {path}")
         expanded = Path(_expand_user_and_env(extend.strip()))
@@ -1057,85 +1156,18 @@ def resolve_repository_config_from_blobs(
         normalized = canonical_repository_path(candidate)
         if normalized is None or normalized.canonical != candidate:
             raise ConfigLoadError("historical config extend path is unsafe")
-        parent, parent_layers = load_chain(candidate)
-        merged = _merge_config_layers(parent, body, file_layer=True)
-        merged.pop("extend", None)
-        return merged, (*parent_layers, layer)
+        return (*load_chain(candidate), layer)
 
-    repo_raw, repo_layers = load_chain(config_path)
+    repo_layers = load_chain(config_path)
     effective_path = root / PurePosixPath(config_path)
-    _validate_config_layers(repo_raw, repo_layers, effective_path)
-    raw = copy.deepcopy(load_default_config_raw())
-    _expand_raw_paths(raw, PACKAGED_DEFAULTS_PATH.parent)
-    raw = _merge_config_layers(raw, repo_raw, file_layer=True)
-    default_command = _parse_default_command(raw, source_path=effective_path)
-    configured_model = _nested_value(raw, "analyze", "model")
-    available_models, selected_catalog_descriptor = _select_analyze_model_descriptor(
-        raw,
-        configured_model=configured_model,
-    )
-    explicit_analyze_keys = {
-        key
-        for layer in repo_layers
-        for table in (layer.body.get("analyze"),)
-        if isinstance(table, dict)
-        for key in table
-    }
-    if selected_catalog_descriptor:
-        explicit_analyze_keys.update(_ANALYZE_REQUIRED_FLAT_DESCRIPTOR_KEYS)
-    policy_origins = tuple(
-        [
-            PolicyRuleOrigin(source=PACKAGED_DEFAULTS_LAYER, position=index)
-            for index in range(len(_raw_policy_rules(load_default_config_raw())))
-        ]
-        + [
-            PolicyRuleOrigin(source=str(layer.path), position=index)
-            for layer in repo_layers
-            for index in range(len(_raw_policy_rules(layer.body)))
-        ]
-    )
-    suppression_source = next(
-        (
-            str(layer.path)
-            for layer in reversed(repo_layers)
-            if isinstance(layer.body.get("lint"), dict)
-            and "suppressions" in cast(dict[str, Any], layer.body["lint"])
+    return _assemble_settings(
+        root,
+        config_path=effective_path,
+        repository_layers=tuple(
+            (layer, "repository_candidate") for layer in repo_layers
         ),
-        PACKAGED_DEFAULTS_LAYER,
-    )
-    provenance_layers: list[tuple[dict[str, Any], str, ConfigSourceKind]] = [
-        (copy.deepcopy(load_default_config_raw()), PACKAGED_DEFAULTS_LAYER, "packaged"),
-        *[
-            (copy.deepcopy(layer.body), str(layer.path), "repository_candidate")
-            for layer in repo_layers
-        ],
-    ]
-    identities = tuple(
-        ConfigLayerIdentity(
-            path=str(layer.path),
-            raw_sha256=layer.raw_sha256,
-            raw_bytes=layer.raw_bytes,
-            stat_identity=layer.stat_identity,
-        )
-        for layer in repo_layers
-    )
-    return _parse_settings(
-        raw,
-        source_path=effective_path,
-        effective_config_path=effective_path,
-        config_layers=(
-            PACKAGED_DEFAULTS_LAYER,
-            *(str(row.path) for row in repo_layers),
-        ),
-        config_layer_identities=identities,
-        policy_rule_origins=policy_origins,
-        suppression_rule_source=suppression_source,
-        analyze_model_source="config [analyze].model",
-        explicit_analyze_keys=frozenset(explicit_analyze_keys),
-        validate_unknown_keys=False,
-        default_command=default_command,
-        available_models=available_models,
-        ratchet_policy_provenance=_ratchet_policy_provenance(provenance_layers),
+        environment={},
+        resolve_symlinks=False,
     )
 
 
@@ -1302,6 +1334,10 @@ def _select_analyze_model_descriptor(
                 "model": descriptor.model,
                 "adapter_model_id": descriptor.adapter_model_id,
                 "model_revision": descriptor.model_revision,
+                "capability_schema_version": descriptor.capability_schema_version,
+                "capability_revision": descriptor.capability_revision,
+                "request_constraints": asdict(descriptor.request_constraints),
+                "maximum_input_bytes": descriptor.maximum_input_bytes,
                 "input_cost_microusd_per_million_tokens": (
                     descriptor.input_cost_microusd_per_million_tokens
                 ),
@@ -1331,28 +1367,31 @@ def _canonical_purl_component(
     *,
     field_name: str,
     safe: str,
+    selector_label: str,
 ) -> str:
     if re.search(r"%(?![0-9A-Fa-f]{2})", value):
         raise ConfigLoadError(
-            f"analyze model selector has invalid percent encoding in {field_name}"
+            f"{selector_label} has invalid percent encoding in {field_name}"
         )
     try:
         decoded = unquote_to_bytes(value).decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ConfigLoadError(
-            f"analyze model selector has invalid UTF-8 in {field_name}"
+            f"{selector_label} has invalid UTF-8 in {field_name}"
         ) from exc
     if not decoded or any(ord(character) < 0x20 for character in decoded):
-        raise ConfigLoadError(f"analyze model selector has invalid {field_name}")
+        raise ConfigLoadError(f"{selector_label} has invalid {field_name}")
     canonical = quote(decoded, safe=safe, encoding="utf-8", errors="strict")
     if canonical != value:
-        raise ConfigLoadError(
-            "analyze model selector must be a canonical pkg:service PURL"
-        )
+        raise ConfigLoadError(f"{selector_label} must be a canonical pkg:service PURL")
     return decoded
 
 
-def _validate_dns_order_service_namespace(namespace: str) -> None:
+def _validate_dns_order_service_namespace(
+    namespace: str,
+    *,
+    selector_label: str,
+) -> None:
     for domain in namespace.split(":"):
         labels = domain.split(".")
         if (
@@ -1361,33 +1400,38 @@ def _validate_dns_order_service_namespace(namespace: str) -> None:
             or (labels[0] in _COMMON_DNS_TLDS and labels[-1] not in _COMMON_DNS_TLDS)
         ):
             raise ConfigLoadError(
-                "analyze model selector pkg:service namespace must be DNS-order"
+                f"{selector_label} pkg:service namespace must be DNS-order"
             )
 
 
-def _validate_canonical_service_purl(selector: str) -> None:
+def _validate_canonical_service_purl(
+    selector: str,
+    *,
+    selector_label: str = "analyze model selector",
+) -> None:
     match = _SERVICE_PURL_RE.fullmatch(selector)
     if match is None:
-        raise ConfigLoadError(
-            "analyze model selector must be a canonical pkg:service PURL"
-        )
+        raise ConfigLoadError(f"{selector_label} must be a canonical pkg:service PURL")
     namespace = match.group("namespace")
-    _validate_dns_order_service_namespace(namespace)
+    _validate_dns_order_service_namespace(
+        namespace,
+        selector_label=selector_label,
+    )
     name = _canonical_purl_component(
         match.group("name"),
         field_name="service name",
         safe=":._-~",
+        selector_label=selector_label,
     )
     if name in {".", ".."}:
-        raise ConfigLoadError(
-            "analyze model selector must contain a stable service name"
-        )
+        raise ConfigLoadError(f"{selector_label} must contain a stable service name")
     version = match.group("version")
     if version is not None:
         _canonical_purl_component(
             version,
             field_name="version",
             safe="/:._-~",
+            selector_label=selector_label,
         )
     qualifiers = match.group("qualifiers")
     if qualifiers is None:
@@ -1398,24 +1442,23 @@ def _validate_canonical_service_purl(selector: str) -> None:
         key, separator, raw_value = assignment.partition("=")
         if not separator or not _SERVICE_QUALIFIER_KEY_RE.fullmatch(key) or key in seen:
             raise ConfigLoadError(
-                "analyze model selector has invalid pkg:service qualifiers"
+                f"{selector_label} has invalid pkg:service qualifiers"
             )
         if key in _SERVICE_PRIVATE_ONLY_QUALIFIERS:
             raise ConfigLoadError(
-                f"analyze model selector pkg:service forbids qualifier {key}"
+                f"{selector_label} pkg:service forbids qualifier {key}"
             )
         _canonical_purl_component(
             raw_value,
             field_name=f"qualifier {key}",
             safe="/:._-~",
+            selector_label=selector_label,
         )
         seen.add(key)
         parsed_qualifiers.append((key, raw_value))
     canonical = "&".join(f"{key}={value}" for key, value in sorted(parsed_qualifiers))
     if canonical != qualifiers:
-        raise ConfigLoadError(
-            "analyze model selector must be a canonical pkg:service PURL"
-        )
+        raise ConfigLoadError(f"{selector_label} must be a canonical pkg:service PURL")
 
 
 def _parse_analyze_model_catalog(
@@ -1477,6 +1520,25 @@ def _parse_analyze_model_catalog(
             plugin_id=identity_values["plugin_id"],
             plugin_distribution_name=identity_values["plugin_distribution_name"],
             model_revision=identity_values["model_revision"],
+            capability_schema_version=_parse_capability_schema_version(
+                raw_descriptor,
+                f"analyze.models.{selector}",
+            ),
+            capability_revision=_parse_capability_revision(
+                raw_descriptor,
+                f"analyze.models.{selector}",
+            ),
+            request_constraints=_parse_request_constraints(
+                raw_descriptor.get("request_constraints"),
+                f"analyze.models.{selector}.request_constraints",
+                authored=True,
+            ),
+            maximum_input_bytes=_require_int(
+                raw_descriptor,
+                "maximum_input_bytes",
+                f"analyze.models.{selector}",
+                minimum=1,
+            ),
             input_cost_microusd_per_million_tokens=_require_int(
                 raw_descriptor,
                 "input_cost_microusd_per_million_tokens",
@@ -1498,6 +1560,169 @@ def _parse_analyze_model_catalog(
             cost_rate_source=identity_values["cost_rate_source"],
         )
     return catalog
+
+
+def _parse_capability_schema_version(
+    table: dict[str, Any],
+    label: str,
+) -> Literal[1]:
+    value = _require_int(table, "capability_schema_version", label, minimum=1)
+    if value != 1:
+        raise ConfigLoadError(f"{label}.capability_schema_version must equal 1")
+    return 1
+
+
+def _parse_capability_revision(table: dict[str, Any], label: str) -> str:
+    value = _require_string(table, "capability_revision", label)
+    if not value.strip():
+        raise ConfigLoadError(f"{label}.capability_revision must be nonblank")
+    return value
+
+
+def _parse_request_constraints(
+    value: Any,
+    label: str,
+    *,
+    authored: bool = False,
+) -> RequestConstraints:
+    """Parse concise TOML rules into SEM-3's exact null-bearing records."""
+
+    if not isinstance(value, dict):
+        raise ConfigLoadError(f"{label} must be a table")
+    field_names = ("json_mode", "temperature", "seed", "max_tokens")
+    if set(value) != set(field_names):
+        missing = sorted(set(field_names) - set(value))
+        unknown = sorted(set(value) - set(field_names))
+        detail = (
+            f"missing: {', '.join(missing)}"
+            if missing
+            else f"unknown: {', '.join(unknown)}"
+        )
+        raise ConfigLoadError(f"{label} must contain exactly four fields; {detail}")
+
+    parsed: dict[str, RequestFieldConstraint] = {}
+    for field_name in field_names:
+        field_label = f"{label}.{field_name}"
+        raw = value[field_name]
+        if not isinstance(raw, dict):
+            raise ConfigLoadError(f"{field_label} must be a table")
+        unknown = sorted(
+            set(raw) - {"presence", "allowed_values", "minimum", "maximum"}
+        )
+        if unknown:
+            raise ConfigLoadError(f"{field_label} has unknown field: {unknown[0]}")
+        presence = raw.get("presence")
+        if presence not in {"required", "optional", "forbidden"}:
+            raise ConfigLoadError(
+                f"{field_label}.presence must be required, optional, or forbidden"
+            )
+        allowed_raw = raw.get("allowed_values")
+        minimum = raw.get("minimum")
+        maximum = raw.get("maximum")
+        normalized_keys = {
+            "presence",
+            "allowed_values",
+            "minimum",
+            "maximum",
+        }
+        supplied_keys = frozenset(raw)
+        if presence == "forbidden":
+            authored_keys = {"presence"}
+            if (
+                authored
+                and supplied_keys != authored_keys
+                or not authored
+                and supplied_keys
+                not in {frozenset(authored_keys), frozenset(normalized_keys)}
+                or supplied_keys == normalized_keys
+                and any(
+                    raw.get(key) is not None for key in normalized_keys - {"presence"}
+                )
+            ):
+                raise ConfigLoadError(
+                    f"{field_label} forbidden form contains only presence"
+                )
+            allowed: tuple[object, ...] | None = None
+        elif field_name in {"json_mode", "temperature"}:
+            authored_keys = {"presence", "allowed_values"}
+            if (
+                authored
+                and supplied_keys != authored_keys
+                or not authored
+                and supplied_keys
+                not in {frozenset(authored_keys), frozenset(normalized_keys)}
+                or supplied_keys == normalized_keys
+                and (raw.get("minimum") is not None or raw.get("maximum") is not None)
+            ):
+                raise ConfigLoadError(
+                    f"{field_label} must contain presence and allowed_values"
+                )
+            allowed_collection_types = (list,) if authored else (list, tuple)
+            if not isinstance(allowed_raw, allowed_collection_types) or not allowed_raw:
+                raise ConfigLoadError(
+                    f"{field_label}.allowed_values must be a nonempty array"
+                )
+            if field_name == "json_mode":
+                if any(item not in {"require", "off"} for item in allowed_raw):
+                    raise ConfigLoadError(
+                        f"{field_label}.allowed_values may contain require and off"
+                    )
+            elif any(
+                isinstance(item, bool)
+                or not isinstance(item, (int, float))
+                or not math.isfinite(float(item))
+                or not 0 <= float(item) <= 2
+                for item in allowed_raw
+            ):
+                raise ConfigLoadError(
+                    f"{field_label}.allowed_values must contain finite numbers "
+                    "from 0 through 2"
+                )
+            if any(
+                item == earlier
+                for index, item in enumerate(allowed_raw)
+                for earlier in allowed_raw[:index]
+            ):
+                raise ConfigLoadError(
+                    f"{field_label}.allowed_values must not contain duplicates"
+                )
+            allowed = tuple(allowed_raw)
+            minimum = maximum = None
+        else:
+            authored_keys = {"presence", "minimum", "maximum"}
+            if (
+                authored
+                and supplied_keys != authored_keys
+                or not authored
+                and supplied_keys
+                not in {frozenset(authored_keys), frozenset(normalized_keys)}
+                or supplied_keys == normalized_keys
+                and raw.get("allowed_values") is not None
+            ):
+                raise ConfigLoadError(
+                    f"{field_label} must contain presence, minimum, and maximum"
+                )
+            if (
+                isinstance(minimum, bool)
+                or isinstance(maximum, bool)
+                or not isinstance(minimum, int)
+                or not isinstance(maximum, int)
+                or minimum > maximum
+                or (field_name == "seed" and minimum < 0)
+                or (field_name == "max_tokens" and minimum < 1)
+            ):
+                raise ConfigLoadError(f"{field_label} has invalid integer bounds")
+            allowed = None
+        try:
+            parsed[field_name] = RequestFieldConstraint(
+                cast(Any, presence),
+                allowed,
+                cast(int | float | None, minimum),
+                cast(int | float | None, maximum),
+            )
+        except ValueError as exc:
+            raise ConfigLoadError(f"{field_label}: {exc}") from None
+    return RequestConstraints(**parsed)
 
 
 def settings_to_json(settings: BackstitchSettings) -> str:
@@ -1559,19 +1784,6 @@ def settings_to_json(settings: BackstitchSettings) -> str:
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
 
-def is_excluded(rel_path: str, excludes: tuple[str, ...]) -> bool:
-    normalized = rel_path.replace("\\", "/")
-    parts = set(normalized.split("/"))
-    for pattern in excludes:
-        if fnmatch(normalized, pattern) or fnmatch(normalized, f"**/{pattern}"):
-            return True
-        if pattern in parts:
-            return True
-        if normalized.startswith(f"{pattern}/") or normalized == pattern:
-            return True
-    return False
-
-
 def _expand_user_and_env(value: str) -> str:
     expanded = os.path.expanduser(value)
     return re.sub(
@@ -1584,9 +1796,16 @@ def _expand_user_and_env(value: str) -> str:
     )
 
 
-def expand_path_value(value: str, *, base_dir: Path) -> str:
+def expand_path_value(
+    value: str,
+    *,
+    base_dir: Path,
+    resolve_symlinks: bool = True,
+) -> str:
     expanded = _expand_user_and_env(value)
     path = Path(expanded)
+    if not resolve_symlinks:
+        return str(lexical_absolute_path(path, base_dir=base_dir))
     if path.is_absolute():
         return str(path.resolve())
     return str((base_dir / path).resolve())
@@ -1619,18 +1838,11 @@ def _pyproject_has_backstitch(path: Path, raw: bytes) -> bool:
 
 
 def _config_stat_identity(value: os.stat_result) -> tuple[int, ...]:
-    # Lazy import avoids the settings -> snapshot -> settings import cycle;
-    # repository_snapshot remains the sole stat-identity implementation owner.
-    from backstitch.repository_snapshot import _file_stat_identity
-
-    return _file_stat_identity(value)
+    return filesystem_io.file_stat_identity(value)
 
 
 def _read_config_source(path: Path, budget: _ConfigReadBudget) -> _ConfigSource:
     """Read one stable config layer exactly once under bootstrap ceilings."""
-
-    # Local import avoids the repository_snapshot -> settings bootstrap cycle.
-    from backstitch.repository_snapshot import StableReadError, read_regular_nofollow
 
     if budget.file_count >= MAXIMUM_CONFIG_CHAIN_FILES:
         raise ConfigLoadError(
@@ -1645,7 +1857,7 @@ def _read_config_source(path: Path, budget: _ConfigReadBudget) -> _ConfigSource:
             raise ConfigLoadError(f"config file exceeds 1,000,000 raw bytes: {path}")
         if budget.byte_count + before.st_size > MAXIMUM_CONFIG_CHAIN_BYTES:
             raise ConfigLoadError("config extend chain exceeds 5,000,000 raw bytes")
-        raw, observed = read_regular_nofollow(
+        raw, observed = filesystem_io.read_regular_nofollow(
             path.parent,
             path.name,
             expected_stat=before,
@@ -1653,7 +1865,7 @@ def _read_config_source(path: Path, budget: _ConfigReadBudget) -> _ConfigSource:
         )
     except ConfigLoadError:
         raise
-    except (OSError, StableReadError) as exc:
+    except (OSError, filesystem_io.StableReadError) as exc:
         raise ConfigLoadError(f"could not read config {path}: {exc}") from exc
     if budget.byte_count + len(raw) > MAXIMUM_CONFIG_CHAIN_BYTES:
         raise ConfigLoadError("config extend chain exceeds 5,000,000 raw bytes")
@@ -1954,7 +2166,12 @@ def _validate_ratchet_invocation_sources(
         )
 
 
-def _expand_raw_paths(body: dict[str, Any], base_dir: Path) -> None:
+def _expand_raw_paths(
+    body: dict[str, Any],
+    base_dir: Path,
+    *,
+    resolve_symlinks: bool = True,
+) -> None:
     """Expand path values against the file that DEFINED them (CFG §2).
 
     Must run per file BEFORE `extend` merging: a parent's relative
@@ -1976,7 +2193,11 @@ def _expand_raw_paths(body: dict[str, Any], base_dir: Path) -> None:
             and isinstance(table.get(key), str)
             and table[key].strip()
         ):
-            table[key] = expand_path_value(table[key], base_dir=base_dir)
+            table[key] = expand_path_value(
+                table[key],
+                base_dir=base_dir,
+                resolve_symlinks=resolve_symlinks,
+            )
     coverage = body.get("coverage")
     if isinstance(coverage, dict):
         floors = coverage.get("floors")
@@ -1998,7 +2219,11 @@ def _expand_raw_paths(body: dict[str, Any], base_dir: Path) -> None:
     if isinstance(roots, dict):
         for name, value in roots.items():
             if isinstance(value, str):
-                roots[name] = expand_path_value(value, base_dir=base_dir)
+                roots[name] = expand_path_value(
+                    value,
+                    base_dir=base_dir,
+                    resolve_symlinks=resolve_symlinks,
+                )
     verify = body.get("verify")
     if isinstance(verify, dict):
         evaluation = verify.get("eval")
@@ -2010,6 +2235,7 @@ def _expand_raw_paths(body: dict[str, Any], base_dir: Path) -> None:
                         value,
                         base_dir=base_dir,
                         field_name=f"verify.eval.{key}",
+                        resolve_symlinks=resolve_symlinks,
                     )
 
 
@@ -2018,10 +2244,17 @@ def _expand_contained_config_path(
     *,
     base_dir: Path,
     field_name: str,
+    resolve_symlinks: bool = True,
 ) -> str:
     expanded = Path(_expand_user_and_env(value))
-    base = base_dir.resolve()
-    candidate = (expanded if expanded.is_absolute() else base / expanded).resolve()
+    if resolve_symlinks:
+        base = base_dir.resolve()
+        candidate = (expanded if expanded.is_absolute() else base / expanded).resolve()
+    else:
+        if not base_dir.is_absolute():
+            raise ConfigLoadError(f"{field_name} config directory must be absolute")
+        base = lexical_absolute_path(base_dir, base_dir=base_dir)
+        candidate = lexical_absolute_path(expanded, base_dir=base)
     if candidate != base and not candidate.is_relative_to(base):
         raise ConfigLoadError(f"{field_name} must be contained by its config directory")
     return str(candidate)
@@ -2032,7 +2265,7 @@ def _load_config_chain(
     seen: set[Path],
     budget: _ConfigReadBudget | None = None,
     preloaded: dict[Path, _ConfigSource] | None = None,
-) -> tuple[dict[str, Any], list[str], tuple[_ConfigLayer, ...]]:
+) -> tuple[list[str], tuple[_ConfigLayer, ...]]:
     if budget is None:
         budget = _ConfigReadBudget()
     if preloaded is None:
@@ -2066,7 +2299,7 @@ def _load_config_chain(
     extend = body.get("extend")
     warnings: list[str] = []
     if extend is None:
-        return body, warnings, (layer,)
+        return warnings, (layer,)
 
     if not isinstance(extend, str) or not extend.strip():
         msg = f"Invalid extend value in {resolved}"
@@ -2083,20 +2316,14 @@ def _load_config_chain(
         missing_message=f"extend target not found: {parent_path}",
     )
 
-    parent_body, parent_warnings, parent_layers = _load_config_chain(
+    parent_warnings, parent_layers = _load_config_chain(
         parent_path,
         seen,
         budget,
         preloaded,
     )
     warnings.extend(parent_warnings)
-    merged = _merge_config_layers(parent_body, body, file_layer=True)
-    merged.pop("extend", None)
-    return (
-        merged,
-        warnings,
-        (*parent_layers, layer),
-    )
+    return warnings, (*parent_layers, layer)
 
 
 def _parse_settings(
@@ -2114,6 +2341,7 @@ def _parse_settings(
     default_command: Literal["check", "analyze"] | None,
     available_models: tuple[str, ...],
     ratchet_policy_provenance: tuple[ConfigValueProvenance, ...],
+    resolve_symlinks: bool = True,
 ) -> BackstitchSettings:
     allow_unknown = raw.get("allow_unknown_keys", False)
     if not isinstance(allow_unknown, bool):
@@ -2176,7 +2404,11 @@ def _parse_settings(
         msg = f"packets.output must be a string in {source_path}"
         raise ConfigLoadError(msg)
     if packets_output is not None:
-        packets_output = expand_path_value(packets_output, base_dir=source_path.parent)
+        packets_output = expand_path_value(
+            packets_output,
+            base_dir=source_path.parent,
+            resolve_symlinks=resolve_symlinks,
+        )
 
     def _roots(key: str) -> tuple[str, ...] | None:
         # CFG §4.3: roots support `~` and env expansion (but stay
@@ -2209,6 +2441,7 @@ def _parse_settings(
         coverage_table,
         source_path=source_path,
         code_roots=profile_settings.code_roots or (),
+        resolve_symlinks=resolve_symlinks,
     )
 
     lint_settings = _parse_lint_settings(
@@ -2232,12 +2465,14 @@ def _parse_settings(
         source_path=source_path,
         explicit_analyze_keys=explicit_analyze_keys,
         available_models=available_models,
+        resolve_symlinks=resolve_symlinks,
     )
     verify_settings = _parse_verify_settings(
         verify_table,
         source_path=source_path,
         analyze=analyze_settings,
         explicit_analyze_keys=explicit_analyze_keys,
+        resolve_symlinks=resolve_symlinks,
     )
     obligation_settings = _parse_obligation_settings(obligations_table)
 
@@ -2246,14 +2481,22 @@ def _parse_settings(
         if not isinstance(weft_root, str):
             msg = "target_roots.weft must be a string"
             raise ConfigLoadError(msg)
-        weft_root = expand_path_value(weft_root, base_dir=source_path.parent)
+        weft_root = expand_path_value(
+            weft_root,
+            base_dir=source_path.parent,
+            resolve_symlinks=resolve_symlinks,
+        )
 
     check_output = check_table.get("output")
     if check_output is not None and not isinstance(check_output, str):
         msg = "check.output must be a string"
         raise ConfigLoadError(msg)
     if check_output is not None:
-        check_output = expand_path_value(check_output, base_dir=source_path.parent)
+        check_output = expand_path_value(
+            check_output,
+            base_dir=source_path.parent,
+            resolve_symlinks=resolve_symlinks,
+        )
 
     try:
         diagnostics = parse_policy(
@@ -2321,6 +2564,7 @@ def _parse_coverage_settings(
     *,
     source_path: Path,
     code_roots: tuple[str, ...],
+    resolve_symlinks: bool,
 ) -> CoverageSettings:
     """Parse the closed deterministic coverage table ([COV-4], [COV-5])."""
 
@@ -2376,7 +2620,11 @@ def _parse_coverage_settings(
     parsed_output = (
         None
         if output is None
-        else expand_path_value(output, base_dir=source_path.parent)
+        else expand_path_value(
+            output,
+            base_dir=source_path.parent,
+            resolve_symlinks=resolve_symlinks,
+        )
     )
     return CoverageSettings(
         mode=mode,
@@ -2586,6 +2834,7 @@ def _parse_analyze_settings(
     source_path: Path,
     explicit_analyze_keys: frozenset[str],
     available_models: tuple[str, ...],
+    resolve_symlinks: bool,
 ) -> AnalyzeSettings:
     """Parse the exact semantic inference, cache, and budget surface."""
 
@@ -2597,6 +2846,15 @@ def _parse_analyze_settings(
     model = _require_string(table, "model", "analyze")
     adapter_model_id = _require_string(table, "adapter_model_id", "analyze")
     model_revision = _require_string(table, "model_revision", "analyze")
+    capability_schema_version = _parse_capability_schema_version(table, "analyze")
+    capability_revision = _parse_capability_revision(table, "analyze")
+    request_constraints = _parse_request_constraints(
+        table.get("request_constraints"),
+        "analyze.request_constraints",
+    )
+    maximum_input_bytes = _require_int(
+        table, "maximum_input_bytes", "analyze", minimum=1
+    )
     concurrency = _require_int(table, "concurrency", "analyze", minimum=1)
     json_mode = _require_enum(
         table, "json_mode", "analyze", {"prefer", "require", "off"}
@@ -2613,7 +2871,11 @@ def _parse_analyze_settings(
     cache_path = _require_string(table, "cache_path", "analyze")
     if not cache_path.strip():
         raise ConfigLoadError("analyze.cache_path must be a nonblank path string")
-    cache_path = expand_path_value(cache_path, base_dir=source_path.parent)
+    cache_path = expand_path_value(
+        cache_path,
+        base_dir=source_path.parent,
+        resolve_symlinks=resolve_symlinks,
+    )
     cache_mode = _require_enum(
         table, "cache_mode", "analyze", {"off", "read-write", "require"}
     )
@@ -2726,6 +2988,10 @@ def _parse_analyze_settings(
         model=model,
         adapter_model_id=adapter_model_id,
         model_revision=model_revision,
+        capability_schema_version=capability_schema_version,
+        capability_revision=capability_revision,
+        request_constraints=request_constraints,
+        maximum_input_bytes=maximum_input_bytes,
         concurrency=concurrency,
         json_mode=json_mode,
         temperature=temperature,
@@ -2760,6 +3026,7 @@ def _parse_verify_settings(
     source_path: Path,
     analyze: AnalyzeSettings,
     explicit_analyze_keys: frozenset[str],
+    resolve_symlinks: bool,
 ) -> DisabledVerifySettings | VerifySettings:
     enabled = _require_bool(table, "enabled", "verify")
     if not enabled:
@@ -2773,7 +3040,11 @@ def _parse_verify_settings(
     cache_path = _require_string(table, "cache_path", "verify")
     if not cache_path.strip():
         raise ConfigLoadError("verify.cache_path must be a nonblank path string")
-    cache_path = expand_path_value(cache_path, base_dir=source_path.parent)
+    cache_path = expand_path_value(
+        cache_path,
+        base_dir=source_path.parent,
+        resolve_symlinks=resolve_symlinks,
+    )
     cache_mode = _require_enum(
         table, "cache_mode", "verify", {"off", "read-write", "require"}
     )
@@ -2920,6 +3191,16 @@ def _parse_verify_search_epochs(value: Any) -> tuple[str, ...]:
 
 
 def _parse_verify_provider(table: dict[str, Any]) -> VerifyProviderSettings:
+    supplied = set(table)
+    missing = sorted(_VERIFY_PROVIDER_KEYS - supplied)
+    unknown = sorted(supplied - _VERIFY_PROVIDER_KEYS)
+    if missing:
+        raise ConfigLoadError(
+            "verify.provider must be a complete descriptor; missing: "
+            + ", ".join(missing)
+        )
+    if unknown:
+        raise ConfigLoadError(f"unknown config key `verify.provider.{unknown[0]}`")
     values = {
         key: _require_string(table, key, "verify.provider")
         for key in (
@@ -2927,7 +3208,9 @@ def _parse_verify_provider(table: dict[str, Any]) -> VerifyProviderSettings:
             "plugin_id",
             "plugin_distribution_name",
             "model",
+            "adapter_model_id",
             "model_revision",
+            "capability_revision",
         )
     }
     blank = [key for key, value in values.items() if not value.strip()]
@@ -2936,6 +3219,10 @@ def _parse_verify_provider(table: dict[str, Any]) -> VerifyProviderSettings:
             "verify.provider identity strings must be nonblank; blank: "
             + ", ".join(blank)
         )
+    _validate_canonical_service_purl(
+        values["model"],
+        selector_label="verify.provider.model",
+    )
     input_cost = _require_int(
         table,
         "input_cost_microusd_per_million_tokens",
@@ -2955,7 +3242,24 @@ def _parse_verify_provider(table: dict[str, Any]) -> VerifyProviderSettings:
         plugin_id=values["plugin_id"],
         plugin_distribution_name=values["plugin_distribution_name"],
         model=values["model"],
+        adapter_model_id=values["adapter_model_id"],
         model_revision=values["model_revision"],
+        capability_schema_version=_parse_capability_schema_version(
+            table,
+            "verify.provider",
+        ),
+        capability_revision=values["capability_revision"],
+        request_constraints=_parse_request_constraints(
+            table.get("request_constraints"),
+            "verify.provider.request_constraints",
+            authored=True,
+        ),
+        maximum_input_bytes=_require_int(
+            table,
+            "maximum_input_bytes",
+            "verify.provider",
+            minimum=1,
+        ),
         input_cost_microusd_per_million_tokens=input_cost,
         output_cost_microusd_per_million_tokens=output_cost,
         input_token_overhead=overhead,
@@ -3400,6 +3704,7 @@ def _validate_config_layers(
         )
     for layer in layers:
         _validate_analyze_descriptor_file_layer(layer.body, layer.path)
+        _validate_verify_provider_file_layer(layer.body, layer.path)
         for message in _unknown_key_messages(layer.body, layer.path):
             if not allow_unknown:
                 raise ConfigLoadError(message)
@@ -3445,9 +3750,44 @@ def _validate_analyze_descriptor_file_layer(
                 f"analyze flat descriptor adapter_model_id in {path} "
                 "must be nonblank when supplied"
             )
+        _parse_capability_schema_version(analyze, "analyze")
+        _parse_capability_revision(analyze, "analyze")
+        _parse_request_constraints(
+            analyze.get("request_constraints"),
+            "analyze.request_constraints",
+            authored=True,
+        )
+        _require_int(analyze, "maximum_input_bytes", "analyze", minimum=1)
     # Parse each layer independently so a later catalog child cannot inherit
     # omitted fields from an earlier descriptor with the same selector.
     _parse_analyze_model_catalog(analyze.get("models"))
+
+
+def _validate_verify_provider_file_layer(
+    raw: dict[str, Any],
+    path: Path,
+) -> None:
+    """Reject partial verifier overrides before deep merge can hide them."""
+
+    verify = raw.get("verify")
+    if not isinstance(verify, dict) or "provider" not in verify:
+        return
+    provider = verify.get("provider")
+    if not isinstance(provider, dict):
+        raise ConfigLoadError(f"verify.provider in {path} must be a table")
+    supplied = set(provider)
+    missing = sorted(_VERIFY_PROVIDER_KEYS - supplied)
+    unknown = sorted(supplied - _VERIFY_PROVIDER_KEYS)
+    if missing:
+        raise ConfigLoadError(
+            f"verify.provider in {path} must be complete in one file layer; "
+            f"missing: {', '.join(missing)}"
+        )
+    if unknown:
+        raise ConfigLoadError(
+            f"unknown config key `verify.provider.{unknown[0]}` in {path}"
+        )
+    _parse_verify_provider(provider)
 
 
 def _unknown_key_messages(raw: dict[str, Any], config_path: Path) -> list[str]:

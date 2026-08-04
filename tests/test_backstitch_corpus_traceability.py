@@ -57,9 +57,10 @@ def test_self_corpus_suppressions_are_auditable() -> None:
     expected_counts = {
         "docs/specs/04-backstitch-traceability-exclusions.md#SUP-DOM-META": 15,
         "docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-PROCESS": 2,
-        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-DEFERRED-MCP": 1,
-        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-COV-INFLIGHT": 3,
-        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-TEST-CITATIONS": 169,
+        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-DEFERRED-MCP": 2,
+        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-DOCUMENTATION-META": 2,
+        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-TEST-CITATIONS": 235,
+        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-VERIFICATION-META": 7,
     }
     assert Counter(record["declaration"] for record in suppressed) == expected_counts
     assert all(record["reason"] for record in suppressed)
@@ -81,9 +82,35 @@ def test_self_corpus_suppressions_are_auditable() -> None:
                 "docs/specs/07-verification-and-evidence-cases.md"
             )
             assert record["section_id"] == "EVC-8.6"
-        elif declaration.endswith("#SUP-COV-INFLIGHT"):
-            assert record["path"] == "docs/specs/08-intent-coverage.md"
-            assert record["section_id"] in {"COV-1", "COV-2", "COV-7"}
+        elif declaration.endswith("#SUP-DOCUMENTATION-META"):
+            assert (record["path"], record["section_id"]) in {
+                ("docs/specs/03-backstitch-configuration.md", "CFG-10"),
+                (
+                    "docs/specs/04-backstitch-traceability-exclusions.md",
+                    "EXC-10",
+                ),
+            }
+            assert record["code"] == "SPEC_SECTION_UNMAPPED"
+        elif declaration.endswith("#SUP-VERIFICATION-META"):
+            assert (record["path"], record["section_id"]) in {
+                ("docs/specs/02-backstitch-core.md", "SC-10"),
+                ("docs/specs/03-backstitch-configuration.md", "CFG-9"),
+                (
+                    "docs/specs/04-backstitch-traceability-exclusions.md",
+                    "EXC-9",
+                ),
+                ("docs/specs/05-backstitch-invariants.md", "INV-9"),
+                ("docs/specs/05-backstitch-invariants.md", "INV-10"),
+                (
+                    "docs/specs/07-verification-and-evidence-cases.md",
+                    "EVC-10",
+                ),
+                (
+                    "docs/specs/07-verification-and-evidence-cases.md",
+                    "EVC-12",
+                ),
+            }
+            assert record["code"] == "SPEC_SECTION_UNMAPPED"
         else:
             assert declaration.endswith("#SUP-TEST-CITATIONS")
             assert record["path"].startswith("tests/")
@@ -115,7 +142,7 @@ def test_dogfood_enables_documented_suppression_governance() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     config = json.loads(result.stdout)
     assert config["lint"]["require_suppression_declarations"] is True
-    assert len(config["lint"]["suppressions"]) == 5
+    assert len(config["lint"]["suppressions"]) == 3
     assert config["analyze"]["required_kinds"] == [
         "section",
         "invariant",

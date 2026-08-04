@@ -73,6 +73,9 @@ plugin_id = ""
 plugin_distribution_name = ""
 model = ""
 model_revision = ""
+capability_schema_version = 1
+capability_revision = "packaged-compatible-v1"
+maximum_input_bytes = 10000000
 concurrency = 1
 json_mode = "prefer"
 temperature = 0.0
@@ -96,6 +99,24 @@ input_cost_microusd_per_million_tokens = 0
 output_cost_microusd_per_million_tokens = 0
 input_token_overhead = 256
 cost_rate_source = ""
+
+[analyze.request_constraints.json_mode]
+presence = "required"
+allowed_values = ["require", "off"]
+
+[analyze.request_constraints.temperature]
+presence = "required"
+allowed_values = [0.0]
+
+[analyze.request_constraints.seed]
+presence = "required"
+minimum = 0
+maximum = 9223372036854775807
+
+[analyze.request_constraints.max_tokens]
+presence = "required"
+minimum = 1
+maximum = 2147483647
 
 [verify]
 enabled = false
@@ -631,6 +652,12 @@ short = "BSC008"
 status = "implemented"
 family = "deterministic"
 summary = "Code cites a spec section whose mapping does not cover that code"
+
+[diagnostics.registry.SPEC_MAPPING_TEST_ONLY]
+short = "BSC009"
+status = "implemented"
+family = "deterministic"
+summary = "Active implementation mapping resolves only to test roots"
 
 [diagnostics.registry.INVARIANT_UNTESTED]
 short = "BSI001"

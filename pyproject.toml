@@ -106,6 +106,15 @@ select = [
 ]
 level = "info"
 
+[tool.backstitch.obligations]
+# The self corpus is the shipping dogfood target. A complete v2 preparation
+# plus trust-boundary validation currently takes about 262 seconds locally.
+# Keep measured platform margin while the later speed phase profiles it.
+maximum_call_seconds = 600.0
+# Discovery-v2's complete 110-obligation corpus is 32.8 MB. Keep explicit
+# headroom while the later batching/source-interning phase optimizes it.
+maximum_packet_bytes = 40000000
+
 [tool.backstitch.analyze]
 # Model Monster's pkg:service PURL is the stable inference identity. The raw
 # OpenAI model ID is transport configuration passed only to llm.
@@ -115,6 +124,9 @@ plugin_distribution_name = "llm"
 model = "pkg:service/openai.com/gpt-5.4-mini"
 adapter_model_id = "gpt-5.4-mini"
 model_revision = "gpt-5.4-mini-2026-03-17"
+capability_schema_version = 1
+capability_revision = "openai-gpt-5.4-mini-2026-07-29"
+maximum_input_bytes = 1600000
 concurrency = 1
 cache_path = ".backstitch/semantic-cache"
 cache_mode = "read-write"
@@ -127,17 +139,35 @@ max_tokens = 512
 require_complete = true
 required_kinds = ["section", "invariant", "suppression"]
 minimum_packets = 1
-maximum_packets = 100
-maximum_prompt_bytes = 1500000
+maximum_packets = 128
+maximum_prompt_bytes = 40000000
 finding_handling = "require_disposition"
-maximum_provider_calls = 100
+maximum_provider_calls = 128
 lock_wait_timeout_seconds = 300
 maximum_runtime_seconds = 1800
-maximum_estimated_cost_microusd = 1000000
+maximum_estimated_cost_microusd = 30000000
 input_cost_microusd_per_million_tokens = 750000
 output_cost_microusd_per_million_tokens = 4500000
 input_token_overhead = 256
 cost_rate_source = "OpenAI GPT-5.4 mini model page (https://developers.openai.com/api/docs/models/gpt-5.4-mini), reviewed 2026-07-28"
+
+[tool.backstitch.analyze.request_constraints.json_mode]
+presence = "required"
+allowed_values = ["require"]
+
+[tool.backstitch.analyze.request_constraints.temperature]
+presence = "required"
+allowed_values = [0.0]
+
+[tool.backstitch.analyze.request_constraints.seed]
+presence = "required"
+minimum = 0
+maximum = 2147483647
+
+[tool.backstitch.analyze.request_constraints.max_tokens]
+presence = "required"
+minimum = 1
+maximum = 16384
 
 [tool.backstitch.verify]
 enabled = false
@@ -194,23 +224,9 @@ declaration = "docs/specs/04-backstitch-traceability-exclusions.md#SUP-DOM-META"
 [[tool.backstitch.lint.suppressions]]
 mechanism = "ignore"
 path = "docs/specs/07-verification-and-evidence-cases.md"
-sections = ["EVC-1", "EVC-12.1"]
-codes = ["SPEC_SECTION_UNMAPPED"]
-declaration = "docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-PROCESS"
-
-[[tool.backstitch.lint.suppressions]]
-mechanism = "ignore"
-path = "docs/specs/07-verification-and-evidence-cases.md"
 sections = ["EVC-8.6"]
-codes = ["SPEC_SECTION_UNMAPPED"]
+codes = ["SPEC_SECTION_UNMAPPED", "OBLIGATION_SKIPPED"]
 declaration = "docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-DEFERRED-MCP"
-
-[[tool.backstitch.lint.suppressions]]
-mechanism = "ignore"
-path = "docs/specs/08-intent-coverage.md"
-sections = ["COV-1", "COV-2", "COV-7"]
-codes = ["SPEC_SECTION_UNMAPPED"]
-declaration = "docs/specs/04-backstitch-traceability-exclusions.md#SUP-COV-INFLIGHT"
 
 [[tool.backstitch.lint.suppressions]]
 mechanism = "ignore"
@@ -297,6 +313,9 @@ ignore = [
     "E501",
     "B008",
 ]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 39
 
 [tool.ruff.lint.isort]
 known-first-party = ["backstitch"]

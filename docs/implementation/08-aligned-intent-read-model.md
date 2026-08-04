@@ -13,10 +13,20 @@ decisions. They cannot approve evidence or edit source.
 
 ## One Immutable Source View
 
-`obligation_runtime.py` is the orchestration boundary. It combines the bounded
-config loader with `repository_snapshot.py`, converges declared mapping targets,
-and returns one frozen view. `check_pipeline.py` and `resolver.py` consume that
-view without reopening repository source.
+`obligation_api.py` is the typed application boundary for the five public
+obligation reads. One normalized request owns capture, runtime construction,
+operation selection, cursor and discovery failures, response budgets, and
+deadlines; one result carries the complete core envelope plus failure state.
+`operation_progress.py` owns the discrete deadline/progress state machine.
+One absolute monotonic deadline crosses capture, catalog, relations, closure,
+candidate detail, packet materialization, and packet accounting. Deadline
+checkpoints carry the phase of the work being done; separately, best-effort
+progress events move only forward through the closed phase table. A failed
+sink disables later progress without changing the domain result.
+`obligation_runtime.py` is the reusable domain boundary beneath it. It combines
+the bounded config loader with `repository_snapshot.py`, converges declared
+mapping targets, and returns one frozen view. `check_pipeline.py` and
+`resolver.py` consume that view without reopening repository source.
 
 The former live-scan resolver entry points are removed. Deterministic checks
 enter through `check_pipeline.build_check_report_from_snapshot()`, and
@@ -38,12 +48,13 @@ target that is a symlink or non-regular object fails closed.
 
 ## Obligation And Evidence Owners
 
-The final aligned-intent split has eight owners: `repository_snapshot.py`,
-`obligation_runtime.py`, `obligations.py`, `evidence_summary.py`,
-`evidence_discovery.py`, `obligation_api.py`, `alignment_guide.py`, and
-`alignment_eval.py`. Runtime capture, orchestration, inventory, evidence,
-discovery, transport, installed guidance, and qualification therefore remain
-separate without creating another source of alignment authority.
+The final aligned-intent split has nine owners: `repository_snapshot.py`,
+`operation_progress.py`, `obligation_runtime.py`, `obligations.py`,
+`evidence_summary.py`, `evidence_discovery.py`, `obligation_api.py`,
+`alignment_guide.py`, and `alignment_eval.py`. Runtime capture,
+deadline/progress state, orchestration, inventory, evidence, discovery,
+transport, installed guidance, and qualification therefore remain separate
+without creating another source of alignment authority.
 
 `obligations.py` projects the existing trace graph into intent, alignment,
 disposition, rung, and gate state. It does not build a second graph.
@@ -116,10 +127,17 @@ closure bases cannot leak between obligations. The logical work budget still
 starts with the catalog's exact charged work: reuse changes execution cost, not
 budget truth or result bytes.
 
-`analysis_packets.generate_source_aligned_packets()` is the sole packet
-producer. The former `generate_packets()` path is removed. It consumes the
-immutable obligation runtime and prepares the shared discovery catalog once;
-`semantic_reports.publish_artifact_set()` owns staged publication of the
+`analysis_packets.plan_source_aligned_packets()` is the sole packet producer.
+Its authoritative `PacketPlan` retains the exact packet and model-request
+bytes consumed by reports, publication, preflight, and analysis without a
+second derivation. `generate_source_aligned_packets()` is only a compatibility
+projection of a complete plan. The former `generate_packets()` path is
+removed. The producer consumes the immutable obligation runtime and prepares
+the shared discovery catalog once;
+`packet_application.publish_packets()` owns the provider-free packet command's
+runtime construction, deterministic gate, optional report, and final artifact
+set;
+`artifact_publication.publish_artifact_set()` owns staged publication of the
 complete packet/result/report artifact set.
 
 A path-only Python mapping declares exactly the module owner at that file. It
@@ -144,8 +162,12 @@ backstitch guide alignment
 backstitch check
 ```
 
-`obligation_api.py` owns the transport-neutral envelopes, content-bound
+`obligation_api.py` also owns the transport-neutral envelopes, content-bound
 cursors, closed problem vocabulary, canonical JSON, and the compact text view.
+The CLI selects the normalized operation, supplies the resolved profile and
+settings, renders the returned envelope, chooses stdout or stderr, and maps the
+application failure bit to process exit `2`. It does not capture, build an
+inventory, discover candidates, or implement a second failure-order policy.
 Text keeps the resolved root outside core JSON, retains page cursors and repair
 actions, and shows the selected evidence or candidate facts needed for the
 bootstrap loop. Default detail uses
@@ -156,10 +178,13 @@ stable unreadable input.
 
 Every complete response is checked against the response-byte limit. Work and
 item ceilings abort the whole discovery operation; wall time may abort only the
-complete operation. There is no partial page, guessed candidate, provider
-import, network call, or source write. Once capture succeeds, any unexpected
-downstream failure returns `INTERNAL_ERROR` with that accepted snapshot rather
-than relabeling the failure as invalid user input.
+complete operation. Snapshot capture checks before and after each file read;
+deterministic discovery checks at every charged work-unit boundary. Blocking
+operating-system reads and scheduler suspension remain outside the cooperative
+100-millisecond tolerance. There is no partial page, guessed candidate,
+provider import, network call, or source write. Once capture succeeds, any
+unexpected downstream failure returns `INTERNAL_ERROR` with that accepted
+snapshot rather than relabeling the failure as invalid user input.
 
 `obligation_api.apply_response_byte_budget()` owns this byte check over
 canonical core JSON before either JSON or text rendering. Public callers do
@@ -195,6 +220,26 @@ merely to validate a later discovery-only artifact: phase-specific identities
 keep that evidence historical and separate. The 2026-07-16 lexical/module
 authority correction refreshed only Phase B's mechanically derived artifacts;
 it did not replay or relabel any Phase A participant observation.
+
+The 2026-07-29 discovery-v2 migration is a historical compatibility fixture,
+not a current qualification. The provider-free maintenance command
+`uv run python tests/product_eval/generate_alignment_bootstrap.py --write`
+rederives only the seven production candidate observations and their binding
+hashes; the same command without `--write` is the drift check. It never changes
+reviewed gold or critical labels.
+
+Discovery-v2 omits 13 reviewed rejected rows (nine module-wide candidates and
+four raw unresolved-reference intermediates), newly surfaces one previously
+reviewed static definition, and schema-2 role diagnostics newly surface one
+`SPEC_MAPPING_TEST_ONLY` report issue. Independent review retained all 13
+absent rows as capture misses and labeled the new issue rejected, critical,
+and partially declared. The resulting valid product observation captures 49
+of 62 eligible candidates and 23 of 30 critical candidates, so it fails the
+capture and all-critical checks. The root manifest also retains a historical
+common tested-product digest. Therefore `require_current_product = true`
+rejects the fixture, both prior phase results are historical, and no current
+bootstrap/discovery qualification claim follows from the refreshed Phase B
+projection.
 
 Independent gold is bound to the full parser-derived source candidate catalog.
 It may include eligible candidates omitted by obligation selection, so capture

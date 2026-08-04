@@ -44,6 +44,7 @@ from backstitch.exclusions import (
 from backstitch.markdown_specs import parse_markdown_spec
 from backstitch.obligation_runtime import build_obligation_runtime
 from backstitch.profiles import get_profile
+from backstitch.semantic_evidence import SemanticResultError, normalize_model_result
 from backstitch.semantic_identity import (
     InferenceIdentity,
     ProviderIdentity,
@@ -674,51 +675,39 @@ def test_config_show_rejects_invalid_suppression_code(tmp_path: Path) -> None:
 
 
 def test_evidence_outside_packet_is_rejected() -> None:
-    from backstitch.analysis_llm import analyze_packets
-
     packet = _full_packet(
         owners=[{"path": "pkg/mod.py", "symbol": None, "start_line": 1, "snippet": "x"}]
     )
-    response = json.dumps(
+    response = {
+        "packet_id": packet["packet_id"],
+        "classification": "ok",
+        "confidence": 0.5,
+        "summary": "fine",
+        "rationale": "because",
+        "evidence": [],
+    }
+    response["evidence"] = [
         {
-            "packet_id": packet["packet_id"],
-            "classification": "ok",
-            "confidence": 0.5,
-            "summary": "fine",
-            "rationale": "because",
-            "evidence": [
-                {
-                    "role": "implementation",
-                    "path": "not-in-packet.py",
-                    "start_line": 999,
-                    "end_line": 999,
-                }
-            ],
+            "role": "implementation",
+            "path": "not-in-packet.py",
+            "start_line": 999,
+            "end_line": 999,
         }
-    )
-    rows, errors = analyze_packets([packet], lambda prompt: response)
-    assert rows == []
-    assert any("exactly one shown" in e for e in errors)
+    ]
+    with pytest.raises(SemanticResultError, match="exactly one shown"):
+        normalize_model_result(packet, response, analysis_key="a" * 64)
+
     # bool is an int subclass; line=true must not validate.
-    bool_line = json.dumps(
+    response["evidence"] = [
         {
-            "packet_id": packet["packet_id"],
-            "classification": "ok",
-            "confidence": 0.5,
-            "summary": "fine",
-            "rationale": "because",
-            "evidence": [
-                {
-                    "role": "implementation",
-                    "path": "pkg/mod.py",
-                    "start_line": True,
-                    "end_line": 1,
-                }
-            ],
+            "role": "implementation",
+            "path": "pkg/mod.py",
+            "start_line": True,
+            "end_line": 1,
         }
-    )
-    rows, errors = analyze_packets([packet], lambda prompt: bool_line)
-    assert rows == []
+    ]
+    with pytest.raises(SemanticResultError):
+        normalize_model_result(packet, response, analysis_key="a" * 64)
 
 
 # --- Round 8 P2: summarize packet-ID universe = sections with packets --------
@@ -1140,33 +1129,28 @@ def test_model_helper_does_not_reread_backstitch_environment(
 
 
 def test_empty_owner_snippet_rejects_line_evidence() -> None:
-    from backstitch.analysis_llm import analyze_packets
-
     # Directory mappings produce owners with empty snippets: the path was
     # named, but no line content was shown -- same rule as tests.
     packet = _full_packet(
         owners=[{"path": "pkg/", "symbol": None, "start_line": 1, "snippet": ""}]
     )
-    response = json.dumps(
-        {
-            "packet_id": packet["packet_id"],
-            "classification": "ok",
-            "confidence": 0.5,
-            "summary": "fine",
-            "rationale": "because",
-            "evidence": [
-                {
-                    "role": "implementation",
-                    "path": "pkg/",
-                    "start_line": 1,
-                    "end_line": 1,
-                }
-            ],
-        }
-    )
-    rows, errors = analyze_packets([packet], lambda prompt: response)
-    assert rows == []
-    assert any("exactly one shown" in e for e in errors)
+    response = {
+        "packet_id": packet["packet_id"],
+        "classification": "ok",
+        "confidence": 0.5,
+        "summary": "fine",
+        "rationale": "because",
+        "evidence": [
+            {
+                "role": "implementation",
+                "path": "pkg/",
+                "start_line": 1,
+                "end_line": 1,
+            }
+        ],
+    }
+    with pytest.raises(SemanticResultError, match="exactly one shown"):
+        normalize_model_result(packet, response, analysis_key="a" * 64)
 
 
 # --- Round 11 P2: start lines must be positive --------------------------------
@@ -1176,33 +1160,28 @@ def test_empty_owner_snippet_rejects_line_evidence() -> None:
 
 
 def test_empty_paths_never_become_evidence_paths() -> None:
-    from backstitch.analysis_llm import analyze_packets
-
-    # Library callers can bypass CLI load validation; the evidence
-    # boundary itself must not admit "" as a citable path.
+    # The evidence normalizer itself must not admit "" as a citable path.
     packet = _full_packet(
         spec_path="",
         owners=[{"path": "", "symbol": None, "start_line": 1, "snippet": "x"}],
     )
-    response = json.dumps(
-        {
-            "packet_id": packet["packet_id"],
-            "classification": "ok",
-            "confidence": 0.5,
-            "summary": "fine",
-            "rationale": "because",
-            "evidence": [
-                {
-                    "role": "implementation",
-                    "path": "",
-                    "start_line": 1,
-                    "end_line": 1,
-                }
-            ],
-        }
-    )
-    rows, errors = analyze_packets([packet], lambda prompt: response)
-    assert rows == []
+    response = {
+        "packet_id": packet["packet_id"],
+        "classification": "ok",
+        "confidence": 0.5,
+        "summary": "fine",
+        "rationale": "because",
+        "evidence": [
+            {
+                "role": "implementation",
+                "path": "",
+                "start_line": 1,
+                "end_line": 1,
+            }
+        ],
+    }
+    with pytest.raises(SemanticResultError):
+        normalize_model_result(packet, response, analysis_key="a" * 64)
 
 
 # --- Round 12 P2: report edges need non-empty locators ------------------------
@@ -1240,31 +1219,27 @@ def test_summarize_rejects_empty_edge_locators(tmp_path: Path) -> None:
 
 
 def test_whitespace_paths_never_become_evidence_paths() -> None:
-    from backstitch.analysis_llm import analyze_packets
-
     packet = _full_packet(
         spec_path="   ",
         owners=[{"path": "   ", "symbol": None, "start_line": 1, "snippet": "x"}],
     )
-    response = json.dumps(
-        {
-            "packet_id": packet["packet_id"],
-            "classification": "ok",
-            "confidence": 0.5,
-            "summary": "fine",
-            "rationale": "because",
-            "evidence": [
-                {
-                    "role": "implementation",
-                    "path": "   ",
-                    "start_line": 1,
-                    "end_line": 1,
-                }
-            ],
-        }
-    )
-    rows, errors = analyze_packets([packet], lambda prompt: response)
-    assert rows == []
+    response = {
+        "packet_id": packet["packet_id"],
+        "classification": "ok",
+        "confidence": 0.5,
+        "summary": "fine",
+        "rationale": "because",
+        "evidence": [
+            {
+                "role": "implementation",
+                "path": "   ",
+                "start_line": 1,
+                "end_line": 1,
+            }
+        ],
+    }
+    with pytest.raises(SemanticResultError):
+        normalize_model_result(packet, response, analysis_key="a" * 64)
 
 
 def _report_with_edge(
@@ -1405,15 +1380,6 @@ def test_incomplete_analysis_rows_are_rejected(row: dict, fragment: str) -> None
     assert load.results == ()
     assert len(load.errors) == 1
     assert fragment in load.errors[0]
-
-
-def test_model_failure_produces_a_problem_and_no_result_row() -> None:
-    from backstitch.analysis_llm import analyze_packets
-
-    packet = _full_packet()
-    rows, errors = analyze_packets([packet], lambda prompt: "not json")
-    assert rows == []
-    assert len(errors) == 1
 
 
 # --- Round 14 P2: every packet locator goes through one validator -------------

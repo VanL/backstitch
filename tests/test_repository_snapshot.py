@@ -14,6 +14,10 @@ from pathlib import Path
 
 import pytest
 
+from backstitch.operation_progress import (
+    OperationDeadlineExceeded,
+    OperationProgress,
+)
 from backstitch.repository_snapshot import (
     FileStat,
     SnapshotAlgorithms,
@@ -96,6 +100,29 @@ def test_capture_returns_one_ordered_exact_byte_view(tmp_path: Path) -> None:
     )
     (tmp_path / "docs/specs/a.md").write_bytes(b"changed after capture")
     assert snapshot.read_bytes("docs/specs/a.md") == b"a\x00\xff"
+
+
+def test_snapshot_checks_deadline_after_each_repository_file_read(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/a.py").write_bytes(b"value = 1\n")
+    now = [0.0]
+    progress = OperationProgress.start(1.0, clock=lambda: now[0])
+
+    def expire_after_read(_attempt: int, _path: str, _root: Path) -> None:
+        now[0] = 1.001
+
+    with pytest.raises(OperationDeadlineExceeded) as raised:
+        capture_repository_snapshot(
+            tmp_path,
+            _config(tmp_path),
+            ALGORITHMS,
+            hooks=SnapshotCaptureHooks(after_file_read=expire_after_read),
+            progress=progress,
+        )
+
+    assert raised.value.phase == "snapshot"
 
 
 def test_torn_attempt_discards_bytes_and_retries_from_empty(tmp_path: Path) -> None:

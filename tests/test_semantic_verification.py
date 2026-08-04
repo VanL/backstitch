@@ -1,4 +1,7 @@
-"""Blinded verifier claim, request, identity, normalization, and aggregation."""
+"""Blinded verifier claim, request, identity, normalization, and aggregation.
+
+Spec: docs/specs/06-semantic-gates.md [SEM-4], [SEM-10]
+"""
 
 from __future__ import annotations
 
@@ -772,7 +775,7 @@ def test_prompt_descriptors_invalidate_only_their_composition_side(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import backstitch.semantic_packets as packet_module
-    import backstitch.semantic_verification as verify_module
+    import backstitch.semantic_verification_contract as verify_contract
 
     def build() -> CompositionIdentity:
         return build_composition_identity(
@@ -802,7 +805,9 @@ def test_prompt_descriptors_invalidate_only_their_composition_side(
     )
 
     monkeypatch.setattr(
-        verify_module, "VERIFY_PROMPT_VERSION", verify_module.VERIFY_PROMPT_VERSION + 1
+        verify_contract,
+        "VERIFY_PROMPT_VERSION",
+        verify_contract.VERIFY_PROMPT_VERSION + 1,
     )
     verify_changed = build()
     assert (
@@ -1019,7 +1024,9 @@ def test_verifier_wait_loop_timeout_serves_published_identical_result(
     cache_path = (tmp_path / "cache").resolve()
     work, result_bytes, expected_rows = _remove_populated_verify_result(cache_path)
     lock_path = cache_path / "verify-locks" / f"{work.identity.verify_key}.lock"
-    lock_path.write_bytes(semantic_cache._new_verify_lock(work.identity.verify_key))
+    lock_path.write_bytes(
+        semantic_cache._new_owned_lock(work.identity.verify_key, "verify")
+    )
     result_path = cache_path / "verify-results" / f"{work.identity.verify_key}.json"
 
     with semantic_cache._verify_guard(
@@ -1029,14 +1036,28 @@ def test_verifier_wait_loop_timeout_serves_published_identical_result(
         poll_interval_seconds=0.01,
     ):
         with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(
-                semantic_cache._wait_for_verify_result,
-                cache_path,
-                work,
-                PROVIDER,
+            coordinator = semantic_cache._OwnershipCoordinator(
+                cache_path=cache_path,
+                key=work.identity.verify_key,
+                lock_kind="verify",
+                result_path=result_path,
+                lock_path=lock_path,
                 timeout_seconds=0.05,
                 poll_interval_seconds=0.01,
-                runtime_deadline=None,
+                load_result=lambda: semantic_cache._load_verify_hit(
+                    cache_path, work, PROVIDER
+                ),
+                read_lock=lambda: semantic_cache._read_verify_lock(
+                    lock_path, work.identity.verify_key
+                ),
+                remove_lock=lambda expected: semantic_cache._remove_verify_lock(
+                    lock_path, work.identity.verify_key, expected
+                ),
+                wait_error="timed out waiting for verifier cache owner",
+                ownership_name="verification lock",
+            )
+            future = pool.submit(
+                coordinator.wait,
             )
             time.sleep(0.01)
             result_path.write_bytes(result_bytes)

@@ -23,6 +23,7 @@ from backstitch.models import Edge, Report, SpecMapping
 from backstitch.obligations import (
     ObligationRecord,
     associate_mapping_declaration_indexes,
+    resolve_evidence_atom,
 )
 from backstitch.python_refs import python_structural_locator
 from backstitch.repository_snapshot import RepositorySnapshot
@@ -42,15 +43,6 @@ _SUMMARY_LOCATOR_KINDS = {
     "python-definition",
     "source-declaration",
 }
-
-
-def _is_under(path: str, roots: Sequence[str]) -> bool:
-    pure = PurePosixPath(path)
-    return any(pure.is_relative_to(PurePosixPath(root)) for root in roots)
-
-
-def _role(path: str, profile: ProfileConfig) -> str:
-    return "test" if _is_under(path, profile.test_roots) else "implementation"
 
 
 def _canonical_nonnegative_decimal(value: str) -> bool:
@@ -298,7 +290,8 @@ def _source_declaration_ordinal(
 
 def _row(
     *,
-    role: str,
+    profile: ProfileConfig,
+    role_path: str,
     path: str,
     symbol: str | None,
     owner: str | None,
@@ -310,18 +303,32 @@ def _row(
     excerpt: str,
     declared_target: str | None = None,
     declarations: Sequence[dict[str, object]] = (),
+    binding_test: bool = False,
+    valid: bool = True,
+    reason: str | None = None,
 ) -> dict[str, object]:
     symbol = unicodedata.normalize("NFC", symbol) if symbol is not None else None
     owner = unicodedata.normalize("NFC", owner) if owner is not None else None
+    atom = resolve_evidence_atom(
+        path=role_path,
+        symbol=symbol,
+        relation_kinds=relation_kinds,  # type: ignore[arg-type]
+        reciprocity_state=reciprocity_state,  # type: ignore[arg-type]
+        test_roots=profile.test_roots,
+        source_identity=hashlib.sha256(canonical_json_bytes(receipt)).hexdigest(),
+        binding_test=binding_test,
+        valid=valid,
+        reason=reason,
+    )
     return {
-        "role": role,
+        "role": atom.source_role,
         "path": path,
         "symbol": symbol,
         "owner": owner,
         "start_line": start_line,
         "end_line": end_line,
-        "relation_kinds": sorted(set(relation_kinds), key=_RELATION_ORDER.__getitem__),
-        "reciprocity_state": reciprocity_state,
+        "relation_kinds": list(atom.relation_kinds),
+        "reciprocity_state": atom.reciprocity_state,
         "receipt": receipt,
         "excerpt": excerpt,
         "declared_target": declared_target,
@@ -450,7 +457,8 @@ def _section_items(
             declaration_rows.append(backlink_declaration)
         rows.append(
             _row(
-                role=_role(backlink.code_path, profile),
+                profile=profile,
+                role_path=backlink.code_path,
                 path=backlink.code_path,
                 symbol=backlink.code_symbol,
                 owner=owner,
@@ -504,7 +512,8 @@ def _section_items(
             source_symbol = declaration.section_id
         rows.append(
             _row(
-                role=_role(edge.code_path, profile),
+                profile=profile,
+                role_path=edge.code_path,
                 path=source_path,
                 symbol=source_symbol,
                 owner=owner,
@@ -540,6 +549,12 @@ def _section_items(
                     )
                     if row is not None
                 ),
+                valid=not declaration_fallback,
+                reason=(
+                    "mapping target has no atomic source receipt"
+                    if declaration_fallback
+                    else None
+                ),
             )
         )
 
@@ -564,11 +579,8 @@ def _section_items(
         owner, start, end, receipt, excerpt = atom
         rows.append(
             _row(
-                role=(
-                    _role(mapping.target_path, profile)
-                    if mapping.target_path is not None
-                    else "implementation"
-                ),
+                profile=profile,
+                role_path=mapping.target_path or mapping.target,
                 path=mapping.spec_path,
                 symbol=mapping.section_id,
                 owner=owner,
@@ -600,6 +612,8 @@ def _section_items(
                     )
                     if row is not None
                 ),
+                valid=False,
+                reason="mapping target did not resolve",
             )
         )
 
@@ -618,7 +632,8 @@ def _section_items(
         owner, start, end, receipt, excerpt = atom
         rows.append(
             _row(
-                role=_role(backlink.code_path, profile),
+                profile=profile,
+                role_path=backlink.code_path,
                 path=backlink.code_path,
                 symbol=backlink.code_symbol,
                 owner=owner,
@@ -700,10 +715,6 @@ def _invariant_items(
         for edge, mapping in zip(declaration_edges, edge_declarations, strict=True):
             if mapping is not None:
                 associated_mappings.add(mapping)
-            if _role(edge.code_path, profile) != "implementation":
-                if mapping is not None:
-                    rejected_mappings.append(mapping)
-                continue
             targets.append(
                 (
                     edge.code_path,
@@ -832,7 +843,8 @@ def _invariant_items(
         )
         rows.append(
             _row(
-                role="implementation",
+                profile=profile,
+                role_path=path,
                 path=path,
                 symbol=symbol,
                 owner=owner,
@@ -865,7 +877,8 @@ def _invariant_items(
         owner, start, end, receipt, excerpt = atom
         rows.append(
             _row(
-                role="implementation",
+                profile=profile,
+                role_path=mapping.target_path or mapping.target,
                 path=mapping.spec_path,
                 symbol=mapping.section_id,
                 owner=owner,
@@ -897,13 +910,16 @@ def _invariant_items(
                     )
                     if row is not None
                 ),
+                valid=False,
+                reason="invariant mapping target is not eligible",
             )
         )
     for bind, atom in bind_atoms:
         owner, start, end, receipt, excerpt = atom
         rows.append(
             _row(
-                role="binding_test",
+                profile=profile,
+                role_path=bind.test_path,
                 path=bind.test_path,
                 symbol=bind.test_symbol,
                 owner=owner,
@@ -933,6 +949,7 @@ def _invariant_items(
                     )
                     if row is not None
                 ),
+                binding_test=True,
             )
         )
     return rows

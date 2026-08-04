@@ -101,8 +101,9 @@ Do not consider work complete until:
   residual risk (see [DOM-10])
 - for implementation work on `backstitch` itself: every enumerable contract
   element the change touches (issue codes, exit codes, config keys) has a
-  firing test, and the self-corpus gate passes — advertised default
-  invocation, exit 0, zero errors and warnings, every governed suppression has
+  firing test, and the hermetic self-corpus gate
+  (`backstitch check --repo-root .`) passes with exit 0 and zero errors and
+  warnings; every governed suppression has
   a valid spec declaration and nonblank rationale in `--show-suppressions`,
   and every eligible suppression packet has a current semantic result or
   reviewed disposition under the applied configuration. When the [SC-10]

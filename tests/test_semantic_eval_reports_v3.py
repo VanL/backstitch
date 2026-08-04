@@ -13,6 +13,8 @@ from typing import Any
 
 import pytest
 
+from backstitch.obligation_runtime import ALGORITHMS
+from backstitch.semantic_eval_identity import derive_eval_search_epoch
 from backstitch.semantic_eval_reports import (
     SemanticEvalContractError,
     SemanticEvalObservedFacts,
@@ -441,6 +443,46 @@ def test_manifest_rejects_noncanonical_bytes(tmp_path: Path) -> None:
         load_semantic_eval_corpus(manifest_path, mode="report")
 
 
+def test_corpus_loader_preserves_validation_phase_error_priority(
+    tmp_path: Path,
+) -> None:
+    manifest_path, manifest = _write_corpus(tmp_path / "schema")
+    manifest["schema_version"] = 2
+    manifest["cases"] = "invalid after schema"
+    manifest_path.write_bytes(_canonical(manifest) + b"\n")
+    with pytest.raises(SemanticEvalContractError) as schema_error:
+        load_semantic_eval_corpus(manifest_path, mode="report")
+    assert str(schema_error.value) == "semantic eval corpus schema_version must be 3"
+
+    manifest_path, manifest = _write_corpus(tmp_path / "fixture")
+    manifest["cases"][0]["clean"]["variant_id"] = "not-clean"
+    manifest["cases"][0]["clean"]["tree_manifest_sha256"] = "sha256:" + "0" * 64
+    manifest_path.write_bytes(_canonical(manifest) + b"\n")
+    with pytest.raises(SemanticEvalContractError) as fixture_error:
+        load_semantic_eval_corpus(manifest_path, mode="report")
+    assert str(fixture_error.value) == (
+        "cases[0].clean identity or transform is invalid"
+    )
+
+    manifest_path, manifest = _write_corpus(tmp_path / "critical")
+    manifest["cases"][0]["critical"] = True
+    manifest["cases"][0]["gold_obligations"][0]["variant_id"] = "unknown"
+    manifest_path.write_bytes(_canonical(manifest) + b"\n")
+    with pytest.raises(SemanticEvalContractError) as critical_error:
+        load_semantic_eval_corpus(manifest_path, mode="report")
+    assert str(critical_error.value) == (
+        "critical_case_ids does not match critical cases"
+    )
+
+    manifest_path, manifest = _write_corpus(tmp_path / "gold")
+    manifest["cases"][0]["gold_obligations"][0]["variant_id"] = "unknown"
+    manifest["reviewed_historical_units"] = [{}]
+    manifest_path.write_bytes(_canonical(manifest) + b"\n")
+    with pytest.raises(SemanticEvalContractError) as gold_error:
+        load_semantic_eval_corpus(manifest_path, mode="report")
+    assert str(gold_error.value) == ("cases[0].gold_obligations[0] has unknown variant")
+
+
 def _provenance() -> dict[str, Any]:
     return {
         "adapter_id": "tests.adapter",
@@ -500,17 +542,8 @@ def _analysis_attempt(
     evidence: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     base_epoch = composition["base_search_epoch"]
-    effective = (
-        "eval-analyze:"
-        + hashlib.sha256(
-            _canonical(
-                {
-                    "base_search_epoch": base_epoch,
-                    "qualification_corpus_sha256": corpus_sha256,
-                    "trial_index": trial,
-                }
-            )
-        ).hexdigest()
+    effective = derive_eval_search_epoch(
+        "eval-analyze", base_epoch, corpus_sha256, trial
     )
     contract = {
         "analysis_contract_version": composition["analysis_contract_version"],
@@ -675,7 +708,7 @@ def _negative_report(corpus_sha256: str, packet_id: str) -> dict[str, Any]:
             "corpus_sha256": corpus_sha256,
             "snapshot_algorithm_version": 1,
             "obligation_algorithm_version": 1,
-            "discovery_algorithm_version": 1,
+            "discovery_algorithm_version": ALGORITHMS.discovery_algorithm_version,
             "packet_contract_version": 3,
             "normalization_version": 1,
             "analysis_composition": analysis_composition,
@@ -763,18 +796,7 @@ def _event(
     }
     claim_hash = hashlib.sha256(_canonical(claim)).hexdigest()
     base = verify_composition["search_epochs"][0]
-    effective = (
-        "eval-verify:"
-        + hashlib.sha256(
-            _canonical(
-                {
-                    "base_search_epoch": base,
-                    "qualification_corpus_sha256": corpus_sha256,
-                    "trial_index": trial,
-                }
-            )
-        ).hexdigest()
-    )
+    effective = derive_eval_search_epoch("eval-verify", base, corpus_sha256, trial)
     contract = {
         "verify_contract_version": verify_composition["verify_contract_version"],
         "verifier_packet_hash": verifier_packet_hash,
@@ -1129,4 +1151,39 @@ def test_authoritative_validation_uses_separate_source_facts_for_metrics(
     ):
         validate_semantic_eval_report_authoritatively(
             report_value, corpus=corpus, observed=contradictory
+        )
+
+
+@pytest.mark.parametrize("lane", ("analyze", "verify"))
+def test_authoritative_validation_recomputes_effective_search_epoch(
+    tmp_path: Path,
+    lane: str,
+) -> None:
+    manifest_path, manifest = _write_corpus(tmp_path)
+    corpus = load_semantic_eval_corpus(manifest_path, mode="report")
+    packet = _observed_packet(manifest)
+    report_value = _positive_report(
+        corpus.corpus_sha256,
+        packet["packet_id"],
+        packet=packet,
+    )
+    observed = _observed_facts(manifest, packet)
+
+    if lane == "analyze":
+        report_value["analysis_attempts"][0]["effective_search_epoch"] = (
+            "eval-analyze:" + "0" * 64
+        )
+    else:
+        report_value["events"][0]["primary_results"][0]["effective_search_epoch"] = (
+            "eval-verify:" + "0" * 64
+        )
+
+    with pytest.raises(
+        SemanticEvalContractError,
+        match="effective_search_epoch does not recompute",
+    ):
+        validate_semantic_eval_report_authoritatively(
+            report_value,
+            corpus=corpus,
+            observed=observed,
         )

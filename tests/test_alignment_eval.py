@@ -607,7 +607,7 @@ def test_absent_human_accepted_gold_is_a_capture_miss_not_a_diff_task(
     gold = next(
         row
         for row in fixture["gold_candidates"]
-        if row["gold_id"] == "implementation-definition-untraced-824fc83bedfb"
+        if row["gold_id"] == "implementation-definition-untraced-d0213ac482c5"
     )
     gold["disposition_label"] = "accepted"
     phase_path.write_bytes(_canonical(phase))

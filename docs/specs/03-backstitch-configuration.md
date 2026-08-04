@@ -204,6 +204,7 @@ the variable holds an absolute path. An expanded absolute result is used
 as-is.
 
 _Implementation mapping_:
+- `backstitch/config.py`
 - `backstitch/settings.py`
 
 ## 5. Precedence [CFG-5]
@@ -302,6 +303,27 @@ resolution boundary may construct or replace a `BackstitchSettings` value and
 pass it directly; resolver and public-CLI tests use the real filesystem, TOML
 parser, environment mapping, and argument parser.
 
+Filesystem discovery and Git-blob lookup are source adapters only. Both
+produce the same ordered configuration-layer envelope and call one effective
+settings assembler/finalizer. That owner alone performs merge, provenance
+projection, model selection, typed parsing, unknown-key and cross-field
+checks, and final paired-root containment.
+
+After [CFG-4]'s user and environment expansion, final profile-root containment
+is lexical for every adapter. Join a relative root to the target repository
+root, normalize `.` and `..`, and compare normalized path equality or
+ancestry. Containment does not call `Path.resolve`, `realpath`, `stat`, or
+another filesystem operation; physical symlink and no-follow enforcement
+belongs to repository capture. Given equal defaults, environment, and layer
+bytes with no CLI overlay, both adapters yield equal non-operational settings
+and identical profile-root containment. Operational output, cache,
+qualification-artifact, and target-root addresses may differ only in adapter
+normalization: the filesystem adapter may preserve its physical
+canonicalization, while the blob adapter validates and normalizes them
+lexically because they are not historical gate authority. Operational source
+provenance may also differ. Blob-backed resolution never consults the checkout
+or live filesystem.
+
 The repeatable CLI form is `--option KEY VALUE`. `KEY` is a known,
 runtime-consulted dotted leaf path in standalone `.backstitch.toml` shape and
 never includes `tool.backstitch`. Split `KEY` on literal dots with no quoted
@@ -335,6 +357,8 @@ load-time structure and cannot be set by `--option`.
 
 The analyze descriptor leaves `backend_id`, `plugin_id`,
 `plugin_distribution_name`, `model_revision`,
+`capability_schema_version`, `capability_revision`, `request_constraints`,
+`maximum_input_bytes`,
 `input_cost_microusd_per_million_tokens`,
 `output_cost_microusd_per_million_tokens`, `input_token_overhead`, and
 `cost_rate_source` are also reserved from generic `--option`. The dedicated
@@ -342,6 +366,14 @@ The analyze descriptor leaves `backend_id`, `plugin_id`,
 selectors and conflict under the ordinary same-key rule. Either selects one
 complete trusted descriptor; no CLI form constructs or partially edits a
 descriptor.
+
+Every leaf below `verify.provider` is likewise reserved from generic
+`--option`, including `backend_id`, `plugin_id`,
+`plugin_distribution_name`, `model`, `adapter_model_id`, `model_revision`,
+`capability_schema_version`, `capability_revision`, `request_constraints`,
+`maximum_input_bytes`, both cost-rate fields, `input_token_overhead`, and
+`cost_rate_source`. The override provider descriptor is file-owned and atomic;
+no CLI form constructs or partially edits it.
 
 The complete dedicated-setting alias map is:
 
@@ -383,12 +415,15 @@ not a second Backstitch configuration source.
 
 _Implementation mapping_:
 
+- `backstitch/config.py`
+- `backstitch/filesystem_io.py`
 - `backstitch/settings.py`
 - `backstitch/cli.py`
 - `backstitch/analysis_llm.py`
 - `backstitch/doctor.py`
 - `backstitch/target_roots.py`
 - `tests/test_cli_config.py`
+- `tests/test_config_parity.py`
 - `tests/test_doctor.py`
 - `tests/test_settings.py`
 - `tests/test_semantic_settings.py`
@@ -511,6 +546,13 @@ a hit. Neither value reuses a result across packet, prompt, request,
 analysis-contract, or search-epoch changes. Changing `search_epoch` remains
 the explicit durable resampling mechanism.
 
+`require_complete` governs result completeness after the authoritative packet
+set has been selected: when true, every selected packet must have one valid
+result under [SEM-3]/[SEM-9]. It does not relax current-source obligation
+readiness, make a partial packet plan executable, bypass packet or request
+budgets, or turn `ALIGNMENT_DEBT` into an advisory result. Help and
+`config show` describe it as result completeness, not source completeness.
+
 `[analyze.models]` is a closed catalog whose quoted child keys are canonical
 Model Monster `pkg:service` PURLs in the form
 `pkg:service/{service_namespace}/{service_name}[@{version}][?{qualifiers}]`.
@@ -519,6 +561,8 @@ the canonical identity selector accepted by `LLM_MODEL` and `--model`. Each chil
 contains exactly the nonblank raw `adapter_model_id` passed to the provider,
 `backend_id`, `plugin_id`,
 `plugin_distribution_name`, `model_revision`,
+`capability_schema_version`, `capability_revision`, `request_constraints`,
+`maximum_input_bytes`,
 `input_cost_microusd_per_million_tokens`,
 `output_cost_microusd_per_million_tokens`, `input_token_overhead`, and
 `cost_rate_source`. Unknown child fields, blank or whitespace-bearing selector
@@ -529,9 +573,45 @@ selector equals the nonblank flat model is invalid; one selector has exactly
 one descriptor owner. `adapter_model_id` aliases must also be unique across the
 flat descriptor and catalog.
 
+The capability portion of every file-owned descriptor is closed.
+`capability_schema_version` is exactly integer `1`;
+`capability_revision` is a nonblank version string; and
+`maximum_input_bytes` is a positive integer conservative ceiling for one
+complete provider request, not the aggregate corpus prompt budget. A request
+larger than that ceiling fails before credential access or a provider call.
+
+`request_constraints` is a closed mapping with exactly `json_mode`,
+`temperature`, `seed`, and `max_tokens`. Each authored TOML value is a closed
+record containing `presence` plus only its applicable constraint keys.
+`presence` is `required`, `optional`, or `forbidden`. `json_mode` uses
+nonempty duplicate-free `allowed_values` drawn from `require` and `off`;
+configured `prefer` is a resolution instruction and must resolve to one of
+those effective wire values before validation. `temperature` uses nonempty
+duplicate-free finite-number `allowed_values`; `seed` and `max_tokens` use
+integer `minimum` and `maximum`, with minimum no greater than maximum. An
+allowed-value constraint omits both bounds. A range constraint omits
+`allowed_values`. A forbidden field omits all three constraint members.
+Unknown or inapplicable authored keys are invalid. The resolver expands the
+authored TOML into [SEM-3]'s exact runtime record by inserting null for every
+omitted inapplicable member. Thus TOML does not need a null literal and the
+normalized descriptor still has one closed canonical shape. A required field
+must be present in the frozen effective request; a forbidden field must be
+absent; an optional field is validated when present. Backstitch validates but
+never silently corrects, adds, or removes an explicitly configured
+incompatible value.
+
+`adapter_model_id` is the analyzer's raw transport selector and resolves to
+`analyzer_model_id`; it never replaces the catalog PURL's stable
+identity. An enabled verifier retains its independently resolved raw selector
+as `verifier_model_id` under [EVC-5]. Both raw IDs remain outside
+`request_constraints` and semantic cache identity, while their selected
+descriptor and provenance remain reportable.
+
 The flat descriptor is one atomic non-packaged file-layer group containing
 exactly `model`, `backend_id`, `plugin_id`, `plugin_distribution_name`,
-`model_revision`, both cost-rate fields, `input_token_overhead`, and
+`model_revision`, `capability_schema_version`, `capability_revision`,
+`request_constraints`, `maximum_input_bytes`, both cost-rate fields,
+`input_token_overhead`, and
 `cost_rate_source`, plus optional `adapter_model_id` (which defaults to
 `model`). If a discovered, selected, parent, or child file layer
 supplies any group member, that same layer must supply the complete group.
@@ -621,6 +701,19 @@ table but makes a minimal disabled table fail for missing required keys.
 The complete enabled base table, nested override provider table, types, ranges,
 all-or-nothing `provider_source` rule, provider identity, cost, cache,
 aggregation, and budget semantics are exactly [EVC-5].
+The nested override provider is one atomic non-packaged file-layer group. It
+contains exactly `backend_id`, `plugin_id`, `plugin_distribution_name`,
+canonical-PURL `model`, nonblank raw `adapter_model_id`, `model_revision`,
+`capability_schema_version`, `capability_revision`, `request_constraints`,
+`maximum_input_bytes`, both cost-rate fields, `input_token_overhead`, and
+`cost_rate_source`. Its authored capability constraints use [CFG-6.5]'s
+concise TOML form and normalize to [SEM-3]'s closed null-bearing runtime
+record. If any group member is present, every member must be present in that
+same file layer. The group replaces an inherited override as a unit; partial
+inheritance, unknown or blank members, and generic-option edits are exit `2`.
+This is a strict backward break for prior override tables with the historical
+raw `model` spelling or without capability fields; Backstitch does not guess
+their stable identity, transport selector, or capabilities.
 The qualification subtable is exactly [EVC-10.1]:
 
 ```toml
@@ -1018,6 +1111,8 @@ _Implementation mapping_:
 
 ## 9. Verification Expectations [CFG-9]
 
+<!-- backstitch: meta because docs/specs/04-backstitch-traceability-exclusions.md#SUP-VERIFICATION-META -->
+
 Required proof:
 
 - firing public-CLI tests for generic scalar, boolean, numeric, array, inline,
@@ -1150,11 +1245,9 @@ configuration directory (for example via `LLM_USER_PATH`) and does not read
 the global `llm` config; this wiring is outside Backstitch config and must not
 be treated as proof for any Backstitch config key.
 
-_Implementation mapping_:
-- `tests/test_settings.py`
-- `tests/test_cli.py`
-
 ## 10. Documentation And Traceability [CFG-10]
+
+<!-- backstitch: meta because docs/specs/04-backstitch-traceability-exclusions.md#SUP-DOCUMENTATION-META -->
 
 Implementation must update:
 
@@ -1167,12 +1260,12 @@ Implementation must update:
 - `README.md` documents configured bare invocation, its exact command
   equivalences, and the explicit trust/cost warning for `"analyze"`
 
-_Implementation mapping_:
-- `docs/implementation/02-repository-map.md`
-- `docs/implementation/04-backstitch-style-traceability.md`
-
 ## Related Plans
 
+- `docs/plans/2026-07-29-usability-remediation-plan.md`
+  (active usability implementation plan; [CFG-5.1] and [CFG-6.5])
+- `docs/plans/2026-07-29-architecture-quality-remediation-plan.md`
+  (active implementation plan; [CFG-4], [CFG-5.1], and [CFG-9])
 - `docs/plans/2026-07-28-intent-coverage-implementation-plan.md`
   (active implementation plan; [CFG-3], [CFG-5], [CFG-6], [CFG-8], and
   [CFG-9] coverage registrations)
