@@ -52,6 +52,7 @@ REVIEWED_EXCLUSIONS = (
 PLANNED_PRELANDING_PYTHON = frozenset(
     {
         "bin/ruff_suppression_index.py",
+        "tests/test_coalesce_check.py",
         "tests/test_ruff_policy.py",
         "tests/test_ruff_suppression_index.py",
     }

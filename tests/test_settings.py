@@ -1522,6 +1522,105 @@ direct = 0.5
     assert by_key["exclude"] == {"packaged"}
 
 
+def test_flatten_ratchet_policy_layer_has_exact_included_and_excluded_gate_keys() -> (
+    None
+):
+    included = {
+        "profile": {
+            "name",
+            "spec_roots",
+            "code_roots",
+            "test_roots",
+            "planned_spec_globs",
+            "exploratory_spec_globs",
+            "meta_spec_globs",
+            "process_spec_globs",
+        },
+        "coverage": {
+            "mode",
+            "granularity",
+            "inherited_counts",
+            "ratchet_base",
+            "exemptions",
+            "maximum_baseline_files",
+            "maximum_file_bytes",
+            "maximum_baseline_bytes",
+            "maximum_history_commits",
+            "maximum_git_command_seconds",
+            "maximum_git_commands",
+            "maximum_git_output_bytes",
+            "maximum_commit_message_bytes",
+            "maximum_runtime_seconds",
+        },
+        "diagnostics": {"default_level", "fail_on", "suppressible_levels", "levels"},
+        "lint": {
+            "warn_unused_ignores",
+            "require_suppression_declarations",
+            "per-file-ignores",
+            "per-section-ignores",
+            "suppressions",
+        },
+    }
+    for table, keys in included.items():
+        for key in keys:
+            expected_key = key.replace("-", "_") if table == "lint" else key
+            assert settings_module._flatten_ratchet_policy_layer(
+                {table: {key: "sentinel"}}
+            ) == (f"{table}.{expected_key}",)
+
+    for table, key in (
+        ("profile", "plan_roots"),
+        ("coverage", "format"),
+        ("coverage", "output"),
+        ("diagnostics", "registry"),
+    ):
+        assert (
+            settings_module._flatten_ratchet_policy_layer(
+                {table: {key: "presentation-only"}}
+            )
+            == ()
+        )
+
+    assert settings_module._flatten_ratchet_policy_layer(
+        {"coverage": {"floors": {}}}
+    ) == ("coverage.floors",)
+    assert settings_module._flatten_ratchet_policy_layer(
+        {
+            "coverage": {
+                "floors": {
+                    "src/": {"direct": 0.5, "accounted": 0.75},
+                }
+            }
+        }
+    ) == ("coverage.floors.src.direct", "coverage.floors.src.accounted")
+    assert settings_module._flatten_ratchet_policy_layer(
+        {"exclude": ["build/**"], "extend_exclude": ["generated/**"]}
+    ) == ("exclude", "extend_exclude")
+
+
+def test_table_key_names_is_the_exact_closed_table_map() -> None:
+    expected = {
+        "defaults": settings_module._DEFAULTS_KEYS,
+        "profile": settings_module._PROFILE_KEYS,
+        "check": settings_module._CHECK_KEYS,
+        "packets": settings_module._PACKETS_KEYS,
+        "coverage": settings_module._COVERAGE_KEYS,
+        "analyze": settings_module._ANALYZE_KEYS,
+        "verify": settings_module._VERIFY_KEYS,
+        "obligations": settings_module._OBLIGATION_KEYS,
+        "target_roots": settings_module._TARGET_ROOT_KEYS,
+        "lint": settings_module._LINT_KEYS,
+        "diagnostics": settings_module._DIAGNOSTICS_KEYS,
+    }
+
+    assert {
+        table_name: settings_module._table_key_names(table_name)
+        for table_name in expected
+    } == expected
+    for unknown in ("", "Profile", "unknown", "verify.provider"):
+        assert settings_module._table_key_names(unknown) == frozenset()
+
+
 def test_report_mode_coverage_scalars_are_generic_options(tmp_path: Path) -> None:
     settings = resolve_config(
         tmp_path,

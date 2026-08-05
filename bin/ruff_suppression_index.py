@@ -63,6 +63,15 @@ class Group:
 
 
 @dataclass(frozen=True)
+class RegistryLayout:
+    by_number: dict[int, str]
+    human_section: tuple[tuple[int, str], ...]
+    first_row: int
+    begin: int
+    end: int
+
+
+@dataclass(frozen=True)
 class Directive:
     path: str
     line: int
@@ -181,7 +190,7 @@ def _parse_raw(value: str, group: str) -> tuple[tuple[str, int], ...]:
     return tuple(sorted(result))
 
 
-def parse_registry(text: str) -> tuple[dict[str, Group], tuple[int, int]]:
+def _registry_layout(text: str) -> RegistryLayout:
     active = _active_lines(text)
     heading = _single_line(active, REGISTRY_HEADING, "SC-17.1 registry heading")
     section_end = next(
@@ -212,60 +221,24 @@ def parse_registry(text: str) -> tuple[dict[str, Group], tuple[int, int]]:
         or by_number.get(cursor + 1, "").strip() != TABLE_DIVIDER
     ):
         _fail("SC-17.1 registry table header does not match the required schema")
-    cursor += 2
-    groups: dict[str, Group] = {}
-    group_row_numbers: set[int] = set()
-    while cursor in by_number and by_number[cursor].strip().startswith("|"):
-        cells = _cells(by_number[cursor])
-        if len(cells) != 9:
-            _fail(f"registry row {cursor} must contain nine columns")
-        group_cell = re.fullmatch(r"`(RUFF-SUP-\d{3})`", cells[0])
-        if group_cell is None:
-            _fail(f"registry row {cursor} has malformed group id")
-        name = group_cell.group(1)
-        if name in groups:
-            _fail(f"duplicate registry group {name}")
-        rules = _parse_rules(cells[1], name)
-        match = re.fullmatch(r"`(\d+)`", cells[2])
-        if not match or int(match.group(1)) < 1:
-            _fail(f"{name} has malformed approved directive count")
-        raw = _parse_raw(cells[3], name)
-        if set(rules) != {code for code, _ in raw}:
-            _fail(f"{name} rules do not match its raw diagnostic rules")
-        lifetime = cells[4].strip()
-        if lifetime != "permanent" and not re.fullmatch(
-            r"temporary: T(?:5|6|7|8|9) .+", lifetime
-        ):
-            _fail(
-                f"{name} has malformed lifetime; temporary entries require a named T5-T9 task"
-            )
-        for field, value in zip(
-            ("protected invariant", "real proof", "rejected alternatives", "approval"),
-            cells[5:9],
-            strict=True,
-        ):
-            _substantive(value, field, name)
-        proof = re.sub(r"[`*_]", "", cells[6]).lower()
-        if not any(
-            word in proof
-            for word in (
-                "test",
-                "probe",
-                "fixture",
-                "suite",
-                "command",
-                "acceptance",
-                "bin/",
-            )
-        ):
-            _fail(f"{name} real proof does not name executable evidence")
-        groups[name] = Group(name, rules, int(match.group(1)), raw)
-        group_row_numbers.add(cursor)
+    if begin >= end:
+        _fail("generated-index markers are reversed")
+    return RegistryLayout(by_number, tuple(human_section), cursor + 2, begin, end)
+
+
+def _registry_rows(layout: RegistryLayout) -> list[tuple[int, str]]:
+    cursor = layout.first_row
+    rows: list[tuple[int, str]] = []
+    while cursor in layout.by_number and layout.by_number[cursor].strip().startswith(
+        "|"
+    ):
+        rows.append((cursor, layout.by_number[cursor]))
         cursor += 1
+    row_numbers = {number for number, _ in rows}
     ignored_rows = [
         number
-        for number, line in human_section
-        if number not in group_row_numbers
+        for number, line in layout.human_section
+        if number not in row_numbers
         and line.strip().startswith("|")
         and "RUFF-SUP-" in line
     ]
@@ -273,13 +246,70 @@ def parse_registry(text: str) -> tuple[dict[str, Group], tuple[int, int]]:
         _fail(
             f"group-shaped registry rows exist outside the human table: {ignored_rows}"
         )
+    if cursor > layout.begin:
+        _fail("human registry table must precede the generated index")
+    return rows
+
+
+def _approved_directives(value: str, name: str) -> int:
+    match = re.fullmatch(r"`(\d+)`", value)
+    if not match or int(match.group(1)) < 1:
+        _fail(f"{name} has malformed approved directive count")
+    return int(match.group(1))
+
+
+def _validate_human_fields(cells: list[str], name: str) -> None:
+    lifetime = cells[4].strip()
+    if lifetime != "permanent" and not re.fullmatch(
+        r"temporary: T(?:5|6|7|8|9) .+", lifetime
+    ):
+        _fail(
+            f"{name} has malformed lifetime; temporary entries require a named T5-T9 task"
+        )
+    fields = ("protected invariant", "real proof", "rejected alternatives", "approval")
+    for field, value in zip(fields, cells[5:9], strict=True):
+        _substantive(value, field, name)
+    proof = re.sub(r"[`*_]", "", cells[6]).lower()
+    evidence_words = (
+        "test",
+        "probe",
+        "fixture",
+        "suite",
+        "command",
+        "acceptance",
+        "bin/",
+    )
+    if not any(word in proof for word in evidence_words):
+        _fail(f"{name} real proof does not name executable evidence")
+
+
+def _parse_group_row(number: int, row: str) -> Group:
+    cells = _cells(row)
+    if len(cells) != 9:
+        _fail(f"registry row {number} must contain nine columns")
+    group_cell = re.fullmatch(r"`(RUFF-SUP-\d{3})`", cells[0])
+    if group_cell is None:
+        _fail(f"registry row {number} has malformed group id")
+    name = group_cell.group(1)
+    rules = _parse_rules(cells[1], name)
+    raw = _parse_raw(cells[3], name)
+    if set(rules) != {code for code, _ in raw}:
+        _fail(f"{name} rules do not match its raw diagnostic rules")
+    _validate_human_fields(cells, name)
+    return Group(name, rules, _approved_directives(cells[2], name), raw)
+
+
+def parse_registry(text: str) -> tuple[dict[str, Group], tuple[int, int]]:
+    layout = _registry_layout(text)
+    groups: dict[str, Group] = {}
+    for number, row in _registry_rows(layout):
+        group = _parse_group_row(number, row)
+        if group.name in groups:
+            _fail(f"duplicate registry group {group.name}")
+        groups[group.name] = group
     if not groups:
         _fail("SC-17.1 registry has no groups")
-    if begin >= end:
-        _fail("generated-index markers are reversed")
-    if cursor > begin:
-        _fail("human registry table must precede the generated index")
-    return groups, (begin, end)
+    return groups, (layout.begin, layout.end)
 
 
 @dataclass(frozen=True)
@@ -421,53 +451,68 @@ def discover_sources(root: Path) -> list[Path]:
     return sorted(set(sources), key=lambda path: _relative(path, root))
 
 
-def _json_findings(
-    result: subprocess.CompletedProcess[str], root: Path, *, label: str
-) -> list[Finding]:
+def _reject_duplicate_json_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
+
+
+def _decode_ruff_payload(
+    result: subprocess.CompletedProcess[str], label: str
+) -> list[object]:
     if result.returncode not in (0, 1):
         raise ToolFailure(
             f"{label} failed ({result.returncode}): {result.stderr.strip()}"
         )
     if not result.stdout.strip():
         raise ToolFailure(f"{label} emitted empty JSON output")
-
-    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-        value: dict[str, object] = {}
-        for key, item in pairs:
-            if key in value:
-                raise ValueError(f"duplicate JSON key: {key}")
-            value[key] = item
-        return value
-
     try:
-        payload = json.loads(result.stdout, object_pairs_hook=reject_duplicate_keys)
+        payload = json.loads(
+            result.stdout, object_pairs_hook=_reject_duplicate_json_keys
+        )
     except (json.JSONDecodeError, ValueError) as exc:
         raise ToolFailure(f"{label} emitted malformed JSON") from exc
     if not isinstance(payload, list):
         raise ToolFailure(f"{label} JSON must be a list")
-    findings: list[Finding] = []
+    return payload
+
+
+def _finding_from_item(item: object, root: Path, label: str) -> Finding:
     try:
-        for item in payload:
-            if not isinstance(item, dict):
-                raise TypeError
-            raw_filename = item["filename"]
-            raw_line = item["noqa_row"]
-            raw_code = item["code"]
-            if (
-                not isinstance(raw_filename, str)
-                or type(raw_line) is not int
-                or raw_line < 1
-                or not isinstance(raw_code, str)
-                or RULE_RE.fullmatch(raw_code) is None
-            ):
-                raise TypeError
-            filename = Path(raw_filename)
-            if not filename.is_absolute():
-                filename = root / filename
-            findings.append(Finding(_relative(filename, root), raw_line, raw_code))
+        if not isinstance(item, dict):
+            raise TypeError
+        raw_filename = item["filename"]
+        raw_line = item["noqa_row"]
+        raw_code = item["code"]
     except (KeyError, TypeError, ValueError) as exc:
         raise ToolFailure(f"{label} emitted an invalid diagnostic object") from exc
-    return findings
+    valid = (
+        isinstance(raw_filename, str)
+        and type(raw_line) is int
+        and raw_line > 0
+        and isinstance(raw_code, str)
+        and RULE_RE.fullmatch(raw_code) is not None
+    )
+    if not valid:
+        raise ToolFailure(f"{label} emitted an invalid diagnostic object")
+    filename = Path(raw_filename)
+    if not filename.is_absolute():
+        filename = root / filename
+    return Finding(_relative(filename, root), raw_line, raw_code)
+
+
+def _json_findings(
+    result: subprocess.CompletedProcess[str], root: Path, *, label: str
+) -> list[Finding]:
+    return [
+        _finding_from_item(item, root, label)
+        for item in _decode_ruff_payload(result, label)
+    ]
 
 
 def collect_findings(root: Path) -> list[Finding]:
@@ -481,13 +526,9 @@ def collect_findings(root: Path) -> list[Finding]:
     return _json_findings(raw, root, label="Ruff raw audit")
 
 
-def reconcile(
-    groups: dict[str, Group], directives: list[Directive], findings: list[Finding]
+def _index_directives(
+    groups: dict[str, Group], directives: list[Directive]
 ) -> dict[str, list[Directive]]:
-    locations = Counter(
-        (finding.path, finding.line, finding.code) for finding in findings
-    )
-    consumed: Counter[tuple[str, int, str]] = Counter()
     by_group: dict[str, list[Directive]] = defaultdict(list)
     pointers: set[tuple[str, str, str]] = set()
     for directive in directives:
@@ -505,21 +546,71 @@ def reconcile(
                 f"duplicate source pointer for {directive.group}: {directive.path}::{directive.symbol}"
             )
         pointers.add(pointer)
-        actual = Counter(
-            {
-                code: count
-                for (path, line, code), count in locations.items()
-                if path == directive.path and line == directive.line
-            }
-        )
-        if set(actual) != set(directive.rules):
-            _fail(
-                f"governed directive rules do not match raw diagnostics at "
-                f"{directive.path}:{directive.line}"
-            )
-        for code, count in actual.items():
-            consumed[(directive.path, directive.line, code)] += count
         by_group[directive.group].append(directive)
+    return by_group
+
+
+def _raw_by_location(
+    findings: list[Finding],
+) -> dict[tuple[str, int], Counter[str]]:
+    locations: dict[tuple[str, int], Counter[str]] = defaultdict(Counter)
+    for finding in findings:
+        locations[(finding.path, finding.line)][finding.code] += 1
+    return locations
+
+
+def _directive_raw(
+    directive: Directive,
+    raw_locations: dict[tuple[str, int], Counter[str]],
+) -> Counter[str]:
+    actual = raw_locations[(directive.path, directive.line)]
+    if set(actual) != set(directive.rules):
+        _fail(
+            f"governed directive rules do not match raw diagnostics at "
+            f"{directive.path}:{directive.line}"
+        )
+    return actual
+
+
+def _validate_group(
+    group: Group,
+    owned: list[Directive],
+    raw_locations: dict[tuple[str, int], Counter[str]],
+) -> None:
+    if len(owned) != group.directives:
+        _fail(
+            f"{group.name} directive cardinality is {len(owned)}; expected {group.directives}"
+        )
+    used_rules = {code for directive in owned for code in directive.rules}
+    if used_rules != set(group.rules):
+        _fail(f"{group.name} live directive rules do not match the registry")
+    group_raw: Counter[str] = Counter()
+    for directive in owned:
+        group_raw.update(raw_locations[(directive.path, directive.line)])
+    if group_raw != Counter(dict(group.raw)):
+        _fail(f"{group.name} raw diagnostic cardinality does not match the registry")
+
+
+def _raw_inventory(
+    raw_locations: dict[tuple[str, int], Counter[str]],
+) -> Counter[tuple[str, int, str]]:
+    inventory: Counter[tuple[str, int, str]] = Counter()
+    for (path, line), counts in raw_locations.items():
+        for code, count in counts.items():
+            inventory[(path, line, code)] += count
+    return inventory
+
+
+def reconcile(
+    groups: dict[str, Group], directives: list[Directive], findings: list[Finding]
+) -> dict[str, list[Directive]]:
+    by_group = _index_directives(groups, directives)
+    raw_locations = _raw_by_location(findings)
+    consumed: Counter[tuple[str, int, str]] = Counter()
+    for directive in directives:
+        for code, count in _directive_raw(directive, raw_locations).items():
+            consumed[(directive.path, directive.line, code)] += count
+    locations = _raw_inventory(raw_locations)
     if locations != consumed:
         extra = list((locations - consumed).elements())
         missing = list((consumed - locations).elements())
@@ -527,22 +618,7 @@ def reconcile(
             f"raw Ruff inventory does not reconcile; unregistered={extra}, excess-directives={missing}"
         )
     for name, group in groups.items():
-        owned = by_group.get(name, [])
-        if len(owned) != group.directives:
-            _fail(
-                f"{name} directive cardinality is {len(owned)}; expected {group.directives}"
-            )
-        used_rules = {code for directive in owned for code in directive.rules}
-        if used_rules != set(group.rules):
-            _fail(f"{name} live directive rules do not match the registry")
-        owned_locations = {(directive.path, directive.line) for directive in owned}
-        group_raw = Counter(
-            finding.code
-            for finding in findings
-            if (finding.path, finding.line) in owned_locations
-        )
-        if group_raw != Counter(dict(group.raw)):
-            _fail(f"{name} raw diagnostic cardinality does not match the registry")
+        _validate_group(group, by_group.get(name, []), raw_locations)
     return by_group
 
 
