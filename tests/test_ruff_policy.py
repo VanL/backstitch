@@ -385,7 +385,7 @@ def test_lint_vector_does_not_expand_the_formatter_scope() -> None:
         Path(line).resolve().relative_to(ROOT).as_posix()
         for line in default_bin.stdout.splitlines()
         if line
-    } == {"bin/release.py"}
+    } == {"bin/release.py", "bin/ruff_suppression_index.py"}
 
 
 def test_provisional_activation_ledger_has_the_reviewed_t2_inventory() -> None:

@@ -2,7 +2,7 @@
 
 Date: 2026-08-05
 
-Status: active; T2 implemented, independently reviewed, and ready to commit
+Status: active; T2 committed; T3 independently reviewed and ready to commit
 
 Class: 5+P. This changes a repository-wide required quality gate, its governing
 spec, CI and release enforcement, and the approved-suppression process.
@@ -880,6 +880,8 @@ Stop and revise this plan if:
 | 2026-08-05 | T2 implementation added one eligible Python file, so combined Ruff discovery moved from the pre-slice 168 rows to 169: 168 Python/shebang files plus `pyproject.toml`. Membership remains derived from Git and reviewed exclusions; the count is only a checked consequence. | `tests/test_ruff_policy.py`; canonical `ruff check --show-files` vector |
 | 2026-08-05 | T2 review replaced broad exclusion-owner existence checks with an exact 99-row path/digest/role/proof inventory, separated tracked authority from an explicit pre-landing allowlist, removed stale count authority, sorted and renumbered the provisional ledger, and corrected temporary task routing. | Independent T2 review; `tests/fixtures/ruff-excluded-python.tsv`; focused policy tests |
 | 2026-08-05 | Final T2 proof closure added exact AST validation for every cited proof symbol and a non-circular legacy semantic-eval v1 manifest/source/mutation hash recomputation test. | Final T2 rereview PASS; nine policy tests |
+| 2026-08-05 | Initial T3 review blocked fail-open and byte-preservation gaps: strict Ruff JSON, closed/single registry authority, duplicate source rules, CRLF-safe region replacement, Markdown-safe paths, and real Ruff end-to-end proof. Corrections assigned before T3A. | Independent hostile review and direct adversarial probes |
+| 2026-08-05 | T3 hardening closed strict JSON/noqa-row parsing, registry/fence authority, duplicate rules, Markdown-safe paths, real pinned-Ruff execution, discovery/read failures, atomic cleanup/mode, and exact-byte CRLF/non-ASCII preservation through production `run()`. | Final T3 rereview PASS; 89 combined focused tests |
 
 ## Review Log
 
@@ -889,13 +891,16 @@ Stop and revise this plan if:
 | 2026-08-05 | Initial implementation-readiness review | independent production-area reviewer | BLOCKED, revisions applied | Ten blockers: formatter scope, task order, durable freeze/cardinality, F401 scope, traceability mapping, [SC-10] delta, red-test sequencing, release test/command shape, and approval owner |
 | 2026-08-05 | Implementation-readiness rereview | independent production-area reviewer | PASS after one wording correction | No remaining blocker after narrowing Out of Scope to disabled-family directives; order, atomicity, cardinalities, mapping, proof, approval, commands, and commit gates are executable |
 | 2026-08-05 | T2 implementation review | independent production-area reviewer | initial BLOCKED; final PASS | Replaced false-confidence exclusion proof, corrected ledger order/task routing and Git authority; added exact proof-symbol validation and real v1 hash recomputation |
+| 2026-08-05 | T3 generator review | independent settings/tooling reviewer | BLOCKED; corrections in progress | Five fail-open/data-preservation defects and missing real-Ruff/failure-path probes; task-order isolation passed |
+| 2026-08-05 | T3 generator final rereview | independent settings/tooling reviewer | PASS | All hostile findings closed; production byte-preservation spot check passed |
 
 ## Execution Evidence
 
 | Task | Changed files | Commands and observed result | Raw/registry delta | Review | Residual risk |
 |---|---|---|---|---|---|
 | T1 | this plan; `docs/plans/README.md` | complete threshold-10 Ruff audit: 152 C901; combined show-files: 168; `git diff --check`: pass; `backstitch check --repo-root .`: exit 0, zero issues | no source or registry activation; current active raw F401=1 | initial BLOCKED review corrected; rereview PASS | exact 153-row TSV is deliberately a T2 deliverable and must pass T3A freeze before activation |
-| T2 | `pyproject.toml`; `uv.lock`; `tests/test_ruff_policy.py`; enabled-rule fixture; exact 99-row excluded-input fixture; activation-ledger TSV | policy/release/workflow suite: 88 passed; policy tests after proof closure: 9 passed; Ruff, focused mypy, format, diff check: pass; self-corpus: exit 0, zero issues; discovery membership derived exactly | proposed ledger only: 152 C901 + 1 F401; no activation or source markers | initial review BLOCKED; corrections incorporated; final rereview PASS | nine pre-existing dangling document path claims remain outside this slice |
+| T2 | `pyproject.toml`; `uv.lock`; `tests/test_ruff_policy.py`; enabled-rule fixture; exact 99-row excluded-input fixture; activation-ledger TSV | policy/release/workflow suite: 88 passed; policy tests after proof closure: 9 passed; Ruff, focused mypy, format, diff check: pass; self-corpus: exit 0, zero issues; discovery membership derived exactly; commit `1e1fbe5` | proposed ledger only: 152 C901 + 1 F401; no activation or source markers | initial review BLOCKED; corrections incorporated; final rereview PASS | nine pre-existing dangling document path claims remain outside this slice |
+| T3 | `bin/ruff_suppression_index.py`; `tests/test_ruff_suppression_index.py`; policy discovery expectation | combined policy/generator tests: 89 passed; canonical Ruff, full format, focused mypy, diff check: pass; real Ruff 0.15.21 extensionless end-to-end: pass | fixture-only generator; no active spec rewrite or source markers | initial review BLOCKED twice; all findings closed; final rereview PASS | full repository mypy has the same six pre-existing `tests/test_semantic_application.py:144` errors with and without T3 |
 
 ## Fresh-Eyes Checklist
 
