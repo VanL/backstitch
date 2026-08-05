@@ -98,7 +98,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0" },
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.6" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.12" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.21" },
     { name = "tree-sitter", specifier = "==0.26.0" },
     { name = "tree-sitter-python", specifier = "==0.25.0" },
 ]
