@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import unicodedata
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -361,7 +362,293 @@ def _merge_declarations(
     return sorted(by_identity.values(), key=_declaration_order)
 
 
-def _section_items(  # noqa: C901 approved [SC-17.1] RUFF-SUP-041 exception
+@dataclass(frozen=True, slots=True)
+class _SectionEvidence:
+    snapshot: RepositorySnapshot
+    profile: ProfileConfig
+    mappings: list[SpecMapping]
+    mapping_edges: list[Edge]
+    backlinks: list[Edge]
+    declarations: tuple[SpecMapping | None, ...]
+
+
+def _matched_backlink_rows(
+    source: _SectionEvidence,
+) -> tuple[list[dict[str, object]], set[int], set[Edge]]:
+    rows: list[dict[str, object]] = []
+    matched_edges: set[int] = set()
+    matched_backlinks: set[Edge] = set()
+    for backlink in source.backlinks:
+        matching = [
+            (index, edge)
+            for index, edge in enumerate(source.mapping_edges)
+            if _mapping_covers(edge, backlink)
+        ]
+        if not matching:
+            continue
+        atom = _python_atom(
+            source.snapshot,
+            source.profile,
+            backlink.code_path,
+            backlink.code_symbol,
+            owner_line=backlink.line,
+        )
+        if atom is None:
+            continue
+        matched_backlinks.add(backlink)
+        matched_edges.update(index for index, _edge in matching)
+        declaration_rows = [
+            row
+            for index, _edge in matching
+            if (declaration := source.declarations[index]) is not None
+            and (
+                row := _declaration_row(
+                    source.snapshot,
+                    relation_kind="spec_mapping",
+                    path=declaration.spec_path,
+                    line=declaration.line,
+                    ordinal=_source_declaration_ordinal(
+                        source.mappings,
+                        declaration,
+                        path_attr="spec_path",
+                        line_attr="line",
+                        path=declaration.spec_path,
+                        line=declaration.line,
+                    ),
+                    declared_target=declaration.target,
+                )
+            )
+            is not None
+        ]
+        backlink_row = _declaration_row(
+            source.snapshot,
+            relation_kind="code_backlink",
+            path=backlink.code_path,
+            line=backlink.line,
+            ordinal=_source_declaration_ordinal(
+                source.backlinks,
+                backlink,
+                path_attr="code_path",
+                line_attr="line",
+                path=backlink.code_path,
+                line=backlink.line,
+            ),
+        )
+        if backlink_row is not None:
+            declaration_rows.append(backlink_row)
+        owner, start, end, receipt, excerpt = atom
+        rows.append(
+            _row(
+                profile=source.profile,
+                role_path=backlink.code_path,
+                path=backlink.code_path,
+                symbol=backlink.code_symbol,
+                owner=owner,
+                start_line=start,
+                end_line=end,
+                relation_kinds=("spec_mapping", "code_backlink"),
+                reciprocity_state="complete",
+                receipt=receipt,
+                excerpt=excerpt,
+                declarations=declaration_rows,
+            )
+        )
+    return rows, matched_edges, matched_backlinks
+
+
+def _unmatched_mapping_rows(
+    source: _SectionEvidence, matched_edges: set[int]
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for edge_index, edge in enumerate(source.mapping_edges):
+        if edge_index in matched_edges:
+            continue
+        atom = _python_atom(
+            source.snapshot, source.profile, edge.code_path, edge.code_symbol
+        )
+        declaration = source.declarations[edge_index]
+        declaration_fallback = atom is None and declaration is not None
+        if atom is None and declaration is not None:
+            atom = _mapping_line_atom(
+                source.snapshot,
+                declaration,
+                relation_kind="spec_mapping",
+                ordinal=_source_declaration_ordinal(
+                    source.mappings,
+                    declaration,
+                    path_attr="spec_path",
+                    line_attr="line",
+                    path=declaration.spec_path,
+                    line=declaration.line,
+                ),
+            )
+        if atom is None:
+            continue
+        owner, start, end, receipt, excerpt = atom
+        source_symbol: str | None
+        if declaration_fallback:
+            assert declaration is not None
+            source_path = declaration.spec_path
+            source_symbol = declaration.section_id
+        else:
+            source_path = edge.code_path
+            source_symbol = edge.code_symbol
+        declaration_row = (
+            _declaration_row(
+                source.snapshot,
+                relation_kind="spec_mapping",
+                path=declaration.spec_path,
+                line=declaration.line,
+                ordinal=_source_declaration_ordinal(
+                    source.mappings,
+                    declaration,
+                    path_attr="spec_path",
+                    line_attr="line",
+                    path=declaration.spec_path,
+                    line=declaration.line,
+                ),
+                declared_target=declaration.target,
+            )
+            if declaration is not None
+            else None
+        )
+        rows.append(
+            _row(
+                profile=source.profile,
+                role_path=edge.code_path,
+                path=source_path,
+                symbol=source_symbol,
+                owner=owner,
+                start_line=start,
+                end_line=end,
+                relation_kinds=("spec_mapping",),
+                reciprocity_state="one_sided",
+                receipt=receipt,
+                excerpt=excerpt,
+                declared_target=declaration.target if declaration else None,
+                declarations=(declaration_row,) if declaration_row else (),
+                valid=not declaration_fallback,
+                reason=(
+                    "mapping target has no atomic source receipt"
+                    if declaration_fallback
+                    else None
+                ),
+            )
+        )
+    return rows
+
+
+def _unresolved_mapping_rows(
+    source: _SectionEvidence, resolved: set[SpecMapping]
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for mapping in source.mappings:
+        if mapping in resolved:
+            continue
+        atom = _mapping_line_atom(
+            source.snapshot,
+            mapping,
+            relation_kind="spec_mapping",
+            ordinal=_source_declaration_ordinal(
+                source.mappings,
+                mapping,
+                path_attr="spec_path",
+                line_attr="line",
+                path=mapping.spec_path,
+                line=mapping.line,
+            ),
+        )
+        if atom is None:
+            continue
+        declaration = _declaration_row(
+            source.snapshot,
+            relation_kind="spec_mapping",
+            path=mapping.spec_path,
+            line=mapping.line,
+            ordinal=_source_declaration_ordinal(
+                source.mappings,
+                mapping,
+                path_attr="spec_path",
+                line_attr="line",
+                path=mapping.spec_path,
+                line=mapping.line,
+            ),
+            declared_target=mapping.target,
+        )
+        owner, start, end, receipt, excerpt = atom
+        rows.append(
+            _row(
+                profile=source.profile,
+                role_path=mapping.target_path or mapping.target,
+                path=mapping.spec_path,
+                symbol=mapping.section_id,
+                owner=owner,
+                start_line=start,
+                end_line=end,
+                relation_kinds=("spec_mapping",),
+                reciprocity_state="one_sided",
+                receipt=receipt,
+                excerpt=excerpt,
+                declared_target=mapping.target,
+                declarations=(declaration,) if declaration else (),
+                valid=False,
+                reason="mapping target did not resolve",
+            )
+        )
+    return rows
+
+
+def _unmatched_backlink_rows(
+    source: _SectionEvidence, matched: set[Edge]
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for backlink in source.backlinks:
+        if backlink in matched:
+            continue
+        atom = _python_atom(
+            source.snapshot,
+            source.profile,
+            backlink.code_path,
+            backlink.code_symbol,
+            owner_line=backlink.line,
+        )
+        if atom is None:
+            continue
+        declaration = _declaration_row(
+            source.snapshot,
+            relation_kind="code_backlink",
+            path=backlink.code_path,
+            line=backlink.line,
+            ordinal=_source_declaration_ordinal(
+                source.backlinks,
+                backlink,
+                path_attr="code_path",
+                line_attr="line",
+                path=backlink.code_path,
+                line=backlink.line,
+            ),
+        )
+        owner, start, end, receipt, excerpt = atom
+        rows.append(
+            _row(
+                profile=source.profile,
+                role_path=backlink.code_path,
+                path=backlink.code_path,
+                symbol=backlink.code_symbol,
+                owner=owner,
+                start_line=start,
+                end_line=end,
+                relation_kinds=("code_backlink",),
+                reciprocity_state="one_sided",
+                receipt=receipt,
+                excerpt=excerpt,
+                declarations=(declaration,) if declaration else (),
+            )
+        )
+    return rows
+
+
+def _section_items(
     report: Report,
     obligation: ObligationRecord,
     snapshot: RepositorySnapshot,
@@ -387,301 +674,39 @@ def _section_items(  # noqa: C901 approved [SC-17.1] RUFF-SUP-041 exception
         and item.spec_path == spec_path
         and item.section_id == section_id
     ]
-    rows: list[dict[str, object]] = []
-    matched_mapping_edge_indexes: set[int] = set()
-    matched_backlinks: set[Edge] = set()
     declaration_by_edge_index = _associate_edge_declarations(mappings, mapping_edges)
     resolved_mappings = {
         declaration
         for declaration in declaration_by_edge_index
         if declaration is not None
     }
+    source = _SectionEvidence(
+        snapshot,
+        profile,
+        mappings,
+        mapping_edges,
+        backlinks,
+        declaration_by_edge_index,
+    )
+    rows, matched_mapping_edge_indexes, matched_backlinks = _matched_backlink_rows(
+        source
+    )
 
-    for backlink in backlinks:
-        matching = [
-            (index, item)
-            for index, item in enumerate(mapping_edges)
-            if _mapping_covers(item, backlink)
-        ]
-        if not matching:
-            continue
-        atom = _python_atom(
-            snapshot,
-            profile,
-            backlink.code_path,
-            backlink.code_symbol,
-            owner_line=backlink.line,
-        )
-        if atom is None:
-            continue
-        matched_backlinks.add(backlink)
-        matched_mapping_edge_indexes.update(index for index, _edge in matching)
-        owner, start, end, receipt, excerpt = atom
-        declaration_rows: list[dict[str, object]] = []
-        for index, _edge in matching:
-            declaration = declaration_by_edge_index[index]
-            if declaration is None:
-                continue
-            declaration_row = _declaration_row(
-                snapshot,
-                relation_kind="spec_mapping",
-                path=declaration.spec_path,
-                line=declaration.line,
-                ordinal=_source_declaration_ordinal(
-                    mappings,
-                    declaration,
-                    path_attr="spec_path",
-                    line_attr="line",
-                    path=declaration.spec_path,
-                    line=declaration.line,
-                ),
-                declared_target=declaration.target,
-            )
-            if declaration_row is not None:
-                declaration_rows.append(declaration_row)
-        backlink_declaration = _declaration_row(
-            snapshot,
-            relation_kind="code_backlink",
-            path=backlink.code_path,
-            line=backlink.line,
-            ordinal=_source_declaration_ordinal(
-                backlinks,
-                backlink,
-                path_attr="code_path",
-                line_attr="line",
-                path=backlink.code_path,
-                line=backlink.line,
-            ),
-        )
-        if backlink_declaration is not None:
-            declaration_rows.append(backlink_declaration)
-        rows.append(
-            _row(
-                profile=profile,
-                role_path=backlink.code_path,
-                path=backlink.code_path,
-                symbol=backlink.code_symbol,
-                owner=owner,
-                start_line=start,
-                end_line=end,
-                relation_kinds=("spec_mapping", "code_backlink"),
-                reciprocity_state="complete",
-                receipt=receipt,
-                excerpt=excerpt,
-                declarations=declaration_rows,
-            )
-        )
+    rows.extend(_unmatched_mapping_rows(source, matched_mapping_edge_indexes))
 
-    for edge_index, edge in enumerate(mapping_edges):
-        if edge_index in matched_mapping_edge_indexes:
-            continue
-        atom = _python_atom(
-            snapshot,
-            profile,
-            edge.code_path,
-            edge.code_symbol,
-        )
-        declaration = declaration_by_edge_index[edge_index]
-        declaration_fallback = atom is None and declaration is not None
-        if atom is None:
-            atom = (
-                _mapping_line_atom(
-                    snapshot,
-                    declaration,
-                    relation_kind="spec_mapping",
-                    ordinal=_source_declaration_ordinal(
-                        mappings,
-                        declaration,
-                        path_attr="spec_path",
-                        line_attr="line",
-                        path=declaration.spec_path,
-                        line=declaration.line,
-                    ),
-                )
-                if declaration is not None
-                else None
-            )
-        if atom is None:
-            continue
-        owner, start, end, receipt, excerpt = atom
-        source_path = edge.code_path
-        source_symbol = edge.code_symbol
-        if declaration_fallback:
-            assert declaration is not None
-            source_path = declaration.spec_path
-            source_symbol = declaration.section_id
-        rows.append(
-            _row(
-                profile=profile,
-                role_path=edge.code_path,
-                path=source_path,
-                symbol=source_symbol,
-                owner=owner,
-                start_line=start,
-                end_line=end,
-                relation_kinds=("spec_mapping",),
-                reciprocity_state="one_sided",
-                receipt=receipt,
-                excerpt=excerpt,
-                declared_target=(
-                    declaration.target if declaration is not None else None
-                ),
-                declarations=tuple(
-                    row
-                    for row in (
-                        _declaration_row(
-                            snapshot,
-                            relation_kind="spec_mapping",
-                            path=declaration.spec_path,
-                            line=declaration.line,
-                            ordinal=_source_declaration_ordinal(
-                                mappings,
-                                declaration,
-                                path_attr="spec_path",
-                                line_attr="line",
-                                path=declaration.spec_path,
-                                line=declaration.line,
-                            ),
-                            declared_target=declaration.target,
-                        )
-                        if declaration is not None
-                        else None,
-                    )
-                    if row is not None
-                ),
-                valid=not declaration_fallback,
-                reason=(
-                    "mapping target has no atomic source receipt"
-                    if declaration_fallback
-                    else None
-                ),
-            )
-        )
+    rows.extend(_unresolved_mapping_rows(source, resolved_mappings))
 
-    for mapping in mappings:
-        if mapping in resolved_mappings:
-            continue
-        atom = _mapping_line_atom(
-            snapshot,
-            mapping,
-            relation_kind="spec_mapping",
-            ordinal=_source_declaration_ordinal(
-                mappings,
-                mapping,
-                path_attr="spec_path",
-                line_attr="line",
-                path=mapping.spec_path,
-                line=mapping.line,
-            ),
-        )
-        if atom is None:
-            continue
-        owner, start, end, receipt, excerpt = atom
-        rows.append(
-            _row(
-                profile=profile,
-                role_path=mapping.target_path or mapping.target,
-                path=mapping.spec_path,
-                symbol=mapping.section_id,
-                owner=owner,
-                start_line=start,
-                end_line=end,
-                relation_kinds=("spec_mapping",),
-                reciprocity_state="one_sided",
-                receipt=receipt,
-                excerpt=excerpt,
-                declared_target=mapping.target,
-                declarations=tuple(
-                    row
-                    for row in (
-                        _declaration_row(
-                            snapshot,
-                            relation_kind="spec_mapping",
-                            path=mapping.spec_path,
-                            line=mapping.line,
-                            ordinal=_source_declaration_ordinal(
-                                mappings,
-                                mapping,
-                                path_attr="spec_path",
-                                line_attr="line",
-                                path=mapping.spec_path,
-                                line=mapping.line,
-                            ),
-                            declared_target=mapping.target,
-                        ),
-                    )
-                    if row is not None
-                ),
-                valid=False,
-                reason="mapping target did not resolve",
-            )
-        )
-
-    for backlink in backlinks:
-        if backlink in matched_backlinks:
-            continue
-        atom = _python_atom(
-            snapshot,
-            profile,
-            backlink.code_path,
-            backlink.code_symbol,
-            owner_line=backlink.line,
-        )
-        if atom is None:
-            continue
-        owner, start, end, receipt, excerpt = atom
-        rows.append(
-            _row(
-                profile=profile,
-                role_path=backlink.code_path,
-                path=backlink.code_path,
-                symbol=backlink.code_symbol,
-                owner=owner,
-                start_line=start,
-                end_line=end,
-                relation_kinds=("code_backlink",),
-                reciprocity_state="one_sided",
-                receipt=receipt,
-                excerpt=excerpt,
-                declarations=tuple(
-                    row
-                    for row in (
-                        _declaration_row(
-                            snapshot,
-                            relation_kind="code_backlink",
-                            path=backlink.code_path,
-                            line=backlink.line,
-                            ordinal=_source_declaration_ordinal(
-                                backlinks,
-                                backlink,
-                                path_attr="code_path",
-                                line_attr="line",
-                                path=backlink.code_path,
-                                line=backlink.line,
-                            ),
-                        ),
-                    )
-                    if row is not None
-                ),
-            )
-        )
+    rows.extend(_unmatched_backlink_rows(source, matched_backlinks))
     return rows
 
 
-def _invariant_items(  # noqa: C901 approved [SC-17.1] RUFF-SUP-040 exception
-    report: Report,
-    obligation: ObligationRecord,
-    snapshot: RepositorySnapshot,
-    profile: ProfileConfig,
-) -> list[dict[str, object]]:
-    invariant_id = obligation.obligation_id.removeprefix("invariant::")
-    declarations = [
-        item for item in report.invariants if item.invariant_id == invariant_id
-    ]
-    binds = [item for item in report.binds if item.invariant_id == invariant_id]
-    rows: list[dict[str, object]] = []
+def _invariant_targets(
+    report: Report, declarations: Sequence[Any]
+) -> tuple[
+    list[tuple[str, str | None, tuple[str, ...], SpecMapping | None]], list[SpecMapping]
+]:
     targets: list[tuple[str, str | None, tuple[str, ...], SpecMapping | None]] = []
-    rejected_mappings: list[SpecMapping] = []
+    rejected: list[SpecMapping] = []
     for declaration in declarations:
         if declaration.declaration_kind == "code":
             targets.append(
@@ -695,39 +720,87 @@ def _invariant_items(  # noqa: C901 approved [SC-17.1] RUFF-SUP-040 exception
             continue
         if declaration.section_id is None:
             continue
-        declaration_mappings = [
+        mappings = [
             mapping
             for mapping in report.spec_mappings
             if mapping.spec_path == declaration.path
             and mapping.section_id == declaration.section_id
         ]
-        declaration_edges = [
+        edges = [
             edge
             for edge in report.edges
             if edge.kind == "mapping"
             and edge.spec_path == declaration.path
             and edge.section_id == declaration.section_id
         ]
-        associated_mappings: set[SpecMapping] = set()
-        edge_declarations = _associate_edge_declarations(
-            declaration_mappings, declaration_edges
-        )
-        for edge, mapping in zip(declaration_edges, edge_declarations, strict=True):
+        associated: set[SpecMapping] = set()
+        for edge, mapping in zip(
+            edges, _associate_edge_declarations(mappings, edges), strict=True
+        ):
             if mapping is not None:
-                associated_mappings.add(mapping)
+                associated.add(mapping)
             targets.append(
-                (
-                    edge.code_path,
-                    edge.code_symbol,
-                    ("invariant_bind",),
-                    mapping,
-                )
+                (edge.code_path, edge.code_symbol, ("invariant_bind",), mapping)
             )
-        rejected_mappings.extend(
-            mapping
-            for mapping in declaration_mappings
-            if mapping not in associated_mappings
+        rejected.extend(mapping for mapping in mappings if mapping not in associated)
+    return targets, rejected
+
+
+def _invariant_target_atoms(
+    snapshot: RepositorySnapshot,
+    profile: ProfileConfig,
+    declarations: Sequence[Any],
+    targets: Sequence[tuple[str, str | None, tuple[str, ...], SpecMapping | None]],
+    rejected: list[SpecMapping],
+) -> list[
+    tuple[
+        str,
+        str | None,
+        tuple[str, ...],
+        SpecMapping | None,
+        tuple[str | None, int, int, dict[str, object], str],
+    ]
+]:
+    atoms = []
+    for path, symbol, relation_kinds, mapping in targets:
+        declaration = next(
+            (
+                item
+                for item in declarations
+                if item.declaration_kind == "code"
+                and item.path == path
+                and item.owner_symbol == symbol
+            ),
+            None,
         )
+        atom = _python_atom(
+            snapshot,
+            profile,
+            path,
+            symbol,
+            owner_line=declaration.line if declaration else None,
+        )
+        if atom is None:
+            if mapping is not None:
+                rejected.append(mapping)
+            continue
+        atoms.append((path, symbol, relation_kinds, mapping, atom))
+    return atoms
+
+
+def _invariant_items(
+    report: Report,
+    obligation: ObligationRecord,
+    snapshot: RepositorySnapshot,
+    profile: ProfileConfig,
+) -> list[dict[str, object]]:
+    invariant_id = obligation.obligation_id.removeprefix("invariant::")
+    declarations = [
+        item for item in report.invariants if item.invariant_id == invariant_id
+    ]
+    binds = [item for item in report.binds if item.invariant_id == invariant_id]
+    rows: list[dict[str, object]] = []
+    targets, rejected_mappings = _invariant_targets(report, declarations)
     unique_targets = tuple(
         dict.fromkeys(
             sorted(
@@ -741,38 +814,13 @@ def _invariant_items(  # noqa: C901 approved [SC-17.1] RUFF-SUP-040 exception
             )
         )
     )
-    target_atoms: list[
-        tuple[
-            str,
-            str | None,
-            tuple[str, ...],
-            SpecMapping | None,
-            tuple[str | None, int, int, dict[str, object], str],
-        ]
-    ] = []
-    for path, symbol, relation_kinds, mapping in unique_targets:
-        code_declaration = next(
-            (
-                declaration
-                for declaration in declarations
-                if declaration.declaration_kind == "code"
-                and declaration.path == path
-                and declaration.owner_symbol == symbol
-            ),
-            None,
-        )
-        atom = _python_atom(
-            snapshot,
-            profile,
-            path,
-            symbol,
-            owner_line=(code_declaration.line if code_declaration else None),
-        )
-        if atom is None:
-            if mapping is not None:
-                rejected_mappings.append(mapping)
-            continue
-        target_atoms.append((path, symbol, relation_kinds, mapping, atom))
+    target_atoms = _invariant_target_atoms(
+        snapshot,
+        profile,
+        declarations,
+        unique_targets,
+        rejected_mappings,
+    )
 
     bind_atoms = [
         (bind, atom)

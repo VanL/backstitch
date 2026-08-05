@@ -592,12 +592,12 @@ def _resolve_request_bytes(  # noqa: C901 approved [SC-17.1] RUFF-SUP-076 except
     return tuple(resolved)
 
 
-def _packet_report_preflight(  # noqa: C901 approved [SC-17.1] RUFF-SUP-074 exception
+def _validated_packet_report(
     request: SemanticAnalysisRequest,
-    rows: tuple[dict[str, Any], ...],
     identities: tuple[InferenceIdentity, ...],
-    request_bytes: tuple[bytes, ...],
 ) -> tuple[list[SemanticAnalysisProblem], PacketReport | None]:
+    """Validate packet-report identity before completeness or budget checks."""
+
     problems: list[SemanticAnalysisProblem] = []
     if packet_report_required(request.settings) and request.packet_report is None:
         problems.append(
@@ -608,11 +608,12 @@ def _packet_report_preflight(  # noqa: C901 approved [SC-17.1] RUFF-SUP-074 exce
             )
         )
         return problems, None
-    if request.packet_report is None:
+    report_input = request.packet_report
+    if report_input is None:
         return problems, None
     try:
         report = validate_packet_report(
-            request.packet_report,
+            report_input,
             packets=request.packets,
             identities=identities,
         )
@@ -625,29 +626,21 @@ def _packet_report_preflight(  # noqa: C901 approved [SC-17.1] RUFF-SUP-074 exce
         )
         return problems, None
 
-    value = report.to_dict()
-    report_schema = value["schema_version"]
-    if report_schema not in {2, 3} or any(
-        not packet.semantic_eligible for packet in request.packets
-    ):
-        problems.append(
-            _problem(
-                "input",
-                "invalid_input",
-                "semantic analysis requires packet schema 3 or 4 and "
-                "packet-report schema 2 or 3",
-            )
-        )
-        return problems, None
-    if value["selection_status"] == "not_run_all_skipped":
-        return problems, report
+    return problems, report
+
+
+def _packet_completeness_problems(
+    request: SemanticAnalysisRequest,
+    rows: tuple[dict[str, Any], ...],
+) -> list[SemanticAnalysisProblem]:
+    """Apply packet-kind and minimum-count completeness floors in order."""
+
+    problems: list[SemanticAnalysisProblem] = []
     emitted = {
         "section": sum(row["kind"] == "section" for row in rows),
         "invariant": sum(row["kind"] == "invariant" for row in rows),
         "suppression": sum(row["kind"] == "suppression" for row in rows),
     }
-    request_byte_counts = tuple(len(value) for value in request_bytes)
-    prompt_byte_count = sum(request_byte_counts)
     for kind in request.settings.required_kinds:
         if kind == "suppression":
             # Current packet-report validation has already proved that every
@@ -664,8 +657,7 @@ def _packet_report_preflight(  # noqa: C901 approved [SC-17.1] RUFF-SUP-074 exce
                     f"required packet kind is missing: {kind}",
                 )
             )
-    count = len(rows)
-    if count < request.settings.minimum_packets:
+    if len(rows) < request.settings.minimum_packets:
         problems.append(
             _problem(
                 "completeness",
@@ -673,6 +665,20 @@ def _packet_report_preflight(  # noqa: C901 approved [SC-17.1] RUFF-SUP-074 exce
                 "packet count is below analyze.minimum_packets",
             )
         )
+    return problems
+
+
+def _packet_budget_problems(
+    request: SemanticAnalysisRequest,
+    rows: tuple[dict[str, Any], ...],
+    request_bytes: tuple[bytes, ...],
+) -> list[SemanticAnalysisProblem]:
+    """Apply aggregate and provider request ceilings after completeness."""
+
+    problems: list[SemanticAnalysisProblem] = []
+    request_byte_counts = tuple(len(value) for value in request_bytes)
+    prompt_byte_count = sum(request_byte_counts)
+    count = len(rows)
     if request.settings.maximum_packets and count > request.settings.maximum_packets:
         problems.append(
             _problem(
@@ -711,6 +717,37 @@ def _packet_report_preflight(  # noqa: C901 approved [SC-17.1] RUFF-SUP-074 exce
                     )
                 )
                 break
+    return problems
+
+
+def _packet_report_preflight(
+    request: SemanticAnalysisRequest,
+    rows: tuple[dict[str, Any], ...],
+    identities: tuple[InferenceIdentity, ...],
+    request_bytes: tuple[bytes, ...],
+) -> tuple[list[SemanticAnalysisProblem], PacketReport | None]:
+    problems, report = _validated_packet_report(request, identities)
+    if report is None or problems:
+        return problems, report
+
+    value = report.to_dict()
+    report_schema = value["schema_version"]
+    if report_schema not in {2, 3} or any(
+        not packet.semantic_eligible for packet in request.packets
+    ):
+        problems.append(
+            _problem(
+                "input",
+                "invalid_input",
+                "semantic analysis requires packet schema 3 or 4 and "
+                "packet-report schema 2 or 3",
+            )
+        )
+        return problems, None
+    if value["selection_status"] == "not_run_all_skipped":
+        return problems, report
+    problems.extend(_packet_completeness_problems(request, rows))
+    problems.extend(_packet_budget_problems(request, rows, request_bytes))
     return problems, report
 
 
@@ -764,7 +801,71 @@ def _empty_projection(
     )
 
 
-def _execute_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-071 exception
+def _shared_adapter_factory(
+    adapter_factory: AdapterFactory | None,
+    *,
+    concurrent: bool,
+) -> AdapterFactory | None:
+    """Memoize one lazily constructed adapter for a concurrent cache run."""
+
+    if not concurrent or adapter_factory is None:
+        return adapter_factory
+    construction_lock = threading.Lock()
+    shared_adapter: ProviderAdapter | None = None
+    construction_error: Exception | None = None
+
+    def build_shared_adapter() -> ProviderAdapter:
+        nonlocal shared_adapter, construction_error
+        with construction_lock:
+            if construction_error is not None:
+                raise RuntimeError("semantic adapter construction failed") from (
+                    construction_error
+                )
+            if shared_adapter is None:
+                try:
+                    shared_adapter = adapter_factory()
+                except Exception as exc:
+                    construction_error = exc
+                    raise
+            return shared_adapter
+
+    return build_shared_adapter
+
+
+def _fold_semantic_cache_runs(
+    runs: tuple[SemanticCacheRun, ...],
+) -> tuple[
+    tuple[dict[str, Any], ...],
+    bytes,
+    tuple[SemanticProblem, ...],
+    int,
+    int,
+    int,
+    dict[str, dict[str, int]],
+    tuple[SemanticResultEnvelope, ...],
+    tuple[SemanticSelectionEvent, ...],
+]:
+    """Fold packet-ordered one-packet runs without changing publication order."""
+
+    kind_counts = _empty_analyzer_kind_counts()
+    for run in runs:
+        for event in kind_counts:
+            for packet_kind in kind_counts[event]:
+                kind_counts[event][packet_kind] += run.kind_counts[event][packet_kind]
+    return (
+        tuple(result for run in runs for result in run.results),
+        b"".join(run.result_jsonl for run in runs),
+        tuple(problem for run in runs for problem in run.problems),
+        sum(run.cache_hits for run in runs),
+        sum(run.cache_misses for run in runs),
+        sum(run.provider_calls for run in runs),
+        kind_counts,
+        tuple(envelope for run in runs for envelope in run.result_envelopes),
+        tuple(event for run in runs for event in run.selection_events),
+    )
+
+
+def _execute_cache(
     request: SemanticAnalysisRequest,
     identities: tuple[InferenceIdentity, ...],
     request_bytes: tuple[bytes, ...],
@@ -783,30 +884,10 @@ def _execute_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-071 exception
     tuple[SemanticSelectionEvent, ...],
 ]:
     provider_call_budget = ProviderCallBudget(request.settings.maximum_provider_calls)
-    adapter_factory = request.adapter_factory
-    if request.settings.concurrency > 1 and adapter_factory is not None:
-        construction_lock = threading.Lock()
-        shared_adapter: ProviderAdapter | None = None
-        construction_error: Exception | None = None
-
-        def build_shared_adapter() -> ProviderAdapter:
-            nonlocal shared_adapter, construction_error
-            with construction_lock:
-                if construction_error is not None:
-                    raise RuntimeError("semantic adapter construction failed") from (
-                        construction_error
-                    )
-                if shared_adapter is None:
-                    try:
-                        shared_adapter = adapter_factory()
-                    except Exception as exc:
-                        construction_error = exc
-                        raise
-                return shared_adapter
-
-        effective_adapter_factory: AdapterFactory | None = build_shared_adapter
-    else:
-        effective_adapter_factory = adapter_factory
+    effective_adapter_factory = _shared_adapter_factory(
+        request.adapter_factory,
+        concurrent=request.settings.concurrency > 1,
+    )
 
     def analyze_packets(
         packets: tuple[ValidatedSemanticPacket, ...],
@@ -857,25 +938,95 @@ def _execute_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-071 exception
                 zip(request.packets, identities, request_bytes, strict=True),
             )
         )
-    kind_counts = _empty_analyzer_kind_counts()
-    for run in runs:
-        for event in kind_counts:
-            for packet_kind in kind_counts[event]:
-                kind_counts[event][packet_kind] += run.kind_counts[event][packet_kind]
-    return (
-        tuple(result for run in runs for result in run.results),
-        b"".join(run.result_jsonl for run in runs),
-        tuple(problem for run in runs for problem in run.problems),
-        sum(run.cache_hits for run in runs),
-        sum(run.cache_misses for run in runs),
-        sum(run.provider_calls for run in runs),
-        kind_counts,
-        tuple(envelope for run in runs for envelope in run.result_envelopes),
-        tuple(event for run in runs for event in run.selection_events),
+    return _fold_semantic_cache_runs(runs)
+
+
+@dataclass(slots=True)
+class _EvidenceStableCallOwner:
+    """Own shared adapter, counters, and budget for one held preparation."""
+
+    request: SemanticAnalysisRequest
+    runtime_deadline: float
+    provider_call_packet_ids: frozenset[str] | None
+    provider_call_budget: ProviderCallBudget
+    adapter: ProviderAdapter | None = None
+    adapter_error: Exception | None = None
+    adapter_lock: threading.Lock = field(default_factory=threading.Lock)
+    counter_lock: threading.Lock = field(default_factory=threading.Lock)
+    provider_calls: int = 0
+    provider_calls_by_kind: dict[str, int] = field(
+        default_factory=lambda: {"section": 0, "invariant": 0, "suppression": 0}
     )
 
+    def _get_adapter(self) -> ProviderAdapter:
+        with self.adapter_lock:
+            if self.adapter_error is not None:
+                raise RuntimeError("semantic adapter construction failed") from (
+                    self.adapter_error
+                )
+            if self.adapter is None:
+                if self.request.adapter_factory is None:
+                    raise RuntimeError("no provider adapter is available")
+                try:
+                    self.adapter = self.request.adapter_factory()
+                except Exception as exc:
+                    self.adapter_error = exc
+                    raise
+            return self.adapter
 
-def _execute_evidence_stable_preparation(  # noqa: C901 approved [SC-17.1] RUFF-SUP-072 exception
+    def call(self, packet: dict[str, Any], packet_request: bytes) -> Any:
+        if time.monotonic() >= self.runtime_deadline:
+            raise SemanticCacheFailure(
+                "budget",
+                "budget_exceeded",
+                "maximum semantic analysis runtime exceeded before provider call",
+            )
+        if (
+            self.provider_call_packet_ids is not None
+            and packet["packet_id"] not in self.provider_call_packet_ids
+        ):
+            raise SemanticCacheFailure(
+                "budget",
+                "budget_exceeded",
+                "unplanned provider call is outside the conservative cost preflight",
+            )
+        if not self.provider_call_budget.reserve():
+            raise SemanticCacheFailure(
+                "budget",
+                "budget_exceeded",
+                "maximum semantic provider calls exceeded during execution",
+            )
+        try:
+            selected_adapter = self._get_adapter()
+        except Exception as exc:
+            self.provider_call_budget.release()
+            detail = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+            raise SemanticCacheFailure(
+                "provider",
+                "provider_failure",
+                f"adapter construction failed: {detail}",
+            ) from exc
+        with self.counter_lock:
+            self.provider_calls += 1
+            self.provider_calls_by_kind[cast(str, packet["kind"])] += 1
+        try:
+            response = selected_adapter(packet_request.decode("utf-8"))
+            if time.monotonic() >= self.runtime_deadline:
+                raise SemanticCacheFailure(
+                    "budget",
+                    "budget_exceeded",
+                    "maximum semantic analysis runtime exceeded during provider call",
+                )
+            return response
+        except SemanticCacheFailure:
+            raise
+        except Exception as exc:
+            raise SemanticCacheFailure(
+                "provider", "provider_failure", f"model call failed: {exc}"
+            ) from exc
+
+
+def _execute_evidence_stable_preparation(
     request: SemanticAnalysisRequest,
     preparation: EvidenceStablePreparation,
     request_bytes: tuple[bytes, ...],
@@ -895,36 +1046,16 @@ def _execute_evidence_stable_preparation(  # noqa: C901 approved [SC-17.1] RUFF-
 ]:
     """Resolve a held run-wide evidence-stable selection after preflight."""
 
-    provider_call_budget = ProviderCallBudget(request.settings.maximum_provider_calls)
-    adapter: ProviderAdapter | None = None
-    adapter_error: Exception | None = None
-    adapter_lock = threading.Lock()
-    counter_lock = threading.Lock()
-    provider_calls = 0
-    provider_calls_by_kind = {
-        "section": 0,
-        "invariant": 0,
-        "suppression": 0,
-    }
+    call_owner = _EvidenceStableCallOwner(
+        request=request,
+        runtime_deadline=runtime_deadline,
+        provider_call_packet_ids=provider_call_packet_ids,
+        provider_call_budget=ProviderCallBudget(
+            request.settings.maximum_provider_calls
+        ),
+    )
 
-    def get_adapter() -> ProviderAdapter:
-        nonlocal adapter, adapter_error
-        with adapter_lock:
-            if adapter_error is not None:
-                raise RuntimeError("semantic adapter construction failed") from (
-                    adapter_error
-                )
-            if adapter is None:
-                if request.adapter_factory is None:
-                    raise RuntimeError("no provider adapter is available")
-                try:
-                    adapter = request.adapter_factory()
-                except Exception as exc:
-                    adapter_error = exc
-                    raise
-            return adapter
-
-    def resolve_item(  # noqa: C901 approved [SC-17.1] RUFF-SUP-073 exception
+    def resolve_item(
         prepared: tuple[Any, bytes],
     ) -> SemanticSelectionEvent | SemanticProblem:
         item, packet_request = prepared
@@ -937,63 +1068,10 @@ def _execute_evidence_stable_preparation(  # noqa: C901 approved [SC-17.1] RUFF-
                 "required semantic cache result is missing",
             )
 
-        def call_provider() -> Any:
-            nonlocal provider_calls
-            if time.monotonic() >= runtime_deadline:
-                raise SemanticCacheFailure(
-                    "budget",
-                    "budget_exceeded",
-                    "maximum semantic analysis runtime exceeded before provider call",
-                )
-            if (
-                provider_call_packet_ids is not None
-                and packet["packet_id"] not in provider_call_packet_ids
-            ):
-                raise SemanticCacheFailure(
-                    "budget",
-                    "budget_exceeded",
-                    "unplanned provider call is outside the conservative cost preflight",
-                )
-            if not provider_call_budget.reserve():
-                raise SemanticCacheFailure(
-                    "budget",
-                    "budget_exceeded",
-                    "maximum semantic provider calls exceeded during execution",
-                )
-            try:
-                selected_adapter = get_adapter()
-            except Exception as exc:
-                provider_call_budget.release()
-                detail = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
-                raise SemanticCacheFailure(
-                    "provider",
-                    "provider_failure",
-                    f"adapter construction failed: {detail}",
-                ) from exc
-            with counter_lock:
-                provider_calls += 1
-                provider_calls_by_kind[cast(str, packet["kind"])] += 1
-            try:
-                response = selected_adapter(packet_request.decode("utf-8"))
-                if time.monotonic() >= runtime_deadline:
-                    raise SemanticCacheFailure(
-                        "budget",
-                        "budget_exceeded",
-                        "maximum semantic analysis runtime exceeded "
-                        "during provider call",
-                    )
-                return response
-            except SemanticCacheFailure:
-                raise
-            except Exception as exc:
-                raise SemanticCacheFailure(
-                    "provider", "provider_failure", f"model call failed: {exc}"
-                ) from exc
-
         try:
             return resolve_prepared_evidence_stable_result(
                 item,
-                call_provider=call_provider,
+                call_provider=lambda: call_owner.call(packet, packet_request),
                 runtime_deadline=runtime_deadline,
             )
         except SemanticCacheFailure as exc:
@@ -1037,14 +1115,14 @@ def _execute_evidence_stable_preparation(  # noqa: C901 approved [SC-17.1] RUFF-
         elif isinstance(outcome, SemanticSelectionEvent):
             cache_hits += 1
             kind_counts["cache_hits"][packet_kind] += 1
-    kind_counts["provider_calls"].update(provider_calls_by_kind)
+    kind_counts["provider_calls"].update(call_owner.provider_calls_by_kind)
     return (
         results,
         result_jsonl,
         problems,
         cache_hits,
         cache_misses,
-        provider_calls,
+        call_owner.provider_calls,
         kind_counts,
         envelopes,
         events,
@@ -1474,7 +1552,150 @@ def _disposition_row(disposition: Any) -> dict[str, object]:
     }
 
 
-def _resolve_independent_qualification(  # noqa: C901 approved [SC-17.1] RUFF-SUP-075 exception
+def _current_qualification_identity(
+    settings: VerifyEvalSettings | None,
+) -> dict[str, object] | None:
+    if settings is None or settings.mode != "enforce":
+        return None
+    return {
+        "corpus_sha256": settings.qualification_corpus_sha256,
+        "mode": settings.mode,
+        "trials": settings.trials,
+        "eval_config": {
+            "trials": settings.trials,
+            "interval_method": settings.interval_method,
+            "confidence_level": settings.confidence_level,
+            "minimum_positive_units": settings.minimum_positive_units,
+            "minimum_negative_units": settings.minimum_negative_units,
+            "minimum_evidence_sufficiency_rate": (
+                settings.minimum_evidence_sufficiency_rate
+            ),
+            "minimum_conditional_precision": settings.minimum_conditional_precision,
+            "minimum_conditional_recall": settings.minimum_conditional_recall,
+            "minimum_end_to_end_recall": settings.minimum_end_to_end_recall,
+            "minimum_recall_lower_bound": settings.minimum_recall_lower_bound,
+            "maximum_false_positive_rate": settings.maximum_false_positive_rate,
+            "maximum_false_positive_upper_bound": (
+                settings.maximum_false_positive_upper_bound
+            ),
+            "maximum_indeterminate_rate": settings.maximum_indeterminate_rate,
+            "maximum_uncached_flip_rate": settings.maximum_uncached_flip_rate,
+            "require_all_critical": settings.require_all_critical,
+        },
+    }
+
+
+def _qualification_report_identities(
+    report_value: dict[str, Any],
+    current_derivation: dict[str, object],
+) -> tuple[dict[str, object], dict[str, object], str]:
+    report_identity = cast(dict[str, Any], report_value["identity"])
+    qualification = cast(dict[str, Any], report_value["qualification"])
+    return (
+        {key: cast(object, report_identity[key]) for key in current_derivation},
+        {
+            "corpus_sha256": report_identity["corpus_sha256"],
+            "mode": qualification["mode"],
+            "trials": report_identity["trials"],
+            "eval_config": report_identity["eval_config"],
+        },
+        cast(str, report_identity["composition_sha256"]),
+    )
+
+
+def _qualification_identity_matches(
+    *,
+    expected_derivation: dict[str, object],
+    current_derivation: dict[str, object],
+    expected_qualification: dict[str, object],
+    current_qualification: dict[str, object] | None,
+    expected_composition: str,
+    current_composition: str | None,
+) -> bool:
+    return (
+        expected_derivation == current_derivation
+        and expected_qualification == current_qualification
+        and expected_composition == current_composition
+    )
+
+
+def _qualification_covers_selectors(
+    report_value: dict[str, Any],
+    selectors: list[str],
+    *,
+    passed: bool,
+) -> bool:
+    qualified_codes = {
+        cast(str, item["code"])
+        for item in cast(list[dict[str, Any]], report_value["by_code"])
+    }
+    selected_codes = {selector.rsplit(":", 1)[0] for selector in selectors}
+    return passed and selected_codes <= qualified_codes
+
+
+def _has_independent_qualification_inputs(
+    verification_settings: ResolvedVerificationSettings | None,
+    evaluation_settings: VerifyEvalSettings | None,
+) -> bool:
+    return bool(
+        verification_settings is not None
+        and evaluation_settings is not None
+        and evaluation_settings.mode == "enforce"
+        and evaluation_settings.qualification_corpus.strip()
+        and evaluation_settings.qualification_corpus_sha256
+        and evaluation_settings.qualification_report.strip()
+        and evaluation_settings.qualification_report_sha256
+    )
+
+
+def _load_independent_qualification_report(
+    settings: VerifyEvalSettings,
+) -> tuple[Any | None, str | None, str | None]:
+    """Load and authoritatively validate the configured qualification artifacts."""
+
+    raw_report_sha256: str | None = None
+    try:
+        from backstitch.semantic_eval_observation import (
+            derive_semantic_eval_observed_facts,
+        )
+        from backstitch.semantic_eval_reports import (
+            load_semantic_eval_corpus,
+            load_semantic_eval_report_bytes,
+            read_semantic_eval_report_bytes,
+            validate_semantic_eval_report_authoritatively,
+        )
+
+        resolved_report_path, raw_report = read_semantic_eval_report_bytes(
+            Path(settings.qualification_report)
+        )
+        raw_report_sha256 = hashlib.sha256(raw_report).hexdigest()
+        corpus = load_semantic_eval_corpus(
+            Path(settings.qualification_corpus), mode="enforce"
+        )
+        if corpus.corpus_sha256 != settings.qualification_corpus_sha256:
+            return None, raw_report_sha256, "identity_mismatch"
+        report = load_semantic_eval_report_bytes(
+            raw_report,
+            path=resolved_report_path,
+            corpus=corpus,
+        )
+        if report.report_sha256 != settings.qualification_report_sha256:
+            return None, raw_report_sha256, "identity_mismatch"
+        observed = derive_semantic_eval_observed_facts(corpus)
+        report = validate_semantic_eval_report_authoritatively(
+            report,
+            corpus=corpus,
+            observed=observed,
+            path=resolved_report_path,
+        )
+    except FileNotFoundError:
+        return None, raw_report_sha256, "missing"
+    except (OSError, ValueError):
+        return None, raw_report_sha256, "corrupt"
+    return report, raw_report_sha256, None
+
+
+def _resolve_independent_qualification(
     policy: SemanticPolicy,
     verification_settings: ResolvedVerificationSettings | None,
     evaluation_settings: VerifyEvalSettings | None = None,
@@ -1498,55 +1719,14 @@ def _resolve_independent_qualification(  # noqa: C901 approved [SC-17.1] RUFF-SU
     )
     from backstitch.obligation_runtime import ALGORITHMS
 
-    current_derivation = {
+    current_derivation: dict[str, object] = {
         "snapshot_algorithm_version": ALGORITHMS.snapshot_algorithm_version,
         "obligation_algorithm_version": ALGORITHMS.obligation_algorithm_version,
         "discovery_algorithm_version": ALGORITHMS.discovery_algorithm_version,
         "packet_contract_version": ALGORITHMS.packet_contract_version,
         "normalization_version": ALGORITHMS.normalization_version,
     }
-    current_qualification: dict[str, object] | None = None
-    if evaluation_settings is not None and evaluation_settings.mode == "enforce":
-        current_qualification = {
-            "corpus_sha256": evaluation_settings.qualification_corpus_sha256,
-            "mode": evaluation_settings.mode,
-            "trials": evaluation_settings.trials,
-            "eval_config": {
-                "trials": evaluation_settings.trials,
-                "interval_method": evaluation_settings.interval_method,
-                "confidence_level": evaluation_settings.confidence_level,
-                "minimum_positive_units": evaluation_settings.minimum_positive_units,
-                "minimum_negative_units": evaluation_settings.minimum_negative_units,
-                "minimum_evidence_sufficiency_rate": (
-                    evaluation_settings.minimum_evidence_sufficiency_rate
-                ),
-                "minimum_conditional_precision": (
-                    evaluation_settings.minimum_conditional_precision
-                ),
-                "minimum_conditional_recall": (
-                    evaluation_settings.minimum_conditional_recall
-                ),
-                "minimum_end_to_end_recall": (
-                    evaluation_settings.minimum_end_to_end_recall
-                ),
-                "minimum_recall_lower_bound": (
-                    evaluation_settings.minimum_recall_lower_bound
-                ),
-                "maximum_false_positive_rate": (
-                    evaluation_settings.maximum_false_positive_rate
-                ),
-                "maximum_false_positive_upper_bound": (
-                    evaluation_settings.maximum_false_positive_upper_bound
-                ),
-                "maximum_indeterminate_rate": (
-                    evaluation_settings.maximum_indeterminate_rate
-                ),
-                "maximum_uncached_flip_rate": (
-                    evaluation_settings.maximum_uncached_flip_rate
-                ),
-                "require_all_critical": evaluation_settings.require_all_critical,
-            },
-        }
+    current_qualification = _current_qualification_identity(evaluation_settings)
     action = (
         "Re-run qualification for the current source-derivation, qualification, "
         "and inference contracts or remove the failure-authority selector."
@@ -1593,80 +1773,33 @@ def _resolve_independent_qualification(  # noqa: C901 approved [SC-17.1] RUFF-SU
             },
         )
 
-    if (
-        verification_settings is None
-        or evaluation_settings is None
-        or evaluation_settings.mode != "enforce"
-        or not evaluation_settings.qualification_corpus.strip()
-        or not evaluation_settings.qualification_corpus_sha256
-        or not evaluation_settings.qualification_report.strip()
-        or not evaluation_settings.qualification_report_sha256
+    if not _has_independent_qualification_inputs(
+        verification_settings, evaluation_settings
     ):
         return unavailable("missing"), None
 
-    corpus_path = Path(evaluation_settings.qualification_corpus)
-    report_path = Path(evaluation_settings.qualification_report)
-    raw_report_sha256: str | None = None
-    try:
-        from backstitch.semantic_eval_observation import (
-            derive_semantic_eval_observed_facts,
-        )
-        from backstitch.semantic_eval_reports import (
-            load_semantic_eval_corpus,
-            load_semantic_eval_report_bytes,
-            read_semantic_eval_report_bytes,
-            validate_semantic_eval_report_authoritatively,
-        )
-
-        resolved_report_path, raw_report = read_semantic_eval_report_bytes(report_path)
-        raw_report_sha256 = hashlib.sha256(raw_report).hexdigest()
-        corpus = load_semantic_eval_corpus(corpus_path, mode="enforce")
-        if corpus.corpus_sha256 != evaluation_settings.qualification_corpus_sha256:
-            return (
-                unavailable("identity_mismatch", raw_report_sha256=raw_report_sha256),
-                None,
-            )
-        report = load_semantic_eval_report_bytes(
-            raw_report,
-            path=resolved_report_path,
-            corpus=corpus,
-        )
-        if report.report_sha256 != evaluation_settings.qualification_report_sha256:
-            return (
-                unavailable("identity_mismatch", raw_report_sha256=raw_report_sha256),
-                None,
-            )
-        observed = derive_semantic_eval_observed_facts(corpus)
-        report = validate_semantic_eval_report_authoritatively(
-            report,
-            corpus=corpus,
-            observed=observed,
-            path=resolved_report_path,
-        )
-    except FileNotFoundError:
-        return unavailable("missing", raw_report_sha256=raw_report_sha256), None
-    except (OSError, ValueError):
-        return unavailable("corrupt", raw_report_sha256=raw_report_sha256), None
+    assert evaluation_settings is not None
+    report, raw_report_sha256, unavailable_reason = (
+        _load_independent_qualification_report(evaluation_settings)
+    )
+    if unavailable_reason is not None:
+        return unavailable(
+            unavailable_reason, raw_report_sha256=raw_report_sha256
+        ), None
+    assert report is not None
 
     report_value = report.to_dict()
-    report_identity = cast(dict[str, Any], report_value["identity"])
-    expected_derivation = {
-        key: cast(object, report_identity[key]) for key in current_derivation
-    }
-    qualification = cast(dict[str, Any], report_value["qualification"])
-    expected_qualification = {
-        "corpus_sha256": report_identity["corpus_sha256"],
-        "mode": qualification["mode"],
-        "trials": report_identity["trials"],
-        "eval_config": report_identity["eval_config"],
-    }
-    expected_composition = cast(str, report_identity["composition_sha256"])
-    identity_matches = (
-        expected_derivation == current_derivation
-        and expected_qualification == current_qualification
-        and expected_composition == current_composition
+    expected_derivation, expected_qualification, expected_composition = (
+        _qualification_report_identities(report_value, current_derivation)
     )
-    if not identity_matches:
+    if not _qualification_identity_matches(
+        expected_derivation=expected_derivation,
+        current_derivation=current_derivation,
+        expected_qualification=expected_qualification,
+        current_qualification=current_qualification,
+        expected_composition=expected_composition,
+        current_composition=current_composition,
+    ):
         return (
             unavailable(
                 "identity_mismatch",
@@ -1677,12 +1810,9 @@ def _resolve_independent_qualification(  # noqa: C901 approved [SC-17.1] RUFF-SU
             ),
             None,
         )
-    qualified_codes = {
-        cast(str, item["code"])
-        for item in cast(list[dict[str, Any]], report_value["by_code"])
-    }
-    selected_codes = {selector.rsplit(":", 1)[0] for selector in selectors}
-    if not report.passed or not selected_codes <= qualified_codes:
+    if not _qualification_covers_selectors(
+        report_value, selectors, passed=report.passed
+    ):
         return (
             unavailable(
                 "failed",

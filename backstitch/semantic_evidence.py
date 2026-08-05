@@ -151,103 +151,60 @@ def _region(
     return _ShownRegion(role, path, start_line, lines)
 
 
-def _shown_regions(packet: dict[str, Any]) -> tuple[_ShownRegion, ...]:  # noqa: C901 approved [SC-17.1] RUFF-SUP-100 exception
-    projection = semantic_packet_projection(packet)
+def _append_region(
+    regions: list[_ShownRegion],
+    role: EvidenceRole,
+    row: dict[str, Any],
+    text_key: str,
+) -> None:
+    shown = _region(role, row["path"], row["start_line"], row[text_key])
+    if shown is not None:
+        regions.append(shown)
+
+
+def _source_packet_regions(projection: dict[str, Any]) -> tuple[_ShownRegion, ...]:
     regions: list[_ShownRegion] = []
-    if projection.get("packet_contract_version") == 3:
-        requirement_row = projection["requirement"]
-        requirement = _region(
-            "requirement",
-            requirement_row["path"],
-            requirement_row["start_line"],
-            requirement_row["text"],
-        )
-        if requirement is not None:
-            regions.append(requirement)
+    _append_region(regions, "requirement", projection["requirement"], "text")
+    if projection["packet_contract_version"] == 3:
         for item in projection["declared_evidence"]:
-            shown = _region(
-                item["role"],
-                item["path"],
-                item["start_line"],
-                item["snippet"],
-            )
-            if shown is not None:
-                regions.append(shown)
-        for item in projection["counterevidence"]:
-            shown = _region(
-                "counterevidence",
-                item["path"],
-                item["start_line"],
-                item["snippet"],
-            )
-            if shown is not None:
-                regions.append(shown)
-    elif projection.get("packet_contract_version") == 4:
-        requirement_row = projection["requirement"]
-        requirement = _region(
-            "requirement",
-            requirement_row["path"],
-            requirement_row["start_line"],
-            requirement_row["text"],
-        )
-        if requirement is not None:
-            regions.append(requirement)
-        for item in projection["counterevidence"]:
-            shown = _region(
-                "counterevidence",
-                item["path"],
-                item["start_line"],
-                item["snippet"],
-            )
-            if shown is not None:
-                regions.append(shown)
-    elif projection["kind"] == "section":
-        requirement = _region(
-            "requirement",
-            projection["spec_path"],
-            projection["section_start_line"],
-            projection["section_text"],
-        )
-        if requirement is not None:
-            regions.append(requirement)
-        for owner in projection["owners"]:
-            implementation = _region(
-                "implementation",
-                owner["path"],
-                owner["start_line"],
-                owner["snippet"],
-            )
-            if implementation is not None:
-                regions.append(implementation)
-    else:
-        declaration = projection["declaration"]
-        requirement = _region(
-            "requirement",
-            declaration["path"],
-            declaration["start_line"],
-            declaration["excerpt"],
-        )
-        if requirement is not None:
-            regions.append(requirement)
-        for item in projection["targets"]:
-            shown = _region(
-                "implementation",
-                item["path"],
-                item["start_line"],
-                item["snippet"],
-            )
-            if shown is not None:
-                regions.append(shown)
-        for item in projection["binding_tests"]:
-            shown = _region(
-                "test",
-                item["path"],
-                item["start_line"],
-                item["snippet"],
-            )
-            if shown is not None:
-                regions.append(shown)
+            _append_region(regions, item["role"], item, "snippet")
+    for item in projection["counterevidence"]:
+        _append_region(regions, "counterevidence", item, "snippet")
     return tuple(regions)
+
+
+def _legacy_section_regions(projection: dict[str, Any]) -> tuple[_ShownRegion, ...]:
+    regions: list[_ShownRegion] = []
+    requirement = _region(
+        "requirement",
+        projection["spec_path"],
+        projection["section_start_line"],
+        projection["section_text"],
+    )
+    if requirement is not None:
+        regions.append(requirement)
+    for owner in projection["owners"]:
+        _append_region(regions, "implementation", owner, "snippet")
+    return tuple(regions)
+
+
+def _legacy_invariant_regions(projection: dict[str, Any]) -> tuple[_ShownRegion, ...]:
+    regions: list[_ShownRegion] = []
+    _append_region(regions, "requirement", projection["declaration"], "excerpt")
+    for item in projection["targets"]:
+        _append_region(regions, "implementation", item, "snippet")
+    for item in projection["binding_tests"]:
+        _append_region(regions, "test", item, "snippet")
+    return tuple(regions)
+
+
+def _shown_regions(packet: dict[str, Any]) -> tuple[_ShownRegion, ...]:
+    projection = semantic_packet_projection(packet)
+    if projection.get("packet_contract_version") in {3, 4}:
+        return _source_packet_regions(projection)
+    if projection["kind"] == "section":
+        return _legacy_section_regions(projection)
+    return _legacy_invariant_regions(projection)
 
 
 def _normalize_evidence(

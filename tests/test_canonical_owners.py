@@ -270,8 +270,7 @@ class _Inventory(ast.NodeVisitor):
         self.generic_visit(node)
         self.scope.pop()
 
-    def visit_Call(self, node: ast.Call) -> None:  # noqa: C901 approved [SC-17.1] RUFF-SUP-150 exception
-        qualified = self._qualified_name(node.func)
+    def _record_json_call(self, node: ast.Call, qualified: str | None) -> None:
         if qualified == "json.dumps":
             keywords = {
                 item.arg: self._resolved_literal(item.value) for item in node.keywords
@@ -289,6 +288,7 @@ class _Inventory(ast.NodeVisitor):
             ):
                 self._record("canonical_json")
 
+    def _record_prompt_call(self, node: ast.Call, qualified: str | None) -> None:
         prompt_keyword: str | None = None
         if qualified in {
             "backstitch.semantic_packets.model_request_bytes",
@@ -308,6 +308,7 @@ class _Inventory(ast.NodeVisitor):
             if authority is None or not self._is_prompt_authority(authority):
                 self._record("prompt_resource_read")
 
+    def _record_sha_join_call(self, node: ast.Call) -> None:
         if (
             isinstance(node.func, ast.Attribute)
             and node.func.attr == "join"
@@ -319,6 +320,7 @@ class _Inventory(ast.NodeVisitor):
         ):
             self._record("sha256_grammar")
 
+    def _record_newline_call(self, node: ast.Call) -> None:
         if isinstance(node.func, ast.Attribute):
             if node.func.attr == "splitlines":
                 self._record("splitlines")
@@ -334,6 +336,13 @@ class _Inventory(ast.NodeVisitor):
                 and _literal(node.args[0]) in {"\n", b"\n"}
             ):
                 self._record("manual_lf_arithmetic")
+
+    def visit_Call(self, node: ast.Call) -> None:
+        qualified = self._qualified_name(node.func)
+        self._record_json_call(node, qualified)
+        self._record_prompt_call(node, qualified)
+        self._record_sha_join_call(node)
+        self._record_newline_call(node)
         self.generic_visit(node)
 
     def visit_Constant(self, node: ast.Constant) -> None:
@@ -435,7 +444,7 @@ CANONICAL_JSON_DISPLAY_EXEMPTION_REASONS = {
     Site("backstitch.cli", "_cmd_packets", "canonical_json"): (
         "renders bounded error details into a failure message, never an identity"
     ),
-    Site("backstitch.cli", "_cmd_analyze", "canonical_json"): (
+    Site("backstitch.cli", "_analyze_failure_error", "canonical_json"): (
         "renders bounded error details into a failure message, never an identity"
     ),
 }

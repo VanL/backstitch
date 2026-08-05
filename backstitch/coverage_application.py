@@ -822,14 +822,20 @@ def _ratchet_state(
     )
 
 
-def _classification_issues(  # noqa: C901 approved [SC-17.1] RUFF-SUP-034 exception
+def _append_coverage_issue(
+    issues: list[Issue], issue: Issue, settings: BackstitchSettings
+) -> None:
+    effective, _ = issue_with_policy(issue, effective_policy=settings.diagnostics)
+    if effective is not None:
+        issues.append(effective)
+
+
+def _definition_issues(
     result: IntentCoverageResult,
-    floor_results: tuple[CoverageFloorResult, ...],
-    repository: _RepositoryState,
     ratchet: _RatchetState,
     settings: BackstitchSettings,
-) -> tuple[Issue, ...] | CoverageFailure:
-    coverage_issues: list[Issue] = []
+) -> list[Issue]:
+    issues: list[Issue] = []
     for item in result.definitions:
         code = (
             "INTENT_UNCOVERED_DEFINITION"
@@ -840,7 +846,8 @@ def _classification_issues(  # noqa: C901 approved [SC-17.1] RUFF-SUP-034 except
         )
         if code is None:
             continue
-        issue, _ = issue_with_policy(
+        _append_coverage_issue(
+            issues,
             Issue(
                 code=code,
                 severity=_intent_severity(code, "repository"),
@@ -854,10 +861,8 @@ def _classification_issues(  # noqa: C901 approved [SC-17.1] RUFF-SUP-034 except
                     else "definition is covered only by a whole-file intent edge"
                 ),
             ),
-            effective_policy=settings.diagnostics,
+            settings,
         )
-        if issue is not None:
-            coverage_issues.append(issue)
         if item.definition.definition_id in ratchet.changed_definition_ids and (
             item.classification == "uncovered"
             or (
@@ -865,7 +870,8 @@ def _classification_issues(  # noqa: C901 approved [SC-17.1] RUFF-SUP-034 except
                 and not settings.coverage.inherited_counts
             )
         ):
-            patch_issue, _ = issue_with_policy(
+            _append_coverage_issue(
+                issues,
                 Issue(
                     code=code,
                     severity=_intent_severity(code, "patch"),
@@ -875,12 +881,20 @@ def _classification_issues(  # noqa: C901 approved [SC-17.1] RUFF-SUP-034 except
                     context="patch",
                     message="changed definition lacks direct intent coverage",
                 ),
-                effective_policy=settings.diagnostics,
+                settings,
             )
-            if patch_issue is not None:
-                coverage_issues.append(patch_issue)
+    return issues
+
+
+def _unscannable_issues(
+    repository: _RepositoryState,
+    ratchet: _RatchetState,
+    settings: BackstitchSettings,
+) -> list[Issue]:
+    issues: list[Issue] = []
     for path in repository.unscannable_paths:
-        issue, _ = issue_with_policy(
+        _append_coverage_issue(
+            issues,
             Issue(
                 code="INTENT_COVERAGE_INCOMPLETE",
                 severity=_intent_severity("INTENT_COVERAGE_INCOMPLETE", "repository"),
@@ -889,16 +903,15 @@ def _classification_issues(  # noqa: C901 approved [SC-17.1] RUFF-SUP-034 except
                 context="repository",
                 message="Python file could not be classified for intent coverage",
             ),
-            effective_policy=settings.diagnostics,
+            settings,
         )
-        if issue is not None:
-            coverage_issues.append(issue)
         current_row = next(row for row in repository.python_rows if row.path == path)
         if (
             ratchet.baseline_source is not None
             and ratchet.baseline_source.blobs.get(path) != current_row.raw_bytes
         ):
-            patch_issue, _ = issue_with_policy(
+            _append_coverage_issue(
+                issues,
                 Issue(
                     code="INTENT_COVERAGE_INCOMPLETE",
                     severity=_intent_severity("INTENT_COVERAGE_INCOMPLETE", "patch"),
@@ -907,12 +920,20 @@ def _classification_issues(  # noqa: C901 approved [SC-17.1] RUFF-SUP-034 except
                     context="patch",
                     message="changed Python file could not be classified",
                 ),
-                effective_policy=settings.diagnostics,
+                settings,
             )
-            if patch_issue is not None:
-                coverage_issues.append(patch_issue)
+    return issues
+
+
+def _exemption_issues(
+    result: IntentCoverageResult,
+    repository: _RepositoryState,
+    settings: BackstitchSettings,
+) -> list[Issue]:
+    issues: list[Issue] = []
     for path, line, symbol in repository.invalid_exemption_markers:
-        issue, _ = issue_with_policy(
+        _append_coverage_issue(
+            issues,
             Issue(
                 code="INTENT_EXEMPTION_UNREASONED",
                 severity=_intent_severity("INTENT_EXEMPTION_UNREASONED"),
@@ -921,14 +942,13 @@ def _classification_issues(  # noqa: C901 approved [SC-17.1] RUFF-SUP-034 except
                 symbol=symbol,
                 message="inline no-spec marker requires a valid nonblank reason",
             ),
-            effective_policy=settings.diagnostics,
+            settings,
         )
-        if issue is not None:
-            coverage_issues.append(issue)
     for exemption in result.exemptions:
         if exemption.state != "unused":
             continue
-        issue, _ = issue_with_policy(
+        _append_coverage_issue(
+            issues,
             Issue(
                 code="INTENT_EXEMPTION_UNUSED",
                 severity=_intent_severity("INTENT_EXEMPTION_UNUSED"),
@@ -938,17 +958,23 @@ def _classification_issues(  # noqa: C901 approved [SC-17.1] RUFF-SUP-034 except
                     f"intent exemption matches no definition: {exemption.selector}"
                 ),
             ),
-            effective_policy=settings.diagnostics,
+            settings,
         )
-        if issue is not None:
-            coverage_issues.append(issue)
+    return issues
+
+
+def _requirement_issues(
+    result: IntentCoverageResult, settings: BackstitchSettings
+) -> list[Issue]:
+    issues: list[Issue] = []
     for requirement in result.requirements:
         if (
             requirement.rung != "active"
             or requirement.implementation_state != "declared_without_live_owner"
         ):
             continue
-        issue, _ = issue_with_policy(
+        _append_coverage_issue(
+            issues,
             Issue(
                 code="INTENT_REQUIREMENT_UNIMPLEMENTED",
                 severity=_intent_severity("INTENT_REQUIREMENT_UNIMPLEMENTED"),
@@ -957,14 +983,20 @@ def _classification_issues(  # noqa: C901 approved [SC-17.1] RUFF-SUP-034 except
                 section_id=requirement.section_id,
                 message=("implementation mappings resolve to no live definition owner"),
             ),
-            effective_policy=settings.diagnostics,
+            settings,
         )
-        if issue is not None:
-            coverage_issues.append(issue)
+    return issues
+
+
+def _floor_issues(
+    floor_results: tuple[CoverageFloorResult, ...], settings: BackstitchSettings
+) -> list[Issue]:
+    issues: list[Issue] = []
     for floor in floor_results:
         if floor.passes:
             continue
-        issue, _ = issue_with_policy(
+        _append_coverage_issue(
+            issues,
             Issue(
                 code="INTENT_COVERAGE_FLOOR_REGRESSION",
                 severity=_intent_severity("INTENT_COVERAGE_FLOOR_REGRESSION"),
@@ -972,10 +1004,15 @@ def _classification_issues(  # noqa: C901 approved [SC-17.1] RUFF-SUP-034 except
                 line=None,
                 message="intent coverage is below a configured floor",
             ),
-            effective_policy=settings.diagnostics,
+            settings,
         )
-        if issue is not None:
-            coverage_issues.append(issue)
+    return issues
+
+
+def _drift_issues(
+    ratchet: _RatchetState, settings: BackstitchSettings
+) -> list[Issue] | CoverageFailure:
+    issues: list[Issue] = []
     locations = dict(ratchet.definition_locations)
     for event in ratchet.drift_events:
         if event.acknowledged:
@@ -986,7 +1023,8 @@ def _classification_issues(  # noqa: C901 approved [SC-17.1] RUFF-SUP-034 except
                 stage="drift",
                 message=(f"drift event has no retained definition: {event.event_id}"),
             )
-        issue, _ = issue_with_policy(
+        _append_coverage_issue(
+            issues,
             Issue(
                 code="INTENT_DRIFT_SUSPECT",
                 severity=_intent_severity("INTENT_DRIFT_SUSPECT"),
@@ -995,11 +1033,28 @@ def _classification_issues(  # noqa: C901 approved [SC-17.1] RUFF-SUP-034 except
                 symbol=definition.qualname,
                 message=("implementation changed without governing evidence movement"),
             ),
-            effective_policy=settings.diagnostics,
+            settings,
         )
-        if issue is not None:
-            coverage_issues.append(issue)
-    return tuple(coverage_issues)
+    return issues
+
+
+def _classification_issues(
+    result: IntentCoverageResult,
+    floor_results: tuple[CoverageFloorResult, ...],
+    repository: _RepositoryState,
+    ratchet: _RatchetState,
+    settings: BackstitchSettings,
+) -> tuple[Issue, ...] | CoverageFailure:
+    issues = _definition_issues(result, ratchet, settings)
+    issues.extend(_unscannable_issues(repository, ratchet, settings))
+    issues.extend(_exemption_issues(result, repository, settings))
+    issues.extend(_requirement_issues(result, settings))
+    issues.extend(_floor_issues(floor_results, settings))
+    drift = _drift_issues(ratchet, settings)
+    if isinstance(drift, CoverageFailure):
+        return drift
+    issues.extend(drift)
+    return tuple(issues)
 
 
 def _unscannable_files(

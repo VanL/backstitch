@@ -2,7 +2,7 @@
 
 Date: 2026-08-05
 
-Status: active; owner-approved T4 activation independently reviewed; ready to commit
+Status: active; T1-T10 implemented and independently reviewed; final gates in progress
 
 Class: 5+P. This changes a repository-wide required quality gate, its governing
 spec, CI and release enforcement, and the approved-suppression process.
@@ -889,6 +889,8 @@ Stop and revise this plan if:
 | 2026-08-05 | T3A remediation returned the generator to zero C901 findings and added exact ratchet-key, table-map, and hermetic coalesce proof. Three cross-reviewers found all 153 rows technically ready to freeze; approval remains an external owner gate. | 153 exact raw matches; 22/27/103 C901 priorities; T3A technical PASS |
 | 2026-08-05 | T4 promotion removed the repeated `[SC-17.1]` token from the registry subheading after the self-corpus gate proved that two headings declaring one stable ID make all 153 source backlinks ambiguous. The generator and live-spec test still require one exact active registry heading. | Adversarial self-corpus probe: 1 duplicate plus 149 ambiguous-reference errors before correction |
 | 2026-08-05 | Repository owner approved all 153 exact group fields. T4 froze the ledger, promoted 153 human and generated rows, activated C901/10, inserted 153 reconciled markers, and aligned CI/release enforcement atomically. | Owner task reply `Approve`; integrated T4 gates |
+| 2026-08-05 | T5-T9 resolved 43 of 49 temporary C901 groups. Six state-machine and lifecycle owners remain registered: 005, 077, 082, 084, 085, and 088. The live registry now contains 110 directives while the frozen activation ledger remains the historical approval input. | Focused owner suites; exact raw audit `C901=109,F401=1`; generated-index reconciliation |
+| 2026-08-05 | T10 score-blind cross-review retained the six cohesive owners and found no shallow extraction to reverse. Retired group IDs remain unused gaps and are not reassigned. | Independent T6, T7, T8, and combined T5/T9 locality reviews |
 
 ## Review Log
 
@@ -904,6 +906,11 @@ Stop and revise this plan if:
 | 2026-08-05 | T3A exact ledger freeze rereview | three cross-reviewers | technical PASS; owner gate pending | All 153 rows exact and substantive; generator C901=0; corrected proofs fire; all approval fields remain `pending owner` and freeze status remains `proposed` |
 | 2026-08-05 | T3A owner authorization | repository owner | APPROVED | Exact 153-row ledger approved in the implementation task; all approval fields record the reply and freeze status is `frozen` |
 | 2026-08-05 | T4 atomic activation | independent semantic-area reviewer | PASS | 153 ledger/human/generated/source rows exact; config, policy, CI, release, self-corpus, acceptance, and atomic rollback all align |
+| 2026-08-05 | T5 settings and T9 tools/tests | independent semantic-area reviewer | PASS after bookkeeping correction | No behavior, precedence, release-order, proxy-state, corpus-identity, visitor-traversal, locality, or proof finding. Removed stale live-registry rows and regenerated the index. |
+| 2026-08-05 | T6 semantic execution | independent settings-area reviewer | PASS | Lease/guard lifetime, reservation release, lazy construction, call budgets, packet order, and preparation isolation remain owned; groups 077/082/084/085/088 are correctly retained. |
+| 2026-08-05 | T7 eval and reports | independent core-area reviewer | PASS | Temporary lifetimes, cold/replay order, global budgets, publication, schema dispatch, first-error order, report binding, and final digests remain intact. |
+| 2026-08-05 | T8 alignment, CLI, evidence, and coverage | independent semantic-area reviewer | PASS | Snapshot/parser ownership, output and exit precedence, lazy provider imports, aggregate order, and proof strength remain intact; group 005 is correctly retained. |
+| 2026-08-05 | T10 locality remediation | cross-review matrix above | PASS; no reversals | Every changed P1/P2 owner received a score-blind review. The six retained owners are cohesive state machines; no new unregistered owner exceeds 10. |
 
 ## Execution Evidence
 
@@ -914,6 +921,12 @@ Stop and revise this plan if:
 | T3 | `bin/ruff_suppression_index.py`; `tests/test_ruff_suppression_index.py`; policy discovery expectation | combined policy/generator tests: 89 passed; canonical Ruff, full format, focused mypy, diff check: pass; real Ruff 0.15.21 extensionless end-to-end: pass; commit `dc36067` | fixture-only generator; no active spec rewrite or source markers | initial review BLOCKED twice; all findings closed; final rereview PASS | full repository mypy has the same six pre-existing `tests/test_semantic_application.py:144` errors with and without T3 |
 | T3A technical freeze | generator locality refactor; `tests/test_settings.py`; `tests/test_coalesce_check.py`; three ledger proof fields | combined focused selection: 278 passed; canonical threshold audit: 152 C901, generator 0; Ruff, full format, focused mypy, diff check: pass | ledger remains 153 proposed rows; no source markers or activation | three cross-reviewers technical PASS | repository-owner authorization is required before changing approval/freeze fields or starting T4 |
 | T4 | 43 governed source files; frozen ledger; core spec; Ruff config/rule fixture; generator/index; policy tests; CI; release helper/tests; self-corpus snapshot | integrated policy/generator/release/workflow: 175 passed; corpus/architecture/policy: 23 passed; acceptance: 24 passed; canonical Ruff, index check, full format, focused mypy, diff check: pass; self-corpus exit 0 with zero issues | 153 frozen human rows; 153 generated rows; raw `C901=152,F401=1`; normal Ruff clean | independent review PASS | promoted registry heading delta recorded after adversarial self-corpus caught duplicate section ID |
+| T5 | `backstitch/settings.py` | 511 settings, semantic-settings, config-parity, and CLI-config tests passed; Ruff, format, mypy, and diff checks passed | 10 temporary groups removed: 126, 127, 130-133, 135-138 | independent review PASS | none |
+| T6 | `backstitch/semantic_analysis.py`; `semantic_application.py`; `semantic_cache.py` | 193 semantic analysis/application/cache/verification tests plus seven targeted race/deadline/order probes passed; Ruff, format, mypy, and diff checks passed | 8 groups removed: 071-075, 078, 083, 089; 5 retained: 077, 082, 084, 085, 088 | independent review PASS | retained owners deliberately preserve ordered mutable lifecycle state |
+| T7 | `backstitch/semantic_eval.py`; `semantic_reports.py` | implementation selection: 305 passed; independent review selection: 176 passed; Ruff, format, and mypy passed | 6 groups removed: 090, 110, 117, 122-124 | independent review PASS | none |
+| T8 | alignment, CLI, coverage, evidence-summary/history, obligations, semantic-evidence owners; canonical-owner inventory | implementation selection: 339 passed; independent review covered 12 focused suites; Ruff, format, and mypy passed | 13 groups removed: 002, 003, 009, 010, 027, 028, 031, 034, 040, 041, 047, 055, 100; group 005 retained | independent review PASS | `_phase_ids` remains one phase-wide manifest, uniqueness, and coverage state machine |
+| T9 | `bin/coalesce-check`; `bin/release.py`; live proxy, semantic corpus generator, and canonical-owner tests | release 37, coalesce 2, and combined helper/corpus/owner selection 89 passed; generator no-write, Ruff, and focused mypy passed | 6 groups removed: 140, 141, 143, 144, 146, 150 | independent review PASS after registry reconciliation | qualification generator source hash intentionally refreshed; generated corpus bytes unchanged |
+| T10 | all T5-T9 P1/P2 diffs and retained owners | exact raw audit `C901=109,F401=1`; normal Ruff and suppression-index check pass | live registry 153 -> 110 directives; 43 retired gaps; frozen activation ledger unchanged | cross-review PASS | no reversal required; six temporary groups retained under their approved invariants |
 
 ## Fresh-Eyes Checklist
 

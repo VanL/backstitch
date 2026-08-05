@@ -847,7 +847,106 @@ def _render_semantic_preflight(preflight: Any) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _cmd_analyze(args: argparse.Namespace, settings: BackstitchSettings) -> int:  # noqa: C901 approved [SC-17.1] RUFF-SUP-027 exception
+def _render_preflight_result(
+    args: argparse.Namespace, preflight: Any, *, blocked: bool = False
+) -> int:
+    if args.format == "json":
+        stream = sys.stderr.buffer if blocked else sys.stdout.buffer
+        stream.write(preflight.to_json_bytes())
+    else:
+        stream = sys.stderr if blocked else sys.stdout
+        stream.write(_render_semantic_preflight(preflight))
+    return cast(int, preflight.exit_code)
+
+
+def _analyze_failure_error(outcome: Any) -> int:
+    if outcome.stage == "packet":
+        assert outcome.code is not None
+        return _error(f"{outcome.code}: {outcome.message}")
+    if outcome.stage == "discovery":
+        assert outcome.code is not None
+        details = json.dumps(
+            dict(outcome.details), sort_keys=True, separators=(",", ":")
+        )
+        return _error(f"{outcome.code}: {outcome.message}; details={details}")
+    if outcome.stage != "publication":
+        return _error(outcome.message)
+    assert outcome.failed_path is not None
+    published = (
+        ", ".join(path.as_posix() for path in outcome.published_paths)
+        if outcome.published_paths
+        else "none"
+    )
+    return _error(
+        "current analyze publication failed at "
+        f"{outcome.failed_path.as_posix()}; already published: {published}; "
+        f"{outcome.message}"
+    )
+
+
+def _render_analyze_run(args: argparse.Namespace, outcome: Any) -> int:
+    run = outcome.run
+    for line in run.stderr_lines:
+        print(line, file=sys.stderr)
+    if args.repo_root is not None and run.exit_code == 2:
+        return cast(int, run.exit_code)
+    if args.format == "json" and run.report_json:
+        sys.stdout.buffer.write(run.report_json)
+    elif run.report:
+        print(
+            f"semantic analysis {run.report['status']}: "
+            f"{run.report['result_count']} result(s), "
+            f"{len(run.diagnostics)} finding(s)"
+        )
+    return cast(int, run.exit_code)
+
+
+def _analysis_adapter_factory(
+    provider: Any, resolved: Any, model_name: str | None
+) -> Any:
+    def build_adapter() -> Any:
+        if resolved.inference is not None:
+            return provider(
+                resolved.inference.adapter_model_id,
+                provider_identity=resolved.provider_identity,
+                request_identity=resolved.request_identity,
+                resolved_inference=resolved.inference,
+            )
+        return provider(
+            model_name,
+            provider_identity=resolved.provider_identity,
+            request_identity=resolved.request_identity,
+        )
+
+    return build_adapter if resolved.cache_mode != "require" else None
+
+
+def _verification_adapter_factory(
+    provider: Any, resolved: Any, response_schema_builder: Any
+) -> Any:
+    if resolved is None or resolved.cache_mode == "require":
+        return None
+
+    def build_adapter() -> Any:
+        if resolved.inference is not None:
+            return provider(
+                resolved.inference.adapter_model_id,
+                provider_identity=resolved.provider_identity,
+                request_identity=resolved.request_identity,
+                resolved_inference=resolved.inference,
+                response_schema_builder=response_schema_builder,
+            )
+        return provider(
+            resolved.provider_identity.model_id,
+            provider_identity=resolved.provider_identity,
+            request_identity=resolved.request_identity,
+            response_schema_builder=response_schema_builder,
+        )
+
+    return build_adapter
+
+
+def _cmd_analyze(args: argparse.Namespace, settings: BackstitchSettings) -> int:
     # Lazy imports preserve the structural no-provider boundary for deterministic
     # commands ([SC-8]).
     from backstitch.analysis_llm import default_provider_adapter, resolve_model_name
@@ -866,7 +965,6 @@ def _cmd_analyze(args: argparse.Namespace, settings: BackstitchSettings) -> int:
         preflight_semantics,
         validate_analysis_mode,
     )
-    from backstitch.semantic_cache import ProviderAdapter
     from backstitch.semantic_policy import materialize_semantic_policy
     from backstitch.semantic_verification import (
         verification_response_schema_from_prompt,
@@ -902,41 +1000,14 @@ def _cmd_analyze(args: argparse.Namespace, settings: BackstitchSettings) -> int:
     if qualification_problem is not None:
         return _analysis_problem_error(qualification_problem)
 
-    def build_adapter() -> ProviderAdapter:
-        if resolved.inference is not None:
-            return default_provider_adapter(
-                resolved.inference.adapter_model_id,
-                provider_identity=resolved.provider_identity,
-                request_identity=resolved.request_identity,
-                resolved_inference=resolved.inference,
-            )
-        return default_provider_adapter(
-            model_name,
-            provider_identity=resolved.provider_identity,
-            request_identity=resolved.request_identity,
-        )
-
-    adapter_factory = build_adapter if resolved.cache_mode != "require" else None
-    verification_adapter_factory: Any = None
-    if resolved_verify is not None and resolved_verify.cache_mode != "require":
-
-        def build_verification_adapter() -> ProviderAdapter:
-            if resolved_verify.inference is not None:
-                return default_provider_adapter(
-                    resolved_verify.inference.adapter_model_id,
-                    provider_identity=resolved_verify.provider_identity,
-                    request_identity=resolved_verify.request_identity,
-                    resolved_inference=resolved_verify.inference,
-                    response_schema_builder=verification_response_schema_from_prompt,
-                )
-            return default_provider_adapter(
-                resolved_verify.provider_identity.model_id,
-                provider_identity=resolved_verify.provider_identity,
-                request_identity=resolved_verify.request_identity,
-                response_schema_builder=verification_response_schema_from_prompt,
-            )
-
-        verification_adapter_factory = build_verification_adapter
+    adapter_factory = _analysis_adapter_factory(
+        default_provider_adapter, resolved, model_name
+    )
+    verification_adapter_factory = _verification_adapter_factory(
+        default_provider_adapter,
+        resolved_verify,
+        verification_response_schema_from_prompt,
+    )
 
     profile = _configured_profile(settings)
     application_request = SemanticApplicationRequest(
@@ -962,43 +1033,13 @@ def _cmd_analyze(args: argparse.Namespace, settings: BackstitchSettings) -> int:
         preflight = preflight_semantics(application_request)
         if isinstance(preflight, SemanticApplicationFailure):
             return _error(preflight.message)
-        if args.format == "json":
-            sys.stdout.buffer.write(preflight.to_json_bytes())
-        else:
-            sys.stdout.write(_render_semantic_preflight(preflight))
-        return preflight.exit_code
+        return _render_preflight_result(args, preflight)
 
     outcome = analyze_semantics(application_request)
     if isinstance(outcome, SemanticPreparationBlocked):
-        preflight = outcome.preflight
-        if args.format == "json":
-            sys.stdout.buffer.write(preflight.to_json_bytes())
-        else:
-            sys.stderr.write(_render_semantic_preflight(preflight))
-        return preflight.exit_code
+        return _render_preflight_result(args, outcome.preflight, blocked=True)
     if isinstance(outcome, SemanticApplicationFailure):
-        if outcome.stage == "packet":
-            assert outcome.code is not None
-            return _error(f"{outcome.code}: {outcome.message}")
-        if outcome.stage == "discovery":
-            assert outcome.code is not None
-            details = json.dumps(
-                dict(outcome.details), sort_keys=True, separators=(",", ":")
-            )
-            return _error(f"{outcome.code}: {outcome.message}; details={details}")
-        if outcome.stage == "publication":
-            assert outcome.failed_path is not None
-            published_text = (
-                ", ".join(path.as_posix() for path in outcome.published_paths)
-                if outcome.published_paths
-                else "none"
-            )
-            return _error(
-                "current analyze publication failed at "
-                f"{outcome.failed_path.as_posix()}; already published: "
-                f"{published_text}; {outcome.message}"
-            )
-        return _error(outcome.message)
+        return _analyze_failure_error(outcome)
     if isinstance(outcome, SemanticReadinessBlocked):
         rendered = (
             render_json(outcome.report)
@@ -1008,23 +1049,64 @@ def _cmd_analyze(args: argparse.Namespace, settings: BackstitchSettings) -> int:
         sys.stdout.write(rendered)
         return 1
     assert isinstance(outcome, SemanticApplicationResult)
-    run = outcome.run
-    for line in run.stderr_lines:
-        print(line, file=sys.stderr)
-    if args.repo_root is not None and run.exit_code == 2:
-        return run.exit_code
-    if args.format == "json" and run.report_json:
-        sys.stdout.buffer.write(run.report_json)
-    elif run.report:
-        print(
-            f"semantic analysis {run.report['status']}: "
-            f"{run.report['result_count']} result(s), "
-            f"{len(run.diagnostics)} finding(s)"
+    return _render_analyze_run(args, outcome)
+
+
+def _eval_paths(args: argparse.Namespace) -> tuple[Path, Path]:
+    try:
+        corpus = args.corpus.resolve()
+        output = args.output.resolve(strict=False)
+    except OSError as exc:
+        raise ConfigLoadError(f"eval path resolution failed: {exc}") from exc
+    if corpus == output:
+        raise ConfigLoadError("eval --corpus and --output paths must be distinct")
+    return corpus, output
+
+
+def _validate_eval_paths(
+    args: argparse.Namespace,
+    settings: BackstitchSettings,
+    corpus_path: Path,
+    output_path: Path,
+    eval_settings: Any,
+) -> None:
+    if eval_settings.qualification_corpus.strip() and (
+        Path(eval_settings.qualification_corpus).resolve() != corpus_path
+    ):
+        raise ConfigLoadError(
+            "configured verify.eval qualification_corpus does not match --corpus"
         )
-    return run.exit_code
+    config_paths = {
+        Path(item.path).resolve(strict=False)
+        for item in settings.config_layer_identities
+    }
+    report_path = (
+        Path(eval_settings.qualification_report).resolve(strict=False)
+        if eval_settings.qualification_report.strip()
+        else None
+    )
+    if report_path == output_path:
+        raise ConfigLoadError(
+            "eval --output must not overlap configured verify.eval qualification_report"
+        )
+    if output_path in config_paths:
+        raise ConfigLoadError("eval --output overlaps selected configuration")
+    if report_path in config_paths:
+        raise ConfigLoadError(
+            "configured verify.eval qualification_report overlaps selected configuration"
+        )
+    try:
+        if args.output.is_symlink() or (
+            args.output.exists() and not args.output.is_file()
+        ):
+            raise ConfigLoadError(
+                "eval --output must be absent or a regular non-symlink file"
+            )
+    except OSError as exc:
+        raise ConfigLoadError(f"cannot inspect eval --output: {exc}") from exc
 
 
-def _cmd_eval(args: argparse.Namespace, settings: BackstitchSettings) -> int:  # noqa: C901 approved [SC-17.1] RUFF-SUP-028 exception
+def _cmd_eval(args: argparse.Namespace, settings: BackstitchSettings) -> int:
     # Like analyze, eval is an explicitly model-touching command. Keep all
     # provider imports inside this handler so deterministic commands retain
     # the structural no-llm guarantee ([SC-8]).
@@ -1044,13 +1126,7 @@ def _cmd_eval(args: argparse.Namespace, settings: BackstitchSettings) -> int:  #
     )
     from backstitch.settings import VerifySettings
 
-    try:
-        corpus_path = args.corpus.resolve()
-        output_path = args.output.resolve(strict=False)
-    except OSError as exc:
-        raise ConfigLoadError(f"eval path resolution failed: {exc}") from exc
-    if corpus_path == output_path:
-        raise ConfigLoadError("eval --corpus and --output paths must be distinct")
+    corpus_path, output_path = _eval_paths(args)
 
     model_name = resolve_model_name(
         None,
@@ -1063,40 +1139,7 @@ def _cmd_eval(args: argparse.Namespace, settings: BackstitchSettings) -> int:  #
     eval_settings = settings.verify.eval
     if eval_settings is None:
         raise ConfigLoadError("semantic eval requires the complete verify.eval table")
-    if eval_settings.qualification_corpus.strip() and (
-        Path(eval_settings.qualification_corpus).resolve() != corpus_path
-    ):
-        raise ConfigLoadError(
-            "configured verify.eval qualification_corpus does not match --corpus"
-        )
-    if eval_settings.qualification_report.strip() and (
-        Path(eval_settings.qualification_report).resolve(strict=False) == output_path
-    ):
-        raise ConfigLoadError(
-            "eval --output must not overlap configured verify.eval qualification_report"
-        )
-    config_paths = {
-        Path(item.path).resolve(strict=False)
-        for item in settings.config_layer_identities
-    }
-    if output_path in config_paths:
-        raise ConfigLoadError("eval --output overlaps selected configuration")
-    if eval_settings.qualification_report.strip() and (
-        Path(eval_settings.qualification_report).resolve(strict=False) in config_paths
-    ):
-        raise ConfigLoadError(
-            "configured verify.eval qualification_report overlaps selected "
-            "configuration"
-        )
-    try:
-        if args.output.is_symlink() or (
-            args.output.exists() and not args.output.is_file()
-        ):
-            raise ConfigLoadError(
-                "eval --output must be absent or a regular non-symlink file"
-            )
-    except OSError as exc:
-        raise ConfigLoadError(f"cannot inspect eval --output: {exc}") from exc
+    _validate_eval_paths(args, settings, corpus_path, output_path, eval_settings)
 
     def build_adapter() -> ProviderAdapter:
         if resolved.inference is not None:
@@ -1563,64 +1606,40 @@ def _resolve_default_invocation_settings(
     )
 
 
-def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901 approved [SC-17.1] RUFF-SUP-031 exception
-    """Run the backstitch CLI."""
-
-    parser = build_parser()
-    raw_argv = tuple(sys.argv[1:] if argv is None else argv)
-    explicit_command = _explicit_command(raw_argv)
-    parser_only = any(token in {"-h", "--help", "--version"} for token in raw_argv)
-    if explicit_command is None and not parser_only:
-        candidates = _parse_default_candidates(parser, raw_argv)
-        if not candidates:
-            parser.parse_args(raw_argv)
-            raise AssertionError("argument parser returned after rejecting arguments")
-        try:
-            settings = _resolve_default_invocation_settings(candidates)
-            if settings.default_command is None:
-                return _error(
-                    "a command is required unless configuration sets default_command"
-                )
-            args = candidates.get(settings.default_command)
-            if args is None:
-                parser.parse_args(
-                    _default_candidate_argv(settings.default_command, raw_argv)
-                )
-                raise AssertionError(
-                    "argument parser returned after rejecting default arguments"
-                )
-            return _dispatch_config_command(args, settings)
-        except (ScanError, ValueError, OSError) as exc:
-            return _error(str(exc))
-        except Exception as exc:  # noqa: BLE001 -- [SC-5]: no traceback, ever.
-            return _error(f"internal error: {exc}")
-
-    args = parser.parse_args(raw_argv)
-    # [CFG-7]: merge the global `backstitch --config/--no-config <command>`
-    # spellings with the per-command flags; any mix of --config and
-    # --no-config across spellings is a usage error (exit 2).
-    _merge_config_controls(args)
+def _run_default_invocation(
+    parser: argparse.ArgumentParser, raw_argv: Sequence[str]
+) -> int:
+    candidates = _parse_default_candidates(parser, raw_argv)
+    if not candidates:
+        parser.parse_args(raw_argv)
+        raise AssertionError("argument parser returned after rejecting arguments")
     try:
-        if args.config is not None and args.no_config:
-            msg = "--config and --no-config are mutually exclusive"
-            raise ConfigLoadError(msg)
-        if args.command is None:
+        settings = _resolve_default_invocation_settings(candidates)
+        if settings.default_command is None:
             return _error(
                 "a command is required unless configuration sets default_command"
             )
-        if args.command not in CONFIG_CONSUMING_COMMANDS:
-            if args.config is not None or args.no_config or args.options:
-                raise ConfigLoadError(
-                    f"{args.command} does not accept --config, --no-config, or --option"
-                )
-            if args.command == "summarize-analysis":
-                return _cmd_summarize(args)
-            if args.command == "cache":
-                return _cmd_cache(args)
-            if args.command == "guide":
-                return _cmd_guide(args)
-            raise ValueError(f"unknown command: {args.command}")
+        args = candidates.get(settings.default_command)
+        if args is None:
+            parser.parse_args(
+                _default_candidate_argv(settings.default_command, raw_argv)
+            )
+            raise AssertionError(
+                "argument parser returned after rejecting default arguments"
+            )
+        return _dispatch_config_command(args, settings)
+    except (ScanError, ValueError, OSError) as exc:
+        return _error(str(exc))
+    except Exception as exc:  # noqa: BLE001 -- [SC-5]: no traceback, ever.
+        return _error(f"internal error: {exc}")
 
+
+def _dispatch_parsed_invocation(args: argparse.Namespace) -> int:
+    if args.config is not None and args.no_config:
+        raise ConfigLoadError("--config and --no-config are mutually exclusive")
+    if args.command is None:
+        return _error("a command is required unless configuration sets default_command")
+    if args.command in CONFIG_CONSUMING_COMMANDS:
         try:
             settings = _resolve_invocation_settings(args)
         except ConfigLoadError as exc:
@@ -1628,7 +1647,43 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901 approved [SC-1
                 return _cmd_obligation(args, None, config_error=exc)
             raise
         return _dispatch_config_command(args, settings)
+    if args.config is not None or args.no_config or args.options:
+        raise ConfigLoadError(
+            f"{args.command} does not accept --config, --no-config, or --option"
+        )
+    handlers = {
+        "summarize-analysis": _cmd_summarize,
+        "cache": _cmd_cache,
+        "guide": _cmd_guide,
+    }
+    handler = handlers.get(args.command)
+    if handler is None:
+        raise ValueError(f"unknown command: {args.command}")
+    return handler(args)
+
+
+def _run_parsed_invocation(args: argparse.Namespace) -> int:
+    try:
+        return _dispatch_parsed_invocation(args)
     except (ScanError, ValueError, OSError) as exc:
         return _error(str(exc))
     except Exception as exc:  # noqa: BLE001 -- [SC-5]: no traceback, ever.
         return _error(f"internal error: {exc}")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the backstitch CLI."""
+
+    parser = build_parser()
+    raw_argv = tuple(sys.argv[1:] if argv is None else argv)
+    explicit_command = _explicit_command(raw_argv)
+    parser_only = any(token in {"-h", "--help", "--version"} for token in raw_argv)
+    if explicit_command is None and not parser_only:
+        return _run_default_invocation(parser, raw_argv)
+
+    args = parser.parse_args(raw_argv)
+    # [CFG-7]: merge the global `backstitch --config/--no-config <command>`
+    # spellings with the per-command flags; any mix of --config and
+    # --no-config across spellings is a usage error (exit 2).
+    _merge_config_controls(args)
+    return _run_parsed_invocation(args)

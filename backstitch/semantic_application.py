@@ -378,7 +378,111 @@ def _current_paths(
     return tuple(operational_exclusions)
 
 
-def _prepare_current(  # noqa: C901 approved [SC-17.1] RUFF-SUP-078 exception
+def _prepare_current_packets(
+    request: SemanticApplicationRequest,
+    *,
+    anchor: Path,
+    operational_exclusions: tuple[str, ...],
+    runtime: obligation_runtime.ObligationRuntime,
+    progress: OperationProgress,
+) -> _PreparedCurrentAnalysis | _BlockedCurrentPreparation:
+    """Own packet planning, cold admission, and current packet materialization."""
+
+    try:
+        inference = request.semantic_settings.inference
+        maximum_input_bytes = (
+            inference.capability.maximum_input_bytes if inference is not None else None
+        )
+        packet_plan = analysis_packets.plan_source_aligned_packets(
+            runtime,
+            maximum_packets=request.semantic_settings.maximum_packets,
+            maximum_prompt_bytes=request.semantic_settings.maximum_prompt_bytes,
+            maximum_input_bytes=maximum_input_bytes,
+            progress=progress,
+        )
+        if not packet_plan.complete:
+            return _BlockedCurrentPreparation(
+                runtime=runtime,
+                packet_plan=packet_plan,
+                budget_projection=project_cold_analyzer_budget(
+                    None,
+                    request.semantic_settings,
+                ),
+                failure=SemanticApplicationFailure(
+                    stage="packet",
+                    code="PACKET_BUDGET_EXHAUSTED",
+                    message=(
+                        f"packet plan crossed {packet_plan.crossed_ceiling} at "
+                        f"{packet_plan.first_crossing_packet_id}"
+                    ),
+                    details=tuple(sorted(packet_plan.to_summary().items())),
+                ),
+            )
+        budget_projection = project_cold_analyzer_budget(
+            tuple(
+                contribution.request_byte_count
+                for contribution in packet_plan.contributions
+            ),
+            request.semantic_settings,
+        )
+        if budget_projection.call_cost_status == "exceeds":
+            return _BlockedCurrentPreparation(
+                runtime=runtime,
+                packet_plan=packet_plan,
+                budget_projection=budget_projection,
+                failure=SemanticApplicationFailure(
+                    stage="budget",
+                    code="COLD_BUDGET_EXHAUSTED",
+                    message="exact no-cache analyzer projection exceeds budget",
+                    details=tuple(sorted(budget_projection.to_row().items())),
+                ),
+            )
+        packet_report = build_source_packet_report(runtime, packet_plan=packet_plan)
+        validated_packets = load_packets_bytes(
+            packet_plan.packet_jsonl,
+            source="current repository",
+        )
+        progress.advance(
+            "complete",
+            completed_work_units=packet_plan.measured_packet_count,
+            total_work_units=packet_plan.measured_packet_count,
+            current_identity=runtime.snapshot.snapshot_hash,
+        )
+    except OperationDeadlineExceeded as exc:
+        return _BlockedCurrentPreparation(
+            runtime=runtime,
+            failure=_deadline_failure(exc),
+        )
+    except SourceAlignedPacketError as exc:
+        failure = SemanticApplicationFailure(
+            stage="alignment",
+            code=exc.code,
+            message=str(exc),
+        )
+        return _BlockedCurrentPreparation(runtime=runtime, failure=failure)
+    except EvidenceDiscoveryError as exc:
+        failure = SemanticApplicationFailure(
+            stage="discovery",
+            code=exc.code,
+            message=str(exc),
+            details=tuple(sorted(exc.details.items())),
+        )
+        return _BlockedCurrentPreparation(runtime=runtime, failure=failure)
+    except PacketReportError as exc:
+        failure = SemanticApplicationFailure(stage="report", message=str(exc))
+        return _BlockedCurrentPreparation(runtime=runtime, failure=failure)
+    return _PreparedCurrentAnalysis(
+        anchor=anchor,
+        operational_exclusions=operational_exclusions,
+        runtime=runtime,
+        packet_plan=packet_plan,
+        packet_report=packet_report,
+        validated_packets=validated_packets,
+        budget_projection=budget_projection,
+    )
+
+
+def _prepare_current(
     request: SemanticApplicationRequest,
 ) -> _PreparedCurrentAnalysis | _BlockedCurrentPreparation | SemanticApplicationFailure:
     """Build the one provider-free current analysis preparation."""
@@ -463,104 +567,12 @@ def _prepare_current(  # noqa: C901 approved [SC-17.1] RUFF-SUP-078 exception
                 message="deterministic findings selected by fail_on block analysis",
             ),
         )
-    try:
-        inference = request.semantic_settings.inference
-        maximum_input_bytes = (
-            inference.capability.maximum_input_bytes if inference is not None else None
-        )
-        packet_plan = analysis_packets.plan_source_aligned_packets(
-            runtime,
-            maximum_packets=request.semantic_settings.maximum_packets,
-            maximum_prompt_bytes=request.semantic_settings.maximum_prompt_bytes,
-            maximum_input_bytes=maximum_input_bytes,
-            progress=progress,
-        )
-        if not packet_plan.complete:
-            return _BlockedCurrentPreparation(
-                runtime=runtime,
-                packet_plan=packet_plan,
-                budget_projection=project_cold_analyzer_budget(
-                    None,
-                    request.semantic_settings,
-                ),
-                failure=SemanticApplicationFailure(
-                    stage="packet",
-                    code="PACKET_BUDGET_EXHAUSTED",
-                    message=(
-                        f"packet plan crossed {packet_plan.crossed_ceiling} at "
-                        f"{packet_plan.first_crossing_packet_id}"
-                    ),
-                    details=tuple(sorted(packet_plan.to_summary().items())),
-                ),
-            )
-        budget_projection = project_cold_analyzer_budget(
-            tuple(
-                contribution.request_byte_count
-                for contribution in packet_plan.contributions
-            ),
-            request.semantic_settings,
-        )
-        if budget_projection.call_cost_status == "exceeds":
-            return _BlockedCurrentPreparation(
-                runtime=runtime,
-                packet_plan=packet_plan,
-                budget_projection=budget_projection,
-                failure=SemanticApplicationFailure(
-                    stage="budget",
-                    code="COLD_BUDGET_EXHAUSTED",
-                    message="exact no-cache analyzer projection exceeds budget",
-                    details=tuple(sorted(budget_projection.to_row().items())),
-                ),
-            )
-        packet_bytes = packet_plan.packet_jsonl
-        packet_report = build_source_packet_report(runtime, packet_plan=packet_plan)
-        validated_packets = load_packets_bytes(
-            packet_bytes,
-            source="current repository",
-        )
-        progress.advance(
-            "complete",
-            completed_work_units=packet_plan.measured_packet_count,
-            total_work_units=packet_plan.measured_packet_count,
-            current_identity=runtime.snapshot.snapshot_hash,
-        )
-    except OperationDeadlineExceeded as exc:
-        return _BlockedCurrentPreparation(
-            runtime=runtime,
-            failure=_deadline_failure(exc),
-        )
-    except SourceAlignedPacketError as exc:
-        return _BlockedCurrentPreparation(
-            runtime=runtime,
-            failure=SemanticApplicationFailure(
-                stage="alignment",
-                code=exc.code,
-                message=str(exc),
-            ),
-        )
-    except EvidenceDiscoveryError as exc:
-        return _BlockedCurrentPreparation(
-            runtime=runtime,
-            failure=SemanticApplicationFailure(
-                stage="discovery",
-                code=exc.code,
-                message=str(exc),
-                details=tuple(sorted(exc.details.items())),
-            ),
-        )
-    except PacketReportError as exc:
-        return _BlockedCurrentPreparation(
-            runtime=runtime,
-            failure=SemanticApplicationFailure(stage="report", message=str(exc)),
-        )
-    return _PreparedCurrentAnalysis(
+    return _prepare_current_packets(
+        request,
         anchor=anchor,
         operational_exclusions=operational_exclusions,
         runtime=runtime,
-        packet_plan=packet_plan,
-        packet_report=packet_report,
-        validated_packets=validated_packets,
-        budget_projection=budget_projection,
+        progress=progress,
     )
 
 

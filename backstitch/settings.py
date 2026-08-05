@@ -26,6 +26,7 @@ import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any, Literal, cast
 from urllib.parse import quote, unquote_to_bytes
 
@@ -353,6 +354,21 @@ _SEMANTIC_CODES = frozenset(
 _TARGET_ROOT_KEYS = frozenset({"weft"})
 _DIAGNOSTICS_KEYS = frozenset(
     {"default_level", "fail_on", "suppressible_levels", "levels"}
+)
+_TABLE_KEY_NAMES: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "defaults": _DEFAULTS_KEYS,
+        "profile": _PROFILE_KEYS,
+        "check": _CHECK_KEYS,
+        "packets": _PACKETS_KEYS,
+        "coverage": _COVERAGE_KEYS,
+        "analyze": _ANALYZE_KEYS,
+        "verify": _VERIFY_KEYS,
+        "obligations": _OBLIGATION_KEYS,
+        "target_roots": _TARGET_ROOT_KEYS,
+        "lint": _LINT_KEYS,
+        "diagnostics": _DIAGNOSTICS_KEYS,
+    }
 )
 _GENERIC_OPTION_LEAVES = frozenset(
     {
@@ -836,7 +852,105 @@ def _require_regular_config(path: Path, *, missing_message: str | None = None) -
         raise ConfigLoadError(f"config is not a regular file: {path}")
 
 
-def _assemble_settings(  # noqa: C901 approved [SC-17.1] RUFF-SUP-126 exception
+def _scope_invocation_environment(
+    *,
+    invocation_command: str | None | object,
+    default_command: Literal["check", "analyze"] | None,
+    environment: Mapping[str, str],
+) -> tuple[str | None, Mapping[str, str]]:
+    if invocation_command is _INVOCATION_COMMAND_UNSET:
+        return None, environment
+    if invocation_command is not None and (
+        not isinstance(invocation_command, str)
+        or invocation_command not in CONFIG_CONSUMING_COMMANDS
+    ):
+        raise ConfigLoadError(
+            f"unknown config-consuming invocation command: {invocation_command!r}"
+        )
+    selected_command = (
+        default_command if invocation_command is None else invocation_command
+    )
+    scoped = {
+        key: value
+        for key, value in environment.items()
+        if key == "BACKSTITCH_WEFT_ROOT"
+        or (key == "LLM_MODEL" and selected_command in _MODEL_ENVIRONMENT_COMMANDS)
+    }
+    return selected_command, scoped
+
+
+def _resolve_cli_overrides(
+    cli_overrides: Mapping[str, Any] | None,
+    cli_overrides_by_command: Mapping[str, Mapping[str, Any]] | None,
+    *,
+    invocation_command: str | None | object,
+    selected_command: str | None,
+) -> dict[str, Any]:
+    effective = dict(cli_overrides or {})
+    if cli_overrides_by_command is None:
+        return effective
+    unknown_commands = sorted(set(cli_overrides_by_command) - {"check", "analyze"})
+    if unknown_commands:
+        raise ConfigLoadError(
+            f"unknown deferred default command override owner: {unknown_commands[0]!r}"
+        )
+    if invocation_command is not None:
+        raise ConfigLoadError(
+            "deferred default command overrides require a bare invocation"
+        )
+    if selected_command is not None:
+        effective.update(cli_overrides_by_command.get(selected_command, {}))
+    return effective
+
+
+def _validate_final_test_roots(repo_root: Path, settings: BackstitchSettings) -> None:
+    invalid = uncontained_test_root(
+        repo_root,
+        settings.profile_overrides.code_roots or (),
+        settings.profile_overrides.test_roots or (),
+    )
+    if invalid is not None:
+        raise ConfigLoadError(
+            f"test root {invalid!r} must be equal to or nested under a"
+            " final effective code root"
+        )
+
+
+def _merged_repository_raw(
+    repository_layers: tuple[tuple[_ConfigLayer, ConfigSourceKind], ...],
+    *,
+    config_path: Path,
+) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for layer, _source_kind in repository_layers:
+        merged = _merge_config_layers(merged, layer.body, file_layer=True)
+    merged.pop("extend", None)
+    _validate_config_layers(
+        merged,
+        tuple(layer for layer, _source_kind in repository_layers),
+        config_path,
+    )
+    return merged
+
+
+def _analyze_model_source_after_overlays(
+    configured_source: str,
+    *,
+    environment_overlay: dict[str, Any],
+    cli_options: Sequence[tuple[str, str]],
+    cli_overrides: Mapping[str, Any],
+) -> str:
+    source = configured_source
+    if _nested_value(environment_overlay, "analyze", "model") is not None:
+        source = "LLM_MODEL environment variable"
+    if any(key == "analyze.model" for key, _value in cli_options):
+        source = "--option analyze.model"
+    if "analyze.model" in cli_overrides:
+        source = "--model"
+    return source
+
+
+def _assemble_settings(
     repo_root: Path,
     *,
     config_path: Path | None,
@@ -871,15 +985,10 @@ def _assemble_settings(  # noqa: C901 approved [SC-17.1] RUFF-SUP-126 exception
     analyze_model_source = "llm default model"
 
     if repository_layers:
-        repo_raw: dict[str, Any] = {}
-        for layer, _source_kind in repository_layers:
-            repo_raw = _merge_config_layers(repo_raw, layer.body, file_layer=True)
-        repo_raw.pop("extend", None)
         assert config_path is not None
-        _validate_config_layers(
-            repo_raw,
-            tuple(layer for layer, _source_kind in repository_layers),
-            config_path,
+        repo_raw = _merged_repository_raw(
+            repository_layers,
+            config_path=config_path,
         )
         raw = _merge_config_layers(raw, repo_raw, file_layer=True)
         for layer, source_kind in repository_layers:
@@ -909,56 +1018,29 @@ def _assemble_settings(  # noqa: C901 approved [SC-17.1] RUFF-SUP-126 exception
 
     source_path = config_path or PACKAGED_DEFAULTS_PATH
     default_command = _parse_default_command(raw, source_path=source_path)
-    selected_command: str | None
-    if invocation_command is _INVOCATION_COMMAND_UNSET:
-        selected_command = None
-        scoped_environment = environment
-    else:
-        if invocation_command is not None and (
-            not isinstance(invocation_command, str)
-            or invocation_command not in CONFIG_CONSUMING_COMMANDS
-        ):
-            raise ConfigLoadError(
-                f"unknown config-consuming invocation command: {invocation_command!r}"
-            )
-        selected_command = (
-            default_command if invocation_command is None else invocation_command
-        )
-        scoped_environment = {
-            key: value
-            for key, value in environment.items()
-            if key == "BACKSTITCH_WEFT_ROOT"
-            or (key == "LLM_MODEL" and selected_command in _MODEL_ENVIRONMENT_COMMANDS)
-        }
-
-    effective_cli_overrides = dict(cli_overrides or {})
-    if cli_overrides_by_command is not None:
-        unknown_commands = sorted(set(cli_overrides_by_command) - {"check", "analyze"})
-        if unknown_commands:
-            raise ConfigLoadError(
-                "unknown deferred default command override owner: "
-                f"{unknown_commands[0]!r}"
-            )
-        if invocation_command is not None:
-            raise ConfigLoadError(
-                "deferred default command overrides require a bare invocation"
-            )
-        if selected_command is not None:
-            effective_cli_overrides.update(
-                cli_overrides_by_command.get(selected_command, {})
-            )
+    selected_command, scoped_environment = _scope_invocation_environment(
+        invocation_command=invocation_command,
+        default_command=default_command,
+        environment=environment,
+    )
+    effective_cli_overrides = _resolve_cli_overrides(
+        cli_overrides,
+        cli_overrides_by_command,
+        invocation_command=invocation_command,
+        selected_command=selected_command,
+    )
 
     environment_overlay = _environment_config_overlay(scoped_environment)
     cli_overlay = _cli_config_overlay(
         cli_options,
         cli_overrides=effective_cli_overrides,
     )
-    if _nested_value(environment_overlay, "analyze", "model") is not None:
-        analyze_model_source = "LLM_MODEL environment variable"
-    if any(key == "analyze.model" for key, _value in cli_options):
-        analyze_model_source = "--option analyze.model"
-    if "analyze.model" in effective_cli_overrides:
-        analyze_model_source = "--model"
+    analyze_model_source = _analyze_model_source_after_overlays(
+        analyze_model_source,
+        environment_overlay=environment_overlay,
+        cli_options=cli_options,
+        cli_overrides=effective_cli_overrides,
+    )
     configured_model = _nested_value(raw, "analyze", "model")
     for overlay, source in (
         (environment_overlay, "environment"),
@@ -1009,16 +1091,7 @@ def _assemble_settings(  # noqa: C901 approved [SC-17.1] RUFF-SUP-126 exception
         ratchet_policy_provenance=_ratchet_policy_provenance(provenance_layers),
         resolve_symlinks=resolve_symlinks,
     )
-    invalid_test_root = uncontained_test_root(
-        repo_root,
-        settings.profile_overrides.code_roots or (),
-        settings.profile_overrides.test_roots or (),
-    )
-    if invalid_test_root is not None:
-        raise ConfigLoadError(
-            f"test root {invalid_test_root!r} must be equal to or nested under a"
-            " final effective code root"
-        )
+    _validate_final_test_roots(repo_root, settings)
     return settings
 
 
@@ -1090,7 +1163,67 @@ def resolve_config(
     return settings
 
 
-def resolve_repository_config_from_blobs(  # noqa: C901 approved [SC-17.1] RUFF-SUP-138 exception
+def _load_blob_config_chain(
+    path: str,
+    *,
+    root: Path,
+    blobs: Mapping[str, bytes],
+    seen: set[str],
+    budget: _ConfigReadBudget,
+) -> tuple[_ConfigLayer, ...]:
+    if path in seen:
+        raise ConfigLoadError(f"Circular extend chain detected at {path}")
+    seen.add(path)
+    raw = blobs.get(path)
+    if raw is None:
+        raise ConfigLoadError(f"historical config layer is missing: {path}")
+    budget.file_count += 1
+    budget.byte_count += len(raw)
+    if budget.file_count > MAXIMUM_CONFIG_CHAIN_FILES:
+        raise ConfigLoadError(
+            f"config extend chain exceeds {MAXIMUM_CONFIG_CHAIN_FILES} config files"
+        )
+    if len(raw) > MAXIMUM_CONFIG_FILE_BYTES:
+        raise ConfigLoadError(f"config file exceeds 1,000,000 raw bytes: {path}")
+    if budget.byte_count > MAXIMUM_CONFIG_CHAIN_BYTES:
+        raise ConfigLoadError("config extend chain exceeds 5,000,000 raw bytes")
+    display_path = root / PurePosixPath(path)
+    body = _extract_config_body(display_path, raw)
+    layer = _ConfigLayer(
+        path=display_path,
+        body=copy.deepcopy(body),
+        raw_sha256=hashlib.sha256(raw).hexdigest(),
+        raw_bytes=raw,
+        stat_identity=(0, 0, 0, len(raw), 0, 0),
+    )
+    _expand_raw_paths(body, display_path.parent, resolve_symlinks=False)
+    extend = body.get("extend")
+    if extend is None:
+        return (layer,)
+    if not isinstance(extend, str) or not extend.strip():
+        raise ConfigLoadError(f"Invalid extend value in {path}")
+    expanded = Path(_expand_user_and_env(extend.strip()))
+    if expanded.is_absolute():
+        raise ConfigLoadError(
+            "historical config extend must remain inside the repository"
+        )
+    candidate = (PurePosixPath(path).parent / expanded.as_posix()).as_posix()
+    normalized = canonical_repository_path(candidate)
+    if normalized is None or normalized.canonical != candidate:
+        raise ConfigLoadError("historical config extend path is unsafe")
+    return (
+        *_load_blob_config_chain(
+            candidate,
+            root=root,
+            blobs=blobs,
+            seen=seen,
+            budget=budget,
+        ),
+        layer,
+    )
+
+
+def resolve_repository_config_from_blobs(
     repo_root: Path,
     config_path: str,
     blobs: Mapping[str, bytes],
@@ -1108,57 +1241,13 @@ def resolve_repository_config_from_blobs(  # noqa: C901 approved [SC-17.1] RUFF-
     canonical = canonical_repository_path(config_path)
     if canonical is None or canonical.canonical != config_path:
         raise ConfigLoadError("historical config path is not repository-relative")
-    seen: set[str] = set()
-    budget = _ConfigReadBudget()
-
-    def load_chain(path: str) -> tuple[_ConfigLayer, ...]:
-        if path in seen:
-            raise ConfigLoadError(f"Circular extend chain detected at {path}")
-        seen.add(path)
-        raw = blobs.get(path)
-        if raw is None:
-            raise ConfigLoadError(f"historical config layer is missing: {path}")
-        budget.file_count += 1
-        budget.byte_count += len(raw)
-        if budget.file_count > MAXIMUM_CONFIG_CHAIN_FILES:
-            raise ConfigLoadError(
-                f"config extend chain exceeds {MAXIMUM_CONFIG_CHAIN_FILES} config files"
-            )
-        if len(raw) > MAXIMUM_CONFIG_FILE_BYTES:
-            raise ConfigLoadError(f"config file exceeds 1,000,000 raw bytes: {path}")
-        if budget.byte_count > MAXIMUM_CONFIG_CHAIN_BYTES:
-            raise ConfigLoadError("config extend chain exceeds 5,000,000 raw bytes")
-        display_path = root / PurePosixPath(path)
-        body = _extract_config_body(display_path, raw)
-        layer = _ConfigLayer(
-            path=display_path,
-            body=copy.deepcopy(body),
-            raw_sha256=hashlib.sha256(raw).hexdigest(),
-            raw_bytes=raw,
-            stat_identity=(0, 0, 0, len(raw), 0, 0),
-        )
-        _expand_raw_paths(
-            body,
-            display_path.parent,
-            resolve_symlinks=False,
-        )
-        extend = body.get("extend")
-        if extend is None:
-            return (layer,)
-        if not isinstance(extend, str) or not extend.strip():
-            raise ConfigLoadError(f"Invalid extend value in {path}")
-        expanded = Path(_expand_user_and_env(extend.strip()))
-        if expanded.is_absolute():
-            raise ConfigLoadError(
-                "historical config extend must remain inside the repository"
-            )
-        candidate = (PurePosixPath(path).parent / expanded.as_posix()).as_posix()
-        normalized = canonical_repository_path(candidate)
-        if normalized is None or normalized.canonical != candidate:
-            raise ConfigLoadError("historical config extend path is unsafe")
-        return (*load_chain(candidate), layer)
-
-    repo_layers = load_chain(config_path)
+    repo_layers = _load_blob_config_chain(
+        config_path,
+        root=root,
+        blobs=blobs,
+        seen=set(),
+        budget=_ConfigReadBudget(),
+    )
     effective_path = root / PurePosixPath(config_path)
     return _assemble_settings(
         root,
@@ -1279,7 +1368,48 @@ def _nested_value(raw: dict[str, Any], *segments: str) -> Any:
     return value
 
 
-def _select_analyze_model_descriptor(  # noqa: C901 approved [SC-17.1] RUFF-SUP-135 exception
+def _analyze_alias_owners(
+    catalog: Mapping[str, AnalyzeModelDescriptor],
+    *,
+    flat_model: str,
+    flat_adapter_model_id: str,
+) -> dict[str, list[str]]:
+    owners: dict[str, list[str]] = {}
+    if flat_model.strip():
+        owners.setdefault(flat_adapter_model_id, []).append(flat_model)
+    for selector, descriptor in catalog.items():
+        owners.setdefault(descriptor.adapter_model_id, []).append(selector)
+    return owners
+
+
+def _apply_analyze_model_descriptor(
+    analyze: dict[str, Any], descriptor: AnalyzeModelDescriptor
+) -> None:
+    analyze.update(
+        {
+            "backend_id": descriptor.backend_id,
+            "plugin_id": descriptor.plugin_id,
+            "plugin_distribution_name": descriptor.plugin_distribution_name,
+            "model": descriptor.model,
+            "adapter_model_id": descriptor.adapter_model_id,
+            "model_revision": descriptor.model_revision,
+            "capability_schema_version": descriptor.capability_schema_version,
+            "capability_revision": descriptor.capability_revision,
+            "request_constraints": asdict(descriptor.request_constraints),
+            "maximum_input_bytes": descriptor.maximum_input_bytes,
+            "input_cost_microusd_per_million_tokens": (
+                descriptor.input_cost_microusd_per_million_tokens
+            ),
+            "output_cost_microusd_per_million_tokens": (
+                descriptor.output_cost_microusd_per_million_tokens
+            ),
+            "input_token_overhead": descriptor.input_token_overhead,
+            "cost_rate_source": descriptor.cost_rate_source,
+        }
+    )
+
+
+def _select_analyze_model_descriptor(
     raw: dict[str, Any],
     *,
     configured_model: Any,
@@ -1305,11 +1435,11 @@ def _select_analyze_model_descriptor(  # noqa: C901 approved [SC-17.1] RUFF-SUP-
     if not isinstance(flat_adapter_model_id, str):
         raise ConfigLoadError("analyze.adapter_model_id must be a string")
 
-    alias_owners: dict[str, list[str]] = {}
-    if flat_model.strip():
-        alias_owners.setdefault(flat_adapter_model_id, []).append(flat_model)
-    for selector, descriptor in catalog.items():
-        alias_owners.setdefault(descriptor.adapter_model_id, []).append(selector)
+    alias_owners = _analyze_alias_owners(
+        catalog,
+        flat_model=flat_model,
+        flat_adapter_model_id=flat_adapter_model_id,
+    )
     ambiguous_aliases = sorted(
         alias for alias, owners in alias_owners.items() if len(owners) > 1
     )
@@ -1326,28 +1456,7 @@ def _select_analyze_model_descriptor(  # noqa: C901 approved [SC-17.1] RUFF-SUP-
 
     if selected_model in catalog:
         descriptor = catalog[selected_model]
-        analyze.update(
-            {
-                "backend_id": descriptor.backend_id,
-                "plugin_id": descriptor.plugin_id,
-                "plugin_distribution_name": descriptor.plugin_distribution_name,
-                "model": descriptor.model,
-                "adapter_model_id": descriptor.adapter_model_id,
-                "model_revision": descriptor.model_revision,
-                "capability_schema_version": descriptor.capability_schema_version,
-                "capability_revision": descriptor.capability_revision,
-                "request_constraints": asdict(descriptor.request_constraints),
-                "maximum_input_bytes": descriptor.maximum_input_bytes,
-                "input_cost_microusd_per_million_tokens": (
-                    descriptor.input_cost_microusd_per_million_tokens
-                ),
-                "output_cost_microusd_per_million_tokens": (
-                    descriptor.output_cost_microusd_per_million_tokens
-                ),
-                "input_token_overhead": descriptor.input_token_overhead,
-                "cost_rate_source": descriptor.cost_rate_source,
-            }
-        )
+        _apply_analyze_model_descriptor(analyze, descriptor)
         return available_models, True
 
     if flat_model.strip() and selected_model == flat_model:
@@ -1579,7 +1688,155 @@ def _parse_capability_revision(table: dict[str, Any], label: str) -> str:
     return value
 
 
-def _parse_request_constraints(  # noqa: C901 approved [SC-17.1] RUFF-SUP-130 exception
+def _request_constraint_keys_are_valid(
+    raw: dict[str, Any],
+    *,
+    authored_keys: set[str],
+    authored: bool,
+) -> bool:
+    normalized_keys = {"presence", "allowed_values", "minimum", "maximum"}
+    supplied_keys = frozenset(raw)
+    if authored:
+        return supplied_keys == authored_keys
+    if supplied_keys not in {frozenset(authored_keys), frozenset(normalized_keys)}:
+        return False
+    if supplied_keys != normalized_keys:
+        return True
+    unused_keys = normalized_keys - authored_keys
+    return all(raw.get(key) is None for key in unused_keys)
+
+
+def _parse_allowed_request_values(
+    field_name: str,
+    allowed_raw: Any,
+    *,
+    field_label: str,
+    authored: bool,
+) -> tuple[object, ...]:
+    allowed_collection_types = (list,) if authored else (list, tuple)
+    if not isinstance(allowed_raw, allowed_collection_types) or not allowed_raw:
+        raise ConfigLoadError(f"{field_label}.allowed_values must be a nonempty array")
+    if field_name == "json_mode":
+        if any(item not in {"require", "off"} for item in allowed_raw):
+            raise ConfigLoadError(
+                f"{field_label}.allowed_values may contain require and off"
+            )
+    elif any(
+        isinstance(item, bool)
+        or not isinstance(item, (int, float))
+        or not math.isfinite(float(item))
+        or not 0 <= float(item) <= 2
+        for item in allowed_raw
+    ):
+        raise ConfigLoadError(
+            f"{field_label}.allowed_values must contain finite numbers from 0 through 2"
+        )
+    if any(
+        item == earlier
+        for index, item in enumerate(allowed_raw)
+        for earlier in allowed_raw[:index]
+    ):
+        raise ConfigLoadError(
+            f"{field_label}.allowed_values must not contain duplicates"
+        )
+    return tuple(allowed_raw)
+
+
+def _parse_request_integer_bounds(
+    field_name: str,
+    minimum: Any,
+    maximum: Any,
+    *,
+    field_label: str,
+) -> tuple[int, int]:
+    if (
+        isinstance(minimum, bool)
+        or isinstance(maximum, bool)
+        or not isinstance(minimum, int)
+        or not isinstance(maximum, int)
+        or minimum > maximum
+        or (field_name == "seed" and minimum < 0)
+        or (field_name == "max_tokens" and minimum < 1)
+    ):
+        raise ConfigLoadError(f"{field_label} has invalid integer bounds")
+    return minimum, maximum
+
+
+def _parse_request_field_constraint(
+    field_name: str,
+    raw: Any,
+    *,
+    label: str,
+    authored: bool,
+) -> RequestFieldConstraint:
+    field_label = f"{label}.{field_name}"
+    if not isinstance(raw, dict):
+        raise ConfigLoadError(f"{field_label} must be a table")
+    unknown = sorted(set(raw) - {"presence", "allowed_values", "minimum", "maximum"})
+    if unknown:
+        raise ConfigLoadError(f"{field_label} has unknown field: {unknown[0]}")
+    presence = raw.get("presence")
+    if presence not in {"required", "optional", "forbidden"}:
+        raise ConfigLoadError(
+            f"{field_label}.presence must be required, optional, or forbidden"
+        )
+    allowed_raw = raw.get("allowed_values")
+    minimum = raw.get("minimum")
+    maximum = raw.get("maximum")
+    if presence == "forbidden":
+        if not _request_constraint_keys_are_valid(
+            raw,
+            authored_keys={"presence"},
+            authored=authored,
+        ):
+            raise ConfigLoadError(
+                f"{field_label} forbidden form contains only presence"
+            )
+        allowed: tuple[object, ...] | None = None
+    elif field_name in {"json_mode", "temperature"}:
+        if not _request_constraint_keys_are_valid(
+            raw,
+            authored_keys={"presence", "allowed_values"},
+            authored=authored,
+        ):
+            raise ConfigLoadError(
+                f"{field_label} must contain presence and allowed_values"
+            )
+        allowed = _parse_allowed_request_values(
+            field_name,
+            allowed_raw,
+            field_label=field_label,
+            authored=authored,
+        )
+        minimum = maximum = None
+    else:
+        if not _request_constraint_keys_are_valid(
+            raw,
+            authored_keys={"presence", "minimum", "maximum"},
+            authored=authored,
+        ):
+            raise ConfigLoadError(
+                f"{field_label} must contain presence, minimum, and maximum"
+            )
+        minimum, maximum = _parse_request_integer_bounds(
+            field_name,
+            minimum,
+            maximum,
+            field_label=field_label,
+        )
+        allowed = None
+    try:
+        return RequestFieldConstraint(
+            cast(Any, presence),
+            allowed,
+            cast(int | float | None, minimum),
+            cast(int | float | None, maximum),
+        )
+    except ValueError as exc:
+        raise ConfigLoadError(f"{field_label}: {exc}") from None
+
+
+def _parse_request_constraints(
     value: Any,
     label: str,
     *,
@@ -1600,128 +1857,15 @@ def _parse_request_constraints(  # noqa: C901 approved [SC-17.1] RUFF-SUP-130 ex
         )
         raise ConfigLoadError(f"{label} must contain exactly four fields; {detail}")
 
-    parsed: dict[str, RequestFieldConstraint] = {}
-    for field_name in field_names:
-        field_label = f"{label}.{field_name}"
-        raw = value[field_name]
-        if not isinstance(raw, dict):
-            raise ConfigLoadError(f"{field_label} must be a table")
-        unknown = sorted(
-            set(raw) - {"presence", "allowed_values", "minimum", "maximum"}
+    parsed = {
+        field_name: _parse_request_field_constraint(
+            field_name,
+            value[field_name],
+            label=label,
+            authored=authored,
         )
-        if unknown:
-            raise ConfigLoadError(f"{field_label} has unknown field: {unknown[0]}")
-        presence = raw.get("presence")
-        if presence not in {"required", "optional", "forbidden"}:
-            raise ConfigLoadError(
-                f"{field_label}.presence must be required, optional, or forbidden"
-            )
-        allowed_raw = raw.get("allowed_values")
-        minimum = raw.get("minimum")
-        maximum = raw.get("maximum")
-        normalized_keys = {
-            "presence",
-            "allowed_values",
-            "minimum",
-            "maximum",
-        }
-        supplied_keys = frozenset(raw)
-        if presence == "forbidden":
-            authored_keys = {"presence"}
-            if (
-                authored
-                and supplied_keys != authored_keys
-                or not authored
-                and supplied_keys
-                not in {frozenset(authored_keys), frozenset(normalized_keys)}
-                or supplied_keys == normalized_keys
-                and any(
-                    raw.get(key) is not None for key in normalized_keys - {"presence"}
-                )
-            ):
-                raise ConfigLoadError(
-                    f"{field_label} forbidden form contains only presence"
-                )
-            allowed: tuple[object, ...] | None = None
-        elif field_name in {"json_mode", "temperature"}:
-            authored_keys = {"presence", "allowed_values"}
-            if (
-                authored
-                and supplied_keys != authored_keys
-                or not authored
-                and supplied_keys
-                not in {frozenset(authored_keys), frozenset(normalized_keys)}
-                or supplied_keys == normalized_keys
-                and (raw.get("minimum") is not None or raw.get("maximum") is not None)
-            ):
-                raise ConfigLoadError(
-                    f"{field_label} must contain presence and allowed_values"
-                )
-            allowed_collection_types = (list,) if authored else (list, tuple)
-            if not isinstance(allowed_raw, allowed_collection_types) or not allowed_raw:
-                raise ConfigLoadError(
-                    f"{field_label}.allowed_values must be a nonempty array"
-                )
-            if field_name == "json_mode":
-                if any(item not in {"require", "off"} for item in allowed_raw):
-                    raise ConfigLoadError(
-                        f"{field_label}.allowed_values may contain require and off"
-                    )
-            elif any(
-                isinstance(item, bool)
-                or not isinstance(item, (int, float))
-                or not math.isfinite(float(item))
-                or not 0 <= float(item) <= 2
-                for item in allowed_raw
-            ):
-                raise ConfigLoadError(
-                    f"{field_label}.allowed_values must contain finite numbers "
-                    "from 0 through 2"
-                )
-            if any(
-                item == earlier
-                for index, item in enumerate(allowed_raw)
-                for earlier in allowed_raw[:index]
-            ):
-                raise ConfigLoadError(
-                    f"{field_label}.allowed_values must not contain duplicates"
-                )
-            allowed = tuple(allowed_raw)
-            minimum = maximum = None
-        else:
-            authored_keys = {"presence", "minimum", "maximum"}
-            if (
-                authored
-                and supplied_keys != authored_keys
-                or not authored
-                and supplied_keys
-                not in {frozenset(authored_keys), frozenset(normalized_keys)}
-                or supplied_keys == normalized_keys
-                and raw.get("allowed_values") is not None
-            ):
-                raise ConfigLoadError(
-                    f"{field_label} must contain presence, minimum, and maximum"
-                )
-            if (
-                isinstance(minimum, bool)
-                or isinstance(maximum, bool)
-                or not isinstance(minimum, int)
-                or not isinstance(maximum, int)
-                or minimum > maximum
-                or (field_name == "seed" and minimum < 0)
-                or (field_name == "max_tokens" and minimum < 1)
-            ):
-                raise ConfigLoadError(f"{field_label} has invalid integer bounds")
-            allowed = None
-        try:
-            parsed[field_name] = RequestFieldConstraint(
-                cast(Any, presence),
-                allowed,
-                cast(int | float | None, minimum),
-                cast(int | float | None, maximum),
-            )
-        except ValueError as exc:
-            raise ConfigLoadError(f"{field_label}: {exc}") from None
+        for field_name in field_names
+    }
     return RequestConstraints(**parsed)
 
 
@@ -2166,7 +2310,53 @@ def _validate_ratchet_invocation_sources(
         )
 
 
-def _expand_raw_paths(  # noqa: C901 approved [SC-17.1] RUFF-SUP-127 exception
+def _expand_named_output_paths(
+    body: dict[str, Any],
+    base_dir: Path,
+    *,
+    resolve_symlinks: bool,
+) -> None:
+    for table_name, key in (
+        ("check", "output"),
+        ("packets", "output"),
+        ("coverage", "output"),
+        ("analyze", "cache_path"),
+        ("verify", "cache_path"),
+    ):
+        table = body.get(table_name)
+        if isinstance(table, dict):
+            value = table.get(key)
+            if isinstance(value, str) and value.strip():
+                table[key] = expand_path_value(
+                    value,
+                    base_dir=base_dir,
+                    resolve_symlinks=resolve_symlinks,
+                )
+
+
+def _canonicalize_coverage_floors(body: dict[str, Any]) -> None:
+    coverage = body.get("coverage")
+    if not isinstance(coverage, dict):
+        return
+    floors = coverage.get("floors")
+    if not isinstance(floors, dict):
+        return
+    canonical_floors: dict[str, Any] = {}
+    for raw_scope, floor in floors.items():
+        scope = _canonical_coverage_selector(
+            raw_scope,
+            label=f"coverage.floors.{raw_scope}",
+            allow_trailing_slash=True,
+        )
+        if scope in canonical_floors:
+            raise ConfigLoadError(
+                f"coverage.floors contains duplicate canonical scope {scope!r}"
+            )
+        canonical_floors[scope] = floor
+    coverage["floors"] = canonical_floors
+
+
+def _expand_raw_paths(
     body: dict[str, Any],
     base_dir: Path,
     *,
@@ -2180,41 +2370,12 @@ def _expand_raw_paths(  # noqa: C901 approved [SC-17.1] RUFF-SUP-127 exception
     results, so the later _parse_settings expansion is a no-op for these.
     """
 
-    for table_name, key in (
-        ("check", "output"),
-        ("packets", "output"),
-        ("coverage", "output"),
-        ("analyze", "cache_path"),
-        ("verify", "cache_path"),
-    ):
-        table = body.get(table_name)
-        if (
-            isinstance(table, dict)
-            and isinstance(table.get(key), str)
-            and table[key].strip()
-        ):
-            table[key] = expand_path_value(
-                table[key],
-                base_dir=base_dir,
-                resolve_symlinks=resolve_symlinks,
-            )
-    coverage = body.get("coverage")
-    if isinstance(coverage, dict):
-        floors = coverage.get("floors")
-        if isinstance(floors, dict):
-            canonical_floors: dict[str, Any] = {}
-            for raw_scope, floor in floors.items():
-                scope = _canonical_coverage_selector(
-                    raw_scope,
-                    label=f"coverage.floors.{raw_scope}",
-                    allow_trailing_slash=True,
-                )
-                if scope in canonical_floors:
-                    raise ConfigLoadError(
-                        f"coverage.floors contains duplicate canonical scope {scope!r}"
-                    )
-                canonical_floors[scope] = floor
-            coverage["floors"] = canonical_floors
+    _expand_named_output_paths(
+        body,
+        base_dir,
+        resolve_symlinks=resolve_symlinks,
+    )
+    _canonicalize_coverage_floors(body)
     roots = body.get("target_roots")
     if isinstance(roots, dict):
         for name, value in roots.items():
@@ -2326,7 +2487,131 @@ def _load_config_chain(
     return warnings, (*parent_layers, layer)
 
 
-def _parse_settings(  # noqa: C901 approved [SC-17.1] RUFF-SUP-131 exception
+def _parse_profile_settings(
+    raw: dict[str, Any], source_path: Path
+) -> tuple[str | None, ProfileSettings]:
+    profile_value = raw.get("profile")
+    if isinstance(profile_value, dict):
+        profile_table = profile_value
+        profile_name = profile_value.get("name")
+        if profile_name is not None and not isinstance(profile_name, str):
+            raise ConfigLoadError(f"profile.name must be a string in {source_path}")
+        if profile_name is not None:
+            from backstitch.profiles import get_profile
+
+            try:
+                get_profile(profile_name)
+            except ValueError as exc:
+                raise ConfigLoadError(f"{exc} in {source_path}") from exc
+    elif profile_value is None:
+        profile_name = None
+        profile_table = {}
+    else:
+        raise ConfigLoadError(
+            f"unknown config key `profile` in {source_path}: the profile"
+            ' name is spelled [profile] name = "..."'
+        )
+
+    def roots(key: str) -> tuple[str, ...] | None:
+        values = _optional_str_tuple(profile_table.get(key), f"profile.{key}")
+        return None if values is None else tuple(expand_root_value(v) for v in values)
+
+    return profile_name, ProfileSettings(
+        spec_roots=roots("spec_roots"),
+        plan_roots=roots("plan_roots"),
+        code_roots=roots("code_roots"),
+        test_roots=roots("test_roots"),
+        planned_spec_globs=_optional_str_tuple(
+            profile_table.get("planned_spec_globs"),
+            "profile.planned_spec_globs",
+        ),
+        exploratory_spec_globs=_optional_str_tuple(
+            profile_table.get("exploratory_spec_globs"),
+            "profile.exploratory_spec_globs",
+        ),
+        meta_spec_globs=_merged_meta_globs(profile_table),
+        process_spec_globs=_optional_str_tuple(
+            profile_table.get("process_spec_globs"),
+            "profile.process_spec_globs",
+        ),
+    )
+
+
+def _parse_optional_output_path(
+    table: dict[str, Any],
+    *,
+    field_name: str,
+    source_path: Path,
+    resolve_symlinks: bool,
+    include_source_in_error: bool = False,
+) -> str | None:
+    value = table.get("output")
+    if value is not None and not isinstance(value, str):
+        suffix = f" in {source_path}" if include_source_in_error else ""
+        raise ConfigLoadError(f"{field_name} must be a string{suffix}")
+    if value is None:
+        return None
+    return expand_path_value(
+        value,
+        base_dir=source_path.parent,
+        resolve_symlinks=resolve_symlinks,
+    )
+
+
+def _parse_check_settings(
+    table: dict[str, Any],
+    *,
+    source_path: Path,
+    resolve_symlinks: bool,
+) -> CheckSettings:
+    check_format = table.get("format")
+    if check_format is not None and check_format not in {"text", "json"}:
+        raise ConfigLoadError("check.format must be 'text' or 'json'")
+    warnings_as_errors = table.get("warnings_as_errors")
+    if warnings_as_errors is not None and not isinstance(warnings_as_errors, bool):
+        raise ConfigLoadError("check.warnings_as_errors must be a boolean")
+    return CheckSettings(
+        format=check_format,
+        warnings_as_errors=warnings_as_errors,
+        output=_parse_optional_output_path(
+            table,
+            field_name="check.output",
+            source_path=source_path,
+            resolve_symlinks=resolve_symlinks,
+        ),
+    )
+
+
+def _parse_weft_root(
+    table: dict[str, Any], *, source_path: Path, resolve_symlinks: bool
+) -> str | None:
+    value = table.get("weft")
+    if value is not None and not isinstance(value, str):
+        raise ConfigLoadError("target_roots.weft must be a string")
+    if value is None:
+        return None
+    return expand_path_value(
+        value,
+        base_dir=source_path.parent,
+        resolve_symlinks=resolve_symlinks,
+    )
+
+
+def _parse_diagnostics_settings(
+    table: dict[str, Any], *, source_path: Path, allow_unknown: bool
+) -> DiagnosticsSettings:
+    try:
+        return parse_policy(
+            table,
+            registry=default_registry(),
+            source=str(source_path),
+            allow_unknown=allow_unknown,
+        )
+    except DiagnosticConfigError as exc:
+        raise ConfigLoadError(str(exc)) from exc
+
+
+def _parse_settings(
     raw: dict[str, Any],
     *,
     source_path: Path,
@@ -2355,35 +2640,7 @@ def _parse_settings(  # noqa: C901 approved [SC-17.1] RUFF-SUP-131 exception
     if validate_unknown_keys:
         _validate_unknown_keys(raw, source_path)
 
-    profile_value = raw.get("profile")
-    if isinstance(profile_value, dict):
-        profile_table = profile_value
-        profile_name = profile_value.get("name")
-        if profile_name is not None and not isinstance(profile_name, str):
-            msg = f"profile.name must be a string in {source_path}"
-            raise ConfigLoadError(msg)
-        if profile_name is not None:
-            # [CFG-8]: an unknown built-in profile name fails at load.
-            from backstitch.profiles import get_profile
-
-            try:
-                get_profile(profile_name)
-            except ValueError as exc:
-                msg = f"{exc} in {source_path}"
-                raise ConfigLoadError(msg) from exc
-    elif profile_value is None:
-        profile_name = None
-        profile_table = {}
-    else:
-        # CFG §6.1: the only profile-name spelling is [profile].name; TOML
-        # cannot represent both a top-level string and a [profile] table, so
-        # the string form is rejected rather than given a "wins" rule.
-        msg = (
-            f"unknown config key `profile` in {source_path}: the profile"
-            ' name is spelled [profile] name = "..."'
-        )
-        raise ConfigLoadError(msg)
-
+    profile_name, profile_settings = _parse_profile_settings(raw, source_path)
     excludes = _resolve_excludes(raw)
 
     check_table = _expect_table(raw.get("check"), "check")
@@ -2399,43 +2656,12 @@ def _parse_settings(  # noqa: C901 approved [SC-17.1] RUFF-SUP-131 exception
     # CFG §6.4: [packets].output is stored for forward compatibility; the
     # CLI still requires --output in v1 -- parsed here so the schema key is
     # never silently dead.
-    packets_output = packets_table.get("output")
-    if packets_output is not None and not isinstance(packets_output, str):
-        msg = f"packets.output must be a string in {source_path}"
-        raise ConfigLoadError(msg)
-    if packets_output is not None:
-        packets_output = expand_path_value(
-            packets_output,
-            base_dir=source_path.parent,
-            resolve_symlinks=resolve_symlinks,
-        )
-
-    def _roots(key: str) -> tuple[str, ...] | None:
-        # CFG §4.3: roots support `~` and env expansion (but stay
-        # repo-relative -- see expand_root_value).
-        values = _optional_str_tuple(profile_table.get(key), f"profile.{key}")
-        if values is None:
-            return None
-        return tuple(expand_root_value(v) for v in values)
-
-    profile_settings = ProfileSettings(
-        spec_roots=_roots("spec_roots"),
-        plan_roots=_roots("plan_roots"),
-        code_roots=_roots("code_roots"),
-        test_roots=_roots("test_roots"),
-        planned_spec_globs=_optional_str_tuple(
-            profile_table.get("planned_spec_globs"),
-            "profile.planned_spec_globs",
-        ),
-        exploratory_spec_globs=_optional_str_tuple(
-            profile_table.get("exploratory_spec_globs"),
-            "profile.exploratory_spec_globs",
-        ),
-        meta_spec_globs=_merged_meta_globs(profile_table),
-        process_spec_globs=_optional_str_tuple(
-            profile_table.get("process_spec_globs"),
-            "profile.process_spec_globs",
-        ),
+    packets_output = _parse_optional_output_path(
+        packets_table,
+        field_name="packets.output",
+        source_path=source_path,
+        resolve_symlinks=resolve_symlinks,
+        include_source_in_error=True,
     )
     coverage_settings = _parse_coverage_settings(
         coverage_table,
@@ -2449,16 +2675,6 @@ def _parse_settings(  # noqa: C901 approved [SC-17.1] RUFF-SUP-131 exception
         suppression_rule_source=suppression_rule_source,
         allow_unknown=allow_unknown,
     )
-
-    check_format = check_table.get("format")
-    if check_format is not None and check_format not in {"text", "json"}:
-        msg = "check.format must be 'text' or 'json'"
-        raise ConfigLoadError(msg)
-
-    warnings_as_errors = check_table.get("warnings_as_errors")
-    if warnings_as_errors is not None and not isinstance(warnings_as_errors, bool):
-        msg = "check.warnings_as_errors must be a boolean"
-        raise ConfigLoadError(msg)
 
     analyze_settings = _parse_analyze_settings(
         analyze_table,
@@ -2476,37 +2692,21 @@ def _parse_settings(  # noqa: C901 approved [SC-17.1] RUFF-SUP-131 exception
     )
     obligation_settings = _parse_obligation_settings(obligations_table)
 
-    weft_root = target_table.get("weft")
-    if weft_root is not None:
-        if not isinstance(weft_root, str):
-            msg = "target_roots.weft must be a string"
-            raise ConfigLoadError(msg)
-        weft_root = expand_path_value(
-            weft_root,
-            base_dir=source_path.parent,
-            resolve_symlinks=resolve_symlinks,
-        )
-
-    check_output = check_table.get("output")
-    if check_output is not None and not isinstance(check_output, str):
-        msg = "check.output must be a string"
-        raise ConfigLoadError(msg)
-    if check_output is not None:
-        check_output = expand_path_value(
-            check_output,
-            base_dir=source_path.parent,
-            resolve_symlinks=resolve_symlinks,
-        )
-
-    try:
-        diagnostics = parse_policy(
-            diagnostics_table,
-            registry=default_registry(),
-            source=str(source_path),
-            allow_unknown=allow_unknown,
-        )
-    except DiagnosticConfigError as exc:
-        raise ConfigLoadError(str(exc)) from exc
+    check_settings = _parse_check_settings(
+        check_table,
+        source_path=source_path,
+        resolve_symlinks=resolve_symlinks,
+    )
+    weft_root = _parse_weft_root(
+        target_table,
+        source_path=source_path,
+        resolve_symlinks=resolve_symlinks,
+    )
+    diagnostics = _parse_diagnostics_settings(
+        diagnostics_table,
+        source_path=source_path,
+        allow_unknown=allow_unknown,
+    )
     if len(policy_rule_origins) != len(diagnostics.levels):
         raise ConfigLoadError(
             "internal configuration error: diagnostic rule origins are not aligned"
@@ -2520,11 +2720,7 @@ def _parse_settings(  # noqa: C901 approved [SC-17.1] RUFF-SUP-131 exception
         exclude=excludes,
         profile_overrides=profile_settings,
         lint=lint_settings,
-        check=CheckSettings(
-            format=check_format,
-            warnings_as_errors=warnings_as_errors,
-            output=check_output,
-        ),
+        check=check_settings,
         coverage=coverage_settings,
         analyze=analyze_settings,
         verify=verify_settings,
@@ -3020,7 +3216,105 @@ def _parse_analyze_settings(  # noqa: C901 approved [SC-17.1] RUFF-SUP-129 excep
     )
 
 
-def _parse_verify_settings(  # noqa: C901 approved [SC-17.1] RUFF-SUP-133 exception
+def _validate_analyze_verify_provider(
+    table: dict[str, Any],
+    *,
+    analyze: AnalyzeSettings,
+    explicit_analyze_keys: frozenset[str],
+    maximum_cost: int,
+) -> None:
+    if "provider" in table:
+        raise ConfigLoadError(
+            "verify.provider must be absent when provider_source = 'analyze'"
+        )
+    identities = {
+        "backend_id": analyze.backend_id,
+        "plugin_id": analyze.plugin_id,
+        "plugin_distribution_name": analyze.plugin_distribution_name,
+        "model": analyze.model,
+        "model_revision": analyze.model_revision,
+    }
+    blank = [name for name, value in identities.items() if not value.strip()]
+    if blank:
+        raise ConfigLoadError(
+            "verify provider_source = 'analyze' requires a complete nonblank "
+            "analyze provider descriptor; blank: " + ", ".join(blank)
+        )
+    if maximum_cost == 0:
+        return
+    cost_keys = {
+        "input_cost_microusd_per_million_tokens",
+        "output_cost_microusd_per_million_tokens",
+        "input_token_overhead",
+    }
+    missing = sorted(cost_keys - explicit_analyze_keys)
+    if missing:
+        raise ConfigLoadError(
+            "a positive verify.maximum_estimated_cost_microusd requires "
+            "explicit analyze rate and overhead values; missing: " + ", ".join(missing)
+        )
+    if not analyze.cost_rate_source.strip():
+        raise ConfigLoadError(
+            "a positive verify.maximum_estimated_cost_microusd requires "
+            "a nonblank analyze.cost_rate_source"
+        )
+
+
+def _resolve_verify_provider_override(
+    table: dict[str, Any], *, maximum_cost: int
+) -> VerifyProviderSettings:
+    if "provider" not in table:
+        raise ConfigLoadError(
+            "verify.provider is required when provider_source = 'override'"
+        )
+    provider = _parse_verify_provider(
+        _expect_table(table["provider"], "verify.provider")
+    )
+    if maximum_cost > 0 and not provider.cost_rate_source.strip():
+        raise ConfigLoadError(
+            "a positive verify.maximum_estimated_cost_microusd requires a "
+            "nonblank verify.provider.cost_rate_source"
+        )
+    return provider
+
+
+def _resolve_verify_provider(
+    table: dict[str, Any],
+    *,
+    provider_source: Literal["analyze", "override"],
+    analyze: AnalyzeSettings,
+    explicit_analyze_keys: frozenset[str],
+    maximum_cost: int,
+) -> VerifyProviderSettings | None:
+    if provider_source == "analyze":
+        _validate_analyze_verify_provider(
+            table,
+            analyze=analyze,
+            explicit_analyze_keys=explicit_analyze_keys,
+            maximum_cost=maximum_cost,
+        )
+        return None
+    return _resolve_verify_provider_override(table, maximum_cost=maximum_cost)
+
+
+def _validate_verify_mode_constraints(
+    *,
+    required_verdicts: int,
+    search_epochs: tuple[str, ...],
+    json_mode: str,
+    cache_mode: str,
+) -> None:
+    if required_verdicts != len(search_epochs):
+        raise ConfigLoadError(
+            "verify.required_verdicts must equal the length of verify.search_epochs"
+        )
+    if json_mode == "prefer" and cache_mode != "off":
+        raise ConfigLoadError(
+            "verify.json_mode = 'prefer' is allowed only with cache_mode = 'off'"
+        )
+
+
+def _parse_verify_settings(
     table: dict[str, Any],
     *,
     source_path: Path,
@@ -3086,66 +3380,19 @@ def _parse_verify_settings(  # noqa: C901 approved [SC-17.1] RUFF-SUP-133 except
         table, "maximum_estimated_cost_microusd", "verify", minimum=0
     )
 
-    if required_verdicts != len(search_epochs):
-        raise ConfigLoadError(
-            "verify.required_verdicts must equal the length of verify.search_epochs"
-        )
-    if json_mode == "prefer" and cache_mode != "off":
-        raise ConfigLoadError(
-            "verify.json_mode = 'prefer' is allowed only with cache_mode = 'off'"
-        )
-
-    provider: VerifyProviderSettings | None
-    if provider_source == "analyze":
-        if "provider" in table:
-            raise ConfigLoadError(
-                "verify.provider must be absent when provider_source = 'analyze'"
-            )
-        provider = None
-        identities = {
-            "backend_id": analyze.backend_id,
-            "plugin_id": analyze.plugin_id,
-            "plugin_distribution_name": analyze.plugin_distribution_name,
-            "model": analyze.model,
-            "model_revision": analyze.model_revision,
-        }
-        blank = [name for name, value in identities.items() if not value.strip()]
-        if blank:
-            raise ConfigLoadError(
-                "verify provider_source = 'analyze' requires a complete nonblank "
-                "analyze provider descriptor; blank: " + ", ".join(blank)
-            )
-        if maximum_cost > 0:
-            cost_keys = {
-                "input_cost_microusd_per_million_tokens",
-                "output_cost_microusd_per_million_tokens",
-                "input_token_overhead",
-            }
-            missing = sorted(cost_keys - explicit_analyze_keys)
-            if missing:
-                raise ConfigLoadError(
-                    "a positive verify.maximum_estimated_cost_microusd requires "
-                    "explicit analyze rate and overhead values; missing: "
-                    + ", ".join(missing)
-                )
-            if not analyze.cost_rate_source.strip():
-                raise ConfigLoadError(
-                    "a positive verify.maximum_estimated_cost_microusd requires "
-                    "a nonblank analyze.cost_rate_source"
-                )
-    else:
-        if "provider" not in table:
-            raise ConfigLoadError(
-                "verify.provider is required when provider_source = 'override'"
-            )
-        provider = _parse_verify_provider(
-            _expect_table(table["provider"], "verify.provider")
-        )
-        if maximum_cost > 0 and not provider.cost_rate_source.strip():
-            raise ConfigLoadError(
-                "a positive verify.maximum_estimated_cost_microusd requires a "
-                "nonblank verify.provider.cost_rate_source"
-            )
+    _validate_verify_mode_constraints(
+        required_verdicts=required_verdicts,
+        search_epochs=search_epochs,
+        json_mode=json_mode,
+        cache_mode=cache_mode,
+    )
+    provider = _resolve_verify_provider(
+        table,
+        provider_source=cast(Literal["analyze", "override"], provider_source),
+        analyze=analyze,
+        explicit_analyze_keys=explicit_analyze_keys,
+        maximum_cost=maximum_cost,
+    )
 
     evaluation = None
     if "eval" in table:
@@ -3790,7 +4037,103 @@ def _validate_verify_provider_file_layer(
     _parse_verify_provider(provider)
 
 
-def _unknown_key_messages(raw: dict[str, Any], config_path: Path) -> list[str]:  # noqa: C901 approved [SC-17.1] RUFF-SUP-137 exception
+def _analyze_nested_unknown_keys(value: dict[str, Any], path: Path) -> list[str]:
+    messages: list[str] = []
+    dispositions = value.get("dispositions")
+    if isinstance(dispositions, list):
+        for index, disposition in enumerate(dispositions):
+            messages.extend(
+                f"unknown config key `analyze.dispositions[{index}].{sub}` in {path}"
+                for sub in _unused_table_keys(disposition, _DISPOSITION_KEYS)
+            )
+    models = value.get("models")
+    if isinstance(models, dict):
+        for selector, descriptor in models.items():
+            if isinstance(descriptor, dict):
+                messages.extend(
+                    f"unknown config key `analyze.models.{selector}.{sub}` in {path}"
+                    for sub in _unused_table_keys(
+                        descriptor,
+                        _ANALYZE_CATALOG_DESCRIPTOR_KEYS,
+                    )
+                )
+    return messages
+
+
+def _lint_nested_unknown_keys(value: dict[str, Any], path: Path) -> list[str]:
+    suppressions = value.get("suppressions")
+    if not isinstance(suppressions, list):
+        return []
+    return [
+        f"unknown config key `lint.suppressions[{index}].{sub}` in {path}"
+        for index, suppression in enumerate(suppressions)
+        for sub in _unused_table_keys(suppression, _SUPPRESSION_KEYS)
+    ]
+
+
+def _coverage_nested_unknown_keys(value: dict[str, Any], path: Path) -> list[str]:
+    messages: list[str] = []
+    exemptions = value.get("exemptions")
+    if isinstance(exemptions, list):
+        for index, exemption in enumerate(exemptions):
+            if isinstance(exemption, dict):
+                messages.extend(
+                    f"unknown config key `coverage.exemptions[{index}].{sub}` in {path}"
+                    for sub in _unused_table_keys(exemption, _COVERAGE_EXEMPTION_KEYS)
+                )
+    floors = value.get("floors")
+    if isinstance(floors, dict):
+        for scope, floor in floors.items():
+            if isinstance(floor, dict):
+                messages.extend(
+                    f"unknown config key `coverage.floors.{scope}.{sub}` in {path}"
+                    for sub in _unused_table_keys(floor, _COVERAGE_FLOOR_KEYS)
+                )
+    return messages
+
+
+def _verify_nested_unknown_keys(value: dict[str, Any], path: Path) -> list[str]:
+    messages: list[str] = []
+    provider = value.get("provider")
+    if isinstance(provider, dict):
+        messages.extend(
+            f"unknown config key `verify.provider.{sub}` in {path}"
+            for sub in _unused_table_keys(provider, _VERIFY_PROVIDER_KEYS)
+        )
+    evaluation = value.get("eval")
+    if isinstance(evaluation, dict):
+        messages.extend(
+            f"unknown config key `verify.eval.{sub}` in {path}"
+            for sub in _unused_table_keys(evaluation, _VERIFY_EVAL_KEYS)
+        )
+    return messages
+
+
+def _diagnostics_nested_unknown_keys(value: dict[str, Any], path: Path) -> list[str]:
+    rules = value.get("levels")
+    if not isinstance(rules, list):
+        return []
+    return [
+        f"unknown config key `diagnostics.levels[{index}].{sub}` in {path}"
+        for index, rule in enumerate(rules)
+        for sub in _unused_table_keys(rule, frozenset({"select", "level"}))
+    ]
+
+
+def _nested_unknown_key_messages(
+    table_name: str, value: dict[str, Any], config_path: Path
+) -> list[str]:
+    parser = {
+        "analyze": _analyze_nested_unknown_keys,
+        "lint": _lint_nested_unknown_keys,
+        "coverage": _coverage_nested_unknown_keys,
+        "verify": _verify_nested_unknown_keys,
+        "diagnostics": _diagnostics_nested_unknown_keys,
+    }.get(table_name)
+    return [] if parser is None else parser(value, config_path)
+
+
+def _unknown_key_messages(raw: dict[str, Any], config_path: Path) -> list[str]:
     """[CFG-8] unknown-key inventory, each message naming key and file."""
 
     messages: list[str] = []
@@ -3804,93 +4147,7 @@ def _unknown_key_messages(raw: dict[str, Any], config_path: Path) -> list[str]: 
                     f"unknown config key `{key}.{sub}` in {config_path}"
                     for sub in _unused_table_keys(value, allowed)
                 )
-                if key == "analyze":
-                    dispositions = value.get("dispositions")
-                    if isinstance(dispositions, list):
-                        for index, disposition in enumerate(dispositions):
-                            messages.extend(
-                                "unknown config key "
-                                f"`analyze.dispositions[{index}].{sub}` in {config_path}"
-                                for sub in _unused_table_keys(
-                                    disposition, _DISPOSITION_KEYS
-                                )
-                            )
-                    models = value.get("models")
-                    if isinstance(models, dict):
-                        for selector, descriptor in models.items():
-                            if isinstance(descriptor, dict):
-                                messages.extend(
-                                    "unknown config key "
-                                    f"`analyze.models.{selector}.{sub}` in "
-                                    f"{config_path}"
-                                    for sub in _unused_table_keys(
-                                        descriptor,
-                                        _ANALYZE_CATALOG_DESCRIPTOR_KEYS,
-                                    )
-                                )
-                if key == "lint":
-                    suppressions = value.get("suppressions")
-                    if isinstance(suppressions, list):
-                        for index, suppression in enumerate(suppressions):
-                            messages.extend(
-                                "unknown config key "
-                                f"`lint.suppressions[{index}].{sub}` in {config_path}"
-                                for sub in _unused_table_keys(
-                                    suppression, _SUPPRESSION_KEYS
-                                )
-                            )
-                if key == "coverage":
-                    exemptions = value.get("exemptions")
-                    if isinstance(exemptions, list):
-                        for index, exemption in enumerate(exemptions):
-                            if isinstance(exemption, dict):
-                                messages.extend(
-                                    "unknown config key "
-                                    f"`coverage.exemptions[{index}].{sub}` in "
-                                    f"{config_path}"
-                                    for sub in _unused_table_keys(
-                                        exemption,
-                                        _COVERAGE_EXEMPTION_KEYS,
-                                    )
-                                )
-                    floors = value.get("floors")
-                    if isinstance(floors, dict):
-                        for scope, floor in floors.items():
-                            if isinstance(floor, dict):
-                                messages.extend(
-                                    "unknown config key "
-                                    f"`coverage.floors.{scope}.{sub}` in {config_path}"
-                                    for sub in _unused_table_keys(
-                                        floor,
-                                        _COVERAGE_FLOOR_KEYS,
-                                    )
-                                )
-                if key == "verify":
-                    provider = value.get("provider")
-                    if isinstance(provider, dict):
-                        messages.extend(
-                            f"unknown config key `verify.provider.{sub}` in {config_path}"
-                            for sub in _unused_table_keys(
-                                provider, _VERIFY_PROVIDER_KEYS
-                            )
-                        )
-                    evaluation = value.get("eval")
-                    if isinstance(evaluation, dict):
-                        messages.extend(
-                            f"unknown config key `verify.eval.{sub}` in {config_path}"
-                            for sub in _unused_table_keys(evaluation, _VERIFY_EVAL_KEYS)
-                        )
-                if key == "diagnostics":
-                    rules = value.get("levels")
-                    if isinstance(rules, list):
-                        for index, rule in enumerate(rules):
-                            messages.extend(
-                                "unknown config key "
-                                f"`diagnostics.levels[{index}].{sub}` in {config_path}"
-                                for sub in _unused_table_keys(
-                                    rule, frozenset({"select", "level"})
-                                )
-                            )
+                messages.extend(_nested_unknown_key_messages(key, value, config_path))
             continue
         if key in _TOP_LEVEL_KEYS:
             continue
@@ -3902,30 +4159,8 @@ def _is_packaged_default_path(path: Path) -> bool:
     return path.resolve() == PACKAGED_DEFAULTS_PATH
 
 
-def _table_key_names(table_name: str) -> frozenset[str]:  # noqa: C901 approved [SC-17.1] RUFF-SUP-136 exception
-    if table_name == "defaults":
-        return _DEFAULTS_KEYS
-    if table_name == "profile":
-        return _PROFILE_KEYS
-    if table_name == "check":
-        return _CHECK_KEYS
-    if table_name == "packets":
-        return _PACKETS_KEYS
-    if table_name == "coverage":
-        return _COVERAGE_KEYS
-    if table_name == "analyze":
-        return _ANALYZE_KEYS
-    if table_name == "verify":
-        return _VERIFY_KEYS
-    if table_name == "obligations":
-        return _OBLIGATION_KEYS
-    if table_name == "target_roots":
-        return _TARGET_ROOT_KEYS
-    if table_name == "lint":
-        return _LINT_KEYS
-    if table_name == "diagnostics":
-        return _DIAGNOSTICS_KEYS
-    return frozenset()
+def _table_key_names(table_name: str) -> frozenset[str]:
+    return _TABLE_KEY_NAMES.get(table_name, frozenset())
 
 
 def _parse_lint_settings(
@@ -3962,7 +4197,100 @@ def _parse_lint_settings(
     )
 
 
-def _parse_structured_suppressions(  # noqa: C901 approved [SC-17.1] RUFF-SUP-132 exception
+def _parse_suppression_path(value: Any, *, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or value.startswith("/")
+        or value.startswith("./")
+        or "\\" in value
+        or "//" in value
+        or any(char in value for char in "\x00\r\n\t")
+        or ".." in PurePosixPath(value).parts
+    ):
+        raise ConfigLoadError(
+            f"{label}.path must be one nonblank repo-relative POSIX glob"
+        )
+    return value
+
+
+def _parse_suppression_sections(raw: Any, *, label: str) -> tuple[str, ...]:
+    sections = _require_str_list(raw, f"{label}.sections")
+    if len(sections) != len(set(sections)):
+        raise ConfigLoadError(f"{label}.sections must not contain duplicates")
+    invalid = sorted(
+        section for section in sections if SECTION_ID_RE.fullmatch(section) is None
+    )
+    if invalid:
+        raise ConfigLoadError(
+            f"{label}.sections contains invalid section IDs: " + ", ".join(invalid)
+        )
+    return tuple(sorted(sections))
+
+
+def _parse_suppression_codes(raw: Any, *, label: str) -> tuple[str, ...]:
+    codes = _require_str_list(raw, f"{label}.codes")
+    canonical = tuple(
+        canonicalize_code(code) if is_ordinary_diagnostic_code(code) else code
+        for code in codes
+    )
+    if len(canonical) != len(set(canonical)):
+        raise ConfigLoadError(
+            f"{label}.codes must not contain duplicate diagnostic identities"
+        )
+    return tuple(sorted(canonical))
+
+
+def _parse_structured_suppression(
+    raw: Any,
+    *,
+    position: int,
+    source: str,
+    allow_unknown: bool,
+) -> SuppressionRule:
+    label = f"lint.suppressions[{position}]"
+    if not isinstance(raw, dict):
+        raise ConfigLoadError(f"{label} must be a table")
+    missing = sorted(_SUPPRESSION_KEYS - set(raw))
+    extra = sorted(set(raw) - _SUPPRESSION_KEYS)
+    if missing:
+        raise ConfigLoadError(f"{label} missing required keys: {', '.join(missing)}")
+    if extra and not allow_unknown:
+        raise ConfigLoadError(f"{label} has unknown keys: {', '.join(extra)}")
+    raw_mechanism = raw["mechanism"]
+    if not isinstance(raw_mechanism, str) or raw_mechanism not in {"ignore", "meta"}:
+        raise ConfigLoadError(f"{label}.mechanism must be 'ignore' or 'meta'")
+    mechanism = cast(Literal["ignore", "meta"], raw_mechanism)
+    path = _parse_suppression_path(raw["path"], label=label)
+    sections = _parse_suppression_sections(raw["sections"], label=label)
+    canonical_codes = _parse_suppression_codes(raw["codes"], label=label)
+    declaration = raw["declaration"]
+    if not is_valid_suppression_reference(declaration):
+        raise ConfigLoadError(
+            f"{label}.declaration must be repo/relative/spec.md#SUP-ID"
+        )
+    if mechanism == "ignore" and not canonical_codes:
+        raise ConfigLoadError(f"{label} ignore rules require at least one code")
+    if mechanism == "meta" and (sections or canonical_codes):
+        raise ConfigLoadError(
+            f"{label} meta rules require sections = [] and codes = []"
+        )
+    return SuppressionRule(
+        mechanism=mechanism,
+        provenance=(
+            "meta"
+            if mechanism == "meta"
+            else ("config_file" if not sections else "config_section")
+        ),
+        path=path,
+        sections=sections,
+        codes=canonical_codes,
+        declaration=declaration,
+        origin=SuppressionOrigin(source=source, position=position),
+    )
+
+
+def _parse_structured_suppressions(
     value: Any,
     *,
     source: str,
@@ -3972,87 +4300,15 @@ def _parse_structured_suppressions(  # noqa: C901 approved [SC-17.1] RUFF-SUP-13
         return ()
     if not isinstance(value, list):
         raise ConfigLoadError("lint.suppressions must be an array of tables")
-    parsed: list[SuppressionRule] = []
-    for position, raw in enumerate(value):
-        label = f"lint.suppressions[{position}]"
-        if not isinstance(raw, dict):
-            raise ConfigLoadError(f"{label} must be a table")
-        missing = sorted(_SUPPRESSION_KEYS - set(raw))
-        extra = sorted(set(raw) - _SUPPRESSION_KEYS)
-        if missing:
-            raise ConfigLoadError(
-                f"{label} missing required keys: {', '.join(missing)}"
-            )
-        if extra and not allow_unknown:
-            raise ConfigLoadError(f"{label} has unknown keys: {', '.join(extra)}")
-        raw_mechanism = raw["mechanism"]
-        if not isinstance(raw_mechanism, str) or raw_mechanism not in {
-            "ignore",
-            "meta",
-        }:
-            raise ConfigLoadError(f"{label}.mechanism must be 'ignore' or 'meta'")
-        mechanism = cast(Literal["ignore", "meta"], raw_mechanism)
-        path = raw["path"]
-        if (
-            not isinstance(path, str)
-            or not path.strip()
-            or path.startswith("/")
-            or path.startswith("./")
-            or "\\" in path
-            or "//" in path
-            or any(char in path for char in "\x00\r\n\t")
-            or ".." in PurePosixPath(path).parts
-        ):
-            raise ConfigLoadError(
-                f"{label}.path must be one nonblank repo-relative POSIX glob"
-            )
-        sections = _require_str_list(raw["sections"], f"{label}.sections")
-        if len(sections) != len(set(sections)):
-            raise ConfigLoadError(f"{label}.sections must not contain duplicates")
-        invalid_sections = sorted(
-            section for section in sections if SECTION_ID_RE.fullmatch(section) is None
+    return tuple(
+        _parse_structured_suppression(
+            raw,
+            position=position,
+            source=source,
+            allow_unknown=allow_unknown,
         )
-        if invalid_sections:
-            raise ConfigLoadError(
-                f"{label}.sections contains invalid section IDs: "
-                + ", ".join(invalid_sections)
-            )
-        codes = _require_str_list(raw["codes"], f"{label}.codes")
-        canonical_codes = tuple(
-            canonicalize_code(code) if is_ordinary_diagnostic_code(code) else code
-            for code in codes
-        )
-        if len(canonical_codes) != len(set(canonical_codes)):
-            raise ConfigLoadError(
-                f"{label}.codes must not contain duplicate diagnostic identities"
-            )
-        declaration = raw["declaration"]
-        if not is_valid_suppression_reference(declaration):
-            raise ConfigLoadError(
-                f"{label}.declaration must be repo/relative/spec.md#SUP-ID"
-            )
-        if mechanism == "ignore" and not canonical_codes:
-            raise ConfigLoadError(f"{label} ignore rules require at least one code")
-        if mechanism == "meta" and (sections or canonical_codes):
-            raise ConfigLoadError(
-                f"{label} meta rules require sections = [] and codes = []"
-            )
-        parsed.append(
-            SuppressionRule(
-                mechanism=mechanism,
-                provenance=(
-                    "meta"
-                    if mechanism == "meta"
-                    else ("config_file" if not sections else "config_section")
-                ),
-                path=path,
-                sections=tuple(sorted(sections)),
-                codes=tuple(sorted(canonical_codes)),
-                declaration=declaration,
-                origin=SuppressionOrigin(source=source, position=position),
-            )
-        )
-    return tuple(parsed)
+        for position, raw in enumerate(value)
+    )
 
 
 def _parse_ignore_table(value: Any, field_name: str) -> dict[str, tuple[str, ...]]:

@@ -702,9 +702,9 @@ def _validate_output_path(corpus: SemanticEvalCorpus, output: Path) -> Path:
     return resolved
 
 
-def run_semantic_eval(request: SemanticEvalRequest) -> SemanticEvalRun:  # noqa: C901 approved [SC-17.1] RUFF-SUP-090 exception
-    """Run one cold-primary/cache-replay semantic qualification execution."""
-
+def _prepare_semantic_eval(
+    request: SemanticEvalRequest,
+) -> tuple[SemanticEvalCorpus, Path]:
     try:
         corpus = load_semantic_eval_corpus(
             request.manifest_path,
@@ -737,72 +737,89 @@ def run_semantic_eval(request: SemanticEvalRequest) -> SemanticEvalRun:  # noqa:
         raise SemanticEvalError(
             "evaluation output overlaps configured qualification report"
         )
+    return corpus, output_path
+
+
+def _derive_eval_variants(
+    corpus: SemanticEvalCorpus,
+    cases: Mapping[str, Any],
+    fixture_root: Path,
+) -> list[SemanticEvalVariantBuild]:
+    builds: list[SemanticEvalVariantBuild] = []
+    for case_id, variant_id in corpus.variant_keys:
+        try:
+            build = derive_semantic_eval_variant(
+                corpus,
+                cases[case_id],
+                variant_id,
+                fixture_root / case_id / variant_id,
+            )
+        except (OSError, SemanticEvalContractError, ValueError) as exc:
+            raise SemanticEvalError(
+                f"cannot derive semantic fixture {case_id}/{variant_id}: {exc}"
+            ) from exc
+        if build.observation.deterministic_problem is not None:
+            raise SemanticEvalError(
+                f"semantic fixture {case_id}/{variant_id} is not executable: "
+                f"{build.observation.deterministic_problem}"
+            )
+        builds.append(build)
+    return builds
+
+
+def _plan_eval_analysis_jobs(
+    corpus: SemanticEvalCorpus,
+    builds: list[SemanticEvalVariantBuild],
+    request: SemanticEvalRequest,
+) -> tuple[
+    list[tuple[int, str, SemanticEvalVariantBuild, ValidatedSemanticPacket, str]],
+    dict[str, tuple[ValidatedSemanticPacket, InferenceIdentity]],
+]:
+    jobs: list[
+        tuple[int, str, SemanticEvalVariantBuild, ValidatedSemanticPacket, str]
+    ] = []
+    unique: dict[str, tuple[ValidatedSemanticPacket, InferenceIdentity]] = {}
+    frozen_requests: dict[
+        tuple[str, str], tuple[ValidatedSemanticPacket, InferenceIdentity]
+    ] = {}
+    for trial in range(request.eval_settings.trials):
+        effective = derive_eval_search_epoch(
+            "eval-analyze", request.settings.search_epoch, corpus.corpus_sha256, trial
+        )
+        for build in builds:
+            for packet in sorted(
+                build.packets, key=lambda item: cast(str, item.to_dict()["packet_id"])
+            ):
+                packet_row = packet.to_dict()
+                request_key = (cast(str, packet_row["packet_hash"]), effective)
+                frozen = frozen_requests.get(request_key)
+                if frozen is None:
+                    identity = build_inference_identity(
+                        packet_row,
+                        request.settings.provider_identity,
+                        request.settings.request_identity,
+                        search_epoch=effective,
+                    )
+                    frozen = (packet, identity)
+                    frozen_requests[request_key] = frozen
+                identity = frozen[1]
+                unique.setdefault(identity.analysis_key, frozen)
+                jobs.append((trial, effective, build, packet, identity.analysis_key))
+    return jobs, unique
+
+
+def run_semantic_eval(request: SemanticEvalRequest) -> SemanticEvalRun:
+    """Run one cold-primary/cache-replay semantic qualification execution."""
+
+    corpus, output_path = _prepare_semantic_eval(request)
 
     cases = semantic_eval_case_rows(corpus)
-    builds: list[SemanticEvalVariantBuild] = []
     with tempfile.TemporaryDirectory(prefix="backstitch-semantic-fixtures-") as raw:
         fixture_root = Path(raw)
-        for case_id, variant_id in corpus.variant_keys:
-            try:
-                build = derive_semantic_eval_variant(
-                    corpus,
-                    cases[case_id],
-                    variant_id,
-                    fixture_root / case_id / variant_id,
-                )
-            except (OSError, SemanticEvalContractError, ValueError) as exc:
-                raise SemanticEvalError(
-                    f"cannot derive semantic fixture {case_id}/{variant_id}: {exc}"
-                ) from exc
-            if build.observation.deterministic_problem is not None:
-                raise SemanticEvalError(
-                    f"semantic fixture {case_id}/{variant_id} is not executable: "
-                    f"{build.observation.deterministic_problem}"
-                )
-            builds.append(build)
-
-        analysis_jobs: list[
-            tuple[int, str, SemanticEvalVariantBuild, ValidatedSemanticPacket, str]
-        ] = []
-        unique_analysis: dict[
-            str, tuple[ValidatedSemanticPacket, InferenceIdentity]
-        ] = {}
-        frozen_analysis_requests: dict[
-            tuple[str, str],
-            tuple[ValidatedSemanticPacket, InferenceIdentity],
-        ] = {}
-        for trial in range(request.eval_settings.trials):
-            effective = derive_eval_search_epoch(
-                "eval-analyze",
-                request.settings.search_epoch,
-                corpus.corpus_sha256,
-                trial,
-            )
-            for build in builds:
-                for packet in sorted(
-                    build.packets,
-                    key=lambda item: cast(str, item.to_dict()["packet_id"]),
-                ):
-                    packet_row = packet.to_dict()
-                    request_key = (
-                        cast(str, packet_row["packet_hash"]),
-                        effective,
-                    )
-                    frozen = frozen_analysis_requests.get(request_key)
-                    if frozen is None:
-                        identity = build_inference_identity(
-                            packet_row,
-                            request.settings.provider_identity,
-                            request.settings.request_identity,
-                            search_epoch=effective,
-                        )
-                        frozen = (packet, identity)
-                        frozen_analysis_requests[request_key] = frozen
-                    identity = frozen[1]
-                    unique_analysis.setdefault(identity.analysis_key, frozen)
-                    analysis_jobs.append(
-                        (trial, effective, build, packet, identity.analysis_key)
-                    )
+        builds = _derive_eval_variants(corpus, cases, fixture_root)
+        analysis_jobs, unique_analysis = _plan_eval_analysis_jobs(
+            corpus, builds, request
+        )
         _assert_prompt_limits(unique_analysis, {}, request)
         analysis_cost, analysis_rate_source = _analysis_cost(
             unique_analysis, request.settings

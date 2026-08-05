@@ -1198,11 +1198,19 @@ def _print_release_plan(
     print(f"tag:     {release_state.tag_name} ({tag_action})")
 
 
-def main(argv: list[str] | None = None) -> int:  # noqa: C901 approved [SC-17.1] RUFF-SUP-141 exception
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-    target = ROOT_RELEASE_TARGET
+@dataclass(frozen=True)
+class _PreparedRelease:
+    current_version: str
+    target_version: str
+    state: ReleaseState
+    tag_action: TagAction
+    version_changed: bool
+    dirty: bool
 
+
+def _prepare_release(
+    args: argparse.Namespace, target: ReleaseTarget
+) -> _PreparedRelease:
     if args.target == ALL_RELEASE_TARGET_KEY and args.version is not None:
         raise RuntimeError(
             "--version cannot be used with target 'all'. Update the package "
@@ -1239,124 +1247,157 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 approved [SC-17.1]
         release_state=release_state,
         tag_action=tag_action,
     )
+    return _PreparedRelease(
+        current_version=current_version,
+        target_version=target_version,
+        state=release_state,
+        tag_action=tag_action,
+        version_changed=version_changed,
+        dirty=dirty,
+    )
 
-    if args.dry_run:
-        if dirty:
-            print("dry-run: working tree is dirty; a real release would fail")
-        if args.publish:
-            _print_publish_note()
-        if not args.skip_checks:
-            run_precheck_commands(dry_run=True)
-        if version_changed:
-            print(
-                "dry-run: would update "
-                + ", ".join(
-                    _display_path(path)
-                    for path in _release_file_paths(target)
-                    if path != UV_LOCK_PATH
-                )
-            )
-        else:
-            print(
-                f"dry-run: current {target.display_name} version {target_version} "
-                "is unpublished; would reuse existing version files"
-            )
-        for step in build_postupdate_steps():
-            run_command(
-                step.command,
-                cwd=step.cwd,
-                dry_run=True,
-                env_overrides=step.env_overrides,
-            )
-        if version_changed:
-            run_command(("git", "add", *_release_file_args(target)), dry_run=True)
-            run_command(
-                (
-                    "git",
-                    "commit",
-                    "-m",
-                    f"Release {target.display_name} {target_version}",
-                ),
-                dry_run=True,
-            )
-        else:
-            print(
-                "dry-run: no release commit needed unless generated release files "
-                "change during post-update checks"
-            )
-        run_command(("git", "push"), dry_run=True)
-        _prepare_tag_action(release_state, tag_action=tag_action, dry_run=True)
-        _push_tag_action(release_state, tag_action=tag_action, dry_run=True)
-        print(
-            "dry-run: next step is to wait for "
-            f"{target.release_workflow} on {release_state.tag_name}"
+
+def _print_dry_run_version_action(
+    prepared: _PreparedRelease, target: ReleaseTarget
+) -> None:
+    if prepared.version_changed:
+        paths = (
+            _display_path(path)
+            for path in _release_file_paths(target)
+            if path != UV_LOCK_PATH
         )
-        return 0
+        print("dry-run: would update " + ", ".join(paths))
+        return
+    print(
+        f"dry-run: current {target.display_name} version {prepared.target_version} "
+        "is unpublished; would reuse existing version files"
+    )
 
+
+def _run_dry_release(
+    args: argparse.Namespace, target: ReleaseTarget, prepared: _PreparedRelease
+) -> int:
+    if prepared.dirty:
+        print("dry-run: working tree is dirty; a real release would fail")
+    if args.publish:
+        _print_publish_note()
+    if not args.skip_checks:
+        run_precheck_commands(dry_run=True)
+    _print_dry_run_version_action(prepared, target)
+    for step in build_postupdate_steps():
+        run_command(
+            step.command,
+            cwd=step.cwd,
+            dry_run=True,
+            env_overrides=step.env_overrides,
+        )
+    if prepared.version_changed:
+        run_command(("git", "add", *_release_file_args(target)), dry_run=True)
+        run_command(
+            (
+                "git",
+                "commit",
+                "-m",
+                f"Release {target.display_name} {prepared.target_version}",
+            ),
+            dry_run=True,
+        )
+    else:
+        print(
+            "dry-run: no release commit needed unless generated release files "
+            "change during post-update checks"
+        )
+    run_command(("git", "push"), dry_run=True)
+    _prepare_tag_action(prepared.state, tag_action=prepared.tag_action, dry_run=True)
+    _push_tag_action(prepared.state, tag_action=prepared.tag_action, dry_run=True)
+    print(
+        "dry-run: next step is to wait for "
+        f"{target.release_workflow} on {prepared.state.tag_name}"
+    )
+    return 0
+
+
+def _write_release_version(target: ReleaseTarget, prepared: _PreparedRelease) -> None:
+    if prepared.version_changed:
+        write_target_version(target, prepared.target_version)
+        changed = (
+            _display_path(path)
+            for path in _release_file_paths(target)
+            if path != UV_LOCK_PATH
+        )
+        print("Updated version files: " + ", ".join(changed))
+        return
+    print(
+        f"Reusing current unpublished {target.display_name} version "
+        f"{prepared.target_version}; version files unchanged"
+    )
+
+
+def _commit_release_files(target: ReleaseTarget, prepared: _PreparedRelease) -> bool:
+    release_commit_created = prepared.version_changed or release_files_changed(target)
+    if not release_commit_created:
+        print("No release commit needed; release files already match target version")
+        return False
+    run_command(("git", "add", *_release_file_args(target)))
+    run_command(
+        (
+            "git",
+            "commit",
+            "-m",
+            f"Release {target.display_name} {prepared.target_version}",
+        )
+    )
+    return True
+
+
+def _run_real_release(
+    args: argparse.Namespace, target: ReleaseTarget, prepared: _PreparedRelease
+) -> int:
     _require_command("uv")
     if args.publish:
         _print_publish_note()
-
     if not args.skip_checks:
         run_precheck_commands()
-
-    if version_changed:
-        write_target_version(target, target_version)
-        print(
-            "Updated version files: "
-            + ", ".join(
-                _display_path(path)
-                for path in _release_file_paths(target)
-                if path != UV_LOCK_PATH
-            )
-        )
-    else:
-        print(
-            f"Reusing current unpublished {target.display_name} version "
-            f"{target_version}; version files unchanged"
-        )
-
+    _write_release_version(target, prepared)
     for step in build_postupdate_steps():
         run_command(step.command, cwd=step.cwd, env_overrides=step.env_overrides)
-
-    release_commit_created = version_changed or release_files_changed(target)
-    if release_commit_created:
-        run_command(("git", "add", *_release_file_args(target)))
-        run_command(
-            ("git", "commit", "-m", f"Release {target.display_name} {target_version}")
-        )
-    else:
-        print("No release commit needed; release files already match target version")
-
+    release_commit_created = _commit_release_files(target, prepared)
     head_commit = current_head_commit()
     tag_action = plan_tag_action(
-        release_state,
+        prepared.state,
         head_commit=head_commit,
         version_changed=release_commit_created,
         allow_retag=args.retag,
     )
-
     run_command(("git", "push"))
-    release_state = refresh_release_state_before_tag_mutation(
-        target_version,
+    state = refresh_release_state_before_tag_mutation(
+        prepared.target_version,
         target=target,
-        observed_remote_tag_commit=release_state.remote_tag_commit,
+        observed_remote_tag_commit=prepared.state.remote_tag_commit,
     )
     tag_action = plan_tag_action(
-        release_state,
+        state,
         head_commit=head_commit,
         version_changed=release_commit_created,
         allow_retag=args.retag,
     )
-    _prepare_tag_action(release_state, tag_action=tag_action, dry_run=False)
-    _push_tag_action(release_state, tag_action=tag_action, dry_run=False)
-
+    _prepare_tag_action(state, tag_action=tag_action, dry_run=False)
+    _push_tag_action(state, tag_action=tag_action, dry_run=False)
     print(
         "Next step: wait for "
-        f"{target.release_workflow} on {release_state.tag_name}. "
+        f"{target.release_workflow} on {state.tag_name}. "
         "It will publish to PyPI via Trusted Publishing and create the GitHub Release."
     )
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    target = ROOT_RELEASE_TARGET
+    prepared = _prepare_release(args, target)
+    if args.dry_run:
+        return _run_dry_release(args, target, prepared)
+    return _run_real_release(args, target, prepared)
 
 
 if __name__ == "__main__":

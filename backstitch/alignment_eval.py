@@ -22,6 +22,7 @@ import tempfile
 import tomllib
 import unicodedata
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -1138,100 +1139,95 @@ def _required_declaration_set(
     )
 
 
-def _validate_gold(  # noqa: C901 approved [SC-17.1] RUFF-SUP-010 exception
-    value: object,
-    tree: _FixtureTree,
-    context: str,
-    *,
-    candidate_artifact: dict[str, Any] | None,
-    settings: BackstitchSettings,
-) -> tuple[dict[str, Any], ...]:
-    if not isinstance(value, list):
-        raise AlignmentEvalError(f"{context} must be an array")
-    rows: list[dict[str, Any]] = []
-    for index, item in enumerate(value):
-        row_context = f"{context}[{index}]"
-        row = _object(item, _GOLD_KEYS, row_context)
-        _nonblank(row["gold_id"], f"{row_context}.gold_id")
-        candidate_id = _nonblank(row["candidate_id"], f"{row_context}.candidate_id")
-        if candidate_ref_digest(candidate_id) is None:
-            raise AlignmentEvalError(f"{row_context}.candidate_id is invalid")
-        if row["candidate_kind"] not in _CANDIDATE_KINDS:
-            raise AlignmentEvalError(f"{row_context}.candidate_kind is invalid")
-        if row["trace_state"] not in _TRACE_STATES:
-            raise AlignmentEvalError(f"{row_context}.trace_state is invalid")
-        if row["disposition_label"] not in _DISPOSITION_LABELS:
-            raise AlignmentEvalError(f"{row_context}.disposition_label is invalid")
-        if not isinstance(row["critical"], bool):
-            raise AlignmentEvalError(f"{row_context}.critical must be boolean")
-        if row["critical"] and row["disposition_label"] == "irrelevant":
-            raise AlignmentEvalError(
-                f"{row_context} critical gold cannot be irrelevant"
+def _gold_span(
+    tree: _FixtureTree, path: str, start: object, end: object, context: str
+) -> tuple[int, int, bytes]:
+    if (
+        isinstance(start, bool)
+        or not isinstance(start, int)
+        or isinstance(end, bool)
+        or not isinstance(end, int)
+        or start < 1
+        or end < start
+    ):
+        raise AlignmentEvalError(f"{context} span is invalid")
+    raw = tree.files[path]
+    try:
+        line_count = lf_line_count(raw.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise AlignmentEvalError(f"{context}.path is not UTF-8: {exc}") from None
+    if end > line_count:
+        raise AlignmentEvalError(f"{context} span exceeds fixture bytes")
+    return start, end, lf_slice(raw, start, end, policy="strict")
+
+
+def _validated_gold_row(
+    item: object, tree: _FixtureTree, row_context: str
+) -> dict[str, Any]:
+    row = _object(item, _GOLD_KEYS, row_context)
+    _nonblank(row["gold_id"], f"{row_context}.gold_id")
+    candidate_id = _nonblank(row["candidate_id"], f"{row_context}.candidate_id")
+    if candidate_ref_digest(candidate_id) is None:
+        raise AlignmentEvalError(f"{row_context}.candidate_id is invalid")
+    for key, allowed in (
+        ("candidate_kind", _CANDIDATE_KINDS),
+        ("trace_state", _TRACE_STATES),
+        ("disposition_label", _DISPOSITION_LABELS),
+    ):
+        if row[key] not in allowed:
+            raise AlignmentEvalError(f"{row_context}.{key} is invalid")
+    if not isinstance(row["critical"], bool):
+        raise AlignmentEvalError(f"{row_context}.critical must be boolean")
+    if row["critical"] and row["disposition_label"] == "irrelevant":
+        raise AlignmentEvalError(f"{row_context} critical gold cannot be irrelevant")
+    path = row["path"]
+    _relative_path(tree.root, path, f"{row_context}.path")
+    if path not in tree.files:
+        raise AlignmentEvalError(f"{row_context}.path is absent from fixture")
+    start, end, span = _gold_span(
+        tree, path, row["start_line"], row["end_line"], row_context
+    )
+    locator = _nonblank(row["structural_locator"], f"{row_context}.structural_locator")
+    expected_id = candidate_ref(
+        hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "candidate_identity_version": 1,
+                    "candidate_kind": row["candidate_kind"],
+                    "path": path,
+                    "structural_locator": locator,
+                }
             )
-        candidate_path = row["path"]
-        _relative_path(tree.root, candidate_path, f"{row_context}.path")
-        if candidate_path not in tree.files:
-            raise AlignmentEvalError(f"{row_context}.path is absent from fixture")
-        start = row["start_line"]
-        end = row["end_line"]
-        if (
-            isinstance(start, bool)
-            or not isinstance(start, int)
-            or isinstance(end, bool)
-            or not isinstance(end, int)
-            or start < 1
-            or end < start
-        ):
-            raise AlignmentEvalError(f"{row_context} span is invalid")
-        try:
-            line_count = lf_line_count(tree.files[candidate_path].decode("utf-8"))
-        except UnicodeDecodeError as exc:
-            raise AlignmentEvalError(
-                f"{row_context}.path is not UTF-8: {exc}"
-            ) from None
-        if end > line_count:
-            raise AlignmentEvalError(f"{row_context} span exceeds fixture bytes")
-        locator = _nonblank(
-            row["structural_locator"], f"{row_context}.structural_locator"
-        )
-        expected_candidate_id = candidate_ref(
-            hashlib.sha256(
-                canonical_json_bytes(
-                    {
-                        "candidate_identity_version": 1,
-                        "candidate_kind": row["candidate_kind"],
-                        "path": candidate_path,
-                        "structural_locator": locator,
-                    }
-                )
-            ).hexdigest()
-        )
-        if candidate_id != expected_candidate_id:
-            raise AlignmentEvalError(f"{row_context}.candidate_id does not recompute")
-        receipt = _object(
-            row["receipt"],
-            {
-                "receipt_version",
-                "path",
-                "structural_locator",
-                "start_line",
-                "end_line",
-                "raw_sha256",
-            },
-            f"{row_context}.receipt",
-        )
-        span = lf_slice(tree.files[candidate_path], start, end, policy="strict")
-        expected_receipt = {
-            "receipt_version": 1,
-            "path": candidate_path,
-            "structural_locator": locator,
-            "start_line": start,
-            "end_line": end,
-            "raw_sha256": hashlib.sha256(span).hexdigest(),
-        }
-        if receipt != expected_receipt:
-            raise AlignmentEvalError(f"{row_context}.receipt does not recompute")
-        rows.append(row)
+        ).hexdigest()
+    )
+    if candidate_id != expected_id:
+        raise AlignmentEvalError(f"{row_context}.candidate_id does not recompute")
+    receipt = _object(
+        row["receipt"],
+        {
+            "receipt_version",
+            "path",
+            "structural_locator",
+            "start_line",
+            "end_line",
+            "raw_sha256",
+        },
+        f"{row_context}.receipt",
+    )
+    expected_receipt = {
+        "receipt_version": 1,
+        "path": path,
+        "structural_locator": locator,
+        "start_line": start,
+        "end_line": end,
+        "raw_sha256": hashlib.sha256(span).hexdigest(),
+    }
+    if receipt != expected_receipt:
+        raise AlignmentEvalError(f"{row_context}.receipt does not recompute")
+    return row
+
+
+def _validate_gold_uniqueness(rows: Sequence[dict[str, Any]], context: str) -> None:
     ids = [cast(str, row["gold_id"]) for row in rows]
     if ids != sorted(set(ids)):
         raise AlignmentEvalError(f"{context} IDs must be unique and sorted")
@@ -1250,66 +1246,76 @@ def _validate_gold(  # noqa: C901 approved [SC-17.1] RUFF-SUP-010 exception
     ]
     if len(set(coordinates)) != len(coordinates):
         raise AlignmentEvalError(f"{context} candidate coordinates must be unique")
-    if candidate_artifact is not None:
-        source_catalog = _source_bound_candidate_catalog(
-            tree,
-            cast(str, candidate_artifact["obligation_id"]),
-            settings,
-        )
-        for row in rows:
-            source_candidate = source_catalog.get(cast(str, row["candidate_id"]))
-            source_projection = {
-                key: row[key]
-                for key in (
-                    "candidate_id",
-                    "candidate_kind",
-                    "path",
-                    "start_line",
-                    "end_line",
-                    "structural_locator",
-                    "receipt",
-                )
-            }
-            if source_candidate != source_projection:
-                raise AlignmentEvalError(
-                    f"{context} gold candidate is not source-bound production syntax"
-                )
-        artifact_rows = cast(list[dict[str, Any]], candidate_artifact["candidates"])
-        artifact_by_id = {
-            cast(str, candidate["candidate_id"]): candidate
-            for candidate in artifact_rows
-        }
-        if len(artifact_by_id) != len(artifact_rows):
-            raise AlignmentEvalError("candidate artifact candidate IDs must be unique")
-        if not set(artifact_by_id).issubset(candidate_ids):
+
+
+def _validate_gold_artifact(
+    rows: Sequence[dict[str, Any]],
+    tree: _FixtureTree,
+    artifact: dict[str, Any],
+    settings: BackstitchSettings,
+    context: str,
+) -> None:
+    source_catalog = _source_bound_candidate_catalog(
+        tree, cast(str, artifact["obligation_id"]), settings
+    )
+    identity_keys = (
+        "candidate_id",
+        "candidate_kind",
+        "path",
+        "start_line",
+        "end_line",
+        "structural_locator",
+        "receipt",
+    )
+    for row in rows:
+        source_candidate = source_catalog.get(cast(str, row["candidate_id"]))
+        if source_candidate != {key: row[key] for key in identity_keys}:
             raise AlignmentEvalError(
-                f"{context} must label every production-discovered candidate exactly once"
+                f"{context} gold candidate is not source-bound production syntax"
             )
-        for row in rows:
-            candidate = artifact_by_id.get(cast(str, row["candidate_id"]))
-            if candidate is None:
-                if row["disposition_label"] == "irrelevant":
-                    raise AlignmentEvalError(
-                        f"{context} absent gold must be accepted or rejected"
-                    )
-                continue
-            projection = {
-                key: candidate[key]
-                for key in (
-                    "candidate_id",
-                    "candidate_kind",
-                    "path",
-                    "start_line",
-                    "end_line",
-                    "structural_locator",
-                    "receipt",
-                )
-            }
-            gold_projection = {key: row[key] for key in projection}
-            if gold_projection != projection:
+    artifact_rows = cast(list[dict[str, Any]], artifact["candidates"])
+    artifact_by_id = {
+        cast(str, candidate["candidate_id"]): candidate for candidate in artifact_rows
+    }
+    if len(artifact_by_id) != len(artifact_rows):
+        raise AlignmentEvalError("candidate artifact candidate IDs must be unique")
+    candidate_ids = {cast(str, row["candidate_id"]) for row in rows}
+    if not set(artifact_by_id).issubset(candidate_ids):
+        raise AlignmentEvalError(
+            f"{context} must label every production-discovered candidate exactly once"
+        )
+    for row in rows:
+        candidate = artifact_by_id.get(cast(str, row["candidate_id"]))
+        if candidate is None:
+            if row["disposition_label"] == "irrelevant":
                 raise AlignmentEvalError(
-                    f"{context} gold identity does not match production candidate"
+                    f"{context} absent gold must be accepted or rejected"
                 )
+            continue
+        projection = {key: candidate[key] for key in identity_keys}
+        if {key: row[key] for key in identity_keys} != projection:
+            raise AlignmentEvalError(
+                f"{context} gold identity does not match production candidate"
+            )
+
+
+def _validate_gold(
+    value: object,
+    tree: _FixtureTree,
+    context: str,
+    *,
+    candidate_artifact: dict[str, Any] | None,
+    settings: BackstitchSettings,
+) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, list):
+        raise AlignmentEvalError(f"{context} must be an array")
+    rows = [
+        _validated_gold_row(item, tree, f"{context}[{index}]")
+        for index, item in enumerate(value)
+    ]
+    _validate_gold_uniqueness(rows, context)
+    if candidate_artifact is not None:
+        _validate_gold_artifact(rows, tree, candidate_artifact, settings, context)
     return tuple(rows)
 
 
@@ -2096,7 +2102,79 @@ def _tree_rows_from_artifact(
     return rows, _sha256(digest, f"{context}.sha256")
 
 
-def _declaration_projection(  # noqa: C901 approved [SC-17.1] RUFF-SUP-003 exception
+def _invariant_declaration_rows(
+    report: Any, obligation_id: str, role: Any, matching_gold: Any
+) -> list[tuple[str, str, str, str]]:
+    invariant_id = obligation_id.removeprefix("invariant::")
+    rows: list[tuple[str, str, str, str]] = []
+    for declaration in report.invariants:
+        if (
+            declaration.invariant_id == invariant_id
+            and declaration.declaration_kind == "code"
+        ):
+            gold_id = matching_gold(
+                declaration.path,
+                declaration.owner_symbol,
+                "implementation_definition",
+            )
+            if gold_id is not None:
+                rows.append(
+                    ("spec_mapping", invariant_id, role(declaration.path), gold_id)
+                )
+    for binding in report.binds:
+        if binding.invariant_id != invariant_id:
+            continue
+        gold_id = matching_gold(
+            binding.test_path, binding.test_symbol, "test_definition"
+        )
+        if gold_id is not None:
+            rows.append(("binding_test", invariant_id, "binding_test", gold_id))
+    return rows
+
+
+def _section_declaration_rows(
+    report: Any,
+    obligation_id: str,
+    role: Any,
+    definition_kind: Any,
+    matching_gold: Any,
+) -> list[tuple[str, str, str, str]]:
+    spec_path, section_id = obligation_id.rsplit("#", 1)
+    rows: list[tuple[str, str, str, str]] = []
+    for mapping in report.spec_mappings:
+        if (
+            mapping.spec_path != spec_path
+            or mapping.section_id != section_id
+            or mapping.target_path is None
+        ):
+            continue
+        gold_id = matching_gold(
+            mapping.target_path,
+            mapping.target_symbol,
+            definition_kind(mapping.target_path),
+        )
+        if gold_id is not None:
+            rows.append(
+                ("spec_mapping", obligation_id, role(mapping.target_path), gold_id)
+            )
+    for reference in report.code_refs:
+        if (
+            reference.ref_context != "asserted"
+            or reference.spec_path != spec_path
+            or section_id not in reference.section_ids
+        ):
+            continue
+        gold_id = matching_gold(
+            reference.path,
+            reference.owner_symbol,
+            definition_kind(reference.path),
+        )
+        if gold_id is not None:
+            rows.append(("code_backlink", obligation_id, role(reference.path), gold_id))
+    return rows
+
+
+def _declaration_projection(
     root: Path,
     profile: ProfileConfig,
     settings: BackstitchSettings,
@@ -2117,7 +2195,6 @@ def _declaration_projection(  # noqa: C901 approved [SC-17.1] RUFF-SUP-003 excep
         ): cast(str, row["gold_id"])
         for row in gold_candidates
     }
-    rows: list[tuple[str, str, str, str]] = []
     test_roots = tuple(item.rstrip("/") + "/" for item in profile.test_roots)
 
     def role(path: str) -> str:
@@ -2169,77 +2246,11 @@ def _declaration_projection(  # noqa: C901 approved [SC-17.1] RUFF-SUP-003 excep
         )
 
     if obligation_id.startswith("invariant::"):
-        invariant_id = obligation_id.removeprefix("invariant::")
-        for declaration in report.invariants:
-            if (
-                declaration.invariant_id == invariant_id
-                and declaration.declaration_kind == "code"
-            ):
-                gold_id = matching_gold(
-                    declaration.path,
-                    declaration.owner_symbol,
-                    "implementation_definition",
-                )
-                if gold_id is not None:
-                    rows.append(
-                        (
-                            "spec_mapping",
-                            invariant_id,
-                            role(declaration.path),
-                            gold_id,
-                        )
-                    )
-        for binding in report.binds:
-            if binding.invariant_id == invariant_id:
-                gold_id = matching_gold(
-                    binding.test_path,
-                    binding.test_symbol,
-                    "test_definition",
-                )
-                if gold_id is not None:
-                    rows.append(("binding_test", invariant_id, "binding_test", gold_id))
+        rows = _invariant_declaration_rows(report, obligation_id, role, matching_gold)
     else:
-        spec_path, section_id = obligation_id.rsplit("#", 1)
-        for mapping in report.spec_mappings:
-            if (
-                mapping.spec_path == spec_path
-                and mapping.section_id == section_id
-                and mapping.target_path is not None
-            ):
-                gold_id = matching_gold(
-                    mapping.target_path,
-                    mapping.target_symbol,
-                    definition_kind(mapping.target_path),
-                )
-                if gold_id is not None:
-                    rows.append(
-                        (
-                            "spec_mapping",
-                            obligation_id,
-                            role(mapping.target_path),
-                            gold_id,
-                        )
-                    )
-        for reference in report.code_refs:
-            if (
-                reference.ref_context == "asserted"
-                and reference.spec_path == spec_path
-                and section_id in reference.section_ids
-            ):
-                gold_id = matching_gold(
-                    reference.path,
-                    reference.owner_symbol,
-                    definition_kind(reference.path),
-                )
-                if gold_id is not None:
-                    rows.append(
-                        (
-                            "code_backlink",
-                            obligation_id,
-                            role(reference.path),
-                            gold_id,
-                        )
-                    )
+        rows = _section_declaration_rows(
+            report, obligation_id, role, definition_kind, matching_gold
+        )
     order = {name: index for index, name in enumerate(_DECLARATION_FORMS)}
     if len(set(rows)) != len(rows):
         raise AlignmentEvalError(
@@ -2587,7 +2598,81 @@ def _recompute_bootstrap_outcome(  # noqa: C901 approved [SC-17.1] RUFF-SUP-007 
     raise AlignmentEvalError(f"{context} has no Phase A expected outcome")
 
 
-def _candidate_projection(  # noqa: C901 approved [SC-17.1] RUFF-SUP-002 exception
+def _validate_candidate_relations(row: dict[str, Any], context: str) -> None:
+    relation_keys = {
+        "relation_kind",
+        "source_candidate_id",
+        "target_candidate_id",
+        "source_locator",
+        "target_locator",
+    }
+    for field_name in ("static_relations", "declared_relations"):
+        relations = row[field_name]
+        if not isinstance(relations, list):
+            raise AlignmentEvalError(f"{context}.{field_name} must be an array")
+        for index, relation in enumerate(relations):
+            relation_context = f"{context}.{field_name}[{index}]"
+            relation_row = _object(relation, relation_keys, relation_context)
+            _nonblank(
+                relation_row["relation_kind"], f"{relation_context}.relation_kind"
+            )
+            for key in relation_keys - {"relation_kind"}:
+                if relation_row[key] is not None:
+                    _nonblank(relation_row[key], f"{relation_context}.{key}")
+
+
+def _validate_trace_advice(row: dict[str, Any], context: str) -> None:
+    advice = row["suggested_trace_edits"]
+    if not isinstance(advice, list):
+        raise AlignmentEvalError(f"{context}.suggested_trace_edits must be an array")
+    keys = {
+        "guidance_code",
+        "target_id",
+        "evidence_role",
+        "supported_forms",
+        "review_warning",
+    }
+    for index, item in enumerate(advice):
+        item_context = f"{context}.suggested_trace_edits[{index}]"
+        advice_row = _object(item, keys, item_context)
+        if advice_row["guidance_code"] not in _GUIDANCE_CODES:
+            raise AlignmentEvalError(f"{item_context}.guidance_code is invalid")
+        _nonblank(advice_row["target_id"], f"{item_context}.target_id")
+        if advice_row["evidence_role"] not in _EVIDENCE_ROLES:
+            raise AlignmentEvalError(f"{item_context}.evidence_role is invalid")
+        forms = advice_row["supported_forms"]
+        if not isinstance(forms, list) or not forms:
+            raise AlignmentEvalError(f"{item_context}.supported_forms is invalid")
+        _ordered_codes(forms, _DECLARATION_FORMS, f"{item_context}.supported_forms")
+        if advice_row["review_warning"] != (
+            "Advice is not evidence; review the source relation before editing."
+        ):
+            raise AlignmentEvalError(f"{item_context}.review_warning is invalid")
+
+
+def _candidate_gold(
+    row: dict[str, Any], candidate_id: str, fixture: _FixtureDefinition, context: str
+) -> dict[str, Any]:
+    matches = [
+        gold for gold in fixture.gold_candidates if gold["candidate_id"] == candidate_id
+    ]
+    if len(matches) != 1:
+        raise AlignmentEvalError(f"{context} has an unmatched or ambiguous gold row")
+    gold = matches[0]
+    for key in (
+        "candidate_kind",
+        "path",
+        "start_line",
+        "end_line",
+        "structural_locator",
+        "receipt",
+    ):
+        if row[key] != gold[key]:
+            raise AlignmentEvalError(f"{context}.{key} does not match exact gold")
+    return gold
+
+
+def _candidate_projection(
     value: object, fixture: _FixtureDefinition, context: str
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     row = _object(value, _PUBLIC_CANDIDATE_KEYS, context)
@@ -2672,90 +2757,9 @@ def _candidate_projection(  # noqa: C901 approved [SC-17.1] RUFF-SUP-002 excepti
         lexical["shared_token_byte_count"],
         f"{context}.lexical_score.shared_token_byte_count",
     )
-    relation_keys = {
-        "relation_kind",
-        "source_candidate_id",
-        "target_candidate_id",
-        "source_locator",
-        "target_locator",
-    }
-    for field_name in ("static_relations", "declared_relations"):
-        relations = row[field_name]
-        if not isinstance(relations, list):
-            raise AlignmentEvalError(f"{context}.{field_name} must be an array")
-        for index, relation in enumerate(relations):
-            relation_row = _object(
-                relation, relation_keys, f"{context}.{field_name}[{index}]"
-            )
-            _nonblank(
-                relation_row["relation_kind"],
-                f"{context}.{field_name}[{index}].relation_kind",
-            )
-            for key in relation_keys - {"relation_kind"}:
-                if relation_row[key] is not None:
-                    _nonblank(
-                        relation_row[key], f"{context}.{field_name}[{index}].{key}"
-                    )
-    advice = row["suggested_trace_edits"]
-    if not isinstance(advice, list):
-        raise AlignmentEvalError(f"{context}.suggested_trace_edits must be an array")
-    for index, item in enumerate(advice):
-        advice_row = _object(
-            item,
-            {
-                "guidance_code",
-                "target_id",
-                "evidence_role",
-                "supported_forms",
-                "review_warning",
-            },
-            f"{context}.suggested_trace_edits[{index}]",
-        )
-        if advice_row["guidance_code"] not in _GUIDANCE_CODES:
-            raise AlignmentEvalError(
-                f"{context}.suggested_trace_edits[{index}].guidance_code is invalid"
-            )
-        _nonblank(
-            advice_row["target_id"],
-            f"{context}.suggested_trace_edits[{index}].target_id",
-        )
-        if advice_row["evidence_role"] not in _EVIDENCE_ROLES:
-            raise AlignmentEvalError(
-                f"{context}.suggested_trace_edits[{index}].evidence_role is invalid"
-            )
-        forms = advice_row["supported_forms"]
-        if not isinstance(forms, list) or not forms:
-            raise AlignmentEvalError(
-                f"{context}.suggested_trace_edits[{index}].supported_forms is invalid"
-            )
-        _ordered_codes(
-            forms,
-            _DECLARATION_FORMS,
-            f"{context}.suggested_trace_edits[{index}].supported_forms",
-        )
-        if (
-            advice_row["review_warning"]
-            != "Advice is not evidence; review the source relation before editing."
-        ):
-            raise AlignmentEvalError(
-                f"{context}.suggested_trace_edits[{index}].review_warning is invalid"
-            )
-    matches = [
-        gold for gold in fixture.gold_candidates if gold["candidate_id"] == candidate_id
-    ]
-    if len(matches) != 1:
-        raise AlignmentEvalError(f"{context} has an unmatched or ambiguous gold row")
-    gold = matches[0]
-    for key in (
-        "candidate_kind",
-        "path",
-        "start_line",
-        "end_line",
-        "structural_locator",
-        "receipt",
-    ):
-        if row[key] != gold[key]:
-            raise AlignmentEvalError(f"{context}.{key} does not match exact gold")
+    _validate_candidate_relations(row, context)
+    _validate_trace_advice(row, context)
+    gold = _candidate_gold(row, candidate_id, fixture, context)
     return (
         {
             "candidate_id": candidate_id,
@@ -3575,7 +3579,112 @@ def _validate_task(
     ).validate()
 
 
-def _validate_candidate_runs(  # noqa: C901 approved [SC-17.1] RUFF-SUP-009 exception
+def _project_candidate_rows(
+    public_candidates: list[Any],
+    fixture: _FixtureDefinition,
+    obligation_id: str,
+    context: str,
+) -> tuple[
+    list[dict[str, Any]],
+    list[tuple[str, dict[str, Any], dict[str, Any]]],
+    set[tuple[str, str]],
+]:
+    reconstructed: list[dict[str, Any]] = []
+    surfaced: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    captured: set[tuple[str, str]] = set()
+    sort_rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    candidate_ids: set[str] = set()
+    for index, public in enumerate(public_candidates):
+        candidate_context = f"{context} output candidates[{index}]"
+        projection, gold = _candidate_projection(public, fixture, candidate_context)
+        candidate_id = cast(str, projection["candidate_id"])
+        if candidate_id in candidate_ids:
+            raise AlignmentEvalError(f"{context} candidate IDs must be unique")
+        candidate_ids.add(candidate_id)
+        reconstructed.append(projection)
+        sort_rows.append((projection, cast(dict[str, Any], public)))
+        captured.add((fixture.fixture_id, cast(str, gold["gold_id"])))
+        surfaced.append((fixture.fixture_id, projection, gold))
+    _validate_candidate_relationships(
+        cast(list[dict[str, Any]], public_candidates),
+        obligation_id,
+        f"{context} output candidates",
+    )
+    if sort_rows != sorted(
+        sort_rows, key=lambda item: _candidate_sort_key(item[0], item[1])
+    ):
+        raise AlignmentEvalError(f"{context} candidates are not in EVC-7 order")
+    return reconstructed, surfaced, captured
+
+
+def _validate_stored_candidates(
+    stored: object, reconstructed: list[dict[str, Any]], context: str
+) -> None:
+    if not isinstance(stored, list):
+        raise AlignmentEvalError(f"{context}.candidates must be an array")
+    for index, candidate in enumerate(stored):
+        _object(candidate, _CANDIDATE_PROJECTION_KEYS, f"{context}.candidates[{index}]")
+    if stored != reconstructed:
+        raise AlignmentEvalError(
+            f"{context}.candidates do not reconstruct from CLI output"
+        )
+    matched = [cast(str, row["matched_gold_id"]) for row in reconstructed]
+    if len(set(matched)) != len(matched):
+        raise AlignmentEvalError(
+            f"{context} candidate rows must match distinct gold rows"
+        )
+
+
+def _candidate_run_output(
+    result_base: Path,
+    fixture: _FixtureDefinition,
+    run: dict[str, Any],
+    context: str,
+) -> tuple[str, dict[str, Any], bytes, list[Any]]:
+    obligation_id = _nonblank(run["obligation_id"], f"{context}.obligation_id")
+    if obligation_id != fixture.task_obligation_id:
+        raise AlignmentEvalError(f"{context}.obligation_id is incorrect")
+    if run["source_tree_manifest_sha256"] != fixture.tree_manifest_sha256:
+        raise AlignmentEvalError(f"{context} source tree hash is incorrect")
+    _tree_rows_from_artifact(
+        result_base,
+        run["source_tree_manifest_path"],
+        run["source_tree_manifest_sha256"],
+        fixture.tree.root,
+        f"{context} source tree",
+    )
+    artifact = fixture.candidate_artifact
+    if artifact is None:
+        raise AlignmentEvalError(f"{context} fixture has no candidate artifact")
+    envelope, output_raw = _public_envelope(
+        result_base,
+        run["output_path"],
+        run["output_sha256"],
+        f"{context} output",
+        expected_snapshot=cast(dict[str, object], artifact["snapshot"]),
+    )
+    if envelope["operation"] != "obligation.find_evidence":
+        raise AlignmentEvalError(f"{context} output must be obligation.find_evidence")
+    result = _object(
+        envelope["result"],
+        {"obligation_id", "candidates", "next_cursor"},
+        f"{context} output.result",
+    )
+    if result["obligation_id"] != obligation_id:
+        raise AlignmentEvalError(f"{context} output obligation_id is incorrect")
+    if result["next_cursor"] is not None:
+        raise AlignmentEvalError(f"{context} candidate output must be complete")
+    public_candidates = result["candidates"]
+    if not isinstance(public_candidates, list):
+        raise AlignmentEvalError(f"{context} output candidates must be an array")
+    if public_candidates != artifact["candidates"]:
+        raise AlignmentEvalError(
+            f"{context} candidates differ from production-derived preregistration"
+        )
+    return obligation_id, envelope, output_raw, public_candidates
+
+
+def _validate_candidate_runs(
     result_base: Path,
     phase: _PhaseManifest,
     value: object,
@@ -3598,92 +3707,15 @@ def _validate_candidate_runs(  # noqa: C901 approved [SC-17.1] RUFF-SUP-009 exce
         run = _object(item, _CANDIDATE_RUN_KEYS, context)
         if run["fixture_id"] != fixture.fixture_id:
             raise AlignmentEvalError(f"{context}.fixture_id is out of order")
-        obligation_id = _nonblank(run["obligation_id"], f"{context}.obligation_id")
-        if obligation_id != fixture.task_obligation_id:
-            raise AlignmentEvalError(f"{context}.obligation_id is incorrect")
-        if run["source_tree_manifest_sha256"] != fixture.tree_manifest_sha256:
-            raise AlignmentEvalError(f"{context} source tree hash is incorrect")
-        _tree_rows_from_artifact(
-            result_base,
-            run["source_tree_manifest_path"],
-            run["source_tree_manifest_sha256"],
-            fixture.tree.root,
-            f"{context} source tree",
+        obligation_id, envelope, output_raw, public_candidates = _candidate_run_output(
+            result_base, fixture, run, context
         )
-        artifact = fixture.candidate_artifact
-        if artifact is None:
-            raise AlignmentEvalError(f"{context} fixture has no candidate artifact")
-        expected_snapshot = cast(dict[str, object], artifact["snapshot"])
-        envelope, output_raw = _public_envelope(
-            result_base,
-            run["output_path"],
-            run["output_sha256"],
-            f"{context} output",
-            expected_snapshot=expected_snapshot,
+        reconstructed, run_surfaced, run_captured = _project_candidate_rows(
+            public_candidates, fixture, obligation_id, context
         )
-        if envelope["operation"] != "obligation.find_evidence":
-            raise AlignmentEvalError(
-                f"{context} output must be obligation.find_evidence"
-            )
-        result = _object(
-            envelope["result"],
-            {"obligation_id", "candidates", "next_cursor"},
-            f"{context} output.result",
-        )
-        if result["obligation_id"] != obligation_id:
-            raise AlignmentEvalError(f"{context} output obligation_id is incorrect")
-        if result["next_cursor"] is not None:
-            raise AlignmentEvalError(f"{context} candidate output must be complete")
-        public_candidates = result["candidates"]
-        if not isinstance(public_candidates, list):
-            raise AlignmentEvalError(f"{context} output candidates must be an array")
-        if public_candidates != artifact["candidates"]:
-            raise AlignmentEvalError(
-                f"{context} candidates differ from production-derived preregistration"
-            )
-        reconstructed: list[dict[str, Any]] = []
-        sort_rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
-        candidate_ids: set[str] = set()
-        for candidate_index, public in enumerate(public_candidates):
-            candidate_context = f"{context} output candidates[{candidate_index}]"
-            projection, gold = _candidate_projection(public, fixture, candidate_context)
-            candidate_id = cast(str, projection["candidate_id"])
-            if candidate_id in candidate_ids:
-                raise AlignmentEvalError(f"{context} candidate IDs must be unique")
-            candidate_ids.add(candidate_id)
-            reconstructed.append(projection)
-            sort_rows.append((projection, cast(dict[str, Any], public)))
-            captured.add((fixture.fixture_id, cast(str, gold["gold_id"])))
-            surfaced.append((fixture.fixture_id, projection, gold))
-        _validate_candidate_relationships(
-            cast(list[dict[str, Any]], public_candidates),
-            obligation_id,
-            f"{context} output candidates",
-        )
-        if sort_rows != sorted(
-            sort_rows, key=lambda item: _candidate_sort_key(item[0], item[1])
-        ):
-            raise AlignmentEvalError(f"{context} candidates are not in EVC-7 order")
-        stored = run["candidates"]
-        if not isinstance(stored, list):
-            raise AlignmentEvalError(f"{context}.candidates must be an array")
-        for candidate_index, candidate in enumerate(stored):
-            _object(
-                candidate,
-                _CANDIDATE_PROJECTION_KEYS,
-                f"{context}.candidates[{candidate_index}]",
-            )
-        if stored != reconstructed:
-            raise AlignmentEvalError(
-                f"{context}.candidates do not reconstruct from CLI output"
-            )
-        matched_gold_ids = [
-            cast(str, projection["matched_gold_id"]) for projection in reconstructed
-        ]
-        if len(set(matched_gold_ids)) != len(matched_gold_ids):
-            raise AlignmentEvalError(
-                f"{context} candidate rows must match distinct gold rows"
-            )
+        surfaced.extend(run_surfaced)
+        captured.update(run_captured)
+        _validate_stored_candidates(run["candidates"], reconstructed, context)
         bindings[fixture.fixture_id] = _CandidateRunBinding(
             fixture_id=fixture.fixture_id,
             obligation_id=obligation_id,

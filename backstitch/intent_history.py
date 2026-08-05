@@ -122,7 +122,187 @@ class IntentRevisionProjector:
         return state
 
 
-def build_intent_revision_state(  # noqa: C901 approved [SC-17.1] RUFF-SUP-047 exception
+def _revision_definitions(
+    snapshot: RepositorySnapshot,
+    profile: ProfileConfig,
+    python_parse_memo: dict[tuple[str, str], Any] | None,
+) -> list[CoverageDefinition]:
+    paths = tuple(
+        row.path
+        for row in snapshot.files
+        if row.path.endswith(".py")
+        and any(
+            PurePosixPath(row.path).is_relative_to(PurePosixPath(root))
+            for root in profile.code_roots
+        )
+    )
+    module_names = resolved_python_module_names(paths, profile, snapshot)
+    definitions: list[CoverageDefinition] = []
+    for path in paths:
+        inventory = python_definition_inventory_bytes(
+            snapshot.read_bytes(path),
+            rel_path=path,
+            module_name=module_names[path],
+            parse_memo=python_parse_memo,
+        )
+        if inventory is None:
+            continue
+        is_test = any(
+            PurePosixPath(path).is_relative_to(PurePosixPath(root))
+            for root in profile.test_roots
+        )
+        definitions.extend(
+            coverage_definitions_from_python_inventory(
+                inventory,
+                role="test" if is_test else "production",
+                tree=_longest_root(path, profile.code_roots),
+            )
+        )
+    return definitions
+
+
+def _revision_sections(
+    snapshot: RepositorySnapshot, report: Any
+) -> tuple[dict[tuple[str, str], str], dict[tuple[str, str], tuple[str, int]]]:
+    hashes: dict[tuple[str, str], str] = {}
+    rows: dict[tuple[str, str], tuple[str, int]] = {}
+    paths = sorted({item.path for item in report.spec_sections})
+    for path in paths:
+        source = snapshot.read_bytes(path)
+        parsed = parse_markdown_spec_bytes(source, path)
+        for section_id, start_line, end_line in parsed.section_spans:
+            projection, digest = section_projection_hash(
+                source,
+                section_start_line=start_line,
+                section_end_line=end_line,
+                mapping_block_spans=parsed.mapping_block_spans,
+                section_id=section_id,
+            )
+            hashes[(path, section_id)] = digest
+            rows[(path, section_id)] = (digest, len(projection))
+    return hashes, rows
+
+
+def _edge_owners(
+    report: Any,
+    definitions: Sequence[CoverageDefinition],
+    classified_by_id: Mapping[str, Any],
+) -> tuple[dict[str, tuple[str, str]], dict[str, str]]:
+    sections: dict[str, tuple[str, str]] = {}
+    owners: dict[str, str] = {}
+    for edge in report.edges:
+        for definition in definitions:
+            if definition.path != edge.code_path:
+                continue
+            edge_id = edge_identity(
+                edge.spec_path,
+                edge.section_id,
+                edge.code_path,
+                definition.structural_locator,
+            )
+            if edge_id in classified_by_id[definition.definition_id].governing_edge_ids:
+                sections[edge_id] = (edge.spec_path, edge.section_id)
+                owners[edge_id] = definition.definition_id
+    return sections, owners
+
+
+def _connected_tests(
+    report: Any,
+    definitions: Sequence[CoverageDefinition],
+    classified: Sequence[Any],
+    edge_sections: Mapping[str, tuple[str, str]],
+    section_hashes: Mapping[tuple[str, str], str],
+) -> tuple[dict[tuple[str, str], str], dict[tuple[str, str], set[str]]]:
+    connected: dict[tuple[str, str], set[tuple[str, str]]] = {
+        key: set() for key in section_hashes
+    }
+    paths: dict[tuple[str, str], set[str]] = {key: set() for key in section_hashes}
+    for item in classified:
+        if item.definition.role != "test":
+            continue
+        for edge_id in item.governing_edge_ids:
+            section = edge_sections.get(edge_id)
+            if section is not None:
+                connected.setdefault(section, set()).add(
+                    (
+                        item.definition.definition_id,
+                        item.definition.source_projection_sha256,
+                    )
+                )
+                paths.setdefault(section, set()).add(item.definition.path)
+    invariant_sections = {
+        item.invariant_id: (item.path, item.section_id)
+        for item in report.invariants
+        if item.declaration_kind == "spec" and item.section_id is not None
+    }
+    definitions_by_location = {
+        (item.path, item.qualname, item.start_line, item.end_line): item
+        for item in definitions
+    }
+    for binding in report.binds:
+        section = invariant_sections.get(binding.invariant_id)
+        definition = definitions_by_location.get(
+            (
+                binding.test_path,
+                binding.test_symbol,
+                binding.start_line,
+                binding.end_line,
+            )
+        )
+        if section is not None and definition is not None:
+            connected.setdefault(section, set()).add(
+                (definition.definition_id, definition.source_projection_sha256)
+            )
+            paths.setdefault(section, set()).add(definition.path)
+    return (
+        {key: connected_test_identity(tuple(rows)) for key, rows in connected.items()},
+        paths,
+    )
+
+
+def _revision_drift_states(
+    classified: Sequence[Any],
+    edge_sections: Mapping[str, tuple[str, str]],
+    edge_owners: Mapping[str, str],
+    section_hashes: Mapping[tuple[str, str], str],
+    mapping_hashes: Mapping[tuple[str, str], str],
+    connected_hashes: Mapping[tuple[str, str], str],
+    connected_paths: Mapping[tuple[str, str], set[str]],
+    requirement_ids: Mapping[tuple[str, str], str],
+) -> tuple[dict[str, DriftState], dict[str, set[str]]]:
+    states: dict[str, DriftState] = {}
+    influence_paths: dict[str, set[str]] = {}
+    for item in classified:
+        if item.definition.role != "production":
+            continue
+        for edge_id in item.governing_edge_ids:
+            if edge_owners.get(edge_id) != item.definition.definition_id:
+                continue
+            section = edge_sections.get(edge_id)
+            if (
+                section is None
+                or section not in section_hashes
+                or section not in requirement_ids
+            ):
+                continue
+            states[edge_id] = DriftState(
+                edge_id=edge_id,
+                requirement_id=requirement_ids[section],
+                definition_id=item.definition.definition_id,
+                section_hash=section_hashes[section],
+                mapping_hash=mapping_hashes[section],
+                implementation_hash=item.definition.source_projection_sha256,
+                connected_test_hash=connected_hashes[section],
+            )
+            influence_paths[edge_id] = {
+                section[0],
+                item.definition.path,
+                *connected_paths.get(section, set()),
+            }
+    return states, influence_paths
+
+
+def build_intent_revision_state(
     blobs: Mapping[str, bytes],
     *,
     repo_root: Path,
@@ -142,63 +322,12 @@ def build_intent_revision_state(  # noqa: C901 approved [SC-17.1] RUFF-SUP-047 e
         markdown_parse_memo=markdown_parse_memo,
         python_parse_memo=python_parse_memo,
     )
-    python_paths = tuple(
-        row.path
-        for row in snapshot.files
-        if row.path.endswith(".py")
-        and any(
-            PurePosixPath(row.path).is_relative_to(PurePosixPath(root))
-            for root in profile.code_roots
-        )
-    )
-    module_names = resolved_python_module_names(python_paths, profile, snapshot)
-    definitions: list[CoverageDefinition] = []
-    for path in python_paths:
-        raw = snapshot.read_bytes(path)
-        inventory = python_definition_inventory_bytes(
-            raw,
-            rel_path=path,
-            module_name=module_names[path],
-            parse_memo=python_parse_memo,
-        )
-        if inventory is None:
-            continue
-        definitions.extend(
-            coverage_definitions_from_python_inventory(
-                inventory,
-                role=(
-                    "test"
-                    if any(
-                        PurePosixPath(path).is_relative_to(PurePosixPath(root))
-                        for root in profile.test_roots
-                    )
-                    else "production"
-                ),
-                tree=_longest_root(path, profile.code_roots),
-            )
-        )
+    definitions = _revision_definitions(snapshot, profile, python_parse_memo)
     # Revision history needs edge ownership and requirement identities only.
     # Rungs, exemptions, and inherited accounting are current-policy report facts;
     # they must not change the exact COV-8 drift preimages reconstructed here.
     result = classify_intent_coverage(tuple(definitions), report)
-    parsed_specs = {
-        path: parse_markdown_spec_bytes(snapshot.read_bytes(path), path)
-        for path in sorted({item.path for item in report.spec_sections})
-    }
-    section_hashes: dict[tuple[str, str], str] = {}
-    section_rows: dict[tuple[str, str], tuple[str, int]] = {}
-    for path, parsed in parsed_specs.items():
-        source = snapshot.read_bytes(path)
-        for section_id, start_line, end_line in parsed.section_spans:
-            projection, digest = section_projection_hash(
-                source,
-                section_start_line=start_line,
-                section_end_line=end_line,
-                mapping_block_spans=parsed.mapping_block_spans,
-                section_id=section_id,
-            )
-            section_hashes[(path, section_id)] = digest
-            section_rows[(path, section_id)] = (digest, len(projection))
+    section_hashes, section_rows = _revision_sections(snapshot, report)
     mapping_hashes = {
         key: mapping_identity(
             tuple(
@@ -212,106 +341,30 @@ def build_intent_revision_state(  # noqa: C901 approved [SC-17.1] RUFF-SUP-047 e
     classified_by_id = {
         item.definition.definition_id: item for item in result.definitions
     }
-    edge_sections: dict[str, tuple[str, str]] = {}
-    edge_owner_definitions: dict[str, str] = {}
-    for edge in report.edges:
-        for definition in definitions:
-            if definition.path != edge.code_path:
-                continue
-            edge_id = edge_identity(
-                edge.spec_path,
-                edge.section_id,
-                edge.code_path,
-                definition.structural_locator,
-            )
-            if edge_id in classified_by_id[definition.definition_id].governing_edge_ids:
-                edge_sections[edge_id] = (edge.spec_path, edge.section_id)
-                edge_owner_definitions[edge_id] = definition.definition_id
-    connected: dict[tuple[str, str], set[tuple[str, str]]] = {
-        key: set() for key in section_hashes
-    }
-    connected_paths: dict[tuple[str, str], set[str]] = {
-        key: set() for key in section_hashes
-    }
-    for item in result.definitions:
-        if item.definition.role != "test":
-            continue
-        for governing_edge in item.governing_edge_ids:
-            section = edge_sections.get(governing_edge)
-            if section is not None:
-                connected.setdefault(section, set()).add(
-                    (
-                        item.definition.definition_id,
-                        item.definition.source_projection_sha256,
-                    )
-                )
-                connected_paths.setdefault(section, set()).add(item.definition.path)
-    invariant_sections = {
-        item.invariant_id: (item.path, item.section_id)
-        for item in report.invariants
-        if item.declaration_kind == "spec" and item.section_id is not None
-    }
-    definitions_by_path_symbol = {
-        (item.path, item.qualname, item.start_line, item.end_line): item
-        for item in definitions
-    }
-    for binding in report.binds:
-        section = invariant_sections.get(binding.invariant_id)
-        bound_definition = definitions_by_path_symbol.get(
-            (
-                binding.test_path,
-                binding.test_symbol,
-                binding.start_line,
-                binding.end_line,
-            )
-        )
-        if section is not None and bound_definition is not None:
-            connected.setdefault(section, set()).add(
-                (
-                    bound_definition.definition_id,
-                    bound_definition.source_projection_sha256,
-                )
-            )
-            connected_paths.setdefault(section, set()).add(bound_definition.path)
-    connected_hashes = {
-        key: connected_test_identity(tuple(rows)) for key, rows in connected.items()
-    }
+    edge_sections, edge_owner_definitions = _edge_owners(
+        report, definitions, classified_by_id
+    )
+    connected_hashes, connected_paths = _connected_tests(
+        report,
+        definitions,
+        result.definitions,
+        edge_sections,
+        section_hashes,
+    )
     requirement_ids = {
         (item.path, item.section_id): item.requirement_id
         for item in result.requirements
     }
-    drift_states: dict[str, DriftState] = {}
-    edge_influence_paths: dict[str, set[str]] = {}
-    for item in result.definitions:
-        if item.definition.role != "production":
-            continue
-        for governing_edge in item.governing_edge_ids:
-            if (
-                edge_owner_definitions.get(governing_edge)
-                != item.definition.definition_id
-            ):
-                continue
-            section = edge_sections.get(governing_edge)
-            if (
-                section is None
-                or section not in section_hashes
-                or section not in requirement_ids
-            ):
-                continue
-            drift_states[governing_edge] = DriftState(
-                edge_id=governing_edge,
-                requirement_id=requirement_ids[section],
-                definition_id=item.definition.definition_id,
-                section_hash=section_hashes[section],
-                mapping_hash=mapping_hashes[section],
-                implementation_hash=item.definition.source_projection_sha256,
-                connected_test_hash=connected_hashes[section],
-            )
-            edge_influence_paths[governing_edge] = {
-                section[0],
-                item.definition.path,
-                *connected_paths.get(section, set()),
-            }
+    drift_states, edge_influence_paths = _revision_drift_states(
+        result.definitions,
+        edge_sections,
+        edge_owner_definitions,
+        section_hashes,
+        mapping_hashes,
+        connected_hashes,
+        connected_paths,
+        requirement_ids,
+    )
     path_edges: dict[str, list[str]] = {}
     for governing_edge, paths in edge_influence_paths.items():
         for path in paths:

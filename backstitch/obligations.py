@@ -1173,7 +1173,204 @@ def _validate_required_roles(
         )
 
 
-def build_obligation_inventory(  # noqa: C901 approved [SC-17.1] RUFF-SUP-055 exception
+@dataclass(frozen=True, slots=True)
+class _ObligationSources:
+    sections: tuple[SpecSection, ...]
+    invariants: tuple[InvariantDeclaration, ...]
+    section_index: Mapping[tuple[str, str], SpecSection]
+    ordinary_ids: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _ObligationProjection:
+    report: Report
+    profile: ProfileConfig
+    required_roles: tuple[Literal["implementation", "test"], ...]
+    section_meta: frozenset[tuple[str, str]]
+    meta_spec_globs: tuple[str, ...]
+    skipped_ids: frozenset[str]
+    candidate_counts: Mapping[str, CandidateCounts]
+    source_end_lines: Mapping[str, int]
+    atomic_targets: frozenset[tuple[str, str | None]]
+    atomic_code_ids: frozenset[str]
+
+
+def _obligation_sources(report: Report) -> _ObligationSources:
+    duplicate_section_ids = {
+        issue.section_id
+        for issue in report.issues
+        if issue.code == "SPEC_SECTION_DUPLICATE" and issue.section_id is not None
+    }
+    colliding_invariant_ids = {
+        issue.invariant_id
+        for issue in report.issues
+        if issue.code == "INVARIANT_DUPLICATE" and issue.invariant_id is not None
+    }
+    sections = tuple(
+        section
+        for section in report.spec_sections
+        if section.section_id not in duplicate_section_ids | colliding_invariant_ids
+    )
+    invariants = tuple(
+        declaration
+        for declaration in report.invariants
+        if declaration.invariant_id not in colliding_invariant_ids
+    )
+    section_index = {(item.path, item.section_id): item for item in sections}
+    ordinary_ids = frozenset(
+        {_section_id(section) for section in sections}
+        | {_invariant_id(declaration) for declaration in invariants}
+    )
+    return _ObligationSources(sections, invariants, section_index, ordinary_ids)
+
+
+def _suppression_inputs(
+    declarations: tuple[SuppressionDeclaration, ...],
+    decisions: tuple[SuppressionDecision, ...],
+) -> tuple[
+    Mapping[str, SuppressionDeclaration],
+    Mapping[str, tuple[SuppressionDecision, ...]],
+]:
+    by_reference = {declaration.reference: declaration for declaration in declarations}
+    grouped: dict[str, list[SuppressionDecision]] = {}
+    for decision in decisions:
+        if decision.declaration is None or decision.rule is None:
+            continue
+        if decision.rule.declaration != decision.declaration:
+            raise ValueError("suppression decision rule/declaration mismatch")
+        if decision.declaration not in by_reference:
+            raise ValueError(
+                "suppression decision names an unresolved declaration: "
+                f"{decision.declaration}"
+            )
+        grouped.setdefault(decision.declaration, []).append(decision)
+    return by_reference, {key: tuple(value) for key, value in grouped.items()}
+
+
+def _validate_projection_keys(
+    projection: _ObligationProjection,
+    ordinary_ids: frozenset[str],
+    suppression_ids: frozenset[str],
+) -> None:
+    unknown_skips = projection.skipped_ids - (ordinary_ids | suppression_ids)
+    if unknown_skips:
+        rendered = ", ".join(sorted(unknown_skips))
+        raise ValueError(f"skipped obligation IDs are not addressable: {rendered}")
+    suppression_skips = projection.skipped_ids & suppression_ids
+    if suppression_skips:
+        rendered = ", ".join(sorted(suppression_skips))
+        raise ValueError(f"suppression obligations cannot be skipped: {rendered}")
+    unknown_counts = set(projection.candidate_counts) - ordinary_ids
+    if unknown_counts:
+        rendered = ", ".join(sorted(unknown_counts))
+        raise ValueError(f"candidate counts name unknown obligations: {rendered}")
+
+
+def _section_records(
+    sources: _ObligationSources,
+    projection: _ObligationProjection,
+) -> list[ObligationRecord]:
+    records: list[ObligationRecord] = []
+    for section in sources.sections:
+        obligation_id = _section_id(section)
+        end_line = projection.source_end_lines.get(obligation_id, section.line)
+        if end_line < section.line:
+            raise ValueError(f"source end line precedes start for {obligation_id}")
+        records.append(
+            _section_record(
+                projection.report,
+                section,
+                profile=projection.profile,
+                required_roles=projection.required_roles,
+                section_meta=projection.section_meta,
+                meta_spec_globs=projection.meta_spec_globs,
+                skipped=obligation_id in projection.skipped_ids,
+                candidate_counts=projection.candidate_counts.get(
+                    obligation_id, CandidateCounts()
+                ),
+                end_line=end_line,
+            )
+        )
+    return records
+
+
+def _invariant_records(
+    sources: _ObligationSources,
+    projection: _ObligationProjection,
+) -> list[ObligationRecord]:
+    records: list[ObligationRecord] = []
+    for declaration in sources.invariants:
+        obligation_id = _invariant_id(declaration)
+        skipped = obligation_id in projection.skipped_ids
+        if skipped and declaration.declaration_kind == "code":
+            raise ValueError(
+                f"code-only invariant {obligation_id} cannot carry a source skip"
+            )
+        end_line = projection.source_end_lines.get(obligation_id, declaration.line)
+        if end_line < declaration.line:
+            raise ValueError(f"source end line precedes start for {obligation_id}")
+        records.append(
+            _invariant_record(
+                projection.report,
+                declaration,
+                sections=sources.section_index,
+                profile=projection.profile,
+                section_meta=projection.section_meta,
+                meta_spec_globs=projection.meta_spec_globs,
+                skipped=skipped,
+                atomic_targets=projection.atomic_targets,
+                atomic_code_invariant_ids=projection.atomic_code_ids,
+                candidate_counts=projection.candidate_counts.get(
+                    obligation_id, CandidateCounts()
+                ),
+                end_line=end_line,
+            )
+        )
+    return records
+
+
+def _suppression_records(
+    declarations: Mapping[str, SuppressionDeclaration],
+    decisions_by_reference: Mapping[str, tuple[SuppressionDecision, ...]],
+) -> list[ObligationRecord]:
+    records: list[ObligationRecord] = []
+    for reference, decisions in decisions_by_reference.items():
+        declaration = declarations[reference]
+        rules_by_bytes = {
+            canonical_json_bytes(suppression_rule_row(decision.rule)): decision.rule
+            for decision in decisions
+            if decision.rule is not None
+        }
+        rules = tuple(rules_by_bytes[key] for key in sorted(rules_by_bytes))
+        records.append(
+            ObligationRecord(
+                obligation_id=f"suppression::{reference}",
+                kind="suppression",
+                path=declaration.path,
+                start_line=declaration.start_line,
+                end_line=declaration.end_line,
+                title=declaration.owner_title,
+                intent_state="identified",
+                alignment_state="complete",
+                disposition="evaluate",
+                obligation_rung="active",
+                gate_state="executable",
+                required_roles=(),
+                evidence_counts=EvidenceCounts(),
+                candidate_counts=CandidateCounts(),
+                blocking_reasons=(),
+                next_actions=("RUN_DETERMINISTIC_CHECK", "RUN_CURRENT_ANALYSIS"),
+                suppression=SuppressionObligationDetail(
+                    declaration=declaration,
+                    rules=rules,
+                    matched_issue_count=len(decisions),
+                ),
+            )
+        )
+    return records
+
+
+def build_obligation_inventory(
     report: Report,
     *,
     profile: ProfileConfig,
@@ -1210,150 +1407,27 @@ def build_obligation_inventory(  # noqa: C901 approved [SC-17.1] RUFF-SUP-055 ex
     source_end_lines = source_end_lines or {}
     unaddressable_excerpts = unaddressable_excerpts or {}
 
-    duplicate_section_ids = {
-        issue.section_id
-        for issue in report.issues
-        if issue.code == "SPEC_SECTION_DUPLICATE" and issue.section_id is not None
-    }
-    colliding_invariant_ids = {
-        issue.invariant_id
-        for issue in report.issues
-        if issue.code == "INVARIANT_DUPLICATE" and issue.invariant_id is not None
-    }
-    invalid_section_ids = duplicate_section_ids | colliding_invariant_ids
-    invalid_invariant_ids = colliding_invariant_ids
-
-    valid_sections = tuple(
-        section
-        for section in report.spec_sections
-        if section.section_id not in invalid_section_ids
+    projection = _ObligationProjection(
+        report=report,
+        profile=profile,
+        required_roles=section_required_roles,
+        section_meta=section_meta,
+        meta_spec_globs=meta_spec_globs,
+        skipped_ids=skipped_obligation_ids,
+        candidate_counts=candidate_counts,
+        source_end_lines=source_end_lines,
+        atomic_targets=atomic_invariant_targets,
+        atomic_code_ids=atomic_code_invariant_ids,
     )
-    section_index = {
-        (section.path, section.section_id): section for section in valid_sections
-    }
-    valid_invariants = tuple(
-        declaration
-        for declaration in report.invariants
-        if declaration.invariant_id not in invalid_invariant_ids
+    sources = _obligation_sources(report)
+    declarations, decisions = _suppression_inputs(
+        suppression_declarations, suppression_decisions
     )
-
-    ordinary_ids = {_section_id(section) for section in valid_sections} | {
-        _invariant_id(declaration) for declaration in valid_invariants
-    }
-    declarations_by_reference = {
-        declaration.reference: declaration for declaration in suppression_declarations
-    }
-    decisions_by_reference: dict[str, list[SuppressionDecision]] = {}
-    for decision in suppression_decisions:
-        if decision.declaration is None or decision.rule is None:
-            continue
-        if decision.rule.declaration != decision.declaration:
-            raise ValueError("suppression decision rule/declaration mismatch")
-        if decision.declaration not in declarations_by_reference:
-            raise ValueError(
-                "suppression decision names an unresolved declaration: "
-                f"{decision.declaration}"
-            )
-        decisions_by_reference.setdefault(decision.declaration, []).append(decision)
-    suppression_ids = {
-        f"suppression::{reference}" for reference in decisions_by_reference
-    }
-    known_ids = ordinary_ids | suppression_ids
-    unknown_skips = skipped_obligation_ids - known_ids
-    if unknown_skips:
-        rendered = ", ".join(sorted(unknown_skips))
-        raise ValueError(f"skipped obligation IDs are not addressable: {rendered}")
-    suppression_skips = skipped_obligation_ids & suppression_ids
-    if suppression_skips:
-        rendered = ", ".join(sorted(suppression_skips))
-        raise ValueError(f"suppression obligations cannot be skipped: {rendered}")
-    unknown_counts = set(candidate_counts) - ordinary_ids
-    if unknown_counts:
-        rendered = ", ".join(sorted(unknown_counts))
-        raise ValueError(f"candidate counts name unknown obligations: {rendered}")
-
-    records: list[ObligationRecord] = []
-    for section in valid_sections:
-        obligation_id = _section_id(section)
-        end_line = source_end_lines.get(obligation_id, section.line)
-        if end_line < section.line:
-            raise ValueError(f"source end line precedes start for {obligation_id}")
-        records.append(
-            _section_record(
-                report,
-                section,
-                profile=profile,
-                required_roles=section_required_roles,
-                section_meta=section_meta,
-                meta_spec_globs=meta_spec_globs,
-                skipped=obligation_id in skipped_obligation_ids,
-                candidate_counts=candidate_counts.get(obligation_id, CandidateCounts()),
-                end_line=end_line,
-            )
-        )
-
-    for declaration in valid_invariants:
-        obligation_id = _invariant_id(declaration)
-        skipped = obligation_id in skipped_obligation_ids
-        if skipped and declaration.declaration_kind == "code":
-            raise ValueError(
-                f"code-only invariant {obligation_id} cannot carry a source skip"
-            )
-        end_line = source_end_lines.get(obligation_id, declaration.line)
-        if end_line < declaration.line:
-            raise ValueError(f"source end line precedes start for {obligation_id}")
-        records.append(
-            _invariant_record(
-                report,
-                declaration,
-                sections=section_index,
-                profile=profile,
-                section_meta=section_meta,
-                meta_spec_globs=meta_spec_globs,
-                skipped=skipped,
-                atomic_targets=atomic_invariant_targets,
-                atomic_code_invariant_ids=atomic_code_invariant_ids,
-                candidate_counts=candidate_counts.get(obligation_id, CandidateCounts()),
-                end_line=end_line,
-            )
-        )
-
-    for reference, decisions in decisions_by_reference.items():
-        suppression_declaration = declarations_by_reference[reference]
-        rules_by_bytes = {
-            canonical_json_bytes(suppression_rule_row(decision.rule)): decision.rule
-            for decision in decisions
-            if decision.rule is not None
-        }
-        rules = tuple(rules_by_bytes[key] for key in sorted(rules_by_bytes))
-        records.append(
-            ObligationRecord(
-                obligation_id=f"suppression::{reference}",
-                kind="suppression",
-                path=suppression_declaration.path,
-                start_line=suppression_declaration.start_line,
-                end_line=suppression_declaration.end_line,
-                title=suppression_declaration.owner_title,
-                intent_state="identified",
-                alignment_state="complete",
-                disposition="evaluate",
-                obligation_rung="active",
-                gate_state="executable",
-                required_roles=(),
-                evidence_counts=EvidenceCounts(),
-                candidate_counts=CandidateCounts(),
-                blocking_reasons=(),
-                next_actions=(
-                    "RUN_DETERMINISTIC_CHECK",
-                    "RUN_CURRENT_ANALYSIS",
-                ),
-                suppression=SuppressionObligationDetail(
-                    declaration=suppression_declaration,
-                    rules=rules,
-                    matched_issue_count=len(decisions),
-                ),
-            )
-        )
+    suppression_ids = frozenset(f"suppression::{key}" for key in decisions)
+    _validate_projection_keys(projection, sources.ordinary_ids, suppression_ids)
+    records = _section_records(sources, projection)
+    records.extend(_invariant_records(sources, projection))
+    records.extend(_suppression_records(declarations, decisions))
 
     records.sort(
         key=lambda item: (item.path, item.start_line, item.kind, item.obligation_id)

@@ -2479,6 +2479,108 @@ def _analyze_config_problems(  # noqa: C901 approved [SC-17.1] RUFF-SUP-079 exce
     return problems
 
 
+@dataclass(slots=True)
+class _AnalyzerCallOwner:
+    """Own lazy adapter construction and one analyzer provider-call budget."""
+
+    adapter_factory: AdapterFactory | None
+    runtime_deadline: float | None
+    provider_call_budget: ProviderCallBudget | None
+    provider_call_packet_ids: frozenset[str] | None
+    kind_counts: dict[str, dict[str, int]]
+    adapter: ProviderAdapter | None = None
+    provider_calls: int = 0
+    runtime_exceeded: bool = False
+
+    def _reserve(self) -> bool:
+        if self.provider_call_budget is None:
+            return False
+        if not self.provider_call_budget.reserve():
+            raise _AnalysisFailure(
+                "budget",
+                "budget_exceeded",
+                "maximum semantic provider calls exceeded during execution",
+            )
+        return True
+
+    def _release(self, reserved: bool) -> None:
+        if reserved:
+            assert self.provider_call_budget is not None
+            self.provider_call_budget.release()
+
+    def _get_adapter(self, reserved: bool) -> ProviderAdapter:
+        if self.adapter is not None:
+            return self.adapter
+        if self.adapter_factory is None:
+            self._release(reserved)
+            raise _AnalysisFailure(
+                "provider", "provider_failure", "no provider adapter is available"
+            )
+        try:
+            self.adapter = self.adapter_factory()
+        except Exception as exc:  # noqa: BLE001 - external adapter boundary
+            self._release(reserved)
+            detail = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+            raise _AnalysisFailure(
+                "provider",
+                "provider_failure",
+                f"adapter construction failed: {detail}",
+            ) from exc
+        return self.adapter
+
+    def _deadline_reached(self) -> bool:
+        return (
+            self.runtime_deadline is not None
+            and time.monotonic() >= self.runtime_deadline
+        )
+
+    def call(
+        self,
+        packet: dict[str, Any],
+        request: bytes,
+    ) -> ProviderCallResult:
+        if self.runtime_exceeded or self._deadline_reached():
+            self.runtime_exceeded = True
+            raise _AnalysisFailure(
+                "budget",
+                "budget_exceeded",
+                "maximum semantic analysis runtime exceeded",
+            )
+        if (
+            self.provider_call_packet_ids is not None
+            and packet["packet_id"] not in self.provider_call_packet_ids
+        ):
+            raise _AnalysisFailure(
+                "budget",
+                "budget_exceeded",
+                "unplanned provider call is outside the conservative cost preflight",
+            )
+        reserved = self._reserve()
+        adapter = self._get_adapter(reserved)
+        if self._deadline_reached():
+            self.runtime_exceeded = True
+            self._release(reserved)
+            raise _AnalysisFailure(
+                "budget",
+                "budget_exceeded",
+                "maximum semantic analysis runtime exceeded before provider call",
+            )
+        self.provider_calls += 1
+        packet_kind = cast(SemanticPacketKind, packet["kind"])
+        self.kind_counts["provider_calls"][packet_kind] += 1
+        try:
+            response = adapter(request.decode("utf-8"))
+        except _AnalysisFailure:
+            raise
+        except Exception as exc:  # noqa: BLE001 - external provider boundary
+            raise _AnalysisFailure(
+                "provider", "provider_failure", f"model call failed: {exc}"
+            ) from exc
+        if self._deadline_reached():
+            self.runtime_exceeded = True
+        return response
+
+
 def analyze_with_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-082 exception
     *,
     packets: Iterable[ValidatedSemanticPacket],
@@ -2505,9 +2607,7 @@ def analyze_with_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-082 exception
     selection_events: list[SemanticSelectionEvent] = []
     cache_hits = 0
     cache_misses = 0
-    provider_calls = 0
     kind_counts = _empty_analyzer_kind_counts()
-    runtime_exceeded = False
     rows = tuple(packet.to_dict() for packet in packet_list)
     problems = _analyze_config_problems(
         packet_list=packet_list,
@@ -2564,84 +2664,13 @@ def analyze_with_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-082 exception
                 0,
             )
 
-    adapter: ProviderAdapter | None = None
-
-    def call(  # noqa: C901 approved [SC-17.1] RUFF-SUP-083 exception
-        packet: dict[str, Any],
-        request: bytes,
-    ) -> ProviderCallResult:
-        nonlocal adapter, provider_calls, runtime_exceeded
-        if runtime_exceeded or (
-            runtime_deadline is not None and time.monotonic() >= runtime_deadline
-        ):
-            runtime_exceeded = True
-            raise _AnalysisFailure(
-                "budget",
-                "budget_exceeded",
-                "maximum semantic analysis runtime exceeded",
-            )
-        if (
-            provider_call_packet_ids is not None
-            and packet["packet_id"] not in provider_call_packet_ids
-        ):
-            raise _AnalysisFailure(
-                "budget",
-                "budget_exceeded",
-                "unplanned provider call is outside the conservative cost preflight",
-            )
-        reserved = False
-        if provider_call_budget is not None:
-            if not provider_call_budget.reserve():
-                raise _AnalysisFailure(
-                    "budget",
-                    "budget_exceeded",
-                    "maximum semantic provider calls exceeded during execution",
-                )
-            reserved = True
-        if adapter is None:
-            if adapter_factory is None:
-                if reserved:
-                    assert provider_call_budget is not None
-                    provider_call_budget.release()
-                raise _AnalysisFailure(
-                    "provider", "provider_failure", "no provider adapter is available"
-                )
-            try:
-                adapter = adapter_factory()
-            except Exception as exc:  # noqa: BLE001 - external adapter boundary
-                if reserved:
-                    assert provider_call_budget is not None
-                    provider_call_budget.release()
-                detail = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
-                raise _AnalysisFailure(
-                    "provider",
-                    "provider_failure",
-                    f"adapter construction failed: {detail}",
-                ) from exc
-        if runtime_deadline is not None and time.monotonic() >= runtime_deadline:
-            runtime_exceeded = True
-            if reserved:
-                assert provider_call_budget is not None
-                provider_call_budget.release()
-            raise _AnalysisFailure(
-                "budget",
-                "budget_exceeded",
-                "maximum semantic analysis runtime exceeded before provider call",
-            )
-        provider_calls += 1
-        packet_kind = cast(SemanticPacketKind, packet["kind"])
-        kind_counts["provider_calls"][packet_kind] += 1
-        try:
-            response = adapter(request.decode("utf-8"))
-        except _AnalysisFailure:
-            raise
-        except Exception as exc:  # noqa: BLE001 - external provider boundary
-            raise _AnalysisFailure(
-                "provider", "provider_failure", f"model call failed: {exc}"
-            ) from exc
-        if runtime_deadline is not None and time.monotonic() >= runtime_deadline:
-            runtime_exceeded = True
-        return response
+    call_owner = _AnalyzerCallOwner(
+        adapter_factory=adapter_factory,
+        runtime_deadline=runtime_deadline,
+        provider_call_budget=provider_call_budget,
+        provider_call_packet_ids=provider_call_packet_ids,
+        kind_counts=kind_counts,
+    )
 
     for row, identity, frozen_request in zip(
         rows, frozen_identities, frozen_requests, strict=True
@@ -2649,7 +2678,7 @@ def analyze_with_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-082 exception
         packet_id = row["packet_id"]
         try:
             if cache_mode == "off":
-                response = call(row, frozen_request)
+                response = call_owner.call(row, frozen_request)
                 normalized, result_object = _normalize_provider_result(
                     row, identity, response, provider_identity
                 )
@@ -2689,7 +2718,7 @@ def analyze_with_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-082 exception
                     current_row: dict[str, Any] = row,
                     current_request: bytes = frozen_request,
                 ) -> ProviderCallResult:
-                    return call(current_row, current_request)
+                    return call_owner.call(current_row, current_request)
 
                 resolution = _resolve_cached_result(
                     cache_path=cache_path,
@@ -2746,7 +2775,7 @@ def analyze_with_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-082 exception
                 )
             )
 
-    if runtime_exceeded and not any(
+    if call_owner.runtime_exceeded and not any(
         problem.code == "budget_exceeded" for problem in problems
     ):
         problems.append(
@@ -2764,7 +2793,7 @@ def analyze_with_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-082 exception
         result_jsonl,
         cache_hits,
         cache_misses,
-        provider_calls,
+        call_owner.provider_calls,
         tuple(result_envelopes),
         tuple(selection_events),
         kind_counts,
@@ -3334,6 +3363,85 @@ def inspect_verification_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-085 ex
     )
 
 
+@dataclass(slots=True)
+class _VerifierCallOwner:
+    """Own lazy adapter construction and the verifier provider-call budget."""
+
+    adapter_factory: AdapterFactory | None
+    runtime_deadline: float | None
+    provider_call_budget: ProviderCallBudget | None
+    adapter: ProviderAdapter | None = None
+    calls: int = 0
+
+    def _reserve(self) -> bool:
+        if self.provider_call_budget is None:
+            return False
+        if not self.provider_call_budget.reserve():
+            raise _AnalysisFailure(
+                "budget", "budget_exceeded", "maximum verifier calls exceeded"
+            )
+        return True
+
+    def _release(self, reserved: bool) -> None:
+        if reserved:
+            assert self.provider_call_budget is not None
+            self.provider_call_budget.release()
+
+    def _get_adapter(self, reserved: bool) -> ProviderAdapter:
+        if self.adapter is not None:
+            return self.adapter
+        if self.adapter_factory is None:
+            self._release(reserved)
+            raise _AnalysisFailure(
+                "provider",
+                "provider_failure",
+                "no verifier adapter is available",
+            )
+        try:
+            self.adapter = self.adapter_factory()
+        except Exception as exc:  # noqa: BLE001 - external adapter boundary
+            self._release(reserved)
+            raise _AnalysisFailure(
+                "provider",
+                "provider_failure",
+                f"adapter construction failed: {exc}",
+            ) from exc
+        return self.adapter
+
+    def _deadline_reached(self) -> bool:
+        return (
+            self.runtime_deadline is not None
+            and time.monotonic() >= self.runtime_deadline
+        )
+
+    def call(self, item: VerificationWork) -> ProviderCallResult:
+        if self._deadline_reached():
+            raise _AnalysisFailure(
+                "budget", "budget_exceeded", "maximum verifier runtime exceeded"
+            )
+        reserved = self._reserve()
+        adapter = self._get_adapter(reserved)
+        self.calls += 1
+        try:
+            response = adapter(
+                verifier_request_bytes(
+                    item.request,
+                    prompt_bytes=item.identity.prompt_bytes,
+                ).decode("utf-8")
+            )
+        except Exception as exc:  # noqa: BLE001 - external provider boundary
+            raise _AnalysisFailure(
+                "provider", "provider_failure", f"verifier call failed: {exc}"
+            ) from exc
+        if self._deadline_reached():
+            raise _AnalysisFailure(
+                "budget",
+                "budget_exceeded",
+                "maximum verifier runtime exceeded after provider return",
+            )
+        return response
+
+
 def verify_with_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-088 exception
     *,
     work_items: Iterable[VerificationWork],
@@ -3476,14 +3584,16 @@ def verify_with_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-088 exception
                 0,
                 0,
             )
-    adapter: ProviderAdapter | None = None
+    call_owner = _VerifierCallOwner(
+        adapter_factory=adapter_factory,
+        runtime_deadline=runtime_deadline,
+        provider_call_budget=provider_call_budget,
+    )
     results: list[CanonicalVerificationResult] = []
     hits = 0
     misses = 0
-    calls = 0
     for item in work:
         packet_id = item.packet["packet_id"]
-        reserved = False
 
         if runtime_deadline is not None and time.monotonic() >= runtime_deadline:
             problems.append(
@@ -3496,65 +3606,10 @@ def verify_with_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-088 exception
             )
             break
 
-        def call(current_item: VerificationWork = item) -> ProviderCallResult:  # noqa: C901 approved [SC-17.1] RUFF-SUP-089 exception
-            nonlocal adapter, calls, reserved
-            if runtime_deadline is not None and time.monotonic() >= runtime_deadline:
-                raise _AnalysisFailure(
-                    "budget", "budget_exceeded", "maximum verifier runtime exceeded"
-                )
-            if provider_call_budget is not None:
-                if not provider_call_budget.reserve():
-                    raise _AnalysisFailure(
-                        "budget", "budget_exceeded", "maximum verifier calls exceeded"
-                    )
-                reserved = True
-            if adapter is None:
-                if adapter_factory is None:
-                    if reserved:
-                        assert provider_call_budget is not None
-                        provider_call_budget.release()
-                        reserved = False
-                    raise _AnalysisFailure(
-                        "provider",
-                        "provider_failure",
-                        "no verifier adapter is available",
-                    )
-                try:
-                    adapter = adapter_factory()
-                except Exception as exc:  # noqa: BLE001
-                    if reserved:
-                        assert provider_call_budget is not None
-                        provider_call_budget.release()
-                        reserved = False
-                    raise _AnalysisFailure(
-                        "provider",
-                        "provider_failure",
-                        f"adapter construction failed: {exc}",
-                    ) from exc
-            calls += 1
-            try:
-                response = adapter(
-                    verifier_request_bytes(
-                        current_item.request,
-                        prompt_bytes=current_item.identity.prompt_bytes,
-                    ).decode("utf-8")
-                )
-            except Exception as exc:  # noqa: BLE001
-                raise _AnalysisFailure(
-                    "provider", "provider_failure", f"verifier call failed: {exc}"
-                ) from exc
-            if runtime_deadline is not None and time.monotonic() >= runtime_deadline:
-                raise _AnalysisFailure(
-                    "budget",
-                    "budget_exceeded",
-                    "maximum verifier runtime exceeded after provider return",
-                )
-            return response
-
         try:
             if cache_mode == "off":
                 result, _ = _normalize_verify_provider_result(
-                    item, call(), provider_identity
+                    item, call_owner.call(item), provider_identity
                 )
             elif cache_mode == "require":
                 result_path = _verify_result_path(cache_path, item.identity.verify_key)
@@ -3573,11 +3628,17 @@ def verify_with_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-088 exception
                 )
                 if not existed:
                     misses += 1
+
+                def call_current_verifier(
+                    current_item: VerificationWork = item,
+                ) -> ProviderCallResult:
+                    return call_owner.call(current_item)
+
                 result, source = _resolve_cached_verify_result(
                     cache_path,
                     item,
                     provider_identity,
-                    call,
+                    call_current_verifier,
                     timeout_seconds=float(lock_wait_timeout_seconds),
                     poll_interval_seconds=float(poll_interval_seconds),
                     runtime_deadline=runtime_deadline,
@@ -3604,7 +3665,9 @@ def verify_with_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-088 exception
                     f"unexpected verifier cache failure: {exc}",
                 )
             )
-    return VerificationCacheRun(tuple(results), tuple(problems), hits, misses, calls)
+    return VerificationCacheRun(
+        tuple(results), tuple(problems), hits, misses, call_owner.calls
+    )
 
 
 def cleanup_lock(

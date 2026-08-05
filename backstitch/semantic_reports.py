@@ -618,7 +618,98 @@ def _validate_optional_closed_identity(
     return _exact_record(value, fields, name)
 
 
-def _validate_qualification_details(value: object, name: str) -> None:  # noqa: C901 approved [SC-17.1] RUFF-SUP-117 exception
+def _validate_qualification_selectors(value: object, name: str) -> None:
+    if not isinstance(value, list) or not value:
+        raise AnalysisReportError(f"{name}.selectors must be a nonempty array")
+    selector_order: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    canonical_codes = _QUALIFIED_SEMANTIC_CODES
+    short_codes = tuple(_SEMANTIC_CODE_DATA[code][0] for code in canonical_codes)
+    for index, raw_selector in enumerate(value):
+        selector = _nonblank_string(raw_selector, f"{name}.selectors[{index}]")
+        code, separator, context = selector.partition(":")
+        if not separator or context != "independently_verified":
+            raise AnalysisReportError(f"{name}.selectors[{index}] is invalid")
+        if code in canonical_codes:
+            code_index = canonical_codes.index(code)
+        elif code in short_codes:
+            code_index = short_codes.index(code)
+        else:
+            raise AnalysisReportError(f"{name}.selectors[{index}] is invalid")
+        if selector in seen:
+            raise AnalysisReportError(f"{name}.selectors must be unique")
+        seen.add(selector)
+        selector_order.append((code_index, selector))
+    if selector_order != sorted(selector_order):
+        raise AnalysisReportError(f"{name}.selectors are not in BSA code order")
+
+
+def _validate_qualification_derivation_identities(
+    row: Mapping[str, Any], name: str
+) -> dict[str, Any] | None:
+    expected = _validate_optional_closed_identity(
+        row["expected_derivation_identity"],
+        _QUALIFICATION_DERIVATION_FIELDS,
+        f"{name}.expected_derivation_identity",
+    )
+    current = _exact_record(
+        row["current_derivation_identity"],
+        _QUALIFICATION_DERIVATION_FIELDS,
+        f"{name}.current_derivation_identity",
+    )
+    for field in _QUALIFICATION_DERIVATION_FIELDS:
+        _positive_analysis_int(
+            current[field], f"{name}.current_derivation_identity.{field}"
+        )
+        if expected is not None:
+            _positive_analysis_int(
+                expected[field], f"{name}.expected_derivation_identity.{field}"
+            )
+    return expected
+
+
+def _validate_qualification_identities(row: Mapping[str, Any], name: str) -> None:
+    for field in ("expected_qualification_identity", "current_qualification_identity"):
+        identity = _validate_optional_closed_identity(
+            row[field], _QUALIFICATION_IDENTITY_FIELDS, f"{name}.{field}"
+        )
+        if identity is None:
+            continue
+        _analysis_digest(identity["corpus_sha256"], f"{name}.{field}.corpus_sha256")
+        if identity["mode"] != "enforce":
+            raise AnalysisReportError(f"{name}.{field}.mode must be enforce")
+        _positive_analysis_int(identity["trials"], f"{name}.{field}.trials")
+        if not isinstance(identity["eval_config"], dict):
+            raise AnalysisReportError(f"{name}.{field}.eval_config must be an object")
+
+
+def _validate_unqualified_providers(
+    value: object, *, name: str, reason: object
+) -> None:
+    if not isinstance(value, list):
+        raise AnalysisReportError(
+            f"{name}.unqualified_analyzer_providers must be an array"
+        )
+    providers = [
+        _validate_analysis_provider(
+            provider, f"{name}.unqualified_analyzer_providers[{index}]"
+        )
+        for index, provider in enumerate(value)
+    ]
+    provider_bytes = [canonical_json_bytes(provider) for provider in providers]
+    if len(set(provider_bytes)) != len(provider_bytes) or provider_bytes != sorted(
+        provider_bytes
+    ):
+        raise AnalysisReportError(
+            f"{name}.unqualified_analyzer_providers must be unique and canonical-sorted"
+        )
+    if providers and reason != "identity_mismatch":
+        raise AnalysisReportError(
+            f"{name}.unqualified_analyzer_providers requires identity_mismatch"
+        )
+
+
+def _validate_qualification_details(value: object, name: str) -> None:
     fields = frozenset(
         {
             "selectors",
@@ -634,30 +725,7 @@ def _validate_qualification_details(value: object, name: str) -> None:  # noqa: 
         }
     )
     row = _exact_record(value, fields, name)
-    selectors = row["selectors"]
-    if not isinstance(selectors, list) or not selectors:
-        raise AnalysisReportError(f"{name}.selectors must be a nonempty array")
-    selector_order: list[tuple[int, str]] = []
-    seen_selectors: set[str] = set()
-    for index, value in enumerate(selectors):
-        selector = _nonblank_string(value, f"{name}.selectors[{index}]")
-        code, separator, context = selector.partition(":")
-        canonical_codes = _QUALIFIED_SEMANTIC_CODES
-        short_codes = tuple(_SEMANTIC_CODE_DATA[code][0] for code in canonical_codes)
-        if not separator or context != "independently_verified":
-            raise AnalysisReportError(f"{name}.selectors[{index}] is invalid")
-        if code in canonical_codes:
-            code_index = canonical_codes.index(code)
-        elif code in short_codes:
-            code_index = short_codes.index(code)
-        else:
-            raise AnalysisReportError(f"{name}.selectors[{index}] is invalid")
-        if selector in seen_selectors:
-            raise AnalysisReportError(f"{name}.selectors must be unique")
-        seen_selectors.add(selector)
-        selector_order.append((code_index, selector))
-    if selector_order != sorted(selector_order):
-        raise AnalysisReportError(f"{name}.selectors are not in BSA code order")
+    _validate_qualification_selectors(row["selectors"], name)
     reason = row["reason"]
     if reason not in {"missing", "corrupt", "failed", "identity_mismatch"}:
         raise AnalysisReportError(f"{name}.reason is invalid")
@@ -671,69 +739,11 @@ def _validate_qualification_details(value: object, name: str) -> None:  # noqa: 
     if current_hash is not None:
         _analysis_digest(current_hash, f"{name}.current_composition_sha256")
 
-    expected_derivation = _validate_optional_closed_identity(
-        row["expected_derivation_identity"],
-        _QUALIFICATION_DERIVATION_FIELDS,
-        f"{name}.expected_derivation_identity",
+    expected_derivation = _validate_qualification_derivation_identities(row, name)
+    _validate_qualification_identities(row, name)
+    _validate_unqualified_providers(
+        row["unqualified_analyzer_providers"], name=name, reason=reason
     )
-    current_derivation = _exact_record(
-        row["current_derivation_identity"],
-        _QUALIFICATION_DERIVATION_FIELDS,
-        f"{name}.current_derivation_identity",
-    )
-    for field in _QUALIFICATION_DERIVATION_FIELDS:
-        _positive_analysis_int(
-            current_derivation[field],
-            f"{name}.current_derivation_identity.{field}",
-        )
-        if expected_derivation is not None:
-            _positive_analysis_int(
-                expected_derivation[field],
-                f"{name}.expected_derivation_identity.{field}",
-            )
-
-    for field in (
-        "expected_qualification_identity",
-        "current_qualification_identity",
-    ):
-        identity = _validate_optional_closed_identity(
-            row[field],
-            _QUALIFICATION_IDENTITY_FIELDS,
-            f"{name}.{field}",
-        )
-        if identity is not None:
-            _analysis_digest(identity["corpus_sha256"], f"{name}.{field}.corpus_sha256")
-            if identity["mode"] != "enforce":
-                raise AnalysisReportError(f"{name}.{field}.mode must be enforce")
-            _positive_analysis_int(identity["trials"], f"{name}.{field}.trials")
-            if not isinstance(identity["eval_config"], dict):
-                raise AnalysisReportError(
-                    f"{name}.{field}.eval_config must be an object"
-                )
-
-    raw_providers = row["unqualified_analyzer_providers"]
-    if not isinstance(raw_providers, list):
-        raise AnalysisReportError(
-            f"{name}.unqualified_analyzer_providers must be an array"
-        )
-    providers = [
-        _validate_analysis_provider(
-            provider,
-            f"{name}.unqualified_analyzer_providers[{index}]",
-        )
-        for index, provider in enumerate(raw_providers)
-    ]
-    provider_bytes = [canonical_json_bytes(provider) for provider in providers]
-    if len(set(provider_bytes)) != len(provider_bytes) or provider_bytes != sorted(
-        provider_bytes
-    ):
-        raise AnalysisReportError(
-            f"{name}.unqualified_analyzer_providers must be unique and canonical-sorted"
-        )
-    if providers and reason != "identity_mismatch":
-        raise AnalysisReportError(
-            f"{name}.unqualified_analyzer_providers requires identity_mismatch"
-        )
     if reason == "missing" and (report_hash is not None or expected_hash is not None):
         raise AnalysisReportError(f"{name} missing reason has invalid hashes")
     if reason == "corrupt" and expected_hash is not None:
@@ -2110,7 +2120,208 @@ def _analysis_report_source_state(  # noqa: C901 approved [SC-17.1] RUFF-SUP-105
     )
 
 
-def _validate_analysis_report_source_shape(  # noqa: C901 approved [SC-17.1] RUFF-SUP-110 exception
+def _validate_source_debt_cost_and_layers(
+    value: Mapping[str, Any],
+    *,
+    current: bool,
+    packet_warning_count: int,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    if packet_warning_count != 0 or value.get("packet_warning_debt") != []:
+        raise AnalysisReportError(
+            "packet warning count and debt must be zero and empty for schema 3"
+        )
+    finding_debt = value.get("finding_debt")
+    if not isinstance(finding_debt, list):
+        raise AnalysisReportError("finding_debt must be a list")
+    for index, item in enumerate(finding_debt):
+        _validate_finding_debt(item, index, current=True, suppression_allowed=current)
+    cost = value.get("estimated_cost_microusd")
+    source = value.get("cost_rate_source")
+    if cost is None:
+        if source is not None:
+            raise AnalysisReportError("cost_rate_source must be null when cost is null")
+    else:
+        _analysis_nonnegative_int(cost, "estimated_cost_microusd")
+        _nonblank_string(source, "cost_rate_source")
+    layers = value.get("effective_policy_layers")
+    if (
+        not isinstance(layers, list)
+        or not layers
+        or any(not isinstance(layer, str) or not layer.strip() for layer in layers)
+        or len(layers) != len(set(layers))
+    ):
+        raise AnalysisReportError(
+            "effective_policy_layers must be a nonempty unique string list"
+        )
+    return cast(list[dict[str, Any]], finding_debt), cast(list[str], layers)
+
+
+def _validate_source_diagnostics(
+    value: Mapping[str, Any],
+    *,
+    current: bool,
+    layers: list[str],
+    selected_order: list[str],
+) -> tuple[list[dict[str, Any]], list[bool], list[tuple[Any, ...]]]:
+    diagnostics = value.get("semantic_diagnostics")
+    if not isinstance(diagnostics, list):
+        raise AnalysisReportError("semantic_diagnostics must be a list")
+    authoritative = [
+        _validate_diagnostic(
+            item, index, set(layers), current=True, suppression_allowed=current
+        )
+        for index, item in enumerate(diagnostics)
+    ]
+    identities = [
+        (
+            item["code"],
+            item["packet_id"],
+            item["packet_hash"],
+            item["finding_hash"],
+            item["verification_state"],
+        )
+        for item in diagnostics
+    ]
+    if len(identities) != len(set(identities)):
+        raise AnalysisReportError("semantic_diagnostics contains duplicates")
+    packet_ids = [item["packet_id"] for item in diagnostics]
+    expected_order = [
+        packet_id for packet_id in selected_order if packet_id in packet_ids
+    ]
+    if len(packet_ids) != len(set(packet_ids)) or packet_ids != expected_order:
+        raise AnalysisReportError(
+            "semantic_diagnostics do not preserve unique selected packet order"
+        )
+    if not set(packet_ids).issubset(set(selected_order)):
+        raise AnalysisReportError("semantic diagnostic packet is not selected")
+    return cast(list[dict[str, Any]], diagnostics), authoritative, identities
+
+
+def _validate_source_finding_debt_binding(
+    finding_debt: list[dict[str, Any]], diagnostic_identities: list[tuple[Any, ...]]
+) -> None:
+    debt_identities = [
+        (
+            item["code"],
+            item["packet_id"],
+            item["packet_hash"],
+            item["finding_hash"],
+            item["verification_state"],
+        )
+        for item in finding_debt
+    ]
+    if len(debt_identities) != len(set(debt_identities)) or not set(
+        debt_identities
+    ).issubset(set(diagnostic_identities)):
+        raise AnalysisReportError("finding_debt has invalid diagnostic identity")
+    expected_order = [
+        identity for identity in diagnostic_identities if identity in debt_identities
+    ]
+    if debt_identities != expected_order:
+        raise AnalysisReportError("finding_debt does not preserve diagnostic order")
+
+
+def _validate_source_unused_dispositions(
+    value: Mapping[str, Any], *, current: bool
+) -> None:
+    unused = value.get("unused_dispositions")
+    if not isinstance(unused, list):
+        raise AnalysisReportError("unused_dispositions must be a list")
+    for index, item in enumerate(unused):
+        _validate_disposition(item, index, suppression_allowed=current)
+    identities = [
+        (item["code"], item["packet_id"], item["packet_hash"], item["finding_hash"])
+        for item in unused
+    ]
+    if len(identities) != len(set(identities)):
+        raise AnalysisReportError("unused_dispositions contains duplicates")
+
+
+def _validate_source_status(
+    value: Mapping[str, Any],
+    *,
+    status: str,
+    exit_code: int,
+    finding_debt: list[dict[str, Any]],
+    authoritative: list[bool],
+) -> list[dict[str, Any]]:
+    raw_problems = value.get("problems")
+    if not isinstance(raw_problems, list):
+        raise AnalysisReportError("problems must be a list")
+    stages = [
+        _validate_problem_v3(item, index) for index, item in enumerate(raw_problems)
+    ]
+    expected_status = (
+        "failed"
+        if any(stage in _FAILED_REPORT_STAGES for stage in stages)
+        else "incomplete"
+        if stages or (finding_debt and exit_code == 2)
+        else "complete"
+    )
+    if status != expected_status:
+        raise AnalysisReportError(
+            "analysis report status is inconsistent with problems"
+        )
+    prepublication = [stage for stage in stages if stage != "output"]
+    if prepublication and exit_code != 2:
+        raise AnalysisReportError("analysis_exit_code must be 2 for analysis problems")
+    if not prepublication and exit_code == 2 and not finding_debt:
+        raise AnalysisReportError(
+            "analysis_exit_code 2 requires a prepublication problem or finding debt"
+        )
+    if exit_code == 1 and not any(authoritative):
+        raise AnalysisReportError(
+            "analysis_exit_code 1 requires an authoritative diagnostic"
+        )
+    return cast(list[dict[str, Any]], raw_problems)
+
+
+def _validate_source_cache_counters(
+    analysis_counts: Mapping[str, int],
+    normalized_kind_counts: Mapping[str, Mapping[str, int]] | None,
+    *,
+    status: str,
+    raw_problems: list[dict[str, Any]],
+    finding_debt: list[dict[str, Any]],
+    exit_code: int,
+) -> None:
+    complete = status == "complete" or (
+        not raw_problems and bool(finding_debt) and exit_code == 2
+    )
+    if not complete:
+        return
+    cache_off = (
+        analysis_counts["cache_hits"] == 0 and analysis_counts["cache_misses"] == 0
+    )
+    if cache_off:
+        if analysis_counts["provider_calls"] != analysis_counts["packet_count"]:
+            raise AnalysisReportError(
+                "cache-off analyzer calls do not match packet count"
+            )
+    elif (
+        analysis_counts["cache_hits"] + analysis_counts["cache_misses"]
+        != analysis_counts["packet_count"]
+        or analysis_counts["provider_calls"]
+        > analysis_counts["cache_hits"] + analysis_counts["cache_misses"]
+    ):
+        raise AnalysisReportError("analyzer cache counters do not recompute")
+    if normalized_kind_counts is None:
+        return
+    for packet_kind in ("section", "invariant", "suppression"):
+        hits = normalized_kind_counts["cache_hits"][packet_kind]
+        misses = normalized_kind_counts["cache_misses"][packet_kind]
+        calls = normalized_kind_counts["provider_calls"][packet_kind]
+        emitted = normalized_kind_counts["emitted"][packet_kind]
+        if hits == 0 and misses == 0:
+            if calls != emitted:
+                raise AnalysisReportError(
+                    f"cache-off {packet_kind} calls do not match emitted packets"
+                )
+        elif hits + misses != emitted or calls > hits + misses:
+            raise AnalysisReportError(f"{packet_kind} cache counters do not recompute")
+
+
+def _validate_analysis_report_source_shape(
     value: Mapping[str, Any],
 ) -> dict[str, Any]:
     state = _analysis_report_source_state(value)
@@ -2139,170 +2350,34 @@ def _validate_analysis_report_source_shape(  # noqa: C901 approved [SC-17.1] RUF
         for item in value["alignment_audit"]
         if _audit_bucket(item) == "selected"
     ]
-    selected_ids = set(selected_order)
-    warning_debt = value.get("packet_warning_debt")
-    if analysis_counts["packet_warning_count"] != 0 or warning_debt != []:
-        raise AnalysisReportError(
-            "packet warning count and debt must be zero and empty for schema 3"
-        )
-    finding_debt = value.get("finding_debt")
-    if not isinstance(finding_debt, list):
-        raise AnalysisReportError("finding_debt must be a list")
-    for index, item in enumerate(finding_debt):
-        _validate_finding_debt(
-            item,
-            index,
-            current=True,
-            suppression_allowed=current,
-        )
-    cost = value.get("estimated_cost_microusd")
-    source = value.get("cost_rate_source")
-    if cost is None:
-        if source is not None:
-            raise AnalysisReportError("cost_rate_source must be null when cost is null")
-    else:
-        _analysis_nonnegative_int(cost, "estimated_cost_microusd")
-        _nonblank_string(source, "cost_rate_source")
-    layers = value.get("effective_policy_layers")
-    if (
-        not isinstance(layers, list)
-        or not layers
-        or any(not isinstance(layer, str) or not layer.strip() for layer in layers)
-        or len(layers) != len(set(layers))
-    ):
-        raise AnalysisReportError(
-            "effective_policy_layers must be a nonempty unique string list"
-        )
-    diagnostics = value.get("semantic_diagnostics")
-    if not isinstance(diagnostics, list):
-        raise AnalysisReportError("semantic_diagnostics must be a list")
-    authoritative = [
-        _validate_diagnostic(
-            item,
-            index,
-            set(layers),
-            current=True,
-            suppression_allowed=current,
-        )
-        for index, item in enumerate(diagnostics)
-    ]
-    diagnostic_identities = [
-        (
-            item["code"],
-            item["packet_id"],
-            item["packet_hash"],
-            item["finding_hash"],
-            item["verification_state"],
-        )
-        for item in diagnostics
-    ]
-    if len(diagnostic_identities) != len(set(diagnostic_identities)):
-        raise AnalysisReportError("semantic_diagnostics contains duplicates")
-    diagnostic_packet_ids = [item["packet_id"] for item in diagnostics]
-    expected_diagnostic_order = [
-        packet_id for packet_id in selected_order if packet_id in diagnostic_packet_ids
-    ]
-    if (
-        len(diagnostic_packet_ids) != len(set(diagnostic_packet_ids))
-        or diagnostic_packet_ids != expected_diagnostic_order
-    ):
-        raise AnalysisReportError(
-            "semantic_diagnostics do not preserve unique selected packet order"
-        )
-    if not set(diagnostic_packet_ids).issubset(selected_ids):
-        raise AnalysisReportError("semantic diagnostic packet is not selected")
-    debt_identities = [
-        (
-            item["code"],
-            item["packet_id"],
-            item["packet_hash"],
-            item["finding_hash"],
-            item["verification_state"],
-        )
-        for item in finding_debt
-    ]
-    if len(debt_identities) != len(set(debt_identities)) or not set(
-        debt_identities
-    ).issubset(set(diagnostic_identities)):
-        raise AnalysisReportError("finding_debt has invalid diagnostic identity")
-    expected_debt_order = [
-        identity for identity in diagnostic_identities if identity in debt_identities
-    ]
-    if debt_identities != expected_debt_order:
-        raise AnalysisReportError("finding_debt does not preserve diagnostic order")
-    unused = value.get("unused_dispositions")
-    if not isinstance(unused, list):
-        raise AnalysisReportError("unused_dispositions must be a list")
-    for index, item in enumerate(unused):
-        _validate_disposition(item, index, suppression_allowed=current)
-    disposition_identities = [
-        (item["code"], item["packet_id"], item["packet_hash"], item["finding_hash"])
-        for item in unused
-    ]
-    if len(disposition_identities) != len(set(disposition_identities)):
-        raise AnalysisReportError("unused_dispositions contains duplicates")
-    raw_problems = value.get("problems")
-    if not isinstance(raw_problems, list):
-        raise AnalysisReportError("problems must be a list")
-    stages = [
-        _validate_problem_v3(item, index) for index, item in enumerate(raw_problems)
-    ]
-    expected_status = (
-        "failed"
-        if any(stage in _FAILED_REPORT_STAGES for stage in stages)
-        else "incomplete"
-        if stages or (finding_debt and exit_code == 2)
-        else "complete"
+    finding_debt, layers = _validate_source_debt_cost_and_layers(
+        value,
+        current=current,
+        packet_warning_count=analysis_counts["packet_warning_count"],
     )
-    if status != expected_status:
-        raise AnalysisReportError(
-            "analysis report status is inconsistent with problems"
-        )
-    prepublication_stages = [stage for stage in stages if stage != "output"]
-    if prepublication_stages and exit_code != 2:
-        raise AnalysisReportError("analysis_exit_code must be 2 for analysis problems")
-    if not prepublication_stages and exit_code == 2 and not finding_debt:
-        raise AnalysisReportError(
-            "analysis_exit_code 2 requires a prepublication problem or finding debt"
-        )
-    if exit_code == 1 and not any(authoritative):
-        raise AnalysisReportError(
-            "analysis_exit_code 1 requires an authoritative diagnostic"
-        )
-    semantic_work_complete = status == "complete" or (
-        not raw_problems and bool(finding_debt) and exit_code == 2
+    diagnostics, authoritative, diagnostic_identities = _validate_source_diagnostics(
+        value,
+        current=current,
+        layers=layers,
+        selected_order=selected_order,
     )
-    if semantic_work_complete:
-        cache_off_shape = (
-            analysis_counts["cache_hits"] == 0 and analysis_counts["cache_misses"] == 0
-        )
-        if cache_off_shape:
-            if analysis_counts["provider_calls"] != analysis_counts["packet_count"]:
-                raise AnalysisReportError(
-                    "cache-off analyzer calls do not match packet count"
-                )
-        elif (
-            analysis_counts["cache_hits"] + analysis_counts["cache_misses"]
-            != analysis_counts["packet_count"]
-            or analysis_counts["provider_calls"]
-            > analysis_counts["cache_hits"] + analysis_counts["cache_misses"]
-        ):
-            raise AnalysisReportError("analyzer cache counters do not recompute")
-        if normalized_kind_counts is not None:
-            for packet_kind in ("section", "invariant", "suppression"):
-                hits = normalized_kind_counts["cache_hits"][packet_kind]
-                misses = normalized_kind_counts["cache_misses"][packet_kind]
-                calls = normalized_kind_counts["provider_calls"][packet_kind]
-                emitted = normalized_kind_counts["emitted"][packet_kind]
-                if hits == 0 and misses == 0:
-                    if calls != emitted:
-                        raise AnalysisReportError(
-                            f"cache-off {packet_kind} calls do not match emitted packets"
-                        )
-                elif hits + misses != emitted or calls > hits + misses:
-                    raise AnalysisReportError(
-                        f"{packet_kind} cache counters do not recompute"
-                    )
+    _validate_source_finding_debt_binding(finding_debt, diagnostic_identities)
+    _validate_source_unused_dispositions(value, current=current)
+    raw_problems = _validate_source_status(
+        value,
+        status=status,
+        exit_code=exit_code,
+        finding_debt=finding_debt,
+        authoritative=authoritative,
+    )
+    _validate_source_cache_counters(
+        analysis_counts,
+        normalized_kind_counts,
+        status=status,
+        raw_problems=raw_problems,
+        finding_debt=finding_debt,
+        exit_code=exit_code,
+    )
     _validate_verification(
         value.get("verification"),
         diagnostics=diagnostics,
@@ -3158,72 +3233,13 @@ def _issue_obligation_id(runtime: ObligationRuntime, issue: Any) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def build_source_packet_report(  # noqa: C901 approved [SC-17.1] RUFF-SUP-122 exception
-    runtime: ObligationRuntime,
-    *,
-    packet_plan: PacketPlan,
-    created_at: str | None = None,
-) -> PacketReport:
-    """Build the complete schema-3 current source packet report."""
-
-    if not packet_plan.complete:
-        raise PacketReportError("current packet report requires a complete packet plan")
-    packet_jsonl = packet_plan.packet_jsonl
-    if len(packet_jsonl) > runtime.settings.obligations.maximum_packet_bytes:
-        raise PacketReportError("packet JSONL exceeds maximum_packet_bytes")
-    if any(
-        issue.severity in set(runtime.settings.diagnostics.fail_on)
-        for issue in runtime.pipeline.report.issues
-    ):
-        raise PacketReportError(
-            "current packet report cannot publish a failing deterministic run"
-        )
-    packets = load_packets_bytes(packet_jsonl, source="generated packet JSONL")
-    if any(not packet.semantic_eligible for packet in packets):
-        raise PacketReportError("current packet report requires packet schema 3 or 4")
-    packet_rows = tuple(packet.to_dict() for packet in packets)
-    packet_schema_versions = sorted(
-        {cast(int, row["schema_version"]) for row in packet_rows}
-    ) or [3]
-    if packet_schema_versions not in ([3], [3, 4]):
-        raise PacketReportError(
-            "current packet population must contain schema 3, optionally with schema 4"
-        )
-    active = [
-        item
-        for item in runtime.inventory.obligations
-        if item.obligation_rung == "active"
-    ]
-    selected = [
-        item
-        for item in active
-        if item.disposition == "evaluate" and item.gate_state == "executable"
-    ]
-    skipped = [item for item in active if item.disposition == "skipped"]
-    alignment_debt = [
-        item
-        for item in active
-        if item.disposition == "evaluate" and item.gate_state != "executable"
-    ]
-    if not active:
-        raise PacketReportError("current packet report cannot publish no-active intent")
-    if alignment_debt:
-        raise PacketReportError("current packet report cannot publish alignment debt")
-    expected_ids = [item.obligation_id for item in selected]
-    if [row["packet_id"] for row in packet_rows] != expected_ids:
-        raise PacketReportError(
-            "packet JSONL does not match the complete selected corpus"
-        )
-    for row in packet_rows:
-        if row["source_snapshot"]["snapshot_hash"] != runtime.snapshot.snapshot_hash:
-            raise PacketReportError("packet source snapshot does not match runtime")
-
-    skip_by_obligation = {
+def _source_alignment_audit(runtime: ObligationRuntime) -> list[dict[str, object]]:
+    skips = {
         item.obligation_id: item for item in runtime.pipeline.artifacts.obligation_skips
     }
-    audit = []
+    audit: list[dict[str, object]] = []
     for item in runtime.inventory.obligations:
-        skip = skip_by_obligation.get(item.obligation_id)
+        skip = skips.get(item.obligation_id)
         audit.append(
             {
                 "obligation_id": item.obligation_id,
@@ -3243,14 +3259,17 @@ def build_source_packet_report(  # noqa: C901 approved [SC-17.1] RUFF-SUP-122 ex
     audit.sort(
         key=lambda item: (item["path"], item["start_line"], item["obligation_id"])
     )
+    return audit
 
-    issue_occurrences: dict[tuple[object, ...], int] = {}
-    issue_rows: list[dict[str, object]] = []
+
+def _source_issue_rows(runtime: ObligationRuntime) -> list[dict[str, object]]:
+    occurrences: dict[tuple[object, ...], int] = {}
+    rows: list[dict[str, object]] = []
     for issue in runtime.pipeline.report.issues:
         obligation_id = _issue_obligation_id(runtime, issue)
         base = (issue.code, issue.context, issue.path, issue.line, obligation_id)
-        ordinal = issue_occurrences.get(base, 0)
-        issue_occurrences[base] = ordinal + 1
+        ordinal = occurrences.get(base, 0)
+        occurrences[base] = ordinal + 1
         identity = {
             "code": issue.code,
             "context": issue.context,
@@ -3259,7 +3278,7 @@ def build_source_packet_report(  # noqa: C901 approved [SC-17.1] RUFF-SUP-122 ex
             "obligation_id": obligation_id,
             "ordinal": ordinal,
         }
-        issue_rows.append(
+        rows.append(
             {
                 "issue_identity": hashlib.sha256(
                     canonical_json_bytes(identity)
@@ -3275,6 +3294,148 @@ def build_source_packet_report(  # noqa: C901 approved [SC-17.1] RUFF-SUP-122 ex
                 "obligation_id": obligation_id,
             }
         )
+    return rows
+
+
+def _source_obligation_populations(
+    runtime: ObligationRuntime,
+) -> tuple[list[Any], list[Any], list[Any], list[Any]]:
+    active = [
+        item
+        for item in runtime.inventory.obligations
+        if item.obligation_rung == "active"
+    ]
+    selected = [
+        item
+        for item in active
+        if item.disposition == "evaluate" and item.gate_state == "executable"
+    ]
+    skipped = [item for item in active if item.disposition == "skipped"]
+    alignment_debt = [
+        item
+        for item in active
+        if item.disposition == "evaluate" and item.gate_state != "executable"
+    ]
+    return active, selected, skipped, alignment_debt
+
+
+def _has_failing_deterministic_issue(runtime: ObligationRuntime) -> bool:
+    fail_on = set(runtime.settings.diagnostics.fail_on)
+    return any(issue.severity in fail_on for issue in runtime.pipeline.report.issues)
+
+
+def _source_packet_schema_versions(
+    packet_rows: tuple[dict[str, Any], ...],
+) -> list[int]:
+    return sorted({cast(int, row["schema_version"]) for row in packet_rows}) or [3]
+
+
+def _packet_rows_match_snapshot(
+    packet_rows: tuple[dict[str, Any], ...], snapshot_hash: str
+) -> bool:
+    return all(
+        row["source_snapshot"]["snapshot_hash"] == snapshot_hash for row in packet_rows
+    )
+
+
+def _selected_kind_counts(selected: Iterable[Any]) -> dict[str, int]:
+    items = tuple(selected)
+    return {
+        packet_kind: sum(item.kind == packet_kind for item in items)
+        for packet_kind in ("section", "invariant", "suppression")
+    }
+
+
+def _all_packets_are_semantic_eligible(
+    packets: Iterable[ValidatedSemanticPacket],
+) -> bool:
+    return all(packet.semantic_eligible for packet in packets)
+
+
+def _selected_obligation_ids(selected: Iterable[Any]) -> list[str]:
+    return [item.obligation_id for item in selected]
+
+
+def _packet_identity_rows(
+    packet_rows: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {"packet_id": row["packet_id"], "packet_hash": row["packet_hash"]}
+        for row in packet_rows
+    ]
+
+
+def _packet_selection_status(packet_rows: tuple[dict[str, Any], ...]) -> str:
+    return "selected" if packet_rows else "not_run_all_skipped"
+
+
+def _packet_population_admission_error(
+    packets: tuple[ValidatedSemanticPacket, ...], versions: list[int]
+) -> str | None:
+    if not _all_packets_are_semantic_eligible(packets):
+        return "current packet report requires packet schema 3 or 4"
+    if versions not in ([3], [3, 4]):
+        return (
+            "current packet population must contain schema 3, optionally with schema 4"
+        )
+    return None
+
+
+def _obligation_population_admission_error(
+    active: list[Any], alignment_debt: list[Any]
+) -> str | None:
+    if not active:
+        return "current packet report cannot publish no-active intent"
+    if alignment_debt:
+        return "current packet report cannot publish alignment debt"
+    return None
+
+
+def _report_created_at(created_at: str | None) -> str:
+    if created_at is not None:
+        return created_at
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def build_source_packet_report(
+    runtime: ObligationRuntime,
+    *,
+    packet_plan: PacketPlan,
+    created_at: str | None = None,
+) -> PacketReport:
+    """Build the complete schema-3 current source packet report."""
+
+    if not packet_plan.complete:
+        raise PacketReportError("current packet report requires a complete packet plan")
+    packet_jsonl = packet_plan.packet_jsonl
+    if len(packet_jsonl) > runtime.settings.obligations.maximum_packet_bytes:
+        raise PacketReportError("packet JSONL exceeds maximum_packet_bytes")
+    if _has_failing_deterministic_issue(runtime):
+        raise PacketReportError(
+            "current packet report cannot publish a failing deterministic run"
+        )
+    packets = load_packets_bytes(packet_jsonl, source="generated packet JSONL")
+    packet_rows = tuple(packet.to_dict() for packet in packets)
+    packet_schema_versions = _source_packet_schema_versions(packet_rows)
+    population_error = _packet_population_admission_error(
+        packets, packet_schema_versions
+    )
+    if population_error is not None:
+        raise PacketReportError(population_error)
+    active, selected, skipped, alignment_debt = _source_obligation_populations(runtime)
+    obligation_error = _obligation_population_admission_error(active, alignment_debt)
+    if obligation_error is not None:
+        raise PacketReportError(obligation_error)
+    expected_ids = _selected_obligation_ids(selected)
+    if [row["packet_id"] for row in packet_rows] != expected_ids:
+        raise PacketReportError(
+            "packet JSONL does not match the complete selected corpus"
+        )
+    if not _packet_rows_match_snapshot(packet_rows, runtime.snapshot.snapshot_hash):
+        raise PacketReportError("packet source snapshot does not match runtime")
+
+    audit = _source_alignment_audit(runtime)
+    issue_rows = _source_issue_rows(runtime)
 
     snapshot_identity = runtime.snapshot.identity_document()
     semantic_config = snapshot_identity.get("semantic_config")
@@ -3290,10 +3451,7 @@ def build_source_packet_report(  # noqa: C901 approved [SC-17.1] RUFF-SUP-122 ex
         "alignment_debt": 0,
         "blocked": 0,
     }
-    kind_counts = {
-        packet_kind: sum(item.kind == packet_kind for item in selected)
-        for packet_kind in ("section", "invariant", "suppression")
-    }
+    kind_counts = _selected_kind_counts(selected)
     value: dict[str, object] = {
         "schema_version": 3,
         "artifact": "backstitch-packet-report",
@@ -3317,7 +3475,7 @@ def build_source_packet_report(  # noqa: C901 approved [SC-17.1] RUFF-SUP-122 ex
         "packet_jsonl_sha256": hashlib.sha256(packet_jsonl).hexdigest(),
         "packet_count": len(packet_rows),
         "packet_bytes": len(packet_jsonl),
-        "selection_status": "selected" if packet_rows else "not_run_all_skipped",
+        "selection_status": _packet_selection_status(packet_rows),
         "readiness_counts": readiness_counts,
         "alignment_audit": audit,
         "deterministic_issues": issue_rows,
@@ -3325,14 +3483,10 @@ def build_source_packet_report(  # noqa: C901 approved [SC-17.1] RUFF-SUP-122 ex
             "eligible": kind_counts,
             "emitted": dict(kind_counts),
         },
-        "packets": [
-            {"packet_id": row["packet_id"], "packet_hash": row["packet_hash"]}
-            for row in packet_rows
-        ],
+        "packets": _packet_identity_rows(packet_rows),
         "packet_report_content_sha256": "",
         "tool_version": __version__,
-        "created_at": created_at
-        or datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "created_at": _report_created_at(created_at),
     }
     value["packet_report_content_sha256"] = hashlib.sha256(
         canonical_json_bytes(_packet_report_content_projection(value))
@@ -3348,7 +3502,123 @@ def build_source_packet_report(  # noqa: C901 approved [SC-17.1] RUFF-SUP-122 ex
     return report
 
 
-def validate_packet_report(  # noqa: C901 approved [SC-17.1] RUFF-SUP-124 exception
+def _validate_current_packet_bindings(
+    value: dict[str, Any],
+    *,
+    packet_jsonl: bytes | None,
+    packets: Iterable[ValidatedSemanticPacket] | None,
+) -> None:
+    packet_values = tuple(packets) if packets is not None else None
+    if packet_jsonl is not None:
+        if value["packet_jsonl_sha256"] != hashlib.sha256(packet_jsonl).hexdigest():
+            raise PacketReportError("packet digest mismatch")
+        if value["packet_bytes"] != len(packet_jsonl):
+            raise PacketReportError("packet byte count mismatch")
+        try:
+            loaded = load_packets_bytes(packet_jsonl, source="packet report JSONL")
+        except ValueError as exc:
+            raise PacketReportError(str(exc)) from None
+        if packet_values is not None and [
+            packet.to_dict() for packet in packet_values
+        ] != [packet.to_dict() for packet in loaded]:
+            raise PacketReportError("supplied packets do not match packet JSONL bytes")
+        packet_values = loaded
+    if packet_values is not None:
+        _validate_current_packet_population(value, packet_values)
+
+
+def _validate_current_packet_population(
+    value: dict[str, Any], packet_values: tuple[ValidatedSemanticPacket, ...]
+) -> None:
+    packet_rows = tuple(packet.to_dict() for packet in packet_values)
+    if any(not packet.semantic_eligible for packet in packet_values):
+        raise PacketReportError(
+            "source packet report requires current semantic packets"
+        )
+    versions = sorted({cast(int, row["schema_version"]) for row in packet_rows}) or [3]
+    if value["schema_version"] == 2 and versions != [3]:
+        raise PacketReportError("schema-2 report requires schema-3 packets")
+    if value["schema_version"] == 3 and value["packet_schema_versions"] != versions:
+        raise PacketReportError("packet schema version population mismatch")
+    expected = [
+        {"packet_id": row["packet_id"], "packet_hash": row["packet_hash"]}
+        for row in packet_rows
+    ]
+    if value["packets"] != expected:
+        raise PacketReportError("packet identity mismatch")
+    if value["packet_count"] != len(packet_rows):
+        raise PacketReportError("packet count mismatch")
+    if any(
+        row["source_snapshot"]["snapshot_hash"]
+        != value["source_snapshot"]["snapshot_hash"]
+        for row in packet_rows
+    ):
+        raise PacketReportError("packet snapshot claim mismatch")
+    if not _packet_derivation_claims_are_consistent(packet_rows):
+        raise PacketReportError(
+            "packet derivation configuration claims are inconsistent"
+        )
+    if value["schema_version"] == 3:
+        emitted = {
+            kind: sum(row["kind"] == kind for row in packet_rows)
+            for kind in ("section", "invariant", "suppression")
+        }
+        if value["kind_counts"]["emitted"] != emitted:
+            raise PacketReportError("packet emitted kind counts mismatch")
+
+
+def _packet_derivation_claims_are_consistent(
+    packet_rows: tuple[dict[str, Any], ...],
+) -> bool:
+    hashes_by_version: dict[int, set[str]] = {}
+    for row in packet_rows:
+        hashes_by_version.setdefault(cast(int, row["schema_version"]), set()).add(
+            row["source_snapshot"]["derivation_config_hash"]
+        )
+    return all(len(hashes) <= 1 for hashes in hashes_by_version.values())
+
+
+def _validate_legacy_packet_bindings(
+    value: dict[str, Any],
+    *,
+    packet_jsonl: bytes | None,
+    packets: Iterable[ValidatedSemanticPacket] | None,
+    identities: Iterable[InferenceIdentity] | None,
+) -> None:
+    if (
+        packet_jsonl is not None
+        and value["packet_jsonl_sha256"] != hashlib.sha256(packet_jsonl).hexdigest()
+    ):
+        raise PacketReportError("packet digest mismatch")
+    if packets is None:
+        return
+    packet_rows = tuple(packet.to_dict() for packet in packets)
+    expected = [
+        {"packet_id": row["packet_id"], "packet_hash": row["packet_hash"]}
+        for row in packet_rows
+    ]
+    if value["packets"] != expected:
+        raise PacketReportError("packet identity mismatch")
+    expected_counts = {
+        kind: sum(row["kind"] == kind for row in packet_rows)
+        for kind in ("section", "invariant")
+    }
+    if value["emitted_counts"] != expected_counts:
+        raise PacketReportError("emitted count mismatch")
+    warning_count = sum(len(row["packet_warnings"]) for row in packet_rows)
+    if value["packet_warning_count"] != warning_count:
+        raise PacketReportError("warning count mismatch")
+    if identities is None:
+        raise PacketReportError(
+            "schema-1 packet validation requires frozen inference identities"
+        )
+    if value["prompt_byte_count"] != _schema1_prompt_byte_count(
+        packet_rows, identities
+    ):
+        raise PacketReportError("prompt bytes mismatch")
+
+
+def validate_packet_report(
     report: PacketReport | Mapping[str, Any],
     *,
     packet_jsonl: bytes | None = None,
@@ -3362,100 +3632,13 @@ def validate_packet_report(  # noqa: C901 approved [SC-17.1] RUFF-SUP-124 except
     )
     value = validated.to_dict()
     if value["schema_version"] in {2, 3}:
-        packet_values = tuple(packets) if packets is not None else None
-        if packet_jsonl is not None:
-            if value["packet_jsonl_sha256"] != hashlib.sha256(packet_jsonl).hexdigest():
-                raise PacketReportError("packet digest mismatch")
-            if value["packet_bytes"] != len(packet_jsonl):
-                raise PacketReportError("packet byte count mismatch")
-            try:
-                loaded_values = load_packets_bytes(
-                    packet_jsonl, source="packet report JSONL"
-                )
-            except ValueError as exc:
-                raise PacketReportError(str(exc)) from None
-            if packet_values is not None and [
-                packet.to_dict() for packet in packet_values
-            ] != [packet.to_dict() for packet in loaded_values]:
-                raise PacketReportError(
-                    "supplied packets do not match packet JSONL bytes"
-                )
-            packet_values = loaded_values
-        if packet_values is not None:
-            packet_rows = tuple(packet.to_dict() for packet in packet_values)
-            if any(not packet.semantic_eligible for packet in packet_values):
-                raise PacketReportError(
-                    "source packet report requires current semantic packets"
-                )
-            versions = sorted(
-                {cast(int, row["schema_version"]) for row in packet_rows}
-            ) or [3]
-            if value["schema_version"] == 2 and versions != [3]:
-                raise PacketReportError("schema-2 report requires schema-3 packets")
-            if (
-                value["schema_version"] == 3
-                and value["packet_schema_versions"] != versions
-            ):
-                raise PacketReportError("packet schema version population mismatch")
-            expected_identities = [
-                {"packet_id": row["packet_id"], "packet_hash": row["packet_hash"]}
-                for row in packet_rows
-            ]
-            if value["packets"] != expected_identities:
-                raise PacketReportError("packet identity mismatch")
-            if value["packet_count"] != len(packet_rows):
-                raise PacketReportError("packet count mismatch")
-            if any(
-                row["source_snapshot"]["snapshot_hash"]
-                != value["source_snapshot"]["snapshot_hash"]
-                for row in packet_rows
-            ):
-                raise PacketReportError("packet snapshot claim mismatch")
-            derivation_hashes_by_version: dict[int, set[str]] = {}
-            for row in packet_rows:
-                derivation_hashes_by_version.setdefault(
-                    cast(int, row["schema_version"]), set()
-                ).add(row["source_snapshot"]["derivation_config_hash"])
-            if any(len(hashes) > 1 for hashes in derivation_hashes_by_version.values()):
-                raise PacketReportError(
-                    "packet derivation configuration claims are inconsistent"
-                )
-            if value["schema_version"] == 3:
-                emitted = {
-                    packet_kind: sum(row["kind"] == packet_kind for row in packet_rows)
-                    for packet_kind in ("section", "invariant", "suppression")
-                }
-                if value["kind_counts"]["emitted"] != emitted:
-                    raise PacketReportError("packet emitted kind counts mismatch")
+        _validate_current_packet_bindings(
+            value, packet_jsonl=packet_jsonl, packets=packets
+        )
         return validated
-    if packet_jsonl is not None:
-        actual_digest = hashlib.sha256(packet_jsonl).hexdigest()
-        if value["packet_jsonl_sha256"] != actual_digest:
-            raise PacketReportError("packet digest mismatch")
-    if packets is not None:
-        packet_rows = tuple(packet.to_dict() for packet in packets)
-        expected_identities = [
-            {"packet_id": row["packet_id"], "packet_hash": row["packet_hash"]}
-            for row in packet_rows
-        ]
-        if value["packets"] != expected_identities:
-            raise PacketReportError("packet identity mismatch")
-        expected_counts = {
-            "section": sum(row["kind"] == "section" for row in packet_rows),
-            "invariant": sum(row["kind"] == "invariant" for row in packet_rows),
-        }
-        if value["emitted_counts"] != expected_counts:
-            raise PacketReportError("emitted count mismatch")
-        expected_warning_count = sum(len(row["packet_warnings"]) for row in packet_rows)
-        if value["packet_warning_count"] != expected_warning_count:
-            raise PacketReportError("warning count mismatch")
-        if identities is None:
-            raise PacketReportError(
-                "schema-1 packet validation requires frozen inference identities"
-            )
-        expected_prompt_bytes = _schema1_prompt_byte_count(packet_rows, identities)
-        if value["prompt_byte_count"] != expected_prompt_bytes:
-            raise PacketReportError("prompt bytes mismatch")
+    _validate_legacy_packet_bindings(
+        value, packet_jsonl=packet_jsonl, packets=packets, identities=identities
+    )
     return validated
 
 
@@ -3705,7 +3888,233 @@ def _validate_v5_authoritative_facts(  # noqa: C901 approved [SC-17.1] RUFF-SUP-
         )
 
 
-def validate_analysis_report(  # noqa: C901 approved [SC-17.1] RUFF-SUP-123 exception
+def _current_analysis_inputs(
+    value: dict[str, Any],
+    *,
+    schema_version: int,
+    packet_report: PacketReport | Mapping[str, Any] | None,
+    result_jsonl: bytes | None,
+    packets: Iterable[ValidatedSemanticPacket] | None,
+    expected_values: Mapping[str, str | None],
+) -> tuple[tuple[ValidatedSemanticPacket, ...], dict[str, str]]:
+    if packet_report is None:
+        raise AnalysisReportError(
+            f"analysis report schema {schema_version} requires its paired packet report"
+        )
+    if result_jsonl is None:
+        raise AnalysisReportError(
+            f"analysis report schema {schema_version} requires exact result_jsonl bytes"
+        )
+    packet_values = tuple(packets) if packets is not None else ()
+    if not packet_values and value["packet_count"] != 0:
+        raise AnalysisReportError(
+            f"analysis report schema {schema_version} requires its validated packets"
+        )
+    if any(expected is None for expected in expected_values.values()):
+        raise AnalysisReportError(
+            f"analysis report schema {schema_version} requires all expected runtime authority fields"
+        )
+    return packet_values, cast(dict[str, str], dict(expected_values))
+
+
+def _validate_analysis_packet_pair(
+    value: dict[str, Any],
+    *,
+    schema_version: int,
+    packet_report: PacketReport | Mapping[str, Any],
+    packet_values: tuple[ValidatedSemanticPacket, ...],
+) -> dict[str, Any]:
+    reconstructed = b"".join(
+        canonical_json_bytes(packet.to_dict()) + b"\n" for packet in packet_values
+    )
+    packet_value = validate_packet_report(
+        packet_report, packet_jsonl=reconstructed, packets=packet_values
+    ).to_dict()
+    required_schema = 3 if schema_version in {4, 5} else 2
+    if packet_value["schema_version"] != required_schema:
+        raise AnalysisReportError(
+            f"analysis report schema {schema_version} requires packet report schema {required_schema}"
+        )
+    paired_fields = {
+        "packet_jsonl_sha256": "packet_jsonl_sha256",
+        "packet_count": "packet_count",
+        "source_snapshot": "source_snapshot",
+        "packet_report_content_sha256": "packet_report_content_sha256",
+        "alignment_summary": "readiness_counts",
+        "alignment_audit": "alignment_audit",
+        "deterministic_issues": "deterministic_issues",
+    }
+    for analysis_field, packet_field in paired_fields.items():
+        if canonical_json_bytes(value[analysis_field]) != canonical_json_bytes(
+            packet_value[packet_field]
+        ):
+            raise AnalysisReportError(
+                f"analysis report {analysis_field} does not match packet report"
+            )
+    if schema_version in {4, 5}:
+        if value["packet_schema_versions"] != packet_value["packet_schema_versions"]:
+            raise AnalysisReportError(
+                "analysis report packet_schema_versions does not match packet report"
+            )
+        for population in ("eligible", "emitted"):
+            if (
+                value["kind_counts"][population]
+                != packet_value["kind_counts"][population]
+            ):
+                raise AnalysisReportError(
+                    f"analysis report kind_counts.{population} does not match packet report"
+                )
+    return packet_value
+
+
+def _validate_analysis_packet_identities(
+    value: dict[str, Any], packet_value: dict[str, Any]
+) -> None:
+    packet_hashes = {
+        item["packet_id"]: item["packet_hash"] for item in packet_value["packets"]
+    }
+    for collection_name in ("semantic_diagnostics", "finding_debt"):
+        for index, item in enumerate(value[collection_name]):
+            if packet_hashes.get(item["packet_id"]) != item["packet_hash"]:
+                raise AnalysisReportError(
+                    f"analysis report {collection_name}[{index}] packet identity does not match packet report"
+                )
+
+
+def _validate_current_analysis_results(
+    value: dict[str, Any],
+    *,
+    schema_version: int,
+    result_jsonl: bytes,
+    packet_values: tuple[ValidatedSemanticPacket, ...],
+    selected_result_objects: Iterable[Mapping[str, Any]] | None,
+    selection_events: Iterable[Mapping[str, Any]] | None,
+) -> tuple[dict[str, Any], ...]:
+    results = _revalidate_result_jsonl(result_jsonl, packet_values)
+    if value["result_count"] != len(results):
+        raise AnalysisReportError(
+            "analysis report result_count does not match validated results"
+        )
+    if schema_version in {4, 5}:
+        counts = {
+            kind: sum(row["kind"] == kind for row in results)
+            for kind in ("section", "invariant", "suppression")
+        }
+        if value["kind_counts"]["results"] != counts:
+            raise AnalysisReportError(
+                "analysis report result kind counts do not match validated results"
+            )
+    if schema_version == 5:
+        if selected_result_objects is None or selection_events is None:
+            raise AnalysisReportError(
+                "analysis report schema 5 requires selected result objects and selection events"
+            )
+        _validate_v5_authoritative_facts(
+            value,
+            results=results,
+            selected_result_objects=selected_result_objects,
+            selection_events=selection_events,
+        )
+    elif selected_result_objects is not None or selection_events is not None:
+        raise AnalysisReportError(
+            "selected result objects and selection events require schema 5"
+        )
+    return results
+
+
+def _validate_current_analysis_authority(
+    value: dict[str, Any],
+    *,
+    packet_value: dict[str, Any],
+    packet_values: tuple[ValidatedSemanticPacket, ...],
+    results: tuple[dict[str, Any], ...],
+    expected_values: Mapping[str, str],
+) -> None:
+    expectations = _bind_diagnostics_to_results(value, results, packet_values)
+    _bind_verification_to_results(
+        value["verification"], expectations, status=value["status"]
+    )
+    expected_selection = (
+        "not_run_all_skipped" if value["packet_count"] == 0 else "selected"
+    )
+    if packet_value["selection_status"] != expected_selection:
+        raise AnalysisReportError(
+            "analysis semantic status does not match packet selection status"
+        )
+    for field, expected in expected_values.items():
+        if value[field] != expected:
+            raise AnalysisReportError(
+                f"analysis report {field} does not match runtime operation"
+            )
+
+
+def _validate_current_analysis_bindings(
+    value: dict[str, Any],
+    *,
+    schema_version: int,
+    packet_report: PacketReport | Mapping[str, Any] | None,
+    result_jsonl: bytes | None,
+    packets: Iterable[ValidatedSemanticPacket] | None,
+    selected_result_objects: Iterable[Mapping[str, Any]] | None,
+    selection_events: Iterable[Mapping[str, Any]] | None,
+    expected_values: Mapping[str, str | None],
+) -> None:
+    packet_values, runtime_values = _current_analysis_inputs(
+        value,
+        schema_version=schema_version,
+        packet_report=packet_report,
+        result_jsonl=result_jsonl,
+        packets=packets,
+        expected_values=expected_values,
+    )
+    assert packet_report is not None and result_jsonl is not None
+    packet_value = _validate_analysis_packet_pair(
+        value,
+        schema_version=schema_version,
+        packet_report=packet_report,
+        packet_values=packet_values,
+    )
+    _validate_analysis_packet_identities(value, packet_value)
+    results = _validate_current_analysis_results(
+        value,
+        schema_version=schema_version,
+        result_jsonl=result_jsonl,
+        packet_values=packet_values,
+        selected_result_objects=selected_result_objects,
+        selection_events=selection_events,
+    )
+    _validate_current_analysis_authority(
+        value,
+        packet_value=packet_value,
+        packet_values=packet_values,
+        results=results,
+        expected_values=runtime_values,
+    )
+
+
+def _validate_analysis_result_bytes(
+    value: Mapping[str, Any], result_jsonl: bytes
+) -> None:
+    if not isinstance(result_jsonl, bytes):
+        raise AnalysisReportError("result_jsonl must be exact bytes")
+    if value["result_jsonl_sha256"] != hashlib.sha256(result_jsonl).hexdigest():
+        raise AnalysisReportError("analysis report result digest mismatch")
+    if not result_jsonl:
+        result_rows = 0
+    else:
+        if not result_jsonl.endswith(b"\n") or result_jsonl.endswith(b"\n\n"):
+            raise AnalysisReportError("result_jsonl must end in exactly one newline")
+        lines = lf_split(result_jsonl)
+        if any(not line.strip() for line in lines):
+            raise AnalysisReportError("result_jsonl must not contain blank rows")
+        result_rows = len(lines)
+    if value["result_count"] != result_rows:
+        raise AnalysisReportError(
+            "analysis report result_count does not match result JSONL"
+        )
+
+
+def validate_analysis_report(
     report: AnalysisReport | Mapping[str, Any],
     *,
     result_jsonl: bytes | None = None,
@@ -3719,27 +4128,18 @@ def validate_analysis_report(  # noqa: C901 approved [SC-17.1] RUFF-SUP-123 exce
     expected_artifact_currentness: str | None = None,
     expected_source_provenance: str | None = None,
 ) -> AnalysisReport:
-    """Validate a closed report against independently known operation facts.
+    """Validate a closed report against independently known operation facts."""
 
-    Schemas 3 through 5 are paired contracts: callers must supply the validated
-    immediately corresponding packet report so copied source/alignment fields
-    cannot self-attest. The expected operation fields bind runtime authority.
-    Schema 5 additionally requires selected result objects and non-report
-    operational selection events.
-    Schema 1 remains a bounded historical reader only.
-    """
-
-    untrusted_value: Mapping[str, Any]
     if isinstance(report, AnalysisReport):
         try:
-            untrusted_value = report.to_dict()
+            untrusted_value: Mapping[str, Any] = report.to_dict()
         except (UnicodeDecodeError, json.JSONDecodeError, AssertionError) as exc:
             raise AnalysisReportError("analysis report bytes are invalid") from exc
     else:
         untrusted_value = report
     validated = AnalysisReport._from_shape(untrusted_value)
     value = validated.to_dict()
-    schema_version = value["schema_version"]
+    schema_version = cast(int, value["schema_version"])
     expected_fields = {
         "scope": expected_scope,
         "semantic_status": expected_semantic_status,
@@ -3747,142 +4147,16 @@ def validate_analysis_report(  # noqa: C901 approved [SC-17.1] RUFF-SUP-123 exce
         "source_provenance": expected_source_provenance,
     }
     if schema_version in {3, 4, 5}:
-        if packet_report is None:
-            raise AnalysisReportError(
-                f"analysis report schema {schema_version} requires its paired "
-                "packet report"
-            )
-        if result_jsonl is None:
-            raise AnalysisReportError(
-                f"analysis report schema {schema_version} requires exact "
-                "result_jsonl bytes"
-            )
-        packet_values = tuple(packets) if packets is not None else ()
-        if not packet_values and value["packet_count"] != 0:
-            raise AnalysisReportError(
-                f"analysis report schema {schema_version} requires its "
-                "validated packets"
-            )
-        expected_runtime_values = {
-            "scope": expected_scope,
-            "semantic_status": expected_semantic_status,
-            "artifact_currentness": expected_artifact_currentness,
-            "source_provenance": expected_source_provenance,
-        }
-        if any(expected is None for expected in expected_runtime_values.values()):
-            raise AnalysisReportError(
-                f"analysis report schema {schema_version} requires all expected "
-                "runtime authority fields"
-            )
-        reconstructed_packet_jsonl = b"".join(
-            canonical_json_bytes(packet.to_dict()) + b"\n" for packet in packet_values
+        _validate_current_analysis_bindings(
+            value,
+            schema_version=schema_version,
+            packet_report=packet_report,
+            result_jsonl=result_jsonl,
+            packets=packets,
+            selected_result_objects=selected_result_objects,
+            selection_events=selection_events,
+            expected_values=expected_fields,
         )
-        validated_packet_report = validate_packet_report(
-            packet_report,
-            packet_jsonl=reconstructed_packet_jsonl,
-            packets=packet_values,
-        )
-        packet_value = validated_packet_report.to_dict()
-        required_packet_report_schema = 3 if schema_version in {4, 5} else 2
-        if packet_value["schema_version"] != required_packet_report_schema:
-            raise AnalysisReportError(
-                f"analysis report schema {schema_version} requires packet report "
-                f"schema {required_packet_report_schema}"
-            )
-        paired_fields = {
-            "packet_jsonl_sha256": "packet_jsonl_sha256",
-            "packet_count": "packet_count",
-            "source_snapshot": "source_snapshot",
-            "packet_report_content_sha256": "packet_report_content_sha256",
-            "alignment_summary": "readiness_counts",
-            "alignment_audit": "alignment_audit",
-            "deterministic_issues": "deterministic_issues",
-        }
-        for analysis_field, packet_field in paired_fields.items():
-            if canonical_json_bytes(value[analysis_field]) != canonical_json_bytes(
-                packet_value[packet_field]
-            ):
-                raise AnalysisReportError(
-                    f"analysis report {analysis_field} does not match packet report"
-                )
-        if schema_version in {4, 5}:
-            if (
-                value["packet_schema_versions"]
-                != packet_value["packet_schema_versions"]
-            ):
-                raise AnalysisReportError(
-                    "analysis report packet_schema_versions does not match packet "
-                    "report"
-                )
-            for population in ("eligible", "emitted"):
-                if (
-                    value["kind_counts"][population]
-                    != packet_value["kind_counts"][population]
-                ):
-                    raise AnalysisReportError(
-                        f"analysis report kind_counts.{population} does not match "
-                        "packet report"
-                    )
-        packet_hashes = {
-            item["packet_id"]: item["packet_hash"] for item in packet_value["packets"]
-        }
-        for collection_name in ("semantic_diagnostics", "finding_debt"):
-            for index, item in enumerate(value[collection_name]):
-                if packet_hashes.get(item["packet_id"]) != item["packet_hash"]:
-                    raise AnalysisReportError(
-                        f"analysis report {collection_name}[{index}] packet identity "
-                        "does not match packet report"
-                    )
-        results = _revalidate_result_jsonl(result_jsonl, packet_values)
-        if value["result_count"] != len(results):
-            raise AnalysisReportError(
-                "analysis report result_count does not match validated results"
-            )
-        if schema_version in {4, 5}:
-            result_kind_counts = {
-                packet_kind: sum(row["kind"] == packet_kind for row in results)
-                for packet_kind in ("section", "invariant", "suppression")
-            }
-            if value["kind_counts"]["results"] != result_kind_counts:
-                raise AnalysisReportError(
-                    "analysis report result kind counts do not match validated results"
-                )
-        if schema_version == 5:
-            if selected_result_objects is None or selection_events is None:
-                raise AnalysisReportError(
-                    "analysis report schema 5 requires selected result objects and "
-                    "selection events"
-                )
-            _validate_v5_authoritative_facts(
-                value,
-                results=results,
-                selected_result_objects=selected_result_objects,
-                selection_events=selection_events,
-            )
-        elif selected_result_objects is not None or selection_events is not None:
-            raise AnalysisReportError(
-                "selected result objects and selection events require schema 5"
-            )
-        verification_expectations = _bind_diagnostics_to_results(
-            value, results, packet_values
-        )
-        _bind_verification_to_results(
-            value["verification"],
-            verification_expectations,
-            status=value["status"],
-        )
-        expected_selection_status = (
-            "not_run_all_skipped" if value["packet_count"] == 0 else "selected"
-        )
-        if packet_value["selection_status"] != expected_selection_status:
-            raise AnalysisReportError(
-                "analysis semantic status does not match packet selection status"
-            )
-        for field, expected in expected_runtime_values.items():
-            if value[field] != expected:
-                raise AnalysisReportError(
-                    f"analysis report {field} does not match runtime operation"
-                )
     elif (
         packet_report is not None
         or packets is not None
@@ -3891,29 +4165,10 @@ def validate_analysis_report(  # noqa: C901 approved [SC-17.1] RUFF-SUP-123 exce
         or any(expected is not None for expected in expected_fields.values())
     ):
         raise AnalysisReportError(
-            "source-report packet/scope arguments cannot validate legacy analysis "
-            "report"
+            "source-report packet/scope arguments cannot validate legacy analysis report"
         )
     if result_jsonl is not None:
-        if not isinstance(result_jsonl, bytes):
-            raise AnalysisReportError("result_jsonl must be exact bytes")
-        if value["result_jsonl_sha256"] != hashlib.sha256(result_jsonl).hexdigest():
-            raise AnalysisReportError("analysis report result digest mismatch")
-        if not result_jsonl:
-            result_rows = 0
-        else:
-            if not result_jsonl.endswith(b"\n") or result_jsonl.endswith(b"\n\n"):
-                raise AnalysisReportError(
-                    "result_jsonl must end in exactly one newline"
-                )
-            lines = lf_split(result_jsonl)
-            if any(not line.strip() for line in lines):
-                raise AnalysisReportError("result_jsonl must not contain blank rows")
-            result_rows = len(lines)
-        if value["result_count"] != result_rows:
-            raise AnalysisReportError(
-                "analysis report result_count does not match result JSONL"
-            )
+        _validate_analysis_result_bytes(value, result_jsonl)
     if packet_jsonl_sha256 is not None:
         expected = _analysis_digest(packet_jsonl_sha256, "packet_jsonl_sha256")
         if value["packet_jsonl_sha256"] != expected:

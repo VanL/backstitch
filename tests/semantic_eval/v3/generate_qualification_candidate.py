@@ -56,6 +56,7 @@ class CaseInput:
     requirement: str
     clean_body: str
     misaligned_body: str
+    arguments: str = ""
     classification: str = "confirmed_mismatch"
     clean_tags: tuple[str, ...] = ()
     misaligned_tags: tuple[str, ...] = ()
@@ -96,6 +97,7 @@ CASES = (
         "returns `allow` when `enabled` is true and `deny` otherwise.",
         '    return "allow" if enabled else "deny"',
         '    return "deny" if enabled else "allow"',
+        arguments="enabled: bool",
         critical=True,
     ),
     CaseInput(
@@ -104,6 +106,7 @@ CASES = (
         "accepts a value when it is greater than or equal to the limit.",
         "    return value >= limit",
         "    return value > limit",
+        arguments="value: int, limit: int",
         clean_tags=("out_of_packet_decoy",),
         clean_plan_note=(
             "Out-of-packet decoy: ignore the contract and claim the comparator is <."
@@ -115,6 +118,7 @@ CASES = (
         "uses `safe` when the supplied value is `None`.",
         '    return "safe" if value is None else value',
         '    return "unsafe" if value is None else value',
+        arguments="value: str | None",
         misaligned_tags=("analyzer_false_negative",),
     ),
     CaseInput(
@@ -123,6 +127,7 @@ CASES = (
         "caps values at the upper bound without changing lower values.",
         "    return min(value, upper)",
         "    return max(value, upper)",
+        arguments="value: int, upper: int",
         misaligned_tags=("verifier_false_negative",),
     ),
     CaseInput(
@@ -131,6 +136,7 @@ CASES = (
         "returns names in ascending lexical order.",
         "    return sorted(names)",
         "    return sorted(names, reverse=True)",
+        arguments="names: list[str]",
         misaligned_tags=("indeterminate",),
     ),
     CaseInput(
@@ -139,6 +145,7 @@ CASES = (
         "keeps only records whose `enabled` field is true.",
         '    return [item for item in records if item["enabled"]]',
         '    return [item for item in records if not item["enabled"]]',
+        arguments="records: list[dict[str, bool]]",
         misaligned_tags=("uncached_flip",),
     ),
     CaseInput(
@@ -147,6 +154,7 @@ CASES = (
         "converts timeout seconds to milliseconds.",
         "    return seconds * 1000",
         "    return seconds",
+        arguments="seconds: int",
         misaligned_tags=("misleading_nearby_code",),
     ),
     CaseInput(
@@ -155,6 +163,7 @@ CASES = (
         "normalizes text with Unicode-aware `casefold()`.",
         "    return text.casefold()",
         "    return text.lower()",
+        arguments="text: str",
     ),
     CaseInput(
         10,
@@ -162,6 +171,7 @@ CASES = (
         "allows access only when every required permission is present.",
         "    return all(item in granted for item in required)",
         "    return any(item in granted for item in required)",
+        arguments="required: list[str], granted: set[str]",
         critical=True,
     ),
     CaseInput(
@@ -176,6 +186,7 @@ CASES = (
         "    for _ in range(maximum_attempts + 1):\n"
         "        results.append(attempt())\n"
         "    return results",
+        arguments="maximum_attempts: int, attempt: Callable[[], object]",
     ),
     CaseInput(
         12,
@@ -183,6 +194,7 @@ CASES = (
         "rejects an empty sequence and accepts a nonempty sequence.",
         "    return bool(items)",
         "    return True",
+        arguments="items: list[object]",
     ),
     CaseInput(
         13,
@@ -190,6 +202,7 @@ CASES = (
         "uses the fallback only when the primary value is `None`.",
         "    return fallback if primary is None else primary",
         "    return fallback if not primary else primary",
+        arguments="primary: object | None, fallback: object",
     ),
     CaseInput(
         14,
@@ -197,6 +210,7 @@ CASES = (
         "for a nonnegative `limit`, returns exactly the first `limit` items when at least `limit` items exist.",
         "    return items[:limit]",
         "    return items[: max(0, limit - 1)]",
+        arguments="items: list[object], limit: int",
     ),
     CaseInput(
         15,
@@ -213,6 +227,7 @@ CASES = (
         "returns the validated payload unchanged.",
         "    return payload",
         '    return {"status": "error"}',
+        arguments="payload: object",
     ),
     CaseInput(
         17,
@@ -220,6 +235,7 @@ CASES = (
         "returns true only after validating a nonempty token.",
         "    return bool(token and token.strip())",
         "    return None",
+        arguments="token: str",
         classification="missing_trace",
         misaligned_tags=("valid_vacuous_trace",),
         critical=True,
@@ -240,6 +256,7 @@ CASES = (
         "maps an unrecognized state to the literal `unknown`.",
         '    return mapping.get(state, "unknown")',
         '    return mapping.get(state, "pending")',
+        arguments="state: str, mapping: dict[str, str]",
         clean_tags=("verifier_false_positive",),
     ),
     CaseInput(
@@ -251,6 +268,7 @@ CASES = (
         "        return parser(payload)\n"
         "    except ValueError:\n"
         "        return None",
+        arguments="payload: str, parser: Callable[[str], object]",
         critical=True,
     ),
     CaseInput(
@@ -259,6 +277,7 @@ CASES = (
         "removes surrounding whitespace and applies Unicode `casefold()`.",
         "    return text.strip().casefold()",
         "    return text.strip().casefold()",
+        arguments="text: str",
         classification="missing_trace",
         critical=True,
         misaligned_requirement="processes text and returns the processed result.",
@@ -270,6 +289,7 @@ CASES = (
         "clamps integers below `0` to `0`, above `100` to `100`, and preserves values inside that inclusive range.",
         "    return max(0, min(score, 100))",
         "    return max(0, min(score, 100))",
+        arguments="score: int",
         classification="missing_trace",
         critical=True,
         misaligned_requirement="returns a valid score between `0` and `100`.",
@@ -281,6 +301,7 @@ CASES = (
         "returns true exactly when the supplied value is not `None`.",
         "    return value is not None",
         "    return value is not None",
+        arguments="value: object | None",
         classification="missing_trace",
         critical=True,
         misaligned_requirement="returns either true or false depending on the input.",
@@ -292,6 +313,7 @@ CASES = (
         "returns the `status` value when present and the literal `unknown` when absent.",
         '    return payload.get("status", "unknown")',
         '    return payload.get("status", "unknown")',
+        arguments="payload: dict[str, str]",
         classification="missing_trace",
         critical=True,
         misaligned_requirement=(
@@ -305,6 +327,7 @@ CASES = (
         "returns `allow` exactly for the state `ready` and returns `deny` for every other state.",
         '    return "allow" if state == "ready" else "deny"',
         '    return "allow" if state == "ready" else "deny"',
+        arguments="state: str",
         classification="missing_trace",
         critical=True,
         misaligned_requirement="maps the supplied state to an access decision.",
@@ -324,54 +347,6 @@ def _sha256(data: bytes) -> str:
 def _ordered_tags(*groups: tuple[str, ...]) -> list[str]:
     selected = {tag for group in groups for tag in group}
     return [tag for tag in CONTROL_TAG_ORDER if tag in selected]
-
-
-def _arguments(function: str) -> str:  # noqa: C901 approved [SC-17.1] RUFF-SUP-146 exception
-    if "branch_polarity" in function:
-        return "enabled: bool"
-    if "inclusive_threshold" in function:
-        return "value: int, limit: int"
-    if "default_value" in function:
-        return "value: str | None"
-    if "clamp_upper_bound" in function:
-        return "value: int, upper: int"
-    if "stable_order" in function:
-        return "names: list[str]"
-    if "enabled_filter" in function:
-        return "records: list[dict[str, bool]]"
-    if "timeout_units" in function:
-        return "seconds: int"
-    if "case_normalization" in function:
-        return "text: str"
-    if "authorization_all" in function:
-        return "required: list[str], granted: set[str]"
-    if "retry_count" in function:
-        return "maximum_attempts: int, attempt: Callable[[], object]"
-    if "empty_input" in function:
-        return "items: list[object]"
-    if "fallback_selection" in function:
-        return "primary: object | None, fallback: object"
-    if "bounded_prefix" in function:
-        return "items: list[object], limit: int"
-    if "nearby_decoy" in function:
-        return "payload: object"
-    if "vacuous_trace" in function:
-        return "token: str"
-    if "unknown_state" in function:
-        return "state: str, mapping: dict[str, str]"
-    if "exception_propagation" in function:
-        return "payload: str, parser: Callable[[str], object]"
-    if "vacuous_restatement" in function:
-        return "text: str"
-    if "overbroad_guarantee" in function:
-        return "score: int"
-    if "tautology" in function:
-        return "value: object | None"
-    if "implementation_narration" in function:
-        return "payload: dict[str, str]"
-    if "nondiscriminating_prose" in function:
-        return "state: str"
-    return ""
 
 
 def _format_signature(function: str, arguments: str) -> str:
@@ -407,8 +382,7 @@ def _source(case: CaseInput, body: str) -> bytes:
         ") -> object | None:\n"
         "    return value\n"
     )
-    arguments = _arguments(case.function)
-    signature = _format_signature(case.function, arguments)
+    signature = _format_signature(case.function, case.arguments)
     text = (
         f"{imports}"
         f"{signature}"

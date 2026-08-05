@@ -25,3 +25,4 @@ read order stay aligned instead of competing.
 7. `07-deterministic-semantic-gate.md`
 8. `08-aligned-intent-read-model.md`
 9. `09-intent-coverage.md`
+10. `10-ruff-complexity-and-suppression-policy.md`
