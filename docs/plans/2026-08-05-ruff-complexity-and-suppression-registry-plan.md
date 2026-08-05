@@ -2,7 +2,7 @@
 
 Date: 2026-08-05
 
-Status: active; T1-T10 implemented and independently reviewed; final gates in progress
+Status: completed; T1-T11 implemented, verified, independently reviewed, and committed
 
 Class: 5+P. This changes a repository-wide required quality gate, its governing
 spec, CI and release enforcement, and the approved-suppression process.
@@ -891,6 +891,7 @@ Stop and revise this plan if:
 | 2026-08-05 | T5-T9 resolved 43 of 49 temporary C901 groups. Six state-machine and lifecycle owners remain registered: 005, 077, 082, 084, 085, and 088. The live registry now contains 110 directives while the frozen activation ledger remains the historical approval input. | Focused owner suites; exact raw audit `C901=109,F401=1`; generated-index reconciliation |
 | 2026-08-05 | T10 score-blind cross-review retained the six cohesive owners and found no shallow extraction to reverse. Retired group IDs remain unused gaps and are not reassigned. | Independent T6, T7, T8, and combined T5/T9 locality reviews |
 | 2026-08-05 | The first full-suite run found six integration failures missed by focused selections: JSON preparation-block output moved to stderr, live policy proof still compared against the historical activation ledger, and the expanded self-corpus exceeded repository dogfood work limits while the deterministic registry packet exceeded the reviewed per-request provider capability. Restored JSON stdout parity, made active-marker paths the live policy oracle, added a measured 3,000,000 work-unit override, and dispositioned [SC-17.1] out of model evaluation because Ruff policy/index gates already prove it deterministically. | Full pytest failure matrix; hostile final review; real isolated self-repository dogfood probe |
+| 2026-08-05 | T11 closed after one clean 2,668-test run, all 62 acceptance probes, zero-error/warning self-corpus, complete bounded preflight, final corrected-review PASS, and committed checkpoints `d9ca746` and `7589e5c`. | Full verification matrix; `git log -2 --oneline` |
 
 ## Review Log
 
@@ -933,22 +934,22 @@ Stop and revise this plan if:
 
 ## Fresh-Eyes Checklist
 
-- [ ] Exact Ruff pin, lock, and binary agree.
-- [ ] Discovery covers tracked lint-eligible Python and intended extensionless
+- [x] Exact Ruff pin, lock, and binary agree.
+- [x] Discovery covers tracked lint-eligible Python and intended extensionless
       entry points; every excluded fixture tree has an exact role/proof owner.
-- [ ] Normal Ruff selects C901 at 10; there is no threshold-39 side lane.
-- [ ] Stable-default expansion did not enter this change.
-- [ ] Every raw finding is fixed or maps exactly once to a reviewed live row.
-- [ ] The existing active F401 importability probe is fixed or governed under
+- [x] Normal Ruff selects C901 at 10; there is no threshold-39 side lane.
+- [x] Stable-default expansion did not enter this change.
+- [x] Every raw finding is fixed or maps exactly once to a reviewed live row.
+- [x] The existing active F401 importability probe is fixed or governed under
       the same generic marker and registry contract.
-- [ ] Registry fields are substantive, not score-only or circular.
-- [ ] The active spec heading exists exactly once and is tested directly.
-- [ ] Generator identity is symbol-keyed and check mode is non-mutating.
-- [ ] CI and release prechecks run the same complete lint and index checks.
-- [ ] Every P1/P2 change passed real proof and a score-blind locality review.
-- [ ] Shallow extractions were reversed even if the final count increased.
-- [ ] Every permanent P3 group has current proof and rejected alternatives.
-- [ ] Full tests, acceptance, static gates, and self-corpus pass.
-- [ ] Spec, implementation docs, maps, plan evidence, and index agree.
-- [ ] Final implementation is committed and verified with `git log` before the
+- [x] Registry fields are substantive, not score-only or circular.
+- [x] The active spec heading exists exactly once and is tested directly.
+- [x] Generator identity is symbol-keyed and check mode is non-mutating.
+- [x] CI and release prechecks run the same complete lint and index checks.
+- [x] Every P1/P2 change passed real proof and a score-blind locality review.
+- [x] Shallow extractions were reversed even if the final count increased.
+- [x] Every permanent P3 group has current proof and rejected alternatives.
+- [x] Full tests, acceptance, static gates, and self-corpus pass.
+- [x] Spec, implementation docs, maps, plan evidence, and index agree.
+- [x] Final implementation is committed and verified with `git log` before the
       plan is marked completed.
