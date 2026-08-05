@@ -12,9 +12,11 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import replace
+from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 
 import pytest
 
@@ -35,6 +37,21 @@ from backstitch.semantic_application import (
 )
 from backstitch.semantic_policy import materialize_semantic_policy
 from backstitch.settings import BackstitchSettings, resolve_config
+
+_CallParams = ParamSpec("_CallParams")
+_CallResult = TypeVar("_CallResult")
+
+
+def _counted_call(
+    call: Callable[_CallParams, _CallResult],
+    record_call: Callable[[], None],
+) -> Callable[_CallParams, _CallResult]:
+    @wraps(call)
+    def counted(*args: _CallParams.args, **kwargs: _CallParams.kwargs) -> _CallResult:
+        record_call()
+        return call(*args, **kwargs)
+
+    return counted
 
 
 def _write_all_skipped_repo(root: Path) -> None:
@@ -138,10 +155,11 @@ def test_preflight_schema_two_projects_closed_provider_free_budgets(
         semantic_application.analysis_packets.plan_source_aligned_packets
     )
 
-    def count_packet_plan(*args: object, **kwargs: object) -> object:
+    def record_packet_plan() -> None:
         nonlocal packet_plans
         packet_plans += 1
-        return real_plan_packets(*args, **kwargs)
+
+    count_packet_plan = _counted_call(real_plan_packets, record_packet_plan)
 
     def forbidden_cache_read(*_args: object, **_kwargs: object) -> object:
         nonlocal cache_reads
