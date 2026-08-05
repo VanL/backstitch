@@ -624,7 +624,7 @@ def test_composition_rejects_invalid_analysis_contract_version(version: object) 
         )
 
 
-def test_every_provider_and_request_composition_field_invalidates_its_side() -> None:
+def test_every_provider_and_request_composition_field_invalidates_its_side() -> None:  # noqa: C901 approved [SC-17.1] RUFF-SUP-152 exception
     def build(
         analysis_provider: ProviderIdentity = PROVIDER,
         analysis_request: RequestIdentity = REQUEST,

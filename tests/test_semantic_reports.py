@@ -1128,7 +1128,7 @@ def test_packet_report_source_shape_preserves_first_error_priority(
         ("problems", "problems must be a list"),
     ],
 )
-def test_analysis_report_source_shape_preserves_first_error_priority(
+def test_analysis_report_source_shape_preserves_first_error_priority(  # noqa: C901 approved [SC-17.1] RUFF-SUP-151 exception
     mutation: str,
     expected: str,
 ) -> None:

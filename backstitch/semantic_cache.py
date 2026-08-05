@@ -800,7 +800,7 @@ def _safe_cache_child(
     return current / filename
 
 
-def _validate_inference_contract_shape(value: object) -> dict[str, Any]:
+def _validate_inference_contract_shape(value: object) -> dict[str, Any]:  # noqa: C901 approved [SC-17.1] RUFF-SUP-081 exception
     if not isinstance(value, dict) or set(value) != _INFERENCE_CONTRACT_FIELDS:
         raise CacheProtocolError("cached inference contract has invalid closed shape")
     version = value.get("analysis_contract_version")
@@ -1039,7 +1039,7 @@ def _forget_owned_cleanup(guard_path: Path) -> None:
         _PENDING_OWNED_CLEANUPS.pop(str(guard_path), None)
 
 
-def _drain_owned_cleanup_under_guard(guard_path: Path) -> None:
+def _drain_owned_cleanup_under_guard(guard_path: Path) -> None:  # noqa: C901 approved [SC-17.1] RUFF-SUP-080 exception
     """Finish a deferred unchanged-owner cleanup while its OS guard is held."""
 
     with _PENDING_OWNED_CLEANUPS_LOCK:
@@ -1324,7 +1324,7 @@ def load_exact_semantic_result(
     return _load_result_envelope(cache_path, packet, identity, provider)
 
 
-def load_semantic_baseline(
+def load_semantic_baseline(  # noqa: C901 approved [SC-17.1] RUFF-SUP-086 exception
     cache_path: Path,
     packet: dict[str, Any],
     review_identity: ReviewIdentity,
@@ -2103,7 +2103,7 @@ def _recheck_owned_review_lease(
 
 
 @contextmanager
-def prepare_evidence_stable_cache(
+def prepare_evidence_stable_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-087 exception
     *,
     packets: Iterable[ValidatedSemanticPacket],
     cache_path: Path,
@@ -2371,7 +2371,7 @@ def resolve_prepared_evidence_stable_result(
     return event
 
 
-def _analyze_config_problems(
+def _analyze_config_problems(  # noqa: C901 approved [SC-17.1] RUFF-SUP-079 exception
     *,
     packet_list: tuple[ValidatedSemanticPacket, ...],
     rows: tuple[dict[str, Any], ...],
@@ -2479,7 +2479,7 @@ def _analyze_config_problems(
     return problems
 
 
-def analyze_with_cache(
+def analyze_with_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-082 exception
     *,
     packets: Iterable[ValidatedSemanticPacket],
     cache_path: Path,
@@ -2566,7 +2566,7 @@ def analyze_with_cache(
 
     adapter: ProviderAdapter | None = None
 
-    def call(
+    def call(  # noqa: C901 approved [SC-17.1] RUFF-SUP-083 exception
         packet: dict[str, Any],
         request: bytes,
     ) -> ProviderCallResult:
@@ -2771,7 +2771,7 @@ def analyze_with_cache(
     )
 
 
-def inspect_semantic_cache(
+def inspect_semantic_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-084 exception
     *,
     packets: Iterable[ValidatedSemanticPacket],
     cache_path: Path,
@@ -3212,7 +3212,7 @@ def _resolve_cached_verify_result(
         raise
 
 
-def inspect_verification_cache(
+def inspect_verification_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-085 exception
     *,
     work_items: Iterable[VerificationWork],
     cache_path: Path,
@@ -3334,7 +3334,7 @@ def inspect_verification_cache(
     )
 
 
-def verify_with_cache(
+def verify_with_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-088 exception
     *,
     work_items: Iterable[VerificationWork],
     cache_path: Path,
@@ -3496,7 +3496,7 @@ def verify_with_cache(
             )
             break
 
-        def call(current_item: VerificationWork = item) -> ProviderCallResult:
+        def call(current_item: VerificationWork = item) -> ProviderCallResult:  # noqa: C901 approved [SC-17.1] RUFF-SUP-089 exception
             nonlocal adapter, calls, reserved
             if runtime_deadline is not None and time.monotonic() >= runtime_deadline:
                 raise _AnalysisFailure(

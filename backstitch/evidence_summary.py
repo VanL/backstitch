@@ -361,7 +361,7 @@ def _merge_declarations(
     return sorted(by_identity.values(), key=_declaration_order)
 
 
-def _section_items(
+def _section_items(  # noqa: C901 approved [SC-17.1] RUFF-SUP-041 exception
     report: Report,
     obligation: ObligationRecord,
     snapshot: RepositorySnapshot,
@@ -668,7 +668,7 @@ def _section_items(
     return rows
 
 
-def _invariant_items(
+def _invariant_items(  # noqa: C901 approved [SC-17.1] RUFF-SUP-040 exception
     report: Report,
     obligation: ObligationRecord,
     snapshot: RepositorySnapshot,

@@ -270,7 +270,7 @@ class _Inventory(ast.NodeVisitor):
         self.generic_visit(node)
         self.scope.pop()
 
-    def visit_Call(self, node: ast.Call) -> None:
+    def visit_Call(self, node: ast.Call) -> None:  # noqa: C901 approved [SC-17.1] RUFF-SUP-150 exception
         qualified = self._qualified_name(node.func)
         if qualified == "json.dumps":
             keywords = {

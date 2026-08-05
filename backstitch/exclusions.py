@@ -256,7 +256,7 @@ def parse_traceability_marker_line(
     return directive.mechanism == "meta", directive.codes, diagnostics
 
 
-def parse_traceability_directive_line(
+def parse_traceability_directive_line(  # noqa: C901 approved [SC-17.1] RUFF-SUP-042 exception
     text: str,
     *,
     allow_unknown: bool = False,
@@ -589,7 +589,7 @@ def should_suppress(
     return True, SuppressionReason(decision.reason)
 
 
-def suppression_decision(
+def suppression_decision(  # noqa: C901 approved [SC-17.1] RUFF-SUP-043 exception
     issue: Issue,
     index: SuppressionIndex,
     *,

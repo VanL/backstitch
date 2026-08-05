@@ -380,7 +380,7 @@ def _is_under(path: str, root: str) -> bool:
     return PurePosixPath(path).is_relative_to(PurePosixPath(root))
 
 
-def _declared_mapping_targets(
+def _declared_mapping_targets(  # noqa: C901 approved [SC-17.1] RUFF-SUP-053 exception
     snapshot: RepositorySnapshot,
     *,
     allow_unknown_codes: bool,

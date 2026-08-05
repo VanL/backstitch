@@ -864,7 +864,7 @@ def _crossed_ceiling(
     return None
 
 
-def plan_source_aligned_packets(
+def plan_source_aligned_packets(  # noqa: C901 approved [SC-17.1] RUFF-SUP-015 exception
     runtime: ObligationRuntime,
     *,
     require_complete_corpus: bool = True,

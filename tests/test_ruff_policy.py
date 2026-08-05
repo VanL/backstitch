@@ -1,10 +1,10 @@
-"""Pre-activation policy tests for Backstitch's canonical Ruff environment.
+"""Policy tests for Backstitch's canonical Ruff environment.
 
-Spec baseline: docs/specs/02-backstitch-core.md [SC-10], [SC-17]
-Plan: docs/plans/2026-08-05-ruff-complexity-and-suppression-registry-plan.md T2
+Spec: docs/specs/02-backstitch-core.md [SC-10], [SC-17], [SC-17.1]
+Plan: docs/plans/2026-08-05-ruff-complexity-and-suppression-registry-plan.md T4
 
-T2 freezes version, discovery, and the current rule/noqa inventory. C901
-activation belongs to T4 and is intentionally not asserted here.
+These tests freeze the version, discovery, configured rules, and governed
+suppression inventory used by normal Ruff checks.
 """
 
 from __future__ import annotations
@@ -33,6 +33,9 @@ ACTIVATION_LEDGER = (
     / "artifacts"
     / "2026-08-05-ruff-suppression-activation-ledger.tsv"
 )
+ACTIVE_SPEC = ROOT / "docs" / "specs" / "02-backstitch-core.md"
+REGISTRY_HEADING = "#### Approved Ruff Suppression Registry"
+OWNER_APPROVAL = "owner task reply Approve 2026-08-05"
 CANONICAL_LINT_TARGETS = (
     ".",
     "bin/check-doc-paths",
@@ -101,7 +104,7 @@ LEDGER_COLUMNS = (
     "approval",
     "freeze_status",
 )
-ACTIVE_RAW_COUNTS = Counter({"F401": 1})
+ACTIVE_RAW_COUNTS = Counter({"C901": 152, "F401": 1})
 DISABLED_TEXTUAL_NOQA_COUNTS = Counter({"BLE001": 22, "N802": 14, "S310": 9})
 
 
@@ -296,6 +299,14 @@ def test_effective_rules_match_the_pinned_binary_fixture() -> None:
     assert _enabled_rules() == expected
 
 
+def test_configured_ruff_activates_c901_at_the_reviewed_ceiling() -> None:
+    with (ROOT / "pyproject.toml").open("rb") as stream:
+        lint = tomllib.load(stream)["tool"]["ruff"]["lint"]
+
+    assert "C901" in lint["select"]
+    assert lint["mccabe"]["max-complexity"] == 10
+
+
 def test_canonical_lint_discovery_matches_tracked_eligible_sources() -> None:
     tracked = _tracked_python_files()
     planned_untracked = _planned_untracked_python_files()
@@ -389,7 +400,7 @@ def test_lint_vector_does_not_expand_the_formatter_scope() -> None:
     } == {"bin/release.py", "bin/ruff_suppression_index.py"}
 
 
-def test_provisional_activation_ledger_has_the_reviewed_t2_inventory() -> None:
+def test_frozen_activation_ledger_has_the_owner_approved_inventory() -> None:
     with ACTIVATION_LEDGER.open(newline="", encoding="utf-8") as stream:
         reader = csv.DictReader(stream, delimiter="\t")
         rows = list(reader)
@@ -413,8 +424,12 @@ def test_provisional_activation_ledger_has_the_reviewed_t2_inventory() -> None:
         == TEMPORARY_TARGET_BY_PATH[row["path_symbol"].split("::", 1)[0]]
         for row in temporary
     )
-    assert all(row["approval"] == "pending owner" for row in rows)
-    assert all(row["freeze_status"] == "proposed" for row in rows)
+    assert all(row["approval"] == OWNER_APPROVAL for row in rows)
+    assert all(row["freeze_status"] == "frozen" for row in rows)
+
+
+def test_active_spec_has_exactly_one_live_registry_heading() -> None:
+    assert ACTIVE_SPEC.read_text(encoding="utf-8").count(REGISTRY_HEADING) == 1
 
 
 def test_raw_active_and_disabled_textual_noqa_are_separate() -> None:
@@ -428,10 +443,16 @@ def test_raw_active_and_disabled_textual_noqa_are_separate() -> None:
     assert result.returncode == 1, result.stderr
     diagnostics = json.loads(result.stdout)
     assert Counter(item["code"] for item in diagnostics) == ACTIVE_RAW_COUNTS
-    assert [
+    with ACTIVATION_LEDGER.open(newline="", encoding="utf-8") as stream:
+        expected_by_path = Counter(
+            row["path_symbol"].split("::", 1)[0]
+            for row in csv.DictReader(stream, delimiter="\t")
+        )
+    actual_by_path = Counter(
         Path(item["filename"]).resolve().relative_to(ROOT).as_posix()
         for item in diagnostics
-    ] == ["backstitch/doctor.py"]
+    )
+    assert actual_by_path == expected_by_path
 
     enabled = _enabled_rules()
     authority = _lint_authority()
@@ -446,6 +467,6 @@ def test_raw_active_and_disabled_textual_noqa_are_separate() -> None:
     assert disabled_textual == DISABLED_TEXTUAL_NOQA_COUNTS
 
 
-def test_current_canonical_lint_vector_is_clean_without_c901_activation() -> None:
+def test_current_canonical_lint_vector_is_clean_with_registry_activation() -> None:
     result = _ruff("check", *CANONICAL_LINT_TARGETS)
     assert result.returncode == 0, result.stdout + result.stderr

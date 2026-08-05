@@ -100,7 +100,7 @@ class _CountingProxy:
     analyze_packet_ids: set[str] = field(default_factory=set)
     recording: bool = False
 
-    def __enter__(self) -> _CountingProxy:
+    def __enter__(self) -> _CountingProxy:  # noqa: C901 approved [SC-17.1] RUFF-SUP-143 exception
         import http.server
         import threading
         import urllib.error
@@ -118,7 +118,7 @@ class _CountingProxy:
             def log_message(self, format: str, *args: object) -> None:
                 return
 
-            def _forward(self) -> None:
+            def _forward(self) -> None:  # noqa: C901 approved [SC-17.1] RUFF-SUP-144 exception
                 length = int(self.headers.get("Content-Length", "0") or "0")
                 body = self.rfile.read(length) if length else b""
                 bridge_analyze_response = False
@@ -1178,7 +1178,7 @@ def test_live_llm_analysis_contract(
     )
 
 
-def _exercise_live_llm_analysis_contract(
+def _exercise_live_llm_analysis_contract(  # noqa: C901 approved [SC-17.1] RUFF-SUP-145 exception
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,

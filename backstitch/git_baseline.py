@@ -306,7 +306,7 @@ class _GitRunner:
             )
         return stdout
 
-    def _communicate_bounded(
+    def _communicate_bounded(  # noqa: C901 approved [SC-17.1] RUFF-SUP-044 exception
         self,
         process: subprocess.Popen[bytes],
         *,
@@ -775,7 +775,7 @@ def _read_first_parent_histories(
     return current, history, history_complete
 
 
-def _read_transition_changes(
+def _read_transition_changes(  # noqa: C901 approved [SC-17.1] RUFF-SUP-045 exception
     runner: _GitRunner,
     commits: tuple[str, ...],
     *,

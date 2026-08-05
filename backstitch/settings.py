@@ -836,7 +836,7 @@ def _require_regular_config(path: Path, *, missing_message: str | None = None) -
         raise ConfigLoadError(f"config is not a regular file: {path}")
 
 
-def _assemble_settings(
+def _assemble_settings(  # noqa: C901 approved [SC-17.1] RUFF-SUP-126 exception
     repo_root: Path,
     *,
     config_path: Path | None,
@@ -1090,7 +1090,7 @@ def resolve_config(
     return settings
 
 
-def resolve_repository_config_from_blobs(
+def resolve_repository_config_from_blobs(  # noqa: C901 approved [SC-17.1] RUFF-SUP-138 exception
     repo_root: Path,
     config_path: str,
     blobs: Mapping[str, bytes],
@@ -1279,7 +1279,7 @@ def _nested_value(raw: dict[str, Any], *segments: str) -> Any:
     return value
 
 
-def _select_analyze_model_descriptor(
+def _select_analyze_model_descriptor(  # noqa: C901 approved [SC-17.1] RUFF-SUP-135 exception
     raw: dict[str, Any],
     *,
     configured_model: Any,
@@ -1579,7 +1579,7 @@ def _parse_capability_revision(table: dict[str, Any], label: str) -> str:
     return value
 
 
-def _parse_request_constraints(
+def _parse_request_constraints(  # noqa: C901 approved [SC-17.1] RUFF-SUP-130 exception
     value: Any,
     label: str,
     *,
@@ -1976,7 +1976,7 @@ def _merge_config_layers(
     return merged
 
 
-def _ratchet_policy_provenance(
+def _ratchet_policy_provenance(  # noqa: C901 approved [SC-17.1] RUFF-SUP-134 exception
     layers: Sequence[tuple[dict[str, Any], str, ConfigSourceKind]],
 ) -> tuple[ConfigValueProvenance, ...]:
     """Retain the effective source of each gate-affecting config value.
@@ -2055,7 +2055,7 @@ def _ratchet_policy_provenance(
     return tuple(item for key in sorted(effective) for item in effective[key])
 
 
-def _flatten_ratchet_policy_layer(
+def _flatten_ratchet_policy_layer(  # noqa: C901 approved [SC-17.1] RUFF-SUP-128 exception
     body: Mapping[str, Any],
 ) -> tuple[str, ...]:
     keys: list[str] = []
@@ -2166,7 +2166,7 @@ def _validate_ratchet_invocation_sources(
         )
 
 
-def _expand_raw_paths(
+def _expand_raw_paths(  # noqa: C901 approved [SC-17.1] RUFF-SUP-127 exception
     body: dict[str, Any],
     base_dir: Path,
     *,
@@ -2326,7 +2326,7 @@ def _load_config_chain(
     return warnings, (*parent_layers, layer)
 
 
-def _parse_settings(
+def _parse_settings(  # noqa: C901 approved [SC-17.1] RUFF-SUP-131 exception
     raw: dict[str, Any],
     *,
     source_path: Path,
@@ -2828,7 +2828,7 @@ def _coverage_positive_number(
     return float(value)
 
 
-def _parse_analyze_settings(
+def _parse_analyze_settings(  # noqa: C901 approved [SC-17.1] RUFF-SUP-129 exception
     table: dict[str, Any],
     *,
     source_path: Path,
@@ -3020,7 +3020,7 @@ def _parse_analyze_settings(
     )
 
 
-def _parse_verify_settings(
+def _parse_verify_settings(  # noqa: C901 approved [SC-17.1] RUFF-SUP-133 exception
     table: dict[str, Any],
     *,
     source_path: Path,
@@ -3790,7 +3790,7 @@ def _validate_verify_provider_file_layer(
     _parse_verify_provider(provider)
 
 
-def _unknown_key_messages(raw: dict[str, Any], config_path: Path) -> list[str]:
+def _unknown_key_messages(raw: dict[str, Any], config_path: Path) -> list[str]:  # noqa: C901 approved [SC-17.1] RUFF-SUP-137 exception
     """[CFG-8] unknown-key inventory, each message naming key and file."""
 
     messages: list[str] = []
@@ -3902,7 +3902,7 @@ def _is_packaged_default_path(path: Path) -> bool:
     return path.resolve() == PACKAGED_DEFAULTS_PATH
 
 
-def _table_key_names(table_name: str) -> frozenset[str]:
+def _table_key_names(table_name: str) -> frozenset[str]:  # noqa: C901 approved [SC-17.1] RUFF-SUP-136 exception
     if table_name == "defaults":
         return _DEFAULTS_KEYS
     if table_name == "profile":
@@ -3962,7 +3962,7 @@ def _parse_lint_settings(
     )
 
 
-def _parse_structured_suppressions(
+def _parse_structured_suppressions(  # noqa: C901 approved [SC-17.1] RUFF-SUP-132 exception
     value: Any,
     *,
     source: str,

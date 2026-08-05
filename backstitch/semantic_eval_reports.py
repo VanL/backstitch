@@ -482,7 +482,7 @@ def _parse_canonical_object(
     return cast(dict[str, Any], value), canonical
 
 
-def _validate_deterministic_config(value: object, name: str) -> None:
+def _validate_deterministic_config(value: object, name: str) -> None:  # noqa: C901 approved [SC-17.1] RUFF-SUP-094 exception
     row = _closed(value, _DETERMINISTIC_CONFIG_FIELDS, name)
     profile = _closed(row["profile"], _PROFILE_FIELDS, f"{name}.profile")
     roots: dict[str, tuple[str, ...]] = {}
@@ -585,7 +585,7 @@ def _validate_deterministic_config(value: object, name: str) -> None:
         )
 
 
-def _load_fixture_tree(
+def _load_fixture_tree(  # noqa: C901 approved [SC-17.1] RUFF-SUP-091 exception
     root: Path,
     tree_path: Path,
     *,
@@ -1870,7 +1870,7 @@ def _validate_eval_config(value: object) -> dict[str, Any]:
     return row
 
 
-def _validate_identity(value: object, corpus: SemanticEvalCorpus) -> dict[str, Any]:
+def _validate_identity(value: object, corpus: SemanticEvalCorpus) -> dict[str, Any]:  # noqa: C901 approved [SC-17.1] RUFF-SUP-096 exception
     from backstitch.obligation_runtime import ALGORITHMS
     from backstitch.semantic_identity import (
         ProviderIdentity,
@@ -2154,7 +2154,7 @@ def _validate_analysis_result(
     return row
 
 
-def _validate_analysis_attempt(
+def _validate_analysis_attempt(  # noqa: C901 approved [SC-17.1] RUFF-SUP-093 exception
     value: object,
     *,
     corpus: SemanticEvalCorpus,
@@ -2416,7 +2416,7 @@ def _expected_aggregate(
     return "verification_indeterminate", "verification_indeterminate"
 
 
-def _validate_event(
+def _validate_event(  # noqa: C901 approved [SC-17.1] RUFF-SUP-095 exception
     value: object,
     *,
     corpus: SemanticEvalCorpus,
@@ -2761,7 +2761,7 @@ def _validate_source_bound_evidence(
         )
 
 
-def _validate_observed_facts(
+def _validate_observed_facts(  # noqa: C901 approved [SC-17.1] RUFF-SUP-097 exception
     *,
     corpus: SemanticEvalCorpus,
     report: dict[str, Any],
@@ -2992,7 +2992,7 @@ def _validate_observed_facts(
     return eligibility, sufficient, packet_maps
 
 
-def _metric_row_from_observed(
+def _metric_row_from_observed(  # noqa: C901 approved [SC-17.1] RUFF-SUP-092 exception
     *,
     corpus: SemanticEvalCorpus,
     report: dict[str, Any],
@@ -3306,7 +3306,7 @@ def _expected_counts(
     return positives, negatives
 
 
-def _validate_operational(
+def _validate_operational(  # noqa: C901 approved [SC-17.1] RUFF-SUP-098 exception
     value: object,
     *,
     analysis_keys: tuple[str, ...],
@@ -3497,7 +3497,7 @@ def _validate_qualification(
         raise SemanticEvalContractError("qualification passed flag does not recompute")
 
 
-def validate_semantic_eval_report_consistency(
+def validate_semantic_eval_report_consistency(  # noqa: C901 approved [SC-17.1] RUFF-SUP-099 exception
     report: Mapping[str, Any] | SemanticEvalReport,
     *,
     corpus: SemanticEvalCorpus,

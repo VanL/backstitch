@@ -130,7 +130,7 @@ def render_json(results: list[CheckResult]) -> str:
 
 def _check_llm_import() -> tuple[bool, CheckResult]:
     try:
-        import llm  # noqa: F401
+        import llm  # noqa: F401 approved [SC-17.1] RUFF-SUP-153 exception
     except Exception as exc:  # noqa: BLE001 - any import failure is the finding
         return False, CheckResult(
             "llm-import",
@@ -370,7 +370,7 @@ def _read_bounded(
         chunks.append(chunk)
 
 
-def _check_endpoint(model: Any | None, probe: bool) -> CheckResult:
+def _check_endpoint(model: Any | None, probe: bool) -> CheckResult:  # noqa: C901 approved [SC-17.1] RUFF-SUP-036 exception
     if not probe:
         return CheckResult(
             "endpoint", "skip", "not evaluated: run with --probe to test"

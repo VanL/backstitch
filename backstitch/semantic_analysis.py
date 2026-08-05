@@ -533,7 +533,7 @@ def _path_alias_problem(request: SemanticAnalysisRequest) -> str | None:
     return None
 
 
-def _resolve_request_bytes(
+def _resolve_request_bytes(  # noqa: C901 approved [SC-17.1] RUFF-SUP-076 exception
     request: SemanticAnalysisRequest,
     rows: tuple[dict[str, Any], ...],
     identities: tuple[InferenceIdentity, ...],
@@ -592,7 +592,7 @@ def _resolve_request_bytes(
     return tuple(resolved)
 
 
-def _packet_report_preflight(
+def _packet_report_preflight(  # noqa: C901 approved [SC-17.1] RUFF-SUP-074 exception
     request: SemanticAnalysisRequest,
     rows: tuple[dict[str, Any], ...],
     identities: tuple[InferenceIdentity, ...],
@@ -764,7 +764,7 @@ def _empty_projection(
     )
 
 
-def _execute_cache(
+def _execute_cache(  # noqa: C901 approved [SC-17.1] RUFF-SUP-071 exception
     request: SemanticAnalysisRequest,
     identities: tuple[InferenceIdentity, ...],
     request_bytes: tuple[bytes, ...],
@@ -875,7 +875,7 @@ def _execute_cache(
     )
 
 
-def _execute_evidence_stable_preparation(
+def _execute_evidence_stable_preparation(  # noqa: C901 approved [SC-17.1] RUFF-SUP-072 exception
     request: SemanticAnalysisRequest,
     preparation: EvidenceStablePreparation,
     request_bytes: tuple[bytes, ...],
@@ -924,7 +924,7 @@ def _execute_evidence_stable_preparation(
                     raise
             return adapter
 
-    def resolve_item(
+    def resolve_item(  # noqa: C901 approved [SC-17.1] RUFF-SUP-073 exception
         prepared: tuple[Any, bytes],
     ) -> SemanticSelectionEvent | SemanticProblem:
         item, packet_request = prepared
@@ -1474,7 +1474,7 @@ def _disposition_row(disposition: Any) -> dict[str, object]:
     }
 
 
-def _resolve_independent_qualification(
+def _resolve_independent_qualification(  # noqa: C901 approved [SC-17.1] RUFF-SUP-075 exception
     policy: SemanticPolicy,
     verification_settings: ResolvedVerificationSettings | None,
     evaluation_settings: VerifyEvalSettings | None = None,
@@ -1996,7 +1996,7 @@ def run_semantic_analysis(request: SemanticAnalysisRequest) -> SemanticAnalysisR
     return _run_semantic_analysis(request, runtime_deadline=None)
 
 
-def _run_semantic_analysis(
+def _run_semantic_analysis(  # noqa: C901 approved [SC-17.1] RUFF-SUP-077 exception
     request: SemanticAnalysisRequest,
     *,
     runtime_deadline: float | None,

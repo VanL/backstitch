@@ -364,7 +364,7 @@ def build_verification_work(
     return tuple(work), tuple(groups)
 
 
-def validate_verification_links(
+def validate_verification_links(  # noqa: C901 approved [SC-17.1] RUFF-SUP-125 exception
     packet: dict[str, Any],
     claim: VerificationClaim,
     request: VerificationRequest,

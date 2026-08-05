@@ -79,6 +79,7 @@ def test_ci_checks_release_helper_format_and_types() -> None:
 
     assert workflow.count("uses: astral-sh/setup-uv@v7") == 4
     assert workflow.count("enable-cache: false") == 4
+    assert workflow.count("run: uv sync --frozen --extra dev") == 3
     assert "uv run ruff format --check" in workflow
     assert "tests\n" in workflow
     assert (
@@ -86,6 +87,25 @@ def test_ci_checks_release_helper_format_and_types() -> None:
         in workflow
     )
     assert "uv run backstitch check --repo-root ." in workflow
+
+
+def test_ci_runs_exact_lint_then_suppression_policy_commands() -> None:
+    workflow = _active_workflow_text("ci.yml")
+    lint_command = (
+        "uv run --frozen --no-sync ruff check . bin/check-doc-paths "
+        "bin/check-dom15-fixtures bin/coalesce-check"
+    )
+    suppression_command = (
+        "uv run --frozen --no-sync python bin/ruff_suppression_index.py --check"
+    )
+    active_lines = [line.strip() for line in workflow.splitlines()]
+
+    assert workflow.count(lint_command) == 1
+    assert workflow.count(suppression_command) == 1
+    lint_index = active_lines.index(lint_command)
+    assert active_lines[lint_index + 1] == suppression_command
+    assert "Complexity ceiling" not in workflow
+    assert "ruff check backstitch bin --select C901" not in workflow
 
 
 def test_ci_collects_and_uploads_coverage() -> None:
@@ -150,7 +170,7 @@ def test_ci_runs_every_benchmark_in_a_standalone_serial_job() -> None:
 
     assert "runs-on: ubuntu-latest" in benchmark_section
     assert 'python-version: "3.12"' in benchmark_section
-    assert "uv sync --extra dev" in benchmark_section
+    assert "uv sync --frozen --extra dev" in benchmark_section
     assert "uv run pytest tests -q -n 0 -m benchmark" in benchmark_section
     assert "-n auto" not in benchmark_section
     assert "--dist" not in benchmark_section

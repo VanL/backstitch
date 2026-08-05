@@ -952,7 +952,7 @@ class _ReferenceResolver:
         static_edges = self.resolve_all_references()
         self.project_edges(static_edges)
 
-    def build_symbol_tables(self) -> None:
+    def build_symbol_tables(self) -> None:  # noqa: C901 approved [SC-17.1] RUFF-SUP-037 exception
         for item in self.nodes.values():
             self.work.checkpoint()
             if (
@@ -1950,7 +1950,7 @@ def _obligation_locator(
     return None
 
 
-def _project_declared_relations(
+def _project_declared_relations(  # noqa: C901 approved [SC-17.1] RUFF-SUP-039 exception
     nodes: Mapping[str, _Node],
     report: Report,
     obligation: ObligationRecord,
@@ -2303,7 +2303,7 @@ def _candidate_tokens(node: _Node) -> frozenset[str]:
     )
 
 
-def _closure(
+def _closure(  # noqa: C901 approved [SC-17.1] RUFF-SUP-038 exception
     nodes: Mapping[str, _Node],
     static_edges: Sequence[tuple[str, str, str]],
     settings: ObligationSettings,

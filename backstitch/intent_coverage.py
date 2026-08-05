@@ -477,7 +477,7 @@ def _propagate_direct_owners(
     return tuple(by_id[item.definition.definition_id] for item in definitions)
 
 
-def _classify_definitions(
+def _classify_definitions(  # noqa: C901 approved [SC-17.1] RUFF-SUP-046 exception
     definitions: tuple[CoverageDefinition, ...],
     report: Report,
 ) -> tuple[ClassifiedDefinition, ...]:

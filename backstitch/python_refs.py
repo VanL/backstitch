@@ -295,7 +295,7 @@ def _in_bracket_range(item: str) -> tuple[str, str] | None:
     return None
 
 
-def _extract_line_refs(line_text: str) -> list[_LineRef]:
+def _extract_line_refs(line_text: str) -> list[_LineRef]:  # noqa: C901 approved [SC-17.1] RUFF-SUP-057 exception
     """Extract every reference on one line of docstring or comment text."""
 
     consumed: list[tuple[int, int]] = []
@@ -690,7 +690,7 @@ class _PythonProjectionState:
         )
 
 
-def _project_python_doc_markers(state: _PythonProjectionState) -> None:
+def _project_python_doc_markers(state: _PythonProjectionState) -> None:  # noqa: C901 approved [SC-17.1] RUFF-SUP-058 exception
     for candidate in state.parsed.doc_candidates:
         physical_lines = _physical_doc_lines(candidate)
         if candidate.node_type != "string" or candidate.text is None:

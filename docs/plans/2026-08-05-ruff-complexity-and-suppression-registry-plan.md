@@ -2,7 +2,7 @@
 
 Date: 2026-08-05
 
-Status: active; T3A technical freeze PASS; repository-owner approval pending
+Status: active; owner-approved T4 activation independently reviewed; ready to commit
 
 Class: 5+P. This changes a repository-wide required quality gate, its governing
 spec, CI and release enforcement, and the approved-suppression process.
@@ -151,7 +151,9 @@ closest proofs, registry/index, and [SC-17.1] mapping.
 - T4 must record a promotion baseline identifier here before later slices make
   compliance claims.
 
-Promotion baseline: pending T4.
+Promotion baseline: `936f248` plus the owner-approved T4 worktree diff to
+`docs/specs/02-backstitch-core.md`; replace this identifier with the T4 commit
+SHA after the reviewed atomic slice lands.
 
 ## Proposed Spec Delta
 
@@ -239,7 +241,7 @@ Insert the following text before `## Related Plans`:
 > source markers, registry, or generator requires recomputing the raw inventory
 > and reviewing every changed disposition.
 >
-> #### Approved Ruff Suppression Registry [SC-17.1]
+> #### Approved Ruff Suppression Registry
 >
 > | Group | Rules | Approved directives | Approved raw diagnostics by rule | Lifetime | Protected invariant | Real proof | Rejected alternatives | Approval |
 > |---|---|---:|---|---|---|---|---|---|
@@ -869,6 +871,7 @@ Stop and revise this plan if:
 
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
 |---|---|---|---|---|
+| [SC-17.1] registry heading | Repeat `[SC-17.1]` on the registry subheading | Keep `[SC-17.1]` only on the owning 17.1 heading; use exact subheading `#### Approved Ruff Suppression Registry` | Repeating the stable section ID creates one duplicate declaration and makes every governed source backlink ambiguous in the self-corpus | incorporated in the promoted [SC-17.1] text |
 
 ## Revision Log
 
@@ -884,6 +887,8 @@ Stop and revise this plan if:
 | 2026-08-05 | T3 hardening closed strict JSON/noqa-row parsing, registry/fence authority, duplicate rules, Markdown-safe paths, real pinned-Ruff execution, discovery/read failures, atomic cleanup/mode, and exact-byte CRLF/non-ASCII preservation through production `run()`. | Final T3 rereview PASS; 89 combined focused tests |
 | 2026-08-05 | Initial T3A cross-review found three new generator C901 diagnostics and three ledger proof gaps. Chose locality-preserving generator decompositions rather than self-suppressing the governance tool, and assigned missing enumerable settings/coalesce proofs before freeze. | Three independent ledger cross-reviews; fresh pinned threshold-10 audit |
 | 2026-08-05 | T3A remediation returned the generator to zero C901 findings and added exact ratchet-key, table-map, and hermetic coalesce proof. Three cross-reviewers found all 153 rows technically ready to freeze; approval remains an external owner gate. | 153 exact raw matches; 22/27/103 C901 priorities; T3A technical PASS |
+| 2026-08-05 | T4 promotion removed the repeated `[SC-17.1]` token from the registry subheading after the self-corpus gate proved that two headings declaring one stable ID make all 153 source backlinks ambiguous. The generator and live-spec test still require one exact active registry heading. | Adversarial self-corpus probe: 1 duplicate plus 149 ambiguous-reference errors before correction |
+| 2026-08-05 | Repository owner approved all 153 exact group fields. T4 froze the ledger, promoted 153 human and generated rows, activated C901/10, inserted 153 reconciled markers, and aligned CI/release enforcement atomically. | Owner task reply `Approve`; integrated T4 gates |
 
 ## Review Log
 
@@ -897,6 +902,8 @@ Stop and revise this plan if:
 | 2026-08-05 | T3 generator final rereview | independent settings/tooling reviewer | PASS | All hostile findings closed; production byte-preservation spot check passed |
 | 2026-08-05 | T3A exact ledger freeze | three cross-reviewers | BLOCKED; remediation in progress | New generator findings must be removed or registered; rows for ratchet policy, table keys, and coalesce lacked the claimed real proof; owner approval remains pending |
 | 2026-08-05 | T3A exact ledger freeze rereview | three cross-reviewers | technical PASS; owner gate pending | All 153 rows exact and substantive; generator C901=0; corrected proofs fire; all approval fields remain `pending owner` and freeze status remains `proposed` |
+| 2026-08-05 | T3A owner authorization | repository owner | APPROVED | Exact 153-row ledger approved in the implementation task; all approval fields record the reply and freeze status is `frozen` |
+| 2026-08-05 | T4 atomic activation | independent semantic-area reviewer | PASS | 153 ledger/human/generated/source rows exact; config, policy, CI, release, self-corpus, acceptance, and atomic rollback all align |
 
 ## Execution Evidence
 
@@ -906,6 +913,7 @@ Stop and revise this plan if:
 | T2 | `pyproject.toml`; `uv.lock`; `tests/test_ruff_policy.py`; enabled-rule fixture; exact 99-row excluded-input fixture; activation-ledger TSV | policy/release/workflow suite: 88 passed; policy tests after proof closure: 9 passed; Ruff, focused mypy, format, diff check: pass; self-corpus: exit 0, zero issues; discovery membership derived exactly; commit `1e1fbe5` | proposed ledger only: 152 C901 + 1 F401; no activation or source markers | initial review BLOCKED; corrections incorporated; final rereview PASS | nine pre-existing dangling document path claims remain outside this slice |
 | T3 | `bin/ruff_suppression_index.py`; `tests/test_ruff_suppression_index.py`; policy discovery expectation | combined policy/generator tests: 89 passed; canonical Ruff, full format, focused mypy, diff check: pass; real Ruff 0.15.21 extensionless end-to-end: pass; commit `dc36067` | fixture-only generator; no active spec rewrite or source markers | initial review BLOCKED twice; all findings closed; final rereview PASS | full repository mypy has the same six pre-existing `tests/test_semantic_application.py:144` errors with and without T3 |
 | T3A technical freeze | generator locality refactor; `tests/test_settings.py`; `tests/test_coalesce_check.py`; three ledger proof fields | combined focused selection: 278 passed; canonical threshold audit: 152 C901, generator 0; Ruff, full format, focused mypy, diff check: pass | ledger remains 153 proposed rows; no source markers or activation | three cross-reviewers technical PASS | repository-owner authorization is required before changing approval/freeze fields or starting T4 |
+| T4 | 43 governed source files; frozen ledger; core spec; Ruff config/rule fixture; generator/index; policy tests; CI; release helper/tests; self-corpus snapshot | integrated policy/generator/release/workflow: 175 passed; corpus/architecture/policy: 23 passed; acceptance: 24 passed; canonical Ruff, index check, full format, focused mypy, diff check: pass; self-corpus exit 0 with zero issues | 153 frozen human rows; 153 generated rows; raw `C901=152,F401=1`; normal Ruff clean | independent review PASS | promoted registry heading delta recorded after adversarial self-corpus caught duplicate section ID |
 
 ## Fresh-Eyes Checklist
 

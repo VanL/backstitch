@@ -275,7 +275,7 @@ def _semantic_issue_error(
     return None
 
 
-def _section_packet_shape_error(
+def _section_packet_shape_error(  # noqa: C901 approved [SC-17.1] RUFF-SUP-024 exception
     row: dict[str, Any],
     *,
     legacy: bool = False,
@@ -325,7 +325,7 @@ def _section_packet_shape_error(
     return None
 
 
-def _invariant_packet_shape_error(row: dict[str, Any]) -> str | None:
+def _invariant_packet_shape_error(row: dict[str, Any]) -> str | None:  # noqa: C901 approved [SC-17.1] RUFF-SUP-018 exception
     """Return an invariant-packet contract violation, or None if valid."""
 
     problem = _required_fields_error(row, INVARIANT_PACKET_FIELDS)
@@ -393,7 +393,7 @@ def _invariant_packet_shape_error(row: dict[str, Any]) -> str | None:
     return None
 
 
-def _v2_section_packet_shape_error(row: dict[str, Any]) -> str | None:
+def _v2_section_packet_shape_error(row: dict[str, Any]) -> str | None:  # noqa: C901 approved [SC-17.1] RUFF-SUP-026 exception
     fields: tuple[tuple[str, type], ...] = (
         ("schema_version", int),
         *(
@@ -459,7 +459,7 @@ def _v2_section_packet_shape_error(row: dict[str, Any]) -> str | None:
     return None
 
 
-def _v2_invariant_packet_shape_error(row: dict[str, Any]) -> str | None:
+def _v2_invariant_packet_shape_error(row: dict[str, Any]) -> str | None:  # noqa: C901 approved [SC-17.1] RUFF-SUP-025 exception
     fields: tuple[tuple[str, type], ...] = (
         ("schema_version", int),
         *(
@@ -749,7 +749,7 @@ class _PacketV3ValidationState:
     summary: dict[str, Any] | None = None
 
 
-def _packet_v3_header_error(state: _PacketV3ValidationState) -> str | None:
+def _packet_v3_header_error(state: _PacketV3ValidationState) -> str | None:  # noqa: C901 approved [SC-17.1] RUFF-SUP-021 exception
     row = state.row
     if set(row) != _PACKET_V3_FIELDS or row.get("schema_version") != 3:
         return "packet schema 3 does not match its closed top-level shape"
@@ -849,7 +849,7 @@ def _packet_v3_header_error(state: _PacketV3ValidationState) -> str | None:
     return None
 
 
-def _packet_v3_declared_error(state: _PacketV3ValidationState) -> str | None:
+def _packet_v3_declared_error(state: _PacketV3ValidationState) -> str | None:  # noqa: C901 approved [SC-17.1] RUFF-SUP-020 exception
     row = state.row
     required_roles = state.required_roles
     declared = row.get("declared_evidence")
@@ -1006,7 +1006,7 @@ def _packet_v3_counter_error(state: _PacketV3ValidationState) -> str | None:
     return None
 
 
-def _packet_v3_summary_error(state: _PacketV3ValidationState) -> str | None:
+def _packet_v3_summary_error(state: _PacketV3ValidationState) -> str | None:  # noqa: C901 approved [SC-17.1] RUFF-SUP-022 exception
     row = state.row
     declared_sources = state.declared_sources
     summary = row.get("trace_summary")
@@ -1221,7 +1221,7 @@ def _suppression_rule_path(value: object) -> bool:
     )
 
 
-def _packet_v4_shape_error(row: dict[str, Any]) -> str | None:
+def _packet_v4_shape_error(row: dict[str, Any]) -> str | None:  # noqa: C901 approved [SC-17.1] RUFF-SUP-023 exception
     """Return a schema-4 suppression packet violation, or ``None``."""
 
     if set(row) != _PACKET_V4_FIELDS or row.get("schema_version") != 4:
@@ -1535,7 +1535,7 @@ def load_packets(path: Path) -> tuple[ValidatedSemanticPacket, ...]:
     return load_packets_bytes(path.read_bytes(), source=path)
 
 
-def _load_packets_text(
+def _load_packets_text(  # noqa: C901 approved [SC-17.1] RUFF-SUP-019 exception
     text: str,
     *,
     source: Path | str,

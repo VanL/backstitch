@@ -98,7 +98,6 @@ def test_write_version_files_updates_untyped_init_version(tmp_path: Path) -> Non
 
 def test_precheck_commands_match_release_contract() -> None:
     commands = release.build_precheck_commands()
-    command_text = "\n".join(" ".join(command) for command in commands)
 
     assert release.HERMETIC_TEST_COMMAND == (
         "uv",
@@ -124,19 +123,38 @@ def test_precheck_commands_match_release_contract() -> None:
         "-m",
         "benchmark",
     )
-    assert commands[:2] == (
+    assert release.RUFF_CHECK_COMMAND == (
+        "uv",
+        "run",
+        "--frozen",
+        "--no-sync",
+        "ruff",
+        "check",
+        ".",
+        "bin/check-doc-paths",
+        "bin/check-dom15-fixtures",
+        "bin/coalesce-check",
+    )
+    assert release.RUFF_SUPPRESSION_CHECK_COMMAND == (
+        "uv",
+        "run",
+        "--frozen",
+        "--no-sync",
+        "python",
+        "bin/ruff_suppression_index.py",
+        "--check",
+    )
+    assert commands == (
         release.HERMETIC_TEST_COMMAND,
         release.BENCHMARK_TEST_COMMAND,
+        release.LIVE_LLM_TEST_COMMAND,
+        release.LOCAL_LLM_TEST_COMMAND,
+        release.RUFF_CHECK_COMMAND,
+        release.RUFF_SUPPRESSION_CHECK_COMMAND,
+        release.RUFF_FORMAT_COMMAND,
+        release.MYPY_COMMAND,
+        release.SELF_CORPUS_COMMAND,
     )
-    assert "pytest tests/live/test_live_llm.py -q" in command_text
-    assert "pytest tests/live/test_live_llm.py -q --tb=short" in command_text
-    assert "ruff check backstitch tests bin" in command_text
-    assert "ruff format --check backstitch bin .github/scripts tests" in command_text
-    assert (
-        "mypy backstitch bin/release.py tests --config-file pyproject.toml"
-        in command_text
-    )
-    assert "backstitch check --repo-root ." in command_text
 
 
 def test_benchmark_precheck_disables_ambient_xdist(

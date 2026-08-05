@@ -252,7 +252,7 @@ def _object(value: object, keys: set[str], context: str) -> dict[str, Any]:
     return _ALIGNMENT_VALIDATORS.closed_record(value, keys, context)
 
 
-def _json_file(path: Path, context: str) -> tuple[dict[str, Any], bytes]:
+def _json_file(path: Path, context: str) -> tuple[dict[str, Any], bytes]:  # noqa: C901 approved [SC-17.1] RUFF-SUP-004 exception
     try:
         mode = path.lstat().st_mode
         if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
@@ -333,7 +333,7 @@ def _authoritative_regular_bytes(root: Path, relative: str, context: str) -> byt
     return _authoritative_regular_input(root, relative, context)[0]
 
 
-def _authoritative_distribution_inventory(root: Path) -> list[dict[str, object]]:
+def _authoritative_distribution_inventory(root: Path) -> list[dict[str, object]]:  # noqa: C901 approved [SC-17.1] RUFF-SUP-001 exception
     try:
         root_mode = root.lstat().st_mode
     except OSError as exc:
@@ -650,7 +650,7 @@ def _fixture_snapshot(
     return rows, files
 
 
-def _validate_tree(
+def _validate_tree(  # noqa: C901 approved [SC-17.1] RUFF-SUP-012 exception
     *,
     phase_base: Path,
     fixture_path: object,
@@ -1138,7 +1138,7 @@ def _required_declaration_set(
     )
 
 
-def _validate_gold(
+def _validate_gold(  # noqa: C901 approved [SC-17.1] RUFF-SUP-010 exception
     value: object,
     tree: _FixtureTree,
     context: str,
@@ -1359,7 +1359,7 @@ def _validate_candidate_artifact(
     return artifact
 
 
-def _phase_ids(
+def _phase_ids(  # noqa: C901 approved [SC-17.1] RUFF-SUP-005 exception
     path: Path, expected_phase: str, declared_sha256: object
 ) -> _PhaseManifest:
     raw, manifest_bytes = _json_file(path, f"Phase {expected_phase} fixture manifest")
@@ -1725,7 +1725,7 @@ def _phase_qualification_sha256(
     return "sha256:" + hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
-def load_alignment_eval_plan(
+def load_alignment_eval_plan(  # noqa: C901 approved [SC-17.1] RUFF-SUP-013 exception
     path: Path, *, require_current_product: bool = False
 ) -> AlignmentEvalPlan:
     """Load one preregistration, optionally requiring the current product bytes."""
@@ -2096,7 +2096,7 @@ def _tree_rows_from_artifact(
     return rows, _sha256(digest, f"{context}.sha256")
 
 
-def _declaration_projection(
+def _declaration_projection(  # noqa: C901 approved [SC-17.1] RUFF-SUP-003 exception
     root: Path,
     profile: ProfileConfig,
     settings: BackstitchSettings,
@@ -2389,7 +2389,7 @@ def _apply_revision(
     )
 
 
-def _public_envelope(
+def _public_envelope(  # noqa: C901 approved [SC-17.1] RUFF-SUP-006 exception
     base: Path,
     path: object,
     digest: object,
@@ -2454,7 +2454,7 @@ def _guidance_codes(value: object, context: str) -> tuple[str, ...]:
     return tuple(codes)
 
 
-def _recompute_bootstrap_outcome(
+def _recompute_bootstrap_outcome(  # noqa: C901 approved [SC-17.1] RUFF-SUP-007 exception
     fixture: _FixtureDefinition, envelope: dict[str, Any], context: str
 ) -> str:
     operation = envelope["operation"]
@@ -2587,7 +2587,7 @@ def _recompute_bootstrap_outcome(
     raise AlignmentEvalError(f"{context} has no Phase A expected outcome")
 
 
-def _candidate_projection(
+def _candidate_projection(  # noqa: C901 approved [SC-17.1] RUFF-SUP-002 exception
     value: object, fixture: _FixtureDefinition, context: str
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     row = _object(value, _PUBLIC_CANDIDATE_KEYS, context)
@@ -2810,7 +2810,7 @@ _DECLARED_RELATION_KINDS = {
 }
 
 
-def _validate_candidate_relationships(
+def _validate_candidate_relationships(  # noqa: C901 approved [SC-17.1] RUFF-SUP-008 exception
     candidates: list[dict[str, Any]],
     obligation_id: str,
     context: str,
@@ -2978,7 +2978,7 @@ def _rerun_public_command(
         )
 
 
-def _validate_recorded_backstitch_argv(argv: tuple[str, ...], context: str) -> None:
+def _validate_recorded_backstitch_argv(argv: tuple[str, ...], context: str) -> None:  # noqa: C901 approved [SC-17.1] RUFF-SUP-011 exception
     """Validate a complete read-only dogfood call without narrowing proof output."""
 
     if len(argv) < 2 or argv[0] != "backstitch":
@@ -3575,7 +3575,7 @@ def _validate_task(
     ).validate()
 
 
-def _validate_candidate_runs(
+def _validate_candidate_runs(  # noqa: C901 approved [SC-17.1] RUFF-SUP-009 exception
     result_base: Path,
     phase: _PhaseManifest,
     value: object,

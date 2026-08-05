@@ -99,7 +99,7 @@ def _resolved_model_adapter_parts(
     return model, model_prompt, json_mode, request_options
 
 
-def default_provider_adapter(
+def default_provider_adapter(  # noqa: C901 approved [SC-17.1] RUFF-SUP-014 exception
     model_name: ResolvedInference | str | None,
     *,
     provider_identity: ProviderIdentity | None = None,

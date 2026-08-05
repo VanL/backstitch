@@ -399,7 +399,7 @@ def guidance_rows(codes: Iterable[GuidanceCode]) -> list[dict[str, str]]:
     return rows
 
 
-def problem_envelope(
+def problem_envelope(  # noqa: C901 approved [SC-17.1] RUFF-SUP-051 exception
     *,
     operation: str,
     snapshot: dict[str, object] | None,
@@ -1421,7 +1421,7 @@ def render_envelope_json(envelope: dict[str, Any]) -> str:
     return canonical_json_bytes(envelope).decode("utf-8") + "\n"
 
 
-def render_envelope_text(envelope: dict[str, Any], *, resolved_root: str) -> str:
+def render_envelope_text(envelope: dict[str, Any], *, resolved_root: str) -> str:  # noqa: C901 approved [SC-17.1] RUFF-SUP-052 exception
     """Render one compact human view while keeping root outside core JSON."""
 
     lines = [f"root {resolved_root}"]

@@ -307,6 +307,7 @@ select = [
     "I",
     "B",
     "C4",
+    "C901",
     "UP",
 ]
 ignore = [
@@ -315,7 +316,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.mccabe]
-max-complexity = 39
+max-complexity = 10
 
 [tool.ruff.lint.isort]
 known-first-party = ["backstitch"]

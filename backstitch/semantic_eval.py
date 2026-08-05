@@ -702,7 +702,7 @@ def _validate_output_path(corpus: SemanticEvalCorpus, output: Path) -> Path:
     return resolved
 
 
-def run_semantic_eval(request: SemanticEvalRequest) -> SemanticEvalRun:
+def run_semantic_eval(request: SemanticEvalRequest) -> SemanticEvalRun:  # noqa: C901 approved [SC-17.1] RUFF-SUP-090 exception
     """Run one cold-primary/cache-replay semantic qualification execution."""
 
     try:

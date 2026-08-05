@@ -822,7 +822,7 @@ def _ratchet_state(
     )
 
 
-def _classification_issues(
+def _classification_issues(  # noqa: C901 approved [SC-17.1] RUFF-SUP-034 exception
     result: IntentCoverageResult,
     floor_results: tuple[CoverageFloorResult, ...],
     repository: _RepositoryState,

@@ -30,7 +30,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: false
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --frozen --extra dev
       - name: Hermetic tests (live LLM deselected)
         run: uv run pytest tests -q -n auto --dist loadgroup -m "not live_llm and not benchmark"
       - name: Prove live tests skip under CI override
@@ -39,10 +39,10 @@ jobs:
           output="$(env -u BACKSTITCH_LIVE_LLM uv run pytest tests/live/test_live_llm.py -q -o run_live_llm=false 2>&1)"
           printf '%s\n' "${output}"
           grep -Eq 'SKIPPED \[1\]' <<< "${output}"
-      - name: Lint
-        run: uv run ruff check .
-      - name: Complexity ceiling
-        run: uv run ruff check backstitch bin --select C901
+      - name: Lint and suppression policy
+        run: |
+          uv run --frozen --no-sync ruff check . bin/check-doc-paths bin/check-dom15-fixtures bin/coalesce-check
+          uv run --frozen --no-sync python bin/ruff_suppression_index.py --check
       - name: Format
         run: >
           uv run ruff format --check
@@ -66,7 +66,7 @@ jobs:
           python-version: "3.12"
           enable-cache: false
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --frozen --extra dev
       - name: Serial wall-clock benchmarks
         run: uv run pytest tests -q -n 0 -m benchmark
 
@@ -81,7 +81,7 @@ jobs:
           python-version: "3.12"
           enable-cache: false
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --frozen --extra dev
       - name: Run tests with coverage
         run: |
           uv run coverage erase

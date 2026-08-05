@@ -64,7 +64,7 @@ Risky plans are blocked if they do not make explicit:
 | 2026-07-29-architecture-quality-remediation-plan.md | completed — implementation, verification, independent review, and owner-authorized landing |
 | 2026-07-29-usability-remediation-plan.md | completed — implementation, exact-state dogfood, independent review, and owner-authorized landing |
 | 2026-08-04-semantic-preparation-performance-plan.md | completed — implementation, verification, and final independent review PASS |
-| 2026-08-05-ruff-complexity-and-suppression-registry-plan.md | active — T3A technical freeze PASS; repository-owner approval pending before T4 |
+| 2026-08-05-ruff-complexity-and-suppression-registry-plan.md | active — owner-approved T4 activation independently reviewed; ready to commit |
 
 (Existing plans carry status via each spec's `## Related Plans` tags;
 rows are added here as plans open or the coalescing sweep needs them.)

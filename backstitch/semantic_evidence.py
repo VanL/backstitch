@@ -151,7 +151,7 @@ def _region(
     return _ShownRegion(role, path, start_line, lines)
 
 
-def _shown_regions(packet: dict[str, Any]) -> tuple[_ShownRegion, ...]:
+def _shown_regions(packet: dict[str, Any]) -> tuple[_ShownRegion, ...]:  # noqa: C901 approved [SC-17.1] RUFF-SUP-100 exception
     projection = semantic_packet_projection(packet)
     regions: list[_ShownRegion] = []
     if projection.get("packet_contract_version") == 3:
@@ -326,7 +326,7 @@ def normalize_packet_evidence(
     return _normalize_evidence(packet, evidence_raw)
 
 
-def required_evidence_roles(kind: str, classification: str) -> frozenset[EvidenceRole]:
+def required_evidence_roles(kind: str, classification: str) -> frozenset[EvidenceRole]:  # noqa: C901 approved [SC-17.1] RUFF-SUP-102 exception
     """Return the minimum canonical evidence roles for one result variant."""
 
     if kind == "section":
@@ -355,7 +355,7 @@ def required_evidence_roles(kind: str, classification: str) -> frozenset[Evidenc
     raise ValueError(f"invalid semantic result variant: {kind}/{classification}")
 
 
-def normalize_model_result(
+def normalize_model_result(  # noqa: C901 approved [SC-17.1] RUFF-SUP-101 exception
     packet: dict[str, Any],
     response: object,
     *,

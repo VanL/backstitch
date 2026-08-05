@@ -100,7 +100,7 @@ class AnalysisLoad:
     errors: tuple[str, ...]
 
 
-def _validate_current_analysis_row(
+def _validate_current_analysis_row(  # noqa: C901 approved [SC-17.1] RUFF-SUP-016 exception
     row: dict[str, Any],
     known_packet_ids: set[str] | Mapping[str, str] | None,
 ) -> AnalysisResult | str:
@@ -236,7 +236,7 @@ def _validate_current_analysis_row(
     )
 
 
-def validate_analysis_row(
+def validate_analysis_row(  # noqa: C901 approved [SC-17.1] RUFF-SUP-017 exception
     row: Any,
     known_packet_ids: set[str] | Mapping[str, str] | None,
     *,

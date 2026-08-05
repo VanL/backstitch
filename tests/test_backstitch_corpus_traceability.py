@@ -59,7 +59,9 @@ def test_self_corpus_suppressions_are_auditable() -> None:
         "docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-PROCESS": 2,
         "docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-DEFERRED-MCP": 2,
         "docs/specs/04-backstitch-traceability-exclusions.md#SUP-DOCUMENTATION-META": 2,
-        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-TEST-CITATIONS": 235,
+        # T4 adds governed Ruff policy/spec backlinks while the test-only
+        # citation policy keeps their non-owning trace records auditable.
+        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-TEST-CITATIONS": 238,
         "docs/specs/04-backstitch-traceability-exclusions.md#SUP-VERIFICATION-META": 7,
     }
     assert Counter(record["declaration"] for record in suppressed) == expected_counts

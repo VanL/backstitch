@@ -396,7 +396,7 @@ def _verifier_context(aggregate: VerificationAggregateLike) -> VerificationState
     return cast(VerificationState, context)
 
 
-def materialize_semantic_policy(
+def materialize_semantic_policy(  # noqa: C901 approved [SC-17.1] RUFF-SUP-103 exception
     settings: DiagnosticsSettings,
     rule_origins: Sequence[PolicyRuleOriginLike],
     effective_policy_layers: Sequence[str],
@@ -604,7 +604,7 @@ def project_semantic_result(
     )
 
 
-def project_semantic_results(
+def project_semantic_results(  # noqa: C901 approved [SC-17.1] RUFF-SUP-104 exception
     results: Sequence[CanonicalResult],
     policy: SemanticPolicy,
     dispositions: Sequence[SemanticDispositionLike] = (),

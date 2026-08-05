@@ -263,7 +263,7 @@ def _extract_heading_skips(
     return cleaned, candidates, diagnostics
 
 
-def _resolve_skip_candidates(
+def _resolve_skip_candidates(  # noqa: C901 approved [SC-17.1] RUFF-SUP-049 exception
     *,
     path: str,
     candidates: list[_SkipCandidate],
@@ -421,7 +421,7 @@ def _strip_final_html_directive(line: str, prefix: re.Pattern[str]) -> str:
     return line[:start].rstrip(" \t") + line[close + 3 :]
 
 
-def project_section_packet_requirement(
+def project_section_packet_requirement(  # noqa: C901 approved [SC-17.1] RUFF-SUP-050 exception
     raw: bytes,
     *,
     path: str,
@@ -1109,7 +1109,7 @@ class _TraceabilityReducer:
         self.nonsemantic_lines.add(line_no)
         return True
 
-    def process_reserved_skip_lines(
+    def process_reserved_skip_lines(  # noqa: C901 approved [SC-17.1] RUFF-SUP-048 exception
         self,
         source_lines: Sequence[tuple[int, str]],
     ) -> tuple[bool, bool]:

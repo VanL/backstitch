@@ -90,11 +90,23 @@ LOCAL_LLM_TEST_COMMAND: Final[tuple[str, ...]] = (
 RUFF_CHECK_COMMAND: Final[tuple[str, ...]] = (
     "uv",
     "run",
+    "--frozen",
+    "--no-sync",
     "ruff",
     "check",
-    "backstitch",
-    "tests",
-    "bin",
+    ".",
+    "bin/check-doc-paths",
+    "bin/check-dom15-fixtures",
+    "bin/coalesce-check",
+)
+RUFF_SUPPRESSION_CHECK_COMMAND: Final[tuple[str, ...]] = (
+    "uv",
+    "run",
+    "--frozen",
+    "--no-sync",
+    "python",
+    "bin/ruff_suppression_index.py",
+    "--check",
 )
 RUFF_FORMAT_COMMAND: Final[tuple[str, ...]] = (
     "uv",
@@ -358,6 +370,7 @@ def build_precheck_commands() -> tuple[tuple[str, ...], ...]:
         LIVE_LLM_TEST_COMMAND,
         LOCAL_LLM_TEST_COMMAND,
         RUFF_CHECK_COMMAND,
+        RUFF_SUPPRESSION_CHECK_COMMAND,
         RUFF_FORMAT_COMMAND,
         MYPY_COMMAND,
         SELF_CORPUS_COMMAND,
@@ -993,7 +1006,7 @@ def _short_commit(commit: str) -> str:
     return commit[:12]
 
 
-def plan_tag_action(
+def plan_tag_action(  # noqa: C901 approved [SC-17.1] RUFF-SUP-142 exception
     state: ReleaseState,
     *,
     head_commit: str,
@@ -1185,7 +1198,7 @@ def _print_release_plan(
     print(f"tag:     {release_state.tag_name} ({tag_action})")
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # noqa: C901 approved [SC-17.1] RUFF-SUP-141 exception
     parser = _build_parser()
     args = parser.parse_args(argv)
     target = ROOT_RELEASE_TARGET

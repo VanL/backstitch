@@ -147,7 +147,7 @@ def default_policy() -> DiagnosticsSettings:
     )
 
 
-def parse_registry(raw: dict[str, Any], *, source: str) -> DiagnosticRegistry:
+def parse_registry(raw: dict[str, Any], *, source: str) -> DiagnosticRegistry:  # noqa: C901 approved [SC-17.1] RUFF-SUP-035 exception
     definitions: dict[str, DiagnosticDefinition] = {}
     short_to_code: dict[str, str] = {}
     for code, value in sorted(raw.items()):

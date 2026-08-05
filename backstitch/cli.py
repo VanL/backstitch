@@ -525,7 +525,7 @@ def _settings_anchor(args: argparse.Namespace) -> Path:
     raise ConfigLoadError(f"{args.command} does not consume configuration")
 
 
-def _dedicated_cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
+def _dedicated_cli_overrides(args: argparse.Namespace) -> dict[str, Any]:  # noqa: C901 approved [SC-17.1] RUFF-SUP-030 exception
     overrides: dict[str, Any] = {}
     if args.command in {"check", "packets", "coverage"}:
         if args.profile is not None:
@@ -732,7 +732,7 @@ def _render_coverage_result(result: object, format_name: str) -> str:
     )
 
 
-def _cmd_packets(args: argparse.Namespace, settings: BackstitchSettings) -> int:
+def _cmd_packets(args: argparse.Namespace, settings: BackstitchSettings) -> int:  # noqa: C901 approved [SC-17.1] RUFF-SUP-029 exception
     from backstitch.packet_application import (
         PacketBlocked,
         PacketFailure,
@@ -847,7 +847,7 @@ def _render_semantic_preflight(preflight: Any) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _cmd_analyze(args: argparse.Namespace, settings: BackstitchSettings) -> int:
+def _cmd_analyze(args: argparse.Namespace, settings: BackstitchSettings) -> int:  # noqa: C901 approved [SC-17.1] RUFF-SUP-027 exception
     # Lazy imports preserve the structural no-provider boundary for deterministic
     # commands ([SC-8]).
     from backstitch.analysis_llm import default_provider_adapter, resolve_model_name
@@ -1024,7 +1024,7 @@ def _cmd_analyze(args: argparse.Namespace, settings: BackstitchSettings) -> int:
     return run.exit_code
 
 
-def _cmd_eval(args: argparse.Namespace, settings: BackstitchSettings) -> int:
+def _cmd_eval(args: argparse.Namespace, settings: BackstitchSettings) -> int:  # noqa: C901 approved [SC-17.1] RUFF-SUP-028 exception
     # Like analyze, eval is an explicitly model-touching command. Keep all
     # provider imports inside this handler so deterministic commands retain
     # the structural no-llm guarantee ([SC-8]).
@@ -1563,7 +1563,7 @@ def _resolve_default_invocation_settings(
     )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901 approved [SC-17.1] RUFF-SUP-031 exception
     """Run the backstitch CLI."""
 
     parser = build_parser()

@@ -65,7 +65,7 @@ def _module_name(path: Path) -> str:
     return ".".join(relative.parts)
 
 
-def _internal_imports(
+def _internal_imports(  # noqa: C901 approved [SC-17.1] RUFF-SUP-147 exception
     module: str,
     source: bytes,
     modules: frozenset[str],
@@ -118,7 +118,7 @@ def _import_graph() -> dict[str, frozenset[str]]:
     }
 
 
-def _strongly_connected_components(
+def _strongly_connected_components(  # noqa: C901 approved [SC-17.1] RUFF-SUP-149 exception
     graph: dict[str, frozenset[str]],
 ) -> tuple[frozenset[str], ...]:
     """Return deterministic SCCs using two depth-first graph passes."""
@@ -162,7 +162,7 @@ def _strongly_connected_components(
     return tuple(components)
 
 
-def _private_imports(
+def _private_imports(  # noqa: C901 approved [SC-17.1] RUFF-SUP-148 exception
     importer: str,
     source: bytes,
 ) -> tuple[tuple[str, str, str], ...]:

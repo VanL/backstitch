@@ -326,7 +326,7 @@ def _ordered_tags(*groups: tuple[str, ...]) -> list[str]:
     return [tag for tag in CONTROL_TAG_ORDER if tag in selected]
 
 
-def _arguments(function: str) -> str:
+def _arguments(function: str) -> str:  # noqa: C901 approved [SC-17.1] RUFF-SUP-146 exception
     if "branch_polarity" in function:
         return "enabled: bool"
     if "inclusive_threshold" in function:

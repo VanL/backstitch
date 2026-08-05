@@ -873,7 +873,7 @@ def _gate_state(
     return "executable"
 
 
-def _section_record(
+def _section_record(  # noqa: C901 approved [SC-17.1] RUFF-SUP-054 exception
     report: Report,
     section: SpecSection,
     *,
@@ -1173,7 +1173,7 @@ def _validate_required_roles(
         )
 
 
-def build_obligation_inventory(
+def build_obligation_inventory(  # noqa: C901 approved [SC-17.1] RUFF-SUP-055 exception
     report: Report,
     *,
     profile: ProfileConfig,

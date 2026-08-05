@@ -378,7 +378,7 @@ def _current_paths(
     return tuple(operational_exclusions)
 
 
-def _prepare_current(
+def _prepare_current(  # noqa: C901 approved [SC-17.1] RUFF-SUP-078 exception
     request: SemanticApplicationRequest,
 ) -> _PreparedCurrentAnalysis | _BlockedCurrentPreparation | SemanticApplicationFailure:
     """Build the one provider-free current analysis preparation."""

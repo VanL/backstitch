@@ -658,7 +658,7 @@ def _inventory_directory(
         os.close(directory_fd)
 
 
-def _inventory_open_directory(
+def _inventory_open_directory(  # noqa: C901 approved [SC-17.1] RUFF-SUP-062 exception
     directory_fd: int,
     directory: _NormalizedPath,
     suffixes: tuple[str, ...],
@@ -756,7 +756,7 @@ class _Inventory:
     missing_roots: tuple[str, ...]
 
 
-def _inventory(
+def _inventory(  # noqa: C901 approved [SC-17.1] RUFF-SUP-061 exception
     root_fd: int,
     repo_root: Path,
     config: SnapshotSemanticConfig,
@@ -912,7 +912,7 @@ def _validate_expected_lstat(root_fd: int, path: str, expected: FileStat) -> Non
         raise _TornCapture
 
 
-def _bounded_read_attempt(
+def _bounded_read_attempt(  # noqa: C901 approved [SC-17.1] RUFF-SUP-059 exception
     root_fd: int,
     path: str,
     expected: FileStat,
@@ -1022,7 +1022,7 @@ def _normalized_identity_config(
     }
 
 
-def _capture_attempt(
+def _capture_attempt(  # noqa: C901 approved [SC-17.1] RUFF-SUP-060 exception
     root_fd: int,
     repo_root: Path,
     config: SnapshotSemanticConfig,
@@ -1139,7 +1139,7 @@ def _catalog_hash(
     return hashlib.sha256(canonical_json_bytes(preimage)).hexdigest()
 
 
-def capture_repository_snapshot(
+def capture_repository_snapshot(  # noqa: C901 approved [SC-17.1] RUFF-SUP-063 exception
     repo_root: Path,
     semantic_config: SnapshotSemanticConfig,
     algorithms: SnapshotAlgorithms,

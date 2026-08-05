@@ -618,7 +618,7 @@ def _validate_optional_closed_identity(
     return _exact_record(value, fields, name)
 
 
-def _validate_qualification_details(value: object, name: str) -> None:
+def _validate_qualification_details(value: object, name: str) -> None:  # noqa: C901 approved [SC-17.1] RUFF-SUP-117 exception
     fields = frozenset(
         {
             "selectors",
@@ -749,7 +749,7 @@ def _validate_qualification_details(value: object, name: str) -> None:
         )
 
 
-def _validate_problem_v3(value: object, index: int) -> str:
+def _validate_problem_v3(value: object, index: int) -> str:  # noqa: C901 approved [SC-17.1] RUFF-SUP-116 exception
     name = f"problems[{index}]"
     row = _exact_record(value, _PROBLEM_V3_FIELDS, name)
     for identity_field in ("packet_id", "obligation_id"):
@@ -924,7 +924,7 @@ def _validate_evidence(value: object, name: str) -> None:
         raise AnalysisReportError(f"{name}.excerpt_sha256 does not match excerpt")
 
 
-def _validate_diagnostic(
+def _validate_diagnostic(  # noqa: C901 approved [SC-17.1] RUFF-SUP-113 exception
     value: object,
     index: int,
     effective_policy_layers: set[str],
@@ -1135,7 +1135,7 @@ def _validate_diagnostic(
     )
 
 
-def _validate_analysis_report_v1_shape(value: Mapping[str, Any]) -> dict[str, Any]:
+def _validate_analysis_report_v1_shape(value: Mapping[str, Any]) -> dict[str, Any]:  # noqa: C901 approved [SC-17.1] RUFF-SUP-111 exception
     if set(value) != _ANALYSIS_REPORT_V1_FIELDS:
         raise AnalysisReportError("analysis report does not match the closed shape")
     schema = value.get("schema_version")
@@ -1391,7 +1391,7 @@ def _validate_analysis_alignment_projection(
     return normalized_counts
 
 
-def _validate_verification_contract(value: object) -> dict[str, Any]:
+def _validate_verification_contract(value: object) -> dict[str, Any]:  # noqa: C901 approved [SC-17.1] RUFF-SUP-120 exception
     from backstitch.semantic_identity import (
         ProviderIdentity,
         RequestIdentity,
@@ -1523,7 +1523,7 @@ def _validate_verification_evidence(value: object, name: str) -> list[dict[str, 
     return value
 
 
-def _validate_verification_event(
+def _validate_verification_event(  # noqa: C901 approved [SC-17.1] RUFF-SUP-121 exception
     value: object,
     index: int,
     *,
@@ -1623,7 +1623,7 @@ def _validate_verification_event(
     return state
 
 
-def _validate_verification(
+def _validate_verification(  # noqa: C901 approved [SC-17.1] RUFF-SUP-119 exception
     value: object,
     *,
     diagnostics: list[dict[str, Any]],
@@ -1822,7 +1822,7 @@ def _validate_result_provenance(value: object, name: str) -> dict[str, Any]:
     return value
 
 
-def _validate_analysis_report_v5_shape(
+def _validate_analysis_report_v5_shape(  # noqa: C901 approved [SC-17.1] RUFF-SUP-112 exception
     value: Mapping[str, Any],
     *,
     analysis_counts: Mapping[str, int],
@@ -1951,7 +1951,7 @@ class _AnalysisReportSourceState:
     exit_code: int
 
 
-def _analysis_report_source_state(
+def _analysis_report_source_state(  # noqa: C901 approved [SC-17.1] RUFF-SUP-105 exception
     value: Mapping[str, Any],
 ) -> _AnalysisReportSourceState:
     schema_version = value.get("schema_version")
@@ -2110,7 +2110,7 @@ def _analysis_report_source_state(
     )
 
 
-def _validate_analysis_report_source_shape(
+def _validate_analysis_report_source_shape(  # noqa: C901 approved [SC-17.1] RUFF-SUP-110 exception
     value: Mapping[str, Any],
 ) -> dict[str, Any]:
     state = _analysis_report_source_state(value)
@@ -2321,7 +2321,7 @@ def _validate_analysis_report_shape(value: Mapping[str, Any]) -> dict[str, Any]:
     return _validate_analysis_report_v1_shape(value)
 
 
-def _revalidate_result_jsonl(
+def _revalidate_result_jsonl(  # noqa: C901 approved [SC-17.1] RUFF-SUP-109 exception
     result_jsonl: bytes,
     packets: tuple[ValidatedSemanticPacket, ...],
 ) -> tuple[dict[str, Any], ...]:
@@ -2504,7 +2504,7 @@ def _closed_counts(value: object, name: str) -> dict[str, int]:
     }
 
 
-def _validate_packet_report_v1_shape(value: Mapping[str, Any]) -> dict[str, Any]:
+def _validate_packet_report_v1_shape(value: Mapping[str, Any]) -> dict[str, Any]:  # noqa: C901 approved [SC-17.1] RUFF-SUP-115 exception
     if set(value) != _PACKET_REPORT_V1_FIELDS:
         raise PacketReportError("packet report does not match the closed shape")
     if value.get("schema_version") != 1 or isinstance(
@@ -2643,7 +2643,7 @@ def _audit_bucket(item: Mapping[str, Any]) -> str:
     return "alignment_debt"
 
 
-def _packet_report_issue_error(
+def _packet_report_issue_error(  # noqa: C901 approved [SC-17.1] RUFF-SUP-106 exception
     item: Mapping[str, Any],
     *,
     index: int,
@@ -2703,7 +2703,7 @@ class _PacketReportSourceState:
     normalized_counts: dict[str, int]
 
 
-def _packet_report_source_state(
+def _packet_report_source_state(  # noqa: C901 approved [SC-17.1] RUFF-SUP-108 exception
     value: Mapping[str, Any],
 ) -> _PacketReportSourceState:
     schema_version = value.get("schema_version")
@@ -2830,7 +2830,7 @@ def _packet_report_source_state(
     )
 
 
-def _validate_packet_report_audit(
+def _validate_packet_report_audit(  # noqa: C901 approved [SC-17.1] RUFF-SUP-114 exception
     value: Mapping[str, Any],
     state: _PacketReportSourceState,
 ) -> list[dict[str, Any]]:
@@ -2960,7 +2960,7 @@ def _validate_packet_report_audit(
     return audit
 
 
-def _packet_report_source_shape(value: Mapping[str, Any]) -> dict[str, Any]:
+def _packet_report_source_shape(value: Mapping[str, Any]) -> dict[str, Any]:  # noqa: C901 approved [SC-17.1] RUFF-SUP-107 exception
     state = _packet_report_source_state(value)
     current = state.current
     packet_count = state.packet_count
@@ -3158,7 +3158,7 @@ def _issue_obligation_id(runtime: ObligationRuntime, issue: Any) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def build_source_packet_report(
+def build_source_packet_report(  # noqa: C901 approved [SC-17.1] RUFF-SUP-122 exception
     runtime: ObligationRuntime,
     *,
     packet_plan: PacketPlan,
@@ -3348,7 +3348,7 @@ def build_source_packet_report(
     return report
 
 
-def validate_packet_report(
+def validate_packet_report(  # noqa: C901 approved [SC-17.1] RUFF-SUP-124 exception
     report: PacketReport | Mapping[str, Any],
     *,
     packet_jsonl: bytes | None = None,
@@ -3500,7 +3500,7 @@ def load_packet_report(path: Path, *, maximum_bytes: int | None = None) -> Packe
     return load_packet_report_bytes(content, source=path, maximum_bytes=maximum_bytes)
 
 
-def _validate_v5_authoritative_facts(
+def _validate_v5_authoritative_facts(  # noqa: C901 approved [SC-17.1] RUFF-SUP-118 exception
     value: Mapping[str, Any],
     *,
     results: tuple[dict[str, Any], ...],
@@ -3705,7 +3705,7 @@ def _validate_v5_authoritative_facts(
         )
 
 
-def validate_analysis_report(
+def validate_analysis_report(  # noqa: C901 approved [SC-17.1] RUFF-SUP-123 exception
     report: AnalysisReport | Mapping[str, Any],
     *,
     result_jsonl: bytes | None = None,

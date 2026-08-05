@@ -960,7 +960,7 @@ class _StaticSyntaxCollector:
             )
         )
 
-    def visit_reference(
+    def visit_reference(  # noqa: C901 approved [SC-17.1] RUFF-SUP-032 exception
         self,
         node: Node,
         owner: _OwnerNodeEntry | None,
@@ -1489,7 +1489,7 @@ def _node_indent(node: Node, source: bytes, line_index: _LineIndex) -> int:
     return len(prefix.expandtabs(8))
 
 
-def _statement_spans(root: Node, line_index: _LineIndex) -> list[tuple[int, int]]:
+def _statement_spans(root: Node, line_index: _LineIndex) -> list[tuple[int, int]]:  # noqa: C901 approved [SC-17.1] RUFF-SUP-033 exception
     spans: list[tuple[int, int]] = []
 
     def visit_container(container: Node) -> None:

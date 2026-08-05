@@ -130,7 +130,7 @@ def _deadline_failure(error: OperationDeadlineExceeded) -> PacketFailure:
     )
 
 
-def publish_packets(
+def publish_packets(  # noqa: C901 approved [SC-17.1] RUFF-SUP-056 exception
     request: PacketRequest,
 ) -> PacketResult | PacketBlocked | PacketFailure:
     """Build one source packet corpus and publish its requested artifacts."""

@@ -220,7 +220,7 @@ def _missing_path_context(token: str, plan_roots: tuple[str, ...]) -> str:
     return "required"
 
 
-def _resolve_mappings(
+def _resolve_mappings(  # noqa: C901 approved [SC-17.1] RUFF-SUP-069 exception
     mappings: Sequence[SpecMapping],
     mapping_path_exists: Mapping[str, bool],
     python_symbols: Mapping[str, frozenset[str] | None],
@@ -425,7 +425,7 @@ def _resolve_bare(
     return None
 
 
-def _resolve_code_refs(
+def _resolve_code_refs(  # noqa: C901 approved [SC-17.1] RUFF-SUP-066 exception
     refs: Sequence[CodeRef],
     index: _GraphIndex,
     profile: ProfileConfig,
@@ -506,7 +506,7 @@ def _resolve_code_refs(
             )
 
 
-def _resolve_file_qualified_ref(
+def _resolve_file_qualified_ref(  # noqa: C901 approved [SC-17.1] RUFF-SUP-067 exception
     ref: CodeRef,
     index: _GraphIndex,
     profile: ProfileConfig,
@@ -593,7 +593,7 @@ def _resolve_file_qualified_ref(
         )
 
 
-def _reciprocal_and_inventory_issues(
+def _reciprocal_and_inventory_issues(  # noqa: C901 approved [SC-17.1] RUFF-SUP-065 exception
     sections: Sequence[SpecSection],
     mappings: Sequence[SpecMapping],
     edges: Sequence[Edge],
@@ -684,7 +684,7 @@ def _reciprocal_and_inventory_issues(
             )
 
 
-def _resolve_invariants(
+def _resolve_invariants(  # noqa: C901 approved [SC-17.1] RUFF-SUP-068 exception
     declarations: Sequence[InvariantDeclaration],
     binding_refs: Sequence[InvariantBind],
     sections: Sequence[SpecSection],
@@ -905,7 +905,7 @@ class ScanArtifacts:
     obligation_search_text: dict[str, str]
 
 
-def _project_scan_artifacts(
+def _project_scan_artifacts(  # noqa: C901 approved [SC-17.1] RUFF-SUP-064 exception
     report: Report,
     parsed_specs: Sequence[ParsedSpec],
     parsed_python: Sequence[ParsedPython],
@@ -1077,7 +1077,7 @@ def _snapshot_roots(snapshot: RepositorySnapshot, key: str) -> tuple[str, ...]:
     return tuple(value for value in values if isinstance(value, str))
 
 
-def scan_snapshot_with_artifacts(
+def scan_snapshot_with_artifacts(  # noqa: C901 approved [SC-17.1] RUFF-SUP-070 exception
     snapshot: RepositorySnapshot,
     repo_root_display: str,
     profile: ProfileConfig,

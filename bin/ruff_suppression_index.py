@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
-REGISTRY_HEADING = "#### Approved Ruff Suppression Registry [SC-17.1]"
+REGISTRY_HEADING = "#### Approved Ruff Suppression Registry"
 BEGIN_MARKER = "<!-- BEGIN GENERATED RUFF SUPPRESSION INDEX -->"
 END_MARKER = "<!-- END GENERATED RUFF SUPPRESSION INDEX -->"
 LINT_TARGETS = (

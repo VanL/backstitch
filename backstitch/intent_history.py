@@ -122,7 +122,7 @@ class IntentRevisionProjector:
         return state
 
 
-def build_intent_revision_state(
+def build_intent_revision_state(  # noqa: C901 approved [SC-17.1] RUFF-SUP-047 exception
     blobs: Mapping[str, bytes],
     *,
     repo_root: Path,

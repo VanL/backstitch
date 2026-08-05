@@ -1028,6 +1028,11 @@ Required proof surfaces:
 - one firing test for each `default_command` value, the disabling `false`
   value, every invalid type/value family, and `extend` override/disable
   behavior
+- configured Ruff policy tests proving the exact manifest/lock/runtime pin,
+  the reviewed lint discovery surface including intended extensionless Python
+  entry points, configured `C901` at 10, active-rule raw inventory, and the
+  checked [SC-17.1] suppression registry through the same canonical lint
+  vector used by CI and release prechecks
 - explicit-versus-bare environment tests proving `LLM_MODEL` applies to bare
   analyze but remains irrelevant to bare check, with one file/config
   resolution and one immutable settings snapshot
@@ -1742,9 +1747,12 @@ Names changed by architecture work read as short declarative statements at
 their call sites. Architecture work does not require a standalone rename wave.
 
 Executable gates enumerate the internal import graph and enforce zero strongly
-connected components larger than one. Ruff enforces a McCabe ceiling of 39
-over production code. Lower-scoring functions remain reviewable design debt;
-the ceiling is not a claim that every permitted function is simple.
+connected components larger than one. Ruff enforces McCabe complexity `C901`
+at a ceiling of 10 over every lint-eligible tracked Python source and intended
+extensionless Python entry point. The score is a review trigger, not a design
+verdict. A function above the ceiling is permitted only through the reviewed,
+source-linked suppression process in [SC-17.1]. File length alone remains
+insufficient reason to split an owner.
 
 _Implementation mapping_:
 - `backstitch/cli.py`
@@ -1767,8 +1775,426 @@ _Implementation mapping_:
 - `pyproject.toml`
 - `.github/workflows/ci.yml`
 
+### 17.1 Repository Complexity And Suppression Gate [SC-17.1]
+
+Ruff's version is exact-pinned in the development manifest and lock. The
+repository proves that the executing binary, manifest pin, and lock resolve
+to the same version before deriving rule or suppression inventories.
+
+The normal configured Ruff check includes `C901` with
+`lint.mccabe.max-complexity = 10`. Lint discovery covers every tracked Python
+source that is not inside an explicit, test-owned fixture-input exclusion and
+every intended extensionless Python entry point. Formatter scope is
+independent and does not expand merely because lint discovery expands.
+
+A governed source suppression has the form
+`# noqa: <RULES> approved [SC-17.1] RUFF-SUP-NNN exception`. Its group ID must
+exist exactly once in the registry below. The generated index identifies a
+suppression by `repo-relative path::qualified symbol`; line numbers are
+presentation data, not identity. Each source pointer must map to exactly one
+active Ruff diagnostic for the declared rule, except when the registry
+explicitly declares and tests a reviewed cardinality greater than one.
+
+A registry row records the group ID, rule set, approved source-directive
+count, approved raw-diagnostic counts per rule, temporary or permanent
+lifetime, protected invariant, real proof, rejected alternatives, and
+approval. Blank, placeholder, circular, or score-only rationales are invalid.
+Temporary rows name a deterministic removal or re-evaluation task. Permanent
+rows explain why splitting the owner would weaken locality or correctness and
+cite the real test or acceptance proof.
+
+The checked generator derives the active source inventory, validates every
+registry/source relationship, and rewrites only the generated region below.
+It fails closed on a missing or duplicated registry heading, malformed
+markers, unknown groups or rules, stale symbols, duplicate pointers,
+cardinality drift, unregistered raw diagnostics, or source/spec disagreement.
+The generator must prove that the exact registry heading exists once in this
+active spec; agreement between a fixture and a ported constant is not proof.
+
+The global raw inventory covers diagnostics emitted by the active configured
+Ruff rule families when `noqa` is ignored. It does not claim to inventory
+textual `noqa` comments for disabled rule families. Per-file ignores, global
+baseline allowlists, silent threshold inflation, and unregistered `noqa`
+directives are not valid substitutes for a registry row.
+
+CI and release prechecks run the normal Ruff check and the suppression-index
+check. A change to the Ruff pin, discovery surface, active rules, threshold,
+source markers, registry, or generator requires recomputing the raw inventory
+and reviewing every changed disposition.
+
+#### Approved Ruff Suppression Registry
+
+| Group | Rules | Approved directives | Approved raw diagnostics by rule | Lifetime | Protected invariant | Real proof | Rejected alternatives | Approval |
+|---|---|---:|---|---|---|---|---|---|
+| `RUFF-SUP-001` | `C901` | `1` | `C901=1` | permanent | One product-identity traversal owns cache exclusion, nonregular rejection, no-follow reads, executable bits, hashes, and canonical order. | test_authoritative_product_identities_* in tests/test_alignment_eval.py. | Separating traversal from opened-file identity would create a TOCTOU seam. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-002` | `C901` | `1` | `C901=1` | temporary: T8 alignment, CLI, evidence, and coverage | Extract closed public-candidate field, span, and receipt validation while gold reconciliation and semantic projection stay together. | Span, absent path, reconstruction, synthetic envelope, and duplicate-coordinate tests across alignment eval suites. | Stop if exact gold comparison, relationship fields, or public candidate order weakens. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-003` | `C901` | `1` | `C901=1` | temporary: T8 alignment, CLI, evidence, and coverage | Separate typed section and invariant projections while retaining production parser use, shared fixture snapshot, canonical order, and exact gold matching. | Declaration production-parser, owning-form, and drift-rejection tests in tests/test_alignment_eval_result.py. | Reject a parallel parser or helpers that duplicate declaration ordering. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-004` | `C901` | `1` | `C901=1` | permanent | One strict filesystem-to-JSON boundary preserves regular-file, no-symlink, duplicate-key, finite-number, and object-only validation. | tests/test_alignment_eval.py duplicate-key, noncanonical-byte, and symlink cases. | Generic JSON helpers would detach filesystem identity and first-error precedence. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-005` | `C901` | `1` | `C901=1` | temporary: T8 alignment, CLI, evidence, and coverage | Create a named per-fixture manifest validator returning one fixture definition and coverage facts while phase-wide hashes, uniqueness, and coverage stay local. | Full phase manifest, fixture, coverage, declaration, and candidate-artifact matrix in tests/test_alignment_eval.py. | Reclassify P3 if the helper must shuttle mutable aggregate sets or phase-wide decisions. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-006` | `C901` | `1` | `C901=1` | permanent | One untrusted-artifact boundary owns canonical bytes, closed envelope shape, operation and snapshot identity, digest, and counts. | CLI-output mutation, malformed artifact, snapshot, and Phase A and B recomputation tests in tests/test_alignment_eval_result.py. | Field-at-a-time helpers would obscure first-failure order. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-007` | `C901` | `1` | `C901=1` | permanent | One explicit readiness and guidance-code decision table recomputes bootstrap outcome. | Bootstrap readiness, call and proof binding, raw authority, and stored-metric drift tests in tests/test_alignment_eval_result.py. | A rule engine or predicate-per-branch split would hide decision precedence. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-008` | `C901` | `1` | `C901=1` | permanent | One graph-contract audit preserves ID and coordinate uniqueness, closed relation kinds, endpoint resolution, locator direction, and obligation ownership. | Candidate reconstruction, obligation identity, duplicate-coordinate, and canonical run tests in tests/test_alignment_eval_result.py. | Separate static and declared validators could diverge on shared endpoint rules. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-009` | `C901` | `1` | `C901=1` | temporary: T8 alignment, CLI, evidence, and coverage | Extract a per-fixture run validator returning surfaced rows, captures, and one binding while cardinality, order, and aggregate capture remain outside. | Candidate identity, canonical find-evidence binding, reconstruction, extra observation, duplicate coordinate, and task-path tests. | Stop if output rerun, sort order, or gold binding gains two owners. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-010` | `C901` | `1` | `C901=1` | temporary: T8 alignment, CLI, evidence, and coverage | Extract only a typed single-gold-row validator while retaining collection uniqueness, source-catalog reconciliation, and discovery completeness in the parent. | Gold label, source-bound, absent-candidate, Unicode, span, and candidate-artifact tests in tests/test_alignment_eval.py. | Stop if first-error order, exact receipt recomputation, or source binding moves. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-011` | `C901` | `1` | `C901=1` | permanent | One explicit read-only command grammar owns option uniqueness, selector conflicts, pagination constraints, and fixture-root binding. | Noncanonical recorded argv, malformed call-log, and canonical run-binding tests in tests/test_alignment_eval_result.py. | Argparse reuse or generic option tables could accept more than the recorded proof grammar. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-012` | `C901` | `1` | `C901=1` | permanent | One fixture-tree boundary owns contained paths, manifest identity, exact inventory, hashes, normalized collisions, and frozen config. | Missing, extra, changed, symlink, collision, and config cases in tests/test_alignment_eval.py. | Independent manifest and filesystem validators could disagree about the accepted tree. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-013` | `C901` | `1` | `C901=1` | permanent | One content-addressed plan loader preserves Phase A and B identity isolation, path and hash validation, sessions, thresholds, and product identities. | Closed-plan, phase-isolation, session-count, product-identity, and threshold-drift tests in tests/test_alignment_eval.py. | Splitting field groups would obscure which inputs contribute to each phase identity. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-014` | `C901` | `1` | `C901=1` | permanent | One provider boundary owns resolved model identity, request options, schema mode, transport, usage, and closed provenance. | Exact-wire, raw-transport, schema, identity-mismatch, omission, no-retry, and absence tests in tests/test_analysis_llm.py. | Provider subclasses or duplicated request assembly would create parallel transport contracts. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-015` | `C901` | `1` | `C901=1` | permanent | One packet planner owns active selection, materialization, cumulative ceilings, first crossing, progress, and measured-prefix accounting. | Budget crossing, retained bytes, deadline phases, progress, clean corpus, and mixed-kind tests in tests/test_analysis_packets.py. | A second accounting pass or divergent dry-run planner would break measured-byte authority. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-016` | `C901` | `1` | `C901=1` | permanent | One current-row boundary owns schema, kind and identity coupling, hashes, classification, evidence coordinates and order, and role completeness. | Current suppression, invariant, role-set, vocabulary, malformed field, confidence, and evidence tests in tests/test_analysis_results.py. | Generic schema machinery or reordered checks would weaken audited first-error behavior. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-017` | `C901` | `1` | `C901=1` | permanent | One compatibility owner distinguishes current, partial-current, and legacy result rows and enforces packet-local evidence. | Legacy and partial union, suppression reinterpretation, kind mismatch, packet evidence, malformed JSON, and classification tests. | Independent legacy dispatch could reinterpret partial current rows. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-018` | `C901` | `1` | `C901=1` | permanent | One invariant-packet boundary owns identity, content hash, locator, snippets, and issue shape. | Legacy invariant acceptance, malformed invariant, discriminator leakage, and content-bound tests. | Merging section and invariant branches would make discriminator-specific precedence implicit. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-019` | `C901` | `1` | `C901=1` | permanent | One loader owns line framing, JSON parsing, schema discrimination, legacy normalization, and row-context errors. | Full load, normalization, and malformed matrix in tests/test_artifact_contracts.py. | Separate loaders could classify the same row differently. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-020` | `C901` | `1` | `C901=1` | permanent | One relational shape check owns declared-region containment, relation lists, locators, and canonical order. | v3 source-aligned, nested declaration, and malformed packet tests. | Separating containment from relation ordering could admit internally inconsistent packets. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-021` | `C901` | `1` | `C901=1` | permanent | One v3 header audit owns identity, locator, span, hashes, and closed header vocabulary. | v3 producer and loader round trips through analysis packet and artifact contract suites. | One helper per field would add indirection without a new owner. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-022` | `C901` | `1` | `C901=1` | permanent | One summary validator owns counts and cross-field total consistency. | Packet compilation, load, and summary-disagreement tests. | Generic count validation would lose packet-kind semantics. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-023` | `C901` | `1` | `C901=1` | permanent | One schema-4 audit owns suppression versus source discriminator rules, relations, issue order, hashes, spans, and identity. | Schema-4 suppression, hash sensitivity, issue order, malformed packet, and load tests. | Handler maps or reflection would obscure the closed discriminator contract. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-024` | `C901` | `1` | `C901=1` | permanent | One explicit legacy section-packet shape preserves discriminator-specific fields and error order. | Legacy normalization and malformed section packet cases in tests/test_artifact_contracts.py. | Reflection or a generic packet validator would hide the compatibility table. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-025` | `C901` | `1` | `C901=1` | permanent | One v2 invariant migration contract owns declaration, span, content, hash, and semantic issue validation. | v2 invariant bounds, declaration-before-marker, multiline declaration, and malformed invariant tests. | Shared v2 machinery is rejected unless it preserves every discriminator-specific first error. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-026` | `C901` | `1` | `C901=1` | permanent | One v2 section migration contract owns snippets, source bounds, semantic issues, and packet-hash recomputation. | v2 acceptance, producer-bound, and multiline-declaration tests in tests/test_artifact_contracts.py. | Field-loop abstraction would hide section-only constraints. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-027` | `C901` | `1` | `C901=1` | temporary: T8 alignment, CLI, evidence, and coverage | Extract typed semantic request and factory construction plus outcome rendering while lazy imports and command-level exit ownership remain local. | Analyze mode, preflight, import quarantine, failure stages, readiness, formats, and exits across CLI and semantic application suites. | Stop if deterministic commands import provider code or failure-stage precedence changes. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-028` | `C901` | `1` | `C901=1` | temporary: T8 alignment, CLI, evidence, and coverage | Separate path and config overlap validation from adapter and request construction while retaining lazy imports and one eval error owner. | Eval config, overlap, provider, and qualification tests across CLI, semantic eval, and phase-C suites. | Stop on path safety, selected config identity, or verification-adapter drift. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-029` | `C901` | `1` | `C901=1` | permanent | One CLI adapter owns path conflict validation and closed blocked, failure, publication, and success rendering. | Packet exit, debt, path collision, budget, publication, and clean-corpus tests. | Generic outcome rendering could change public messages or exits. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-030` | `C901` | `1` | `C901=1` | permanent | One explicit command-to-config-key allowlist preserves CLI override scope. | CLI and settings no-op prevention and command-scoping tests. | Reflection over argparse fields or broad pass-through would widen configuration authority. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-031` | `C901` | `1` | `C901=1` | temporary: T8 alignment, CLI, evidence, and coverage | Extract explicit-command execution from default-command selection while one outer parser and traceback-containment boundary remains. | Default invocation, explicit precedence, resolution-once, no-command, bad config, and no-traceback tests in tests/test_cli.py. | Stop if parse count, exit-2 semantics, or exception precedence changes. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-032` | `C901` | `1` | `C901=1` | permanent | One tree-sitter node dispatcher preserves definitions, bindings, patterns, calls, attributes, and fallback traversal order. | Static syntax, branch binding, PEP 695, scope, comprehension, and parser-ownership tests. | Visitor registries or runtime-AST fallback would hide or duplicate parser semantics. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-033` | `C901` | `1` | `C901=1` | permanent | One recursive walk owns statement and block traversal plus special case and elif spans. | Statement-body, elif and match, and noqa attachment tests in tests/test_code_parser.py and tests/test_python_refs.py. | Parallel span derivation or generic tree walking would break parser-owned coordinates. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-034` | `C901` | `1` | `C901=1` | temporary: T8 alignment, CLI, evidence, and coverage | Extract owner-local emitters for definition, unscannable, exemption, requirement, floor, and drift families while policy application and order remain shared. | Every real diagnostic producer, repository and patch context, floors, drift, exemptions, and CLI parity tests. | Stop if any enumerable code loses a firing test or context and severity changes. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-035` | `C901` | `1` | `C901=1` | permanent | One registry parser owns row validation, short-code uniqueness, replacement existence, and cycle proof. | Registry uniqueness, family, status, replacement, cycle, and canonicalization tests in tests/test_diagnostics.py. | Schema libraries or post-construction repair would obscure fail-closed registry authority. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-036` | `C901` | `1` | `C901=1` | permanent | One endpoint decision table owns URL sanitation, redirects, HTTP states, bounds, payload parsing, and model membership. | Status, redirect, oversized, truncated, slow, credential, malformed payload, membership, and connection tests in tests/test_doctor.py. | Generic HTTP clients or response helpers could follow redirects or leak credentials. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-037` | `C901` | `1` | `C901=1` | permanent | One mutable resolver owner builds module, plausible-name, definition, scope, and function-scope indexes in order. | Module-root, ambiguity, lexical scope, ordinals, PEP 695, and source-order tests in tests/test_evidence_discovery.py. | Helpers that partially mutate resolver tables would split initialization ownership. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-038` | `C901` | `1` | `C901=1` | permanent | One graph-search state machine owns seeds, budget charges, lexical cap, bridges, ambiguity expansion, depth frontier, and ceiling. | Budget-unit, collapsed-bridge, ambiguity, frontier, depth, and candidate-ceiling tests. | Generic graph libraries or split queues would change charging and selection order. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-039` | `C901` | `1` | `C901=1` | permanent | One pass owns issue, conflict, section, invariant, reciprocal flags, and candidate relation rows. | Section and invariant reciprocal, conflict, module invariant, frontier, and projection tests. | Independent relation and trace-flag passes could disagree. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-040` | `C901` | `1` | `C901=1` | temporary: T8 alignment, CLI, evidence, and coverage | Extract code-owned and spec-owned invariant row projection while target and binding association state remains local. | Spec and code invariant, unresolved target, test evidence, NFC collision, duplicate owner, and module-receipt tests. | Reclassify P3 if helpers need shared mutable association cursors. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-041` | `C901` | `1` | `C901=1` | temporary: T8 alignment, CLI, evidence, and coverage | Extract typed mapping, backlink, and evidence row projectors while declaration consumption, association, deduplication, and order stay together. | Complete, non-atomic, duplicate same-line, merged backlink, directory mapping, and exact-receipt tests. | Stop if declaration ordinals or duplicate consumption order changes. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-042` | `C901` | `1` | `C901=1` | permanent | One parser owns reserved-skip exclusion, underscore and HTML grammar, declaration delimiters, mechanisms, references, strict unknowns, and malformed affordances. | Inline, meta, declaration, unknown, reserved, and malformed cases in exclusions and Markdown suites. | Regex decomposition could change precedence or accept near misses. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-043` | `C901` | `1` | `C901=1` | permanent | One canonical ordered path owns rule scopes, meta semantics, usage accounting, unsuppressible diagnostics, and declaration lookup. | Meta, inline-over-config, section, context severity, unsuppressible, unused, and short-code tests. | Separate match and audit passes could disagree about the effective suppression. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-044` | `C901` | `1` | `C901=1` | permanent | One bounded subprocess protocol owns stdin, output threads, deadline, aggregate charging, close and join, and primary failure. | Unsafe-ref, output-budget, byte-budget, large-batch, and timeout-history tests in tests/test_git_baseline.py. | Generic subprocess wrappers or unbounded communicate would weaken resource limits. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-045` | `C901` | `1` | `C901=1` | permanent | One Git record parser owns framing, path arity, renames, OIDs, canonical paths, blob batching, and deterministic transitions. | Multiple-path, merge-base, 200-transition, unsafe-path, and blob-dedup tests. | Line parsing or per-record Git calls would break framing and scale. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-046` | `C901` | `1` | `C901=1` | permanent | One classifier owns mapping, backlink, whole-file inheritance, smallest owner, invariant declarations, binds, and precedence. | Direct, inherited, module, backlink, invariant, binding, exemption, and ambiguity tests in tests/test_intent_coverage.py. | Separate edge classifiers could apply different ownership ambiguity rules. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-047` | `C901` | `1` | `C901=1` | temporary: T8 alignment, CLI, evidence, and coverage | Extract typed definition, section hash, connected-test, and drift projection phases while one captured snapshot and report remain authoritative. | Real graph reuse, exact hashes, implementation-only drift, stale history, and scale tests in intent history and Git baseline suites. | Stop if any helper reopens files or rescans independently. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-048` | `C901` | `1` | `C901=1` | permanent | One reducer transition owns reserved-skip block parsing, ordinary-marker coexistence, interleave invalidation, and state mutation. | Skip order, duplicate, interleave, malformed, and marker coexistence tests. | Preprocessing outside the token reducer would split parser state. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-049` | `C901` | `1` | `C901=1` | permanent | One complete-file resolver owns duplicate invalidation, section and invariant ownership, unused versus invalid classification, and order. | Standalone and inline skip, duplicate, ownership, unknown target, reason, interleave, and coexistence tests. | Eager resolution during token parsing would act on an incomplete file. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-050` | `C901` | `1` | `C901=1` | permanent | One requirement projector owns exact line masking for mappings, traceability markers, skips, HTML directives, and preserved layout. | Wrapped requirement, directive masking, invariant skip, mapping span, and CommonMark tests. | A second Markdown parser would duplicate the structure boundary. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-051` | `C901` | `1` | `C901=1` | permanent | One public problem audit owns the closed code-to-detail-shape contract and canonical envelope validation. | Every closed detail shape, deadline phase, malformed shape, and not-found tests in tests/test_obligation_api.py. | Generic object validation or open detail dictionaries would weaken enumerable API proof. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-052` | `C901` | `1` | `C901=1` | permanent | One text adapter owns explicit operation, result, problem, null, success, and error rendering. | List, get, evidence, candidate pagination, and exact adapter-budget tests. | Reflection or parsing values back from presentation text would make wording load-bearing. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-053` | `C901` | `1` | `C901=1` | permanent | One additional-path derivation boundary owns snapshot roots, captured Markdown, canonical collisions, ownership, and bare-symbol advisory handling. | Target convergence, missing targets, config identity, symlink replacement, and collision tests in tests/test_obligation_runtime.py. | Source reopening or treating bare symbols as paths would violate snapshot authority. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-054` | `C901` | `1` | `C901=1` | permanent | One section state transition owns evidence completeness, conflict precedence, blockers, guidance, rung, skip, gate state, and counts. | Reciprocal and one-sided relations, role independence, test roots, rungs, skip, conflict, and candidate-count tests. | Separate blocker and guidance passes could disagree about the same state. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-055` | `C901` | `1` | `C901=1` | temporary: T8 alignment, CLI, evidence, and coverage | Extract owner-local input and index validation plus suppression-record projection while ID closure, iteration, order, and aggregate actions remain shared. | Empty bootstrap, duplicate, unaddressable, section, invariant, suppression, skip, count, and summary tests. | Stop if an obligation kind is sorted or validated through a separate path. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-056` | `C901` | `1` | `C901=1` | permanent | One application lifecycle owns runtime, deterministic blocking, packet plan, report, progress completion, atomic publication, and failure precedence. | CLI parity, deadline-no-publication, progress isolation, partial publication, and deterministic-block tests. | Moving publication before accounting or using parallel writes would break artifact-set authority. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-057` | `C901` | `1` | `C901=1` | permanent | One line parser owns precedence among file-qualified refs, adjacent groups, ranges, bare IDs, and consumed spans. | File-qualified, compact, comma, cross-bracket, dash, anchor, prose-noqa, and noise tests. | Independent regex passes without shared consumption state could double-project references. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-058` | `C901` | `1` | `C901=1` | permanent | One physical-line pass owns interpolation and escape rejection, bindings, declaration continuations, consumed lines, and invariant construction. | Physical marker, malformed, concatenated, interpolated, escaped, continuation, binding, and owner tests. | Evaluated-string parsing or a parallel marker parser would lose source coordinates. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-059` | `C901` | `1` | `C901=1` | permanent | One stable-read attempt owns expected lstat, no-follow open, fstat identity, bounded chunks, deadline, and close. | Stable bounded failure, per-read deadline, symlink, nonregular, and boundary-pin tests. | Ordinary Path.read_bytes or detached checks would weaken no-follow identity. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-060` | `C901` | `1` | `C901=1` | permanent | One torn-read transaction owns initial inventory, ordered reads, mutation hooks, hashes, and whole-attempt discard. | Torn retry and exhaustion, membership, inode, catalog mutation, and deadline tests. | Retaining partial bytes across attempts would mix repository moments. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-061` | `C901` | `1` | `C901=1` | permanent | One attempt inventory owns normalized targets, source and catalog roles, direct files, directories, missing targets, collisions, and identity. | Additional and missing targets, catalog mutation, collision, unsafe components, budget, and identity tests. | Separate code, spec, and additional inventories could disagree about one repository view. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-062` | `C901` | `1` | `C901=1` | permanent | One descriptor-relative directory lease owns recursion, exclusions, names, catalog and source classification, no-follow opens, and nonregular rejection. | Catalog, exclusion, symlink, Unicode, collision, mutation, and canonical-owner tests in tests/test_repository_snapshot.py. | Path-based reopening or recursion outside the descriptor would create TOCTOU risk. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-063` | `C901` | `1` | `C901=1` | permanent | One public capture owner preserves platform and root validation, config sources, path convergence, retry, catalog hash, and final identity. | Full repository snapshot suite plus no-reopen and shared-projection snapshot resolver tests. | Separate semantic and config snapshots or fallback readers would violate one-view capture. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-064` | `C901` | `1` | `C901=1` | permanent | One projection phase owns report parts, suppression diagnostics and decisions, issue order, parsed artifacts, and immutable output. | Snapshot and check shared projection, suppressions, parser diagnostics, and CLI format consistency tests. | Independent report and artifact passes could diverge. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-065` | `C901` | `1` | `C901=1` | permanent | One completed-edge audit owns mapping and backlink reciprocity, path and symbol coverage, duplicate accounting, and inventory diagnostics. | One-sided mapping and backlink, directory mapping, test-only mapping, and reciprocal tests. | Emitting reciprocity during partial resolution would report transient graph state. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-066` | `C901` | `1` | `C901=1` | permanent | One code-reference phase owns qualified, bare, and range dispatch, prefix filtering, rung classification, deduplication, and backlinks. | Bare, qualified, range, rung, reciprocal, and snapshot resolver tests. | A second parser or separate bare-reference engine would duplicate resolution policy. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-067` | `C901` | `1` | `C901=1` | permanent | One qualified-reference boundary owns containment, existence, classification, section and range expansion, issues, and backlinks. | Missing spec and section, range, outside-root, rung, and reciprocal tests. | Resolving sections without file policy context could accept invalid targets. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-068` | `C901` | `1` | `C901=1` | permanent | One invariant phase owns declaration ownership, target and bind resolution, ambiguity, containment, edges, and issues. | Code and spec invariant, binding, missing and ambiguous target, duplicate, and outside-root tests. | Separate code and spec invariant engines could apply different identity rules. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-069` | `C901` | `1` | `C901=1` | permanent | One resolver phase owns mapping normalization, ladder resolution, ambiguity, missing severity, edges, and diagnostics. | Mapping, ambiguity, missing target, rung, and reciprocal tests in resolver and snapshot resolver suites. | Separate path and symbol lookup paths could diverge. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-070` | `C901` | `1` | `C901=1` | permanent | One captured-byte scan path owns roots, Markdown and Python parsing, module identities, path facts, resolution phases, and final projection. | Shared projection, no-reopen, external target, missing and unreadable row, and CLI check tests. | Any source reopening or parallel scan API would violate snapshot authority. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-071` | `C901` | `1` | `C901=1` | temporary: T6 cache and semantic execution | Shared adapter construction and call budget remain one owner while parallel runs fold in packet order. | tests/test_semantic_analysis.py concurrency/order and operational-count cases | Generic executor or a second adapter-construction owner | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-072` | `C901` | `1` | `C901=1` | temporary: T6 cache and semantic execution | One evidence-stable execution owner preserves adapter construction, call budget, counters, locks, lease lifetime, and ordered outcomes. | tests/test_semantic_analysis.py mixed carry/live and foreign-winner cases; tests/test_semantic_cache.py failure/deadline cases | Helpers that shuttle live lease and counter state or split cache selection from lease lifetime | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-073` | `C901` | `1` | `C901=1` | temporary: T6 cache and semantic execution | Packet-local resolution retains exact provider/cache failure mapping under the outer evidence-stable lifecycle owner. | tests/test_semantic_analysis.py evidence-stable concurrency, mixed carry/live, foreign-winner, deadline, and failure-containment cases | A stateless callback that obscures budget release, adapter ownership, or packet-local containment | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-074` | `C901` | `1` | `C901=1` | temporary: T6 cache and semantic execution | Packet-report identity errors precede completeness and budget findings; accumulated problem order stays stable. | tests/test_semantic_analysis.py required-report, zero-packet, budget, and complete-run cases | Moving report validation behind capacity checks or creating a generic preflight framework | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-075` | `C901` | `1` | `C901=1` | temporary: T6 cache and semantic execution | Qualification authority fails closed in missing, corrupt, identity-mismatch, then failed order using authoritative corpus/report facts. | tests/test_semantic_analysis.py qualification cases; tests/test_semantic_eval_reports_v3.py authoritative report tests | A second qualification parser or helpers that reorder failure precedence | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-076` | `C901` | `1` | `C901=1` | permanent | One prepared-plan byte-integrity validator preserves packet order, contribution equality, prompt prefix, digest, and aggregate measurements. | tests/test_semantic_analysis.py retained-request-byte, misaligned-plan, and prompt-mutation cases | Field-by-field helpers or a second request-byte validation path | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-077` | `C901` | `1` | `C901=1` | temporary: T6 cache and semantic execution | One run owner preserves preflight, cache/verification execution, exit choice, result-before-report publication, report rebuild, and output-error precedence. | Full tests/test_semantic_analysis.py, especially publication failure, partial output, cost, currentness, and verification cases | Phase helpers that pass the full local state or move publication/report validation order | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-078` | `C901` | `1` | `C901=1` | temporary: T6 cache and semantic execution | Provider-free preparation preserves snapshot, progress, admission, deterministic/alignment error priority, packet planning, and cold-budget checks. | Full tests/test_semantic_application.py provider-free preflight, budget, currentness, and deadline cases | A parallel preparation path or any extraction that makes provider work reachable | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-079` | `C901` | `1` | `C901=1` | permanent | One ordered analyzer preflight owns the closed cache, identity, timing, packet, and adapter constraints. | tests/test_semantic_cache.py invalid epoch, duplicate ID, cache eligibility, blank provider, and require-mode cases | One helper per check or a generic configuration framework | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-080` | `C901` | `1` | `C901=1` | permanent | Lock-kind selection, unchanged-owner authority, best-effort cleanup, and primary-failure protection remain one guarded transaction. | tests/test_semantic_cache.py cleanup critical-section, ownership-loss, unchanged-token, and primary-failure cases | Per-lock-kind cleanup owners or cleanup errors displacing the primary failure | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-081` | `C901` | `1` | `C901=1` | permanent | One closed inference-contract validator binds prompt, provider, request, cached identity completeness, and canonical form. | tests/test_semantic_cache.py unknown-field, malformed-identity, and corruption matrices | Generic schema validation or separate provider/request acceptance paths | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-082` | `C901` | `1` | `C901=1` | temporary: T6 cache and semantic execution | Ordered cache-mode resolution stays in one owner while a named call owner contains adapter, deadline, reservation, accounting, and external errors. | Full tests/test_semantic_cache.py off/read-write/require, race, deadline, budget, corrupt-hit, and continuation cases | Splitting cache mutation/normalization order or trusting the earlier inspection pass | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-083` | `C901` | `1` | `C901=1` | temporary: T6 cache and semantic execution | One analyzer-call owner preserves lazy adapter construction, global reservation/release, deadline, request bytes, and call counters. | tests/test_semantic_cache.py factory-deadline, call-budget, adapter/provider failure, and prompt-byte cases | A stateless callback or second counter/reservation owner | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-084` | `C901` | `1` | `C901=1` | temporary: T6 cache and semantic execution | Inspection shares only pure preflight and identity freezing, then remains strictly read-only and independently revalidates untrusted hits. | tests/test_semantic_cache.py cache-inspection, off-mode no-stat, corrupt-hit, and require-miss cases | Sharing execution state, creating cache paths/guards, or treating inspection as authoritative for execution | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-085` | `C901` | `1` | `C901=1` | temporary: T6 cache and semantic execution | Verifier work and identity preflight can be shared while hit inspection remains read-only and side-effect free. | tests/test_semantic_verification.py read-only inspection and malformed-work cases | A shared path that constructs adapters, writes cache state, or translates errors differently from execution | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-086` | `C901` | `1` | `C901=1` | permanent | Immutable baseline, result object, inference contract, review identity, and envelope validation remain one no-fallback chain. | tests/test_semantic_cache.py absent-target, stale identity, corrupt target, and race cases | Partial loaders, fallback reads, or reordered artifact validation | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-087` | `C901` | `1` | `C901=1` | permanent | One context-manager owns lexical lease acquisition, second-read arbitration, exact fallback, yield lifetime, and reverse cleanup. | tests/test_semantic_cache.py lock-order, publication-race, carry-forward, deadline, and cleanup cases | Helpers that move lease arrays, selections, or active state across owners | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-088` | `C901` | `1` | `C901=1` | temporary: T6 cache and semantic execution | Ordered verifier cache modes remain one owner while a named call owner preserves deadline, reservation, prompt bytes, adapter, counters, and error translation. | Full tests/test_semantic_verification.py cache, single-flight, deadline, malformed-adapter, and work-preflight suites | Moving hit/miss correction, normalization, or item containment into a generic cache executor | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-089` | `C901` | `1` | `C901=1` | temporary: T6 cache and semantic execution | One verifier-call owner preserves lazy adapter construction, global reservation/release, frozen prompt identity, calls, and post-return deadline checks. | tests/test_semantic_verification.py budget, factory failure, request bytes, deadline-after-return, and replay cases | A stateless callback or duplicated reservation and adapter state | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-090` | `C901` | `1` | `C901=1` | temporary: T7 eval, reports, and artifacts | One qualification-run owner preserves fixture/cache temporary lifetimes, cold-primary then zero-call replay, global budgets, authoritative revalidation, and atomic publication. | Full tests/test_semantic_eval.py, especially cold/replay, trials, budgets, overlaps, and publication | Phase helpers that outlive temporary roots, duplicate job identity, or reorder analyzer/verifier work | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-091` | `C901` | `1` | `C901=1` | permanent | One filesystem trust boundary observes walk order, symlink status, regular bytes, modes, manifest equality, and digest from one tree. | tests/test_semantic_eval_reports_v3.py fixture load/materialization and validation-priority cases | Separate walker and manifest readers that can observe different filesystem states | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-092` | `C901` | `1` | `C901=1` | permanent | One metric owner shares exact slot populations across expected findings, predictions, stability, false positives, flips, critical cases, and confidence bounds. | tests/test_semantic_eval_reports_v3.py aggregate/by-code recomputation and authoritative observation cases | Generic metrics framework or helpers that duplicate finding-slot definitions | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-093` | `C901` | `1` | `C901=1` | permanent | Attempt identity, primary/replay bytes, provenance, and cache-object hashes remain one artifact chain. | tests/test_semantic_eval_reports_v3.py local identity/cache and replay recomputation cases | Partial result or provenance loaders and reordered hash validation | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-094` | `C901` | `1` | `C901=1` | permanent | One closed deterministic-config contract preserves root containment and ordered unique policy fields. | tests/test_semantic_eval_reports_v3.py corpus manifest/config mutation cases | Generic config schema machinery or reordered first-error precedence | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-095` | `C901` | `1` | `C901=1` | permanent | Claim reconstruction, primary/replay verifier results, aggregate context, and comparison signature remain one event contract. | tests/test_semantic_eval_reports_v3.py event/by-code and effective-epoch recomputation cases | Per-side validators that weaken cross-side byte identity or event ordering | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-096` | `C901` | `1` | `C901=1` | permanent | Analysis, verification, derivation, evaluation, and composition hashes form one paired report identity. | tests/test_semantic_eval_reports_v3.py identity/composition recomputation mutations | Independent analysis and verification validators that can accept a mismatched pair | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-097` | `C901` | `1` | `C901=1` | permanent | Authoritative source facts own eligibility, gold membership, packet validation, and analyzer/verifier evidence rebinding. | tests/test_semantic_eval_reports_v3.py authoritative source-fact and metric cases | Report-derived gold, synthetic packet facts, or splitting evidence validation from eligibility | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-098` | `C901` | `1` | `C901=1` | permanent | Cold/replay lane counters and costs reconcile from one distinct-key population oracle. | tests/test_semantic_eval.py cold-primary/zero-call replay; tests/test_semantic_eval_reports_v3.py local recomputation | Per-counter helpers or report-claimed call populations | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-099` | `C901` | `1` | `C901=1` | permanent | One report-local validator owns closed shape, attempt/event coverage and order, metrics, operational counts, and qualification. | Full tests/test_semantic_eval_reports_v3.py | Moving coverage/order checks into loaders that lack the complete report | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-100` | `C901` | `1` | `C901=1` | temporary: T8 alignment, CLI, evidence, and coverage | Schema-specific projection helpers must preserve exact model-visible region order, roles, spans, and omissions. | tests/test_semantic_evidence.py deduplicated, overlapping, and exact-region cases | A generic projection engine or helpers that change schema-specific evidence visibility | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-101` | `C901` | `1` | `C901=1` | permanent | Closed response validation, vocabulary, confidence/rationale rules, evidence normalization, and invariant downgrade precedence remain one boundary. | Full tests/test_semantic_evidence.py, especially downgrade and forged-evidence cases | Separating downgrade from role validation or accepting partial responses | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-102` | `C901` | `1` | `C901=1` | permanent | The explicit kind/classification decision table is the audit surface for minimum evidence roles. | tests/test_semantic_evidence.py every-kind/classification role matrix | Opaque lookup indirection without an enumerable firing matrix | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-103` | `C901` | `1` | `C901=1` | permanent | One matrix owner resolves every code/state cell with later-rule precedence, exact provenance, and failure-authority checks. | tests/test_semantic_policy.py exact-cell, selector precedence, and authority matrices | Generic rule engine or precomputed policy that obscures winning-rule provenance | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-104` | `C901` | `1` | `C901=1` | permanent | Finding-keyed verification composition, disposition use, diagnostic order, and debt projection remain one audit pass. | tests/test_semantic_policy.py transition, precedence, unknown-observation, debt, and unused-disposition cases | Separate diagnostic/debt loops or positional verifier composition | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-105` | `C901` | `1` | `C901=1` | permanent | Top-level schema, scope, currentness, source, alignment, and counts validate before derived source state exists. | tests/test_semantic_reports.py source-shape first-error and current/historical scope matrices | Separate schema-version readers or constructing state before validation completes | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-106` | `C901` | `1` | `C901=1` | permanent | Registry vocabulary, context/severity, occurrence ordinal, and deterministic issue identity recompute in one ordered pass. | tests/test_semantic_reports.py issue identity/order cases; tests/test_canonical_owners.py registry ownership | Trusting rendered issue fields or moving ordinal ownership outside the pass | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-107` | `C901` | `1` | `C901=1` | permanent | Audit, deterministic issues, packet identity, kind counts, timestamp, and content digest reconcile in one source-report validator. | tests/test_semantic_reports.py derived-mismatch, issue-contract, canonical-output, and first-error cases | Digest validation before constituent contracts or a second content projection | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-108` | `C901` | `1` | `C901=1` | permanent | Schema, snapshot, derivation, readiness counts, and selection status validate before normalized packet-report state exists. | tests/test_semantic_reports.py packet source-shape first-error and derived-mismatch cases | Schema-specific parallel loaders or returning state before counts balance | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-109` | `C901` | `1` | `C901=1` | permanent | Exact LF, JSON, canonical bytes, packet binding, semantic evidence, uniqueness, and packet order remain one JSONL boundary. | tests/test_semantic_reports.py exact result-JSONL mutations; tests/test_canonical_owners.py | Separating line parsing from packet-bound canonical revalidation | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-110` | `C901` | `1` | `C901=1` | temporary: T7 eval, reports, and artifacts | Source-state errors precede semantic audit; diagnostics, debt, dispositions, problems, status, verification, and cache/kind counters remain population-consistent. | tests/test_semantic_reports.py first-error, debt subset/order, status, cache counters, and all-skipped cases | Helpers that duplicate report vocabulary, reorder validation, or split related populations | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-111` | `C901` | `1` | `C901=1` | permanent | One bounded legacy reader preserves its exact count, debt, diagnostic, problem, and status relationships. | tests/test_semantic_reports.py legacy round-trip and current-argument rejection cases | Routing legacy reports through current-schema normalization | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-112` | `C901` | `1` | `C901=1` | permanent | Selected inference, prompts, result sources/providers, reuse mode, and operational count shape remain one schema-5 contract. | tests/test_semantic_reports.py schema-5 operational oracle and authoritative-fact mutations | Normalization that obscures carried versus exact result selection | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-113` | `C901` | `1` | `C901=1` | permanent | Semantic identity, kind/classification, evidence, finding hash, policy provenance, and authority remain one diagnostic contract. | tests/test_semantic_reports.py cross-contract forgery, evidence span, finding hash, and policy cases | Independent hash/evidence/policy validators that can accept different rows | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-114` | `C901` | `1` | `C901=1` | permanent | Alignment vocabulary, identity grammar, skip/gate consistency, canonical order, and readiness counts share one audit population. | tests/test_semantic_reports.py audit-bucket and source-shape cases; suppression lifecycle probes | One handler per obligation kind or partial-row acceptance | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-115` | `C901` | `1` | `C901=1` | permanent | One bounded legacy packet-report reader preserves exact identity, kind, count, warning, prompt, and packet relationships. | tests/test_semantic_reports.py schema-1 round-trip and closed/range/count cases | Current-schema normalization or relaxed legacy acceptance | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-116` | `C901` | `1` | `C901=1` | permanent | The explicit stage/code/details decision table is the closed problem contract. | tests/test_semantic_reports.py _PROBLEM_CASES firing matrix and closed-details mutations | Loose details schemas, generic dispatch, or untested stage/code pairs | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-117` | `C901` | `1` | `C901=1` | temporary: T7 eval, reports, and artifacts | Ordered helpers must preserve selector, derivation/qualification identity, provider, hash, and reason-dependent field contracts. | tests/test_semantic_analysis.py qualification modes; tests/test_semantic_reports.py problem-row contracts | A generic identity validator or any extraction that changes first-error order | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-118` | `C901` | `1` | `C901=1` | permanent | Result objects, events, selected inference, review keys, provenance, selection mode, and provider grouping remain one authoritative chain. | tests/test_semantic_reports.py schema-5 authoritative-fact mutation matrix | Partial provenance loaders or provider grouping derived from report claims | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-119` | `C901` | `1` | `C901=1` | permanent | Enabled/disabled shape, counters, event order, aggregate counts, and report status share one subsection population. | tests/test_semantic_reports.py enabled/disabled, failed-run, cache-off, and aggregate cases | Separate counter and event passes that can accept different populations | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-120` | `C901` | `1` | `C901=1` | permanent | Provider, request, prompt, epoch, and cost fields form one closed verifier identity contract. | tests/test_semantic_reports.py verification-contract relationship mutations | Independent field validators that do not recompute the paired contract | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-121` | `C901` | `1` | `C901=1` | permanent | Claim hash, verifier packet hash, results, evidence, aggregate, and context remain one event contract. | tests/test_semantic_reports.py verification aggregate and evidence-rebinding cases | Per-result validation that loses claim or aggregate linkage | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-122` | `C901` | `1` | `C901=1` | temporary: T7 eval, reports, and artifacts | Pure audit and issue-row builders may extract, but runtime admission, packet/snapshot/config binding, self-hash, and final byte ceiling remain here. | tests/test_semantic_reports.py build/recompute cases; tests/test_analysis_packets.py source packet generation | Moving publication admission or byte ceiling into row builders, or changing issue ordinal/order | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-123` | `C901` | `1` | `C901=1` | temporary: T7 eval, reports, and artifacts | Closed shape validates first; paired packet report, exact results, schema-5 facts, diagnostics, verification, runtime authority, and final digests retain strict order. | Full tests/test_semantic_reports.py, especially first-error, cross-contract forgery, source pairing, v5 facts, and legacy rejection | Generic artifact framework, self-attestation, or moving validation phases across precedence boundaries | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-124` | `C901` | `1` | `C901=1` | temporary: T7 eval, reports, and artifacts | Current and legacy authoritative binders must preserve digest, bytes, packet parse, supplied packet comparison, version/kind, and prompt precedence. | tests/test_semantic_reports.py packet digest/byte/packet/version/kind/prompt mismatch suite | Fallback between schema families or validation helpers that reorder first failure | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-125` | `C901` | `1` | `C901=1` | permanent | Packet, claim, request, prompt identity, epochs, hashes, and verify key recompute as one complete provider-independent graph. | tests/test_semantic_verification.py claim/request/identity mutation and normalization cases | Partial validators, self-attesting hashes, or parallel claim/request identity paths | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-126` | `C901` | `1` | `C901=1` | temporary: T5 settings | Repository layers, provenance, command-scoped environment, CLI overlays, and final root containment retain one precedence chain. | tests/test_settings.py precedence/default-command/root-containment, tests/test_cli_config.py, and tests/test_config_parity.py. | A second resolver or helpers that shuttle mutable raw and provenance state. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-127` | `C901` | `1` | `C901=1` | temporary: T5 settings | Every path expands against its defining layer while coverage scopes, roots, verifier paths, symlink policy, duplicates, and containment retain their distinct contracts. | tests/test_settings.py anchoring/canonical-floor/extend cases and tests/test_semantic_settings.py verify-eval containment. | One generic path walker or any extraction that changes base directory, historical lexical behavior, or containment order. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-128` | `C901` | `1` | `C901=1` | permanent | One closed inventory owns every gate-affecting profile, coverage, diagnostics, and lint key while excluding presentation-only keys and canonicalizing floor scopes. | tests/test_settings.py::test_flatten_ratchet_policy_layer_has_exact_included_and_excluded_gate_keys enumerates every included and excluded gate key, floor-scope canonicalization, and exclude/extend behavior; tests/test_config_parity.py::test_equal_layers_produce_equal_nonoperational_settings proves source parity. | Reflection over all settings fields would silently admit presentation-only inputs. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-129` | `C901` | `1` | `C901=1` | permanent | The explicit closed analyze descriptor, cache, budget, alias, cost, and cross-field contract remains beside final construction. | tests/test_semantic_settings.py every field/type/range, cache identity, cost input, packet bound, and alias cases. | Reflection or dataclass auto-loading would hide field and cross-field firing obligations. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-130` | `C901` | `1` | `C901=1` | temporary: T5 settings | The closed four-field authored/normalized grammar preserves exact null-bearing output, accepted TOML shapes, duplicate checks, ranges, and first-error order. | tests/test_semantic_settings.py capability incompatibility, authored-shape, type, range, and duplicate cases. | A validation DSL or per-field path that changes normalized shape or validation order. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-131` | `C901` | `1` | `C901=1` | temporary: T5 settings | Unknown keys validate before typed parsing; one immutable BackstitchSettings construction preserves path anchoring and policy-origin cardinality. | Full tests/test_settings.py, tests/test_semantic_settings.py, tests/test_cli_config.py, and tests/test_config_parity.py. | A generic schema engine, alternate config path, or helper that reorders validation and final assembly. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-132` | `C901` | `1` | `C901=1` | temporary: T5 settings | Ordered suppression rows preserve required keys, provenance, path grammar, section/code canonicalization, and meta-versus-ignore constraints. | tests/test_settings.py documented parse, invalid shapes, required fields, hatch, and replace-across-extend cases. | A generic config-object loader or any helper that changes row order or canonicalization. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-133` | `C901` | `1` | `C901=1` | temporary: T5 settings | Provider-source resolution, dormant disabled descriptors, inherited versus override ownership, epochs, cost provenance, and final construction remain all-or-nothing. | tests/test_semantic_settings.py disabled/activation, provider completeness, epochs, cost/cache, and eval cases. | Stop if dormant parsing, provider error order, or explicit-rate provenance moves. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-134` | `C901` | `1` | `C901=1` | permanent | One effective-origin mirror preserves replacement, append, floor reset, and packaged empty-default semantics. | tests/test_settings.py coverage-policy provenance and ratchet trust plus tests/test_config_parity.py equality. | A generic provenance-event framework or a second merge implementation. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-135` | `C901` | `1` | `C901=1` | temporary: T5 settings | Alias ownership, collision rejection, model precedence, and complete descriptor projection remain atomic. | tests/test_semantic_settings.py catalog/flat ownership, alias collision, CLI/environment precedence, and atomic-extend cases. | A generic model registry or any helper that permits partial descriptor inheritance. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-136` | `C901` | `1` | `C901=1` | temporary: T5 settings | One explicit immutable table-name to allowed-key map preserves the closed table vocabulary and empty unknown-table fallback. | tests/test_settings.py::test_table_key_names_is_the_exact_closed_table_map fires all eleven named table branches and the empty fallback for unknown, nested, case-drifted, and blank names. | Reflection from parser internals or a map that omits a table without failing. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-137` | `C901` | `1` | `C901=1` | temporary: T5 settings | Top-level and nested unknown-key inventories preserve deterministic traversal, exact paths, the allow-unknown hatch, and first-message order. | tests/test_settings.py and tests/test_semantic_settings.py unknown-key, nested-child, and allow-unknown cases. | A loose recursive schema walker that changes known children, paths, or reporting order. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-138` | `C901` | `1` | `C901=1` | temporary: T5 settings | Historical config loading stays lexical, repository-contained, budgeted, filesystem-free, and behaviorally identical to current config loading. | tests/test_settings.py blob normalization/containment/parity and tests/test_config_parity.py. | Stop if extraction calls Path.resolve, reads the filesystem, changes error order, or creates current/historical divergence. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-139` | `C901` | `1` | `C901=1` | permanent | One enumerable fixture-table audit owns class grammar, cumulative coverage, negative facts, and subsume-cue validation. | bin/check-dom15-fixtures --self-test and the live DOM-15 gate with one mutation probe per declared rule. | A general Markdown policy engine or removal of a mutation probe. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-140` | `C901` | `1` | `C901=1` | temporary: T9 tests, tools, and P3 | Claim and cue classification preserves informational local-only/foreign states, fatal broken cues, remote checks, and both dated-H2 counts. | tests/test_coalesce_check.py::test_coalesce_check_reports_local_only_and_foreign_without_failing and ::test_coalesce_check_fails_for_unattributed_and_broken_retrieval_cues run the real script against a temporary Git repository and local bare origin, covering both dated-H2 forms without network access. | A generic evidence framework or extraction that turns informational states fatal or broken cues successful. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-141` | `C901` | `1` | `C901=1` | temporary: T9 tests, tools, and P3 | Parsing, version and safety gates, dry-run parity, push then fresh-state recheck, and tag mutation retain one release order. | tests/test_release_script.py dirty/dry-run/real-rerun/publication/tag-fence cases. | A flag-heavy batch/single runner or extraction that moves push, fresh-state, tag, or dry-run order. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-142` | `C901` | `1` | `C901=1` | permanent | The explicit fail-closed publication, local-tag, remote-tag, version-change, and retag decision table remains one audit surface. | tests/test_release_script.py plan-tag, published-version, refreshed-state, and conflict cases. | A generic rule engine or one helper per branch. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-143` | `C901` | `1` | `C901=1` | temporary: T9 tests, tools, and P3 | One real loopback proxy lifecycle owns handler construction, server publication, thread startup, and teardown. | tests/test_live_llm_helpers.py body/schema/stream/SSE/error/prefix/cleanup cases plus the live contract. | Mocked HTTP, a parallel fake adapter, or a handler owner detached from proxy lifecycle. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-144` | `C901` | `1` | `C901=1` | temporary: T9 tests, tools, and P3 | Forwarded request bytes, once-per-packet recording, stream bridging, response-start state, short-read behavior, and 502 precedence stay local to the real handler. | tests/test_live_llm_helpers.py proxy transport and failure matrix plus the live contract. | Stop if extraction changes bytes, headers, status, close behavior, or creates a second forwarding path. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-145` | `C901` | `1` | `C901=1` | permanent | One end-to-end packets, analyze, cache replay, check, and summary story preserves same-corpus causal assertions and row-level validation. | The live analysis contract plus helper-driven hermetic preflight and real transport tests. | Stage splitting that loses same-corpus causality or mocks the CLI, provider, or cache. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-146` | `C901` | `1` | `C901=1` | temporary: T9 tests, tools, and P3 | Each qualification case owns its function arguments beside slug, bodies, labels, and control facts while generated identities remain reviewed. | tests/test_semantic_eval_corpus_v3.py rederivation, frozen identity, floors, controls, mutations, and generator no-write check. | Inferring arguments from source bodies or accepting unreviewed generated-byte and hash drift. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-147` | `C901` | `1` | `C901=1` | permanent | One static AST edge collector includes direct, relative, function-local, and TYPE_CHECKING imports so the conservative graph remains authoritative. | Focused local-edge and TYPE_CHECKING tests plus live DAG and ranked-layer gates. | Runtime import probing or a visitor abstraction that can hide local edges. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-148` | `C901` | `1` | `C901=1` | permanent | One cross-rank private-import audit covers direct imports and module-attribute aliases using the same rank and alias state. | Module-attribute discovery test plus the live layer gate in tests/test_architecture.py. | Runtime reflection or separating alias collection from attribute scanning. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-149` | `C901` | `1` | `C901=1` | permanent | The deterministic two-pass SCC algorithm retains its traversal order and local visited, finish, reverse, and assignment state. | Settings/snapshot separation and zero-live-SCC tests in tests/test_architecture.py. | A graph dependency or fragmented traversal helpers without a new graph contract. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-150` | `C901` | `1` | `C901=1` | temporary: T9 tests, tools, and P3 | JSON, prompt authority, SHA grammar, and newline call detectors share one visitor traversal, scope, imports, constants, and exactly one generic_visit. | Canonical-owner adversarial/evasion and closed-inventory suite in tests/test_canonical_owners.py. | Stop if detector extraction traverses twice, misses nested calls, or loses any mutation test. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-151` | `C901` | `1` | `C901=1` | permanent | Each matrix case installs two invalid facts and proves the source validator reports the first contractual error. | The parametrized first-error test plus canonical source-shape neighbors in tests/test_semantic_reports.py. | Single-error tests or dynamic mutation that no longer proves precedence. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-152` | `C901` | `1` | `C901=1` | permanent | Every provider dataclass field and request field mutates one composition side while the other side remains byte-identical. | The exhaustive field test plus epoch, threshold, and aggregation composition neighbors. | Reflection that silently accepts a new field or separate tests that lose exact-side causality. | owner task reply Approve 2026-08-05 |
+| `RUFF-SUP-153` | `F401` | `1` | `F401=1` | permanent | The doctor intentionally imports llm to prove importability, then obtains the installed version through the package metadata owner. | tests/test_doctor.py import success, import failure containment, version reporting, and no-traceback cases. | Removing the probe import or adding a fake use would stop testing the dependency boundary. | owner task reply Approve 2026-08-05 |
+
+<!-- BEGIN GENERATED RUFF SUPPRESSION INDEX -->
+Global active-rule raw inventory: `C901=152`, `F401=1`
+
+| Group | Source symbols | Directives | Raw diagnostics by rule |
+| --- | --- | ---: | --- |
+| `RUFF-SUP-001` | `backstitch/alignment_eval.py::_authoritative_distribution_inventory` | `1` | `C901=1` |
+| `RUFF-SUP-002` | `backstitch/alignment_eval.py::_candidate_projection` | `1` | `C901=1` |
+| `RUFF-SUP-003` | `backstitch/alignment_eval.py::_declaration_projection` | `1` | `C901=1` |
+| `RUFF-SUP-004` | `backstitch/alignment_eval.py::_json_file` | `1` | `C901=1` |
+| `RUFF-SUP-005` | `backstitch/alignment_eval.py::_phase_ids` | `1` | `C901=1` |
+| `RUFF-SUP-006` | `backstitch/alignment_eval.py::_public_envelope` | `1` | `C901=1` |
+| `RUFF-SUP-007` | `backstitch/alignment_eval.py::_recompute_bootstrap_outcome` | `1` | `C901=1` |
+| `RUFF-SUP-008` | `backstitch/alignment_eval.py::_validate_candidate_relationships` | `1` | `C901=1` |
+| `RUFF-SUP-009` | `backstitch/alignment_eval.py::_validate_candidate_runs` | `1` | `C901=1` |
+| `RUFF-SUP-010` | `backstitch/alignment_eval.py::_validate_gold` | `1` | `C901=1` |
+| `RUFF-SUP-011` | `backstitch/alignment_eval.py::_validate_recorded_backstitch_argv` | `1` | `C901=1` |
+| `RUFF-SUP-012` | `backstitch/alignment_eval.py::_validate_tree` | `1` | `C901=1` |
+| `RUFF-SUP-013` | `backstitch/alignment_eval.py::load_alignment_eval_plan` | `1` | `C901=1` |
+| `RUFF-SUP-014` | `backstitch/analysis_llm.py::default_provider_adapter` | `1` | `C901=1` |
+| `RUFF-SUP-015` | `backstitch/analysis_packets.py::plan_source_aligned_packets` | `1` | `C901=1` |
+| `RUFF-SUP-016` | `backstitch/analysis_results.py::_validate_current_analysis_row` | `1` | `C901=1` |
+| `RUFF-SUP-017` | `backstitch/analysis_results.py::validate_analysis_row` | `1` | `C901=1` |
+| `RUFF-SUP-018` | `backstitch/artifact_contracts.py::_invariant_packet_shape_error` | `1` | `C901=1` |
+| `RUFF-SUP-019` | `backstitch/artifact_contracts.py::_load_packets_text` | `1` | `C901=1` |
+| `RUFF-SUP-020` | `backstitch/artifact_contracts.py::_packet_v3_declared_error` | `1` | `C901=1` |
+| `RUFF-SUP-021` | `backstitch/artifact_contracts.py::_packet_v3_header_error` | `1` | `C901=1` |
+| `RUFF-SUP-022` | `backstitch/artifact_contracts.py::_packet_v3_summary_error` | `1` | `C901=1` |
+| `RUFF-SUP-023` | `backstitch/artifact_contracts.py::_packet_v4_shape_error` | `1` | `C901=1` |
+| `RUFF-SUP-024` | `backstitch/artifact_contracts.py::_section_packet_shape_error` | `1` | `C901=1` |
+| `RUFF-SUP-025` | `backstitch/artifact_contracts.py::_v2_invariant_packet_shape_error` | `1` | `C901=1` |
+| `RUFF-SUP-026` | `backstitch/artifact_contracts.py::_v2_section_packet_shape_error` | `1` | `C901=1` |
+| `RUFF-SUP-027` | `backstitch/cli.py::_cmd_analyze` | `1` | `C901=1` |
+| `RUFF-SUP-028` | `backstitch/cli.py::_cmd_eval` | `1` | `C901=1` |
+| `RUFF-SUP-029` | `backstitch/cli.py::_cmd_packets` | `1` | `C901=1` |
+| `RUFF-SUP-030` | `backstitch/cli.py::_dedicated_cli_overrides` | `1` | `C901=1` |
+| `RUFF-SUP-031` | `backstitch/cli.py::main` | `1` | `C901=1` |
+| `RUFF-SUP-032` | `backstitch/code_parser.py::_StaticSyntaxCollector.visit_reference` | `1` | `C901=1` |
+| `RUFF-SUP-033` | `backstitch/code_parser.py::_statement_spans` | `1` | `C901=1` |
+| `RUFF-SUP-034` | `backstitch/coverage_application.py::_classification_issues` | `1` | `C901=1` |
+| `RUFF-SUP-035` | `backstitch/diagnostics.py::parse_registry` | `1` | `C901=1` |
+| `RUFF-SUP-036` | `backstitch/doctor.py::_check_endpoint` | `1` | `C901=1` |
+| `RUFF-SUP-037` | `backstitch/evidence_discovery.py::_ReferenceResolver.build_symbol_tables` | `1` | `C901=1` |
+| `RUFF-SUP-038` | `backstitch/evidence_discovery.py::_closure` | `1` | `C901=1` |
+| `RUFF-SUP-039` | `backstitch/evidence_discovery.py::_project_declared_relations` | `1` | `C901=1` |
+| `RUFF-SUP-040` | `backstitch/evidence_summary.py::_invariant_items` | `1` | `C901=1` |
+| `RUFF-SUP-041` | `backstitch/evidence_summary.py::_section_items` | `1` | `C901=1` |
+| `RUFF-SUP-042` | `backstitch/exclusions.py::parse_traceability_directive_line` | `1` | `C901=1` |
+| `RUFF-SUP-043` | `backstitch/exclusions.py::suppression_decision` | `1` | `C901=1` |
+| `RUFF-SUP-044` | `backstitch/git_baseline.py::_GitRunner._communicate_bounded` | `1` | `C901=1` |
+| `RUFF-SUP-045` | `backstitch/git_baseline.py::_read_transition_changes` | `1` | `C901=1` |
+| `RUFF-SUP-046` | `backstitch/intent_coverage.py::_classify_definitions` | `1` | `C901=1` |
+| `RUFF-SUP-047` | `backstitch/intent_history.py::build_intent_revision_state` | `1` | `C901=1` |
+| `RUFF-SUP-048` | `backstitch/markdown_specs.py::_TraceabilityReducer.process_reserved_skip_lines` | `1` | `C901=1` |
+| `RUFF-SUP-049` | `backstitch/markdown_specs.py::_resolve_skip_candidates` | `1` | `C901=1` |
+| `RUFF-SUP-050` | `backstitch/markdown_specs.py::project_section_packet_requirement` | `1` | `C901=1` |
+| `RUFF-SUP-051` | `backstitch/obligation_api.py::problem_envelope` | `1` | `C901=1` |
+| `RUFF-SUP-052` | `backstitch/obligation_api.py::render_envelope_text` | `1` | `C901=1` |
+| `RUFF-SUP-053` | `backstitch/obligation_runtime.py::_declared_mapping_targets` | `1` | `C901=1` |
+| `RUFF-SUP-054` | `backstitch/obligations.py::_section_record` | `1` | `C901=1` |
+| `RUFF-SUP-055` | `backstitch/obligations.py::build_obligation_inventory` | `1` | `C901=1` |
+| `RUFF-SUP-056` | `backstitch/packet_application.py::publish_packets` | `1` | `C901=1` |
+| `RUFF-SUP-057` | `backstitch/python_refs.py::_extract_line_refs` | `1` | `C901=1` |
+| `RUFF-SUP-058` | `backstitch/python_refs.py::_project_python_doc_markers` | `1` | `C901=1` |
+| `RUFF-SUP-059` | `backstitch/repository_snapshot.py::_bounded_read_attempt` | `1` | `C901=1` |
+| `RUFF-SUP-060` | `backstitch/repository_snapshot.py::_capture_attempt` | `1` | `C901=1` |
+| `RUFF-SUP-061` | `backstitch/repository_snapshot.py::_inventory` | `1` | `C901=1` |
+| `RUFF-SUP-062` | `backstitch/repository_snapshot.py::_inventory_open_directory` | `1` | `C901=1` |
+| `RUFF-SUP-063` | `backstitch/repository_snapshot.py::capture_repository_snapshot` | `1` | `C901=1` |
+| `RUFF-SUP-064` | `backstitch/resolver.py::_project_scan_artifacts` | `1` | `C901=1` |
+| `RUFF-SUP-065` | `backstitch/resolver.py::_reciprocal_and_inventory_issues` | `1` | `C901=1` |
+| `RUFF-SUP-066` | `backstitch/resolver.py::_resolve_code_refs` | `1` | `C901=1` |
+| `RUFF-SUP-067` | `backstitch/resolver.py::_resolve_file_qualified_ref` | `1` | `C901=1` |
+| `RUFF-SUP-068` | `backstitch/resolver.py::_resolve_invariants` | `1` | `C901=1` |
+| `RUFF-SUP-069` | `backstitch/resolver.py::_resolve_mappings` | `1` | `C901=1` |
+| `RUFF-SUP-070` | `backstitch/resolver.py::scan_snapshot_with_artifacts` | `1` | `C901=1` |
+| `RUFF-SUP-071` | `backstitch/semantic_analysis.py::_execute_cache` | `1` | `C901=1` |
+| `RUFF-SUP-072` | `backstitch/semantic_analysis.py::_execute_evidence_stable_preparation` | `1` | `C901=1` |
+| `RUFF-SUP-073` | `backstitch/semantic_analysis.py::_execute_evidence_stable_preparation.resolve_item` | `1` | `C901=1` |
+| `RUFF-SUP-074` | `backstitch/semantic_analysis.py::_packet_report_preflight` | `1` | `C901=1` |
+| `RUFF-SUP-075` | `backstitch/semantic_analysis.py::_resolve_independent_qualification` | `1` | `C901=1` |
+| `RUFF-SUP-076` | `backstitch/semantic_analysis.py::_resolve_request_bytes` | `1` | `C901=1` |
+| `RUFF-SUP-077` | `backstitch/semantic_analysis.py::_run_semantic_analysis` | `1` | `C901=1` |
+| `RUFF-SUP-078` | `backstitch/semantic_application.py::_prepare_current` | `1` | `C901=1` |
+| `RUFF-SUP-079` | `backstitch/semantic_cache.py::_analyze_config_problems` | `1` | `C901=1` |
+| `RUFF-SUP-080` | `backstitch/semantic_cache.py::_drain_owned_cleanup_under_guard` | `1` | `C901=1` |
+| `RUFF-SUP-081` | `backstitch/semantic_cache.py::_validate_inference_contract_shape` | `1` | `C901=1` |
+| `RUFF-SUP-082` | `backstitch/semantic_cache.py::analyze_with_cache` | `1` | `C901=1` |
+| `RUFF-SUP-083` | `backstitch/semantic_cache.py::analyze_with_cache.call` | `1` | `C901=1` |
+| `RUFF-SUP-084` | `backstitch/semantic_cache.py::inspect_semantic_cache` | `1` | `C901=1` |
+| `RUFF-SUP-085` | `backstitch/semantic_cache.py::inspect_verification_cache` | `1` | `C901=1` |
+| `RUFF-SUP-086` | `backstitch/semantic_cache.py::load_semantic_baseline` | `1` | `C901=1` |
+| `RUFF-SUP-087` | `backstitch/semantic_cache.py::prepare_evidence_stable_cache` | `1` | `C901=1` |
+| `RUFF-SUP-088` | `backstitch/semantic_cache.py::verify_with_cache` | `1` | `C901=1` |
+| `RUFF-SUP-089` | `backstitch/semantic_cache.py::verify_with_cache.call` | `1` | `C901=1` |
+| `RUFF-SUP-090` | `backstitch/semantic_eval.py::run_semantic_eval` | `1` | `C901=1` |
+| `RUFF-SUP-091` | `backstitch/semantic_eval_reports.py::_load_fixture_tree` | `1` | `C901=1` |
+| `RUFF-SUP-092` | `backstitch/semantic_eval_reports.py::_metric_row_from_observed` | `1` | `C901=1` |
+| `RUFF-SUP-093` | `backstitch/semantic_eval_reports.py::_validate_analysis_attempt` | `1` | `C901=1` |
+| `RUFF-SUP-094` | `backstitch/semantic_eval_reports.py::_validate_deterministic_config` | `1` | `C901=1` |
+| `RUFF-SUP-095` | `backstitch/semantic_eval_reports.py::_validate_event` | `1` | `C901=1` |
+| `RUFF-SUP-096` | `backstitch/semantic_eval_reports.py::_validate_identity` | `1` | `C901=1` |
+| `RUFF-SUP-097` | `backstitch/semantic_eval_reports.py::_validate_observed_facts` | `1` | `C901=1` |
+| `RUFF-SUP-098` | `backstitch/semantic_eval_reports.py::_validate_operational` | `1` | `C901=1` |
+| `RUFF-SUP-099` | `backstitch/semantic_eval_reports.py::validate_semantic_eval_report_consistency` | `1` | `C901=1` |
+| `RUFF-SUP-100` | `backstitch/semantic_evidence.py::_shown_regions` | `1` | `C901=1` |
+| `RUFF-SUP-101` | `backstitch/semantic_evidence.py::normalize_model_result` | `1` | `C901=1` |
+| `RUFF-SUP-102` | `backstitch/semantic_evidence.py::required_evidence_roles` | `1` | `C901=1` |
+| `RUFF-SUP-103` | `backstitch/semantic_policy.py::materialize_semantic_policy` | `1` | `C901=1` |
+| `RUFF-SUP-104` | `backstitch/semantic_policy.py::project_semantic_results` | `1` | `C901=1` |
+| `RUFF-SUP-105` | `backstitch/semantic_reports.py::_analysis_report_source_state` | `1` | `C901=1` |
+| `RUFF-SUP-106` | `backstitch/semantic_reports.py::_packet_report_issue_error` | `1` | `C901=1` |
+| `RUFF-SUP-107` | `backstitch/semantic_reports.py::_packet_report_source_shape` | `1` | `C901=1` |
+| `RUFF-SUP-108` | `backstitch/semantic_reports.py::_packet_report_source_state` | `1` | `C901=1` |
+| `RUFF-SUP-109` | `backstitch/semantic_reports.py::_revalidate_result_jsonl` | `1` | `C901=1` |
+| `RUFF-SUP-110` | `backstitch/semantic_reports.py::_validate_analysis_report_source_shape` | `1` | `C901=1` |
+| `RUFF-SUP-111` | `backstitch/semantic_reports.py::_validate_analysis_report_v1_shape` | `1` | `C901=1` |
+| `RUFF-SUP-112` | `backstitch/semantic_reports.py::_validate_analysis_report_v5_shape` | `1` | `C901=1` |
+| `RUFF-SUP-113` | `backstitch/semantic_reports.py::_validate_diagnostic` | `1` | `C901=1` |
+| `RUFF-SUP-114` | `backstitch/semantic_reports.py::_validate_packet_report_audit` | `1` | `C901=1` |
+| `RUFF-SUP-115` | `backstitch/semantic_reports.py::_validate_packet_report_v1_shape` | `1` | `C901=1` |
+| `RUFF-SUP-116` | `backstitch/semantic_reports.py::_validate_problem_v3` | `1` | `C901=1` |
+| `RUFF-SUP-117` | `backstitch/semantic_reports.py::_validate_qualification_details` | `1` | `C901=1` |
+| `RUFF-SUP-118` | `backstitch/semantic_reports.py::_validate_v5_authoritative_facts` | `1` | `C901=1` |
+| `RUFF-SUP-119` | `backstitch/semantic_reports.py::_validate_verification` | `1` | `C901=1` |
+| `RUFF-SUP-120` | `backstitch/semantic_reports.py::_validate_verification_contract` | `1` | `C901=1` |
+| `RUFF-SUP-121` | `backstitch/semantic_reports.py::_validate_verification_event` | `1` | `C901=1` |
+| `RUFF-SUP-122` | `backstitch/semantic_reports.py::build_source_packet_report` | `1` | `C901=1` |
+| `RUFF-SUP-123` | `backstitch/semantic_reports.py::validate_analysis_report` | `1` | `C901=1` |
+| `RUFF-SUP-124` | `backstitch/semantic_reports.py::validate_packet_report` | `1` | `C901=1` |
+| `RUFF-SUP-125` | `backstitch/semantic_verification.py::validate_verification_links` | `1` | `C901=1` |
+| `RUFF-SUP-126` | `backstitch/settings.py::_assemble_settings` | `1` | `C901=1` |
+| `RUFF-SUP-127` | `backstitch/settings.py::_expand_raw_paths` | `1` | `C901=1` |
+| `RUFF-SUP-128` | `backstitch/settings.py::_flatten_ratchet_policy_layer` | `1` | `C901=1` |
+| `RUFF-SUP-129` | `backstitch/settings.py::_parse_analyze_settings` | `1` | `C901=1` |
+| `RUFF-SUP-130` | `backstitch/settings.py::_parse_request_constraints` | `1` | `C901=1` |
+| `RUFF-SUP-131` | `backstitch/settings.py::_parse_settings` | `1` | `C901=1` |
+| `RUFF-SUP-132` | `backstitch/settings.py::_parse_structured_suppressions` | `1` | `C901=1` |
+| `RUFF-SUP-133` | `backstitch/settings.py::_parse_verify_settings` | `1` | `C901=1` |
+| `RUFF-SUP-134` | `backstitch/settings.py::_ratchet_policy_provenance` | `1` | `C901=1` |
+| `RUFF-SUP-135` | `backstitch/settings.py::_select_analyze_model_descriptor` | `1` | `C901=1` |
+| `RUFF-SUP-136` | `backstitch/settings.py::_table_key_names` | `1` | `C901=1` |
+| `RUFF-SUP-137` | `backstitch/settings.py::_unknown_key_messages` | `1` | `C901=1` |
+| `RUFF-SUP-138` | `backstitch/settings.py::resolve_repository_config_from_blobs` | `1` | `C901=1` |
+| `RUFF-SUP-139` | `bin/check-dom15-fixtures::check` | `1` | `C901=1` |
+| `RUFF-SUP-140` | `bin/coalesce-check::main` | `1` | `C901=1` |
+| `RUFF-SUP-141` | `bin/release.py::main` | `1` | `C901=1` |
+| `RUFF-SUP-142` | `bin/release.py::plan_tag_action` | `1` | `C901=1` |
+| `RUFF-SUP-143` | `tests/live/test_live_llm.py::_CountingProxy.__enter__` | `1` | `C901=1` |
+| `RUFF-SUP-144` | `tests/live/test_live_llm.py::_CountingProxy.__enter__.Handler._forward` | `1` | `C901=1` |
+| `RUFF-SUP-145` | `tests/live/test_live_llm.py::_exercise_live_llm_analysis_contract` | `1` | `C901=1` |
+| `RUFF-SUP-146` | `tests/semantic_eval/v3/generate_qualification_candidate.py::_arguments` | `1` | `C901=1` |
+| `RUFF-SUP-147` | `tests/test_architecture.py::_internal_imports` | `1` | `C901=1` |
+| `RUFF-SUP-148` | `tests/test_architecture.py::_private_imports` | `1` | `C901=1` |
+| `RUFF-SUP-149` | `tests/test_architecture.py::_strongly_connected_components` | `1` | `C901=1` |
+| `RUFF-SUP-150` | `tests/test_canonical_owners.py::_Inventory.visit_Call` | `1` | `C901=1` |
+| `RUFF-SUP-151` | `tests/test_semantic_reports.py::test_analysis_report_source_shape_preserves_first_error_priority` | `1` | `C901=1` |
+| `RUFF-SUP-152` | `tests/test_semantic_verification.py::test_every_provider_and_request_composition_field_invalidates_its_side` | `1` | `C901=1` |
+| `RUFF-SUP-153` | `backstitch/doctor.py::_check_llm_import` | `1` | `F401=1` |
+<!-- END GENERATED RUFF SUPPRESSION INDEX -->
+
+_Implementation mapping_:
+- `.github/workflows/ci.yml`
+- `pyproject.toml`
+- `uv.lock`
+- `bin/ruff_suppression_index.py`
+- `bin/release.py`
+- `tests/test_ruff_policy.py`
+- `tests/test_ruff_suppression_index.py`
+- `backstitch/alignment_eval.py`
+- `backstitch/analysis_llm.py`
+- `backstitch/analysis_packets.py`
+- `backstitch/analysis_results.py`
+- `backstitch/artifact_contracts.py`
+- `backstitch/cli.py`
+- `backstitch/code_parser.py`
+- `backstitch/coverage_application.py`
+- `backstitch/diagnostics.py`
+- `backstitch/doctor.py`
+- `backstitch/evidence_discovery.py`
+- `backstitch/evidence_summary.py`
+- `backstitch/exclusions.py`
+- `backstitch/git_baseline.py`
+- `backstitch/intent_coverage.py`
+- `backstitch/intent_history.py`
+- `backstitch/markdown_specs.py`
+- `backstitch/obligation_api.py`
+- `backstitch/obligation_runtime.py`
+- `backstitch/obligations.py`
+- `backstitch/packet_application.py`
+- `backstitch/python_refs.py`
+- `backstitch/repository_snapshot.py`
+- `backstitch/resolver.py`
+- `backstitch/semantic_analysis.py`
+- `backstitch/semantic_application.py`
+- `backstitch/semantic_cache.py`
+- `backstitch/semantic_eval.py`
+- `backstitch/semantic_eval_reports.py`
+- `backstitch/semantic_evidence.py`
+- `backstitch/semantic_policy.py`
+- `backstitch/semantic_reports.py`
+- `backstitch/semantic_verification.py`
+- `backstitch/settings.py`
+- `bin/check-dom15-fixtures`
+- `bin/coalesce-check`
+- `tests/live/test_live_llm.py`
+- `tests/semantic_eval/v3/generate_qualification_candidate.py`
+- `tests/test_architecture.py`
+- `tests/test_canonical_owners.py`
+- `tests/test_semantic_reports.py`
+- `tests/test_semantic_verification.py`
+
 ## Related Plans
 
+- `docs/plans/2026-08-05-ruff-complexity-and-suppression-registry-plan.md`
+  (active implementation plan; [SC-17], [SC-17.1])
 - `docs/plans/2026-08-04-semantic-preparation-performance-plan.md`
   (implementation plan; [SC-5] and [SC-7])
 - `docs/plans/2026-07-29-usability-remediation-plan.md`
