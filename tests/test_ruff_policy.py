@@ -104,7 +104,7 @@ LEDGER_COLUMNS = (
     "approval",
     "freeze_status",
 )
-ACTIVE_RAW_COUNTS = Counter({"C901": 152, "F401": 1})
+ACTIVE_RAW_COUNTS = Counter({"C901": 109, "F401": 1})
 DISABLED_TEXTUAL_NOQA_COUNTS = Counter({"BLE001": 22, "N802": 14, "S310": 9})
 
 
@@ -267,6 +267,28 @@ def _textual_noqa_counts(paths: set[str]) -> Counter[str]:
                 f"lint-eligible source is not tokenizable: {relative}"
             ) from None
     return counts
+
+
+def _governed_noqa_by_path(paths: set[str]) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    pattern = re.compile(
+        r"# noqa: [A-Z]+\d+(?:, [A-Z]+\d+)* approved "
+        r"\[SC-17\.1\] RUFF-SUP-\d{3} exception$"
+    )
+    for relative in sorted(paths):
+        path = ROOT / relative
+        try:
+            tokens = tokenize.tokenize(io.BytesIO(path.read_bytes()).readline)
+            counts[relative] += sum(
+                token.type == tokenize.COMMENT
+                and pattern.fullmatch(token.string) is not None
+                for token in tokens
+            )
+        except (IndentationError, SyntaxError, tokenize.TokenError):
+            raise AssertionError(
+                f"lint-eligible source is not tokenizable: {relative}"
+            ) from None
+    return +counts
 
 
 def test_manifest_lock_metadata_and_running_binary_use_one_exact_ruff() -> None:
@@ -443,11 +465,11 @@ def test_raw_active_and_disabled_textual_noqa_are_separate() -> None:
     assert result.returncode == 1, result.stderr
     diagnostics = json.loads(result.stdout)
     assert Counter(item["code"] for item in diagnostics) == ACTIVE_RAW_COUNTS
-    with ACTIVATION_LEDGER.open(newline="", encoding="utf-8") as stream:
-        expected_by_path = Counter(
-            row["path_symbol"].split("::", 1)[0]
-            for row in csv.DictReader(stream, delimiter="\t")
-        )
+    authority = _lint_authority()
+    active_paths = authority - {
+        path for path in authority if _is_reviewed_exclusion(path)
+    }
+    expected_by_path = _governed_noqa_by_path(active_paths)
     actual_by_path = Counter(
         Path(item["filename"]).resolve().relative_to(ROOT).as_posix()
         for item in diagnostics
@@ -455,10 +477,7 @@ def test_raw_active_and_disabled_textual_noqa_are_separate() -> None:
     assert actual_by_path == expected_by_path
 
     enabled = _enabled_rules()
-    authority = _lint_authority()
-    textual = _textual_noqa_counts(
-        authority - {path for path in authority if _is_reviewed_exclusion(path)}
-    )
+    textual = _textual_noqa_counts(active_paths)
     active_textual = Counter(
         {rule: count for rule, count in textual.items() if rule in enabled}
     )

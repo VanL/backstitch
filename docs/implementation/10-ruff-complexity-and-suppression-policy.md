@@ -70,3 +70,12 @@ Repository completion also requires normal Ruff, the suppression-index check,
 the acceptance probes, and `backstitch check --repo-root .`. These gates prove
 that every live raw diagnostic is either fixed or represented exactly once by
 a reviewed active row.
+
+Owner extraction increases the self-corpus definition graph, so the repository
+overrides the packaged obligation work limit to 3,000,000. Provider capability
+is not a corpus budget: the reviewed 1.6 MB per-request analyzer limit remains
+unchanged. [SC-17.1] is instead skipped from model evaluation because the live
+registry is generated policy data already proved exhaustively by the real Ruff
+and index gates. The isolated self-repository acceptance probe must still
+complete both cold and replay artifact flows under the committed work, packet,
+prompt, call, runtime, cost, and provider-request limits.

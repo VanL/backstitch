@@ -59,6 +59,7 @@ def test_self_corpus_suppressions_are_auditable() -> None:
         "docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-PROCESS": 2,
         "docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-DEFERRED-MCP": 2,
         "docs/specs/04-backstitch-traceability-exclusions.md#SUP-DOCUMENTATION-META": 2,
+        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-RUFF-REGISTRY-SEMANTIC": 1,
         # T4 adds governed Ruff policy/spec backlinks while the test-only
         # citation policy keeps their non-owning trace records auditable.
         "docs/specs/04-backstitch-traceability-exclusions.md#SUP-TEST-CITATIONS": 238,
@@ -93,6 +94,10 @@ def test_self_corpus_suppressions_are_auditable() -> None:
                 ),
             }
             assert record["code"] == "SPEC_SECTION_UNMAPPED"
+        elif declaration.endswith("#SUP-RUFF-REGISTRY-SEMANTIC"):
+            assert record["path"] == "docs/specs/02-backstitch-core.md"
+            assert record["section_id"] == "SC-17.1"
+            assert record["code"] == "OBLIGATION_SKIPPED"
         elif declaration.endswith("#SUP-VERIFICATION-META"):
             assert (record["path"], record["section_id"]) in {
                 ("docs/specs/02-backstitch-core.md", "SC-10"),
@@ -144,7 +149,16 @@ def test_dogfood_enables_documented_suppression_governance() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     config = json.loads(result.stdout)
     assert config["lint"]["require_suppression_declarations"] is True
-    assert len(config["lint"]["suppressions"]) == 3
+    assert len(config["lint"]["suppressions"]) == 4
+    ruff_registry = next(
+        item
+        for item in config["lint"]["suppressions"]
+        if item["declaration"].endswith("#SUP-RUFF-REGISTRY-SEMANTIC")
+    )
+    assert ruff_registry["mechanism"] == "ignore"
+    assert ruff_registry["path"] == "docs/specs/02-backstitch-core.md"
+    assert ruff_registry["sections"] == ["SC-17.1"]
+    assert ruff_registry["codes"] == ["OBLIGATION_SKIPPED"]
     assert config["analyze"]["required_kinds"] == [
         "section",
         "invariant",

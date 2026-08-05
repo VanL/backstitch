@@ -114,6 +114,9 @@ maximum_call_seconds = 600.0
 # Discovery-v2's complete 110-obligation corpus is 32.8 MB. Keep explicit
 # headroom while the later batching/source-interning phase optimizes it.
 maximum_packet_bytes = 40000000
+# Complexity-owner extraction increases the self-corpus definition graph.
+# Keep deterministic discovery headroom above the previous 2,000,000 default.
+maximum_work_units = 3000000
 
 [tool.backstitch.analyze]
 # Model Monster's pkg:service PURL is the stable inference identity. The raw
@@ -227,6 +230,13 @@ path = "docs/specs/07-verification-and-evidence-cases.md"
 sections = ["EVC-8.6"]
 codes = ["SPEC_SECTION_UNMAPPED", "OBLIGATION_SKIPPED"]
 declaration = "docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-DEFERRED-MCP"
+
+[[tool.backstitch.lint.suppressions]]
+mechanism = "ignore"
+path = "docs/specs/02-backstitch-core.md"
+sections = ["SC-17.1"]
+codes = ["OBLIGATION_SKIPPED"]
+declaration = "docs/specs/04-backstitch-traceability-exclusions.md#SUP-RUFF-REGISTRY-SEMANTIC"
 
 [[tool.backstitch.lint.suppressions]]
 mechanism = "ignore"

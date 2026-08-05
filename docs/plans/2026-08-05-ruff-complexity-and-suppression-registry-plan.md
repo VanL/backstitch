@@ -132,7 +132,7 @@ Files created by this plan:
 - `tests/fixtures/ruff-excluded-python.tsv`
 - `tests/test_ruff_policy.py`
 - `tests/test_ruff_suppression_index.py`
-- `docs/implementation/10-complexity-and-suppression-policy.md`
+- `docs/implementation/10-ruff-complexity-and-suppression-policy.md`
 
 Files changed at activation include the governing spec, Ruff config and lock,
 all source files with live pointers, CI, release prechecks/tests, the registry,
@@ -151,9 +151,8 @@ closest proofs, registry/index, and [SC-17.1] mapping.
 - T4 must record a promotion baseline identifier here before later slices make
   compliance claims.
 
-Promotion baseline: `936f248` plus the owner-approved T4 worktree diff to
-`docs/specs/02-backstitch-core.md`; replace this identifier with the T4 commit
-SHA after the reviewed atomic slice lands.
+Promotion baseline: commit `25759b7` (`Activate Ruff complexity suppression
+policy`).
 
 ## Proposed Spec Delta
 
@@ -734,7 +733,7 @@ Gate: locality review PASS with every reversal and registry change recorded.
 
 ### T11: Documentation, Traceability, And Closure
 
-1. Add `docs/implementation/10-complexity-and-suppression-policy.md` explaining
+1. Add `docs/implementation/10-ruff-complexity-and-suppression-policy.md` explaining
    authority, discovery, generator ownership, approval, update workflow,
    rollback, and why suppression count is not the success metric.
 2. Add it to `docs/implementation/00-implementation-index.md`.
@@ -891,6 +890,7 @@ Stop and revise this plan if:
 | 2026-08-05 | Repository owner approved all 153 exact group fields. T4 froze the ledger, promoted 153 human and generated rows, activated C901/10, inserted 153 reconciled markers, and aligned CI/release enforcement atomically. | Owner task reply `Approve`; integrated T4 gates |
 | 2026-08-05 | T5-T9 resolved 43 of 49 temporary C901 groups. Six state-machine and lifecycle owners remain registered: 005, 077, 082, 084, 085, and 088. The live registry now contains 110 directives while the frozen activation ledger remains the historical approval input. | Focused owner suites; exact raw audit `C901=109,F401=1`; generated-index reconciliation |
 | 2026-08-05 | T10 score-blind cross-review retained the six cohesive owners and found no shallow extraction to reverse. Retired group IDs remain unused gaps and are not reassigned. | Independent T6, T7, T8, and combined T5/T9 locality reviews |
+| 2026-08-05 | The first full-suite run found six integration failures missed by focused selections: JSON preparation-block output moved to stderr, live policy proof still compared against the historical activation ledger, and the expanded self-corpus exceeded repository dogfood work limits while the deterministic registry packet exceeded the reviewed per-request provider capability. Restored JSON stdout parity, made active-marker paths the live policy oracle, added a measured 3,000,000 work-unit override, and dispositioned [SC-17.1] out of model evaluation because Ruff policy/index gates already prove it deterministically. | Full pytest failure matrix; hostile final review; real isolated self-repository dogfood probe |
 
 ## Review Log
 
@@ -911,6 +911,8 @@ Stop and revise this plan if:
 | 2026-08-05 | T7 eval and reports | independent core-area reviewer | PASS | Temporary lifetimes, cold/replay order, global budgets, publication, schema dispatch, first-error order, report binding, and final digests remain intact. |
 | 2026-08-05 | T8 alignment, CLI, evidence, and coverage | independent semantic-area reviewer | PASS | Snapshot/parser ownership, output and exit precedence, lazy provider imports, aggregate order, and proof strength remain intact; group 005 is correctly retained. |
 | 2026-08-05 | T10 locality remediation | cross-review matrix above | PASS; no reversals | Every changed P1/P2 owner received a score-blind review. The six retained owners are cohesive state machines; no new unregistered owner exceeds 10. |
+| 2026-08-05 | T11 initial integration review | independent semantic-area reviewer | BLOCKED; correction applied | Rejected an unsupported 40 MB analyzer request limit because `maximum_input_bytes` is a provider capability, not aggregate corpus capacity. |
+| 2026-08-05 | T11 corrected integration rereview | independent semantic-area reviewer | PASS | Provider capability remains 1.6 MB. The exact SC-17.1 semantic skip, section/code suppression, and declaration are narrow and non-circular; real Ruff/index proof, self-check, preflight, and documentation align. |
 
 ## Execution Evidence
 
@@ -927,6 +929,7 @@ Stop and revise this plan if:
 | T8 | alignment, CLI, coverage, evidence-summary/history, obligations, semantic-evidence owners; canonical-owner inventory | implementation selection: 339 passed; independent review covered 12 focused suites; Ruff, format, and mypy passed | 13 groups removed: 002, 003, 009, 010, 027, 028, 031, 034, 040, 041, 047, 055, 100; group 005 retained | independent review PASS | `_phase_ids` remains one phase-wide manifest, uniqueness, and coverage state machine |
 | T9 | `bin/coalesce-check`; `bin/release.py`; live proxy, semantic corpus generator, and canonical-owner tests | release 37, coalesce 2, and combined helper/corpus/owner selection 89 passed; generator no-write, Ruff, and focused mypy passed | 6 groups removed: 140, 141, 143, 144, 146, 150 | independent review PASS after registry reconciliation | qualification generator source hash intentionally refreshed; generated corpus bytes unchanged |
 | T10 | all T5-T9 P1/P2 diffs and retained owners | exact raw audit `C901=109,F401=1`; normal Ruff and suppression-index check pass | live registry 153 -> 110 directives; 43 retired gaps; frozen activation ledger unchanged | cross-review PASS | no reversal required; six temporary groups retained under their approved invariants |
+| T11 integration correction | CLI JSON blocked-result stream; active policy oracle; repository work limit; [SC-17.1] semantic disposition and declared suppression | final full suite: 2,668 passed; acceptance: 62 passed; self-check exit 0 with zero errors/warnings; preflight complete with 111 packets, 33,373,837 aggregate prompt bytes, and 1,119,701 maximum request bytes under the 1.6 MB capability; canonical Ruff, index, format, policy/release, and diff gates pass | no Ruff suppression or rule delta; one valid semantic skip and exact audited deterministic suppression | initial BLOCKED; corrected rereview PASS | full mypy retains the same six pre-existing errors at `tests/test_semantic_application.py:144`; nine pre-existing dangling document-path claims remain |
 
 ## Fresh-Eyes Checklist
 

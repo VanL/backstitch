@@ -1777,6 +1777,8 @@ _Implementation mapping_:
 
 ### 17.1 Repository Complexity And Suppression Gate [SC-17.1]
 
+<!-- backstitch: skip-obligation [SC-17.1] "The generated suppression registry is exhaustively checked by Ruff policy and index gates; model evaluation would duplicate deterministic proof and exceed the reviewed provider request capability." -->
+
 Ruff's version is exact-pinned in the development manifest and lock. The
 repository proves that the executing binary, manifest pin, and lock resolve
 to the same version before deriving rule or suppression inventories.

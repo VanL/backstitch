@@ -851,8 +851,9 @@ def _render_preflight_result(
     args: argparse.Namespace, preflight: Any, *, blocked: bool = False
 ) -> int:
     if args.format == "json":
-        stream = sys.stderr.buffer if blocked else sys.stdout.buffer
-        stream.write(preflight.to_json_bytes())
+        # JSON is a structured result even when preparation is blocked. Keep it
+        # on stdout so ordinary analyze and explicit preflight remain identical.
+        sys.stdout.buffer.write(preflight.to_json_bytes())
     else:
         stream = sys.stderr if blocked else sys.stdout
         stream.write(_render_semantic_preflight(preflight))

@@ -622,6 +622,8 @@ _Traceability: suppression-declaration [SUP-EVC-PROCESS] "The EVC purpose and co
 
 _Traceability: suppression-declaration [SUP-EVC-DEFERRED-MCP] "The optional local MCP adapter is explicitly deferred and has no implementation mapping until that product phase is promoted."_
 
+_Traceability: suppression-declaration [SUP-RUFF-REGISTRY-SEMANTIC] "The generated Ruff suppression registry is exhaustively checked by deterministic policy and index gates; model evaluation would duplicate that proof and exceed the reviewed provider request capability."_
+
 _Traceability: suppression-declaration [SUP-TEST-CITATIONS] "Tests cite contracts as verification evidence but are not general implementation owners; test-only unmapped backlinks and reciprocal-mapping findings are retained as audited noise."_
 
 _Traceability: suppression-declaration [SUP-VERIFICATION-META] "Verification sections define proof obligations and test policy rather than runtime implementation behavior, so tests remain reciprocal evidence without being claimed as production implementation owners."_
