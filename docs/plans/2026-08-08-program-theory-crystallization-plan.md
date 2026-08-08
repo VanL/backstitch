@@ -215,6 +215,16 @@ What this establishes:
   It is the named first mitigation if first-contact cost bites on an
   external corpus — try an alternate mapping carrier before judging
   the adoption model falsified.
+- **The first-real-test corpus is mm** (owner designation,
+  2026-08-08): every repository in the fleet is owner-authored, so
+  no genuinely foreign corpus exists among them — but mm contains
+  substantial code not written by the owner, making it the closest
+  available approximation of external contact. Weft remains the
+  design-time reference target; the falsifier-grade adoption test is
+  mm. The falsifiers keyed to "first external contact" (adoption
+  cost phase two, anti-Goodhart on a non-self-authored corpus,
+  articulation convergence off the home repo) resolve their venue to
+  mm accordingly.
 
 ## Deviation Log
 
