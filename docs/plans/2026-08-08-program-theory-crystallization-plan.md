@@ -1,6 +1,8 @@
 # Program Theory Crystallization Plan
 
-Status: draft — owner interview in progress; rung 1 of 7 ratified.
+Status: draft — interview complete (D1–D6 ratified); theory draft
+written, independently reviewed (ADOPT-WITH-EDITS, all edits
+applied); awaiting owner ratification to Active.
 Decisions recorded here promote into `docs/program-theory.md` at
 crystallization with this plan as the source record.
 Class: 5 — will create `docs/program-theory.md` (new normative
@@ -361,3 +363,58 @@ attributable to a theory statement"). Mapping, with honest status:
 - 2026-08-08: Plan opened mid-interview to stop the rung-1
   ratification from living only in a session transcript. Rungs 2–7
   append to the Decision Log as the owner ratifies them.
+- 2026-08-08: Interview complete — D1–D6 all owner-ratified.
+  `docs/program-theory.md` drafted from the decision log (Status:
+  Draft).
+- 2026-08-08: Independent semantic review dispatched (codex,
+  read-only, existence-check-first brief covering spec-code
+  accuracy, D1–D6 fidelity, the D3 no-restatement rule,
+  term-collision safety, and genre conformance). Verdict:
+  **ADOPT-WITH-EDITS** — "D1, D4, D5, and the overall structure are
+  faithful. Ratification should wait for the D3 authority violation
+  and the factual errors below to be corrected." Nine findings,
+  dispositions all **applied** to the draft:
+  - PT-01 (P1): draft restated [SC-16] lane/authority mechanics,
+    violating D3 — replaced with cite-don't-restate wording
+    throughout ([THEORY-1] boundary/feel bullets, [THEORY-3] lede,
+    [THEORY-4] policy row); A2 now cites [SC-4], A3 cites [COV-5],
+    A6 defers mechanics to [COV-7].
+  - PT-02 (P2): [COV-2] ladder quote corrected to "…and every
+    intent traceable to behavior."
+  - PT-03 (P2): provenance fixed — the self-corpus smoke check was
+    in the first spec commit but the zero-warning shipped-defect
+    rule was ratified in `1e9c0d9` (2026-07-02); "docs led
+    substantive implementation" (first spec commit carried a
+    skeleton); bake-off 2026-07-01, reconciliation 2026-07-02.
+  - PT-04 (P2): self-corpus paradox updated to current facts —
+    applied ceiling 40 MB; complete 111-packet 33,373,837-byte
+    preflight on 2026-08-05; demoted from live tension to
+    historical tension with a surviving test. Unreproducible
+    "median six owners" claim deleted.
+  - PT-05 (P2): suppression described per [EXC-*] (governed forms
+    bind declaration + rationale); `ambiguous` broadened beyond
+    section analysis; concept table column renamed "Relevant
+    contract owner(s)" with deterministic-finding and policy rows
+    listing their real owners.
+  - PT-06 (P2): composite-authorship correction completed — nine
+    questions and the iterative loop are also external-agent
+    coinage, per the lore record's authorship correction.
+  - PT-07 (P2): evidence typing — terminology note added
+    (observation/provenance vs the product senses of evidence/
+    coverage); SimpleBroker adoption typed as "one owner-reported
+    phase-one observation… not an efficacy test"; concentration's
+    single ad hoc run typed; mm "supplies external-contact
+    observations".
+  - PT-08 (P3): falsifier section now leads "Six falsifiers and one
+    live tension"; observables sharpened for falsifiers 1, 4
+    (predeclared denominator/checkpoints/threshold else unscored),
+    and 7 (in-scope drift established by audit/incident/independent
+    detector with no finding from the applied run).
+  - PT-09 (P3): D6's README disposition made legible in [THEORY-8]
+    (v2 retained only as source material; D1 supersedes its
+    corpus-substrate spine).
+  - Reviewer observation: this plan's header still said "rung 1 of
+    7" — reconciled this entry's same change.
+- 2026-08-08: Awaiting owner ratification (Draft → Active), then
+  startup wiring, then the wave and README units per the agreed
+  execution order.
