@@ -44,7 +44,8 @@ refusals-don't-transfer failure mode operating at the theory tier.
 2. Founding continuity and provenance — DECIDED 2026-08-08 (D2).
 3. Architecture of authority ([SC-16] placement) — DECIDED
    2026-08-08 (D3).
-4. Falsifiers for a zero-to-one product — pending.
+4. Falsifiers for a zero-to-one product — in progress (D4 partial;
+   owner evidence recorded, slate disposition pending).
 5. Durable-alternative selection (twelve-plus-one register) — pending.
 6. The README program (the unlanded 2026-07-29 v2 vision draft) —
    pending.
@@ -172,6 +173,48 @@ Three layers, no duplication:
   names [SC-16] explicitly; the incoming wave's judgment paragraph
   and startup-order wiring make the theory load for product-scope
   judgment.
+
+### D4 (partial) — First-contact adoption cost: evidence recorded (2026-08-08)
+
+Owner evidence, verbatim:
+
+> First contact adoption cost is real. Simplebroker had an extensive
+> README with a lot of the contract information. I migrated the
+> contracts to specs, and one big reason was to use backstitch. It
+> seemed to me that inserting all of the crossrefs would harm the
+> readability of the README as the primary documentation surface.
+>
+> That said, was it difficult? A little. Not too much, with agents.
+> It took a day and a half. It turned up some bugs. I think it ended
+> up being net positive. But it was a cost.
+>
+> That said, I didn't explore a mapping table or other options.
+
+What this establishes:
+
+- **Adoption has two phases.** The corpus-shaping phase (specs with
+  stable IDs, contracts migrated out of prose) and the tool-wiring
+  phase (backstitch actually running). SimpleBroker has paid the
+  first — roughly 1.5 agent-assisted days, bug-finding, judged net
+  positive — without yet paying the second. The falsifier's
+  predeclared observable therefore splits: corpus-shaping cost is
+  *partially exercised with favorable evidence*; tool-wiring cost
+  remains unexercised.
+- **The adoption pressure shaped the fleet's documentation
+  architecture.** The readability concern — inline crossrefs would
+  damage the README as the primary human surface — is a stated
+  motivation for the layered source-of-truth architecture
+  (README-as-human-entry, specs-as-contract, section registry) now
+  practiced in SimpleBroker and adopted by taut. Backstitch's
+  adoption model and the layered-docs architecture co-evolved; the
+  theory should state this coupling rather than presenting either as
+  independent.
+- **Unexplored alternative, recorded honestly as unexplored (not
+  rejected):** a mapping table or other non-inline mapping carrier
+  (section→code bindings outside the spec prose) was never tried.
+  It is the named first mitigation if first-contact cost bites on an
+  external corpus — try an alternate mapping carrier before judging
+  the adoption model falsified.
 
 ## Deviation Log
 
