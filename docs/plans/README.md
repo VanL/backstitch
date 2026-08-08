@@ -46,6 +46,7 @@ Risky plans are blocked if they do not make explicit:
 
 | Plan | Status |
 |------|--------|
+| 2026-08-08-program-theory-crystallization-plan.md | draft |
 | 2026-07-11-deterministic-semantic-gate-plan.md | active |
 | 2026-07-14-agent-guidance-propagation-plan.md | active |
 | 2026-07-15-agent-interfaces-runbook-adoption-plan.md | completed — runbook adopted from agent-guidance @ a4b4345 |
