@@ -42,7 +42,8 @@ refusals-don't-transfer failure mode operating at the theory tier.
 
 1. The bet itself — RATIFIED 2026-08-08 (Decision Log D1).
 2. Founding continuity and provenance — DECIDED 2026-08-08 (D2).
-3. Architecture of authority ([SC-16] placement) — pending.
+3. Architecture of authority ([SC-16] placement) — DECIDED
+   2026-08-08 (D3).
 4. Falsifiers for a zero-to-one product — pending.
 5. Durable-alternative selection (twelve-plus-one register) — pending.
 6. The README program (the unlanded 2026-07-29 v2 vision draft) —
@@ -108,10 +109,20 @@ lore** — the hub's `docs/lore/` tier (curated primary-source
 excerpts; non-normative; owner-established with two prior entries).
 Executed: the hub lore entry
 "2026-07-29-backstitch-readme-dialogue-founding-text" (agent-theory
-repository) now carries the founding dialogue verbatim — the owner's
-founding message (thesis sentence, nine possession questions,
-iterative loop), the dialogue's excerpted products, a
+repository) now carries the founding dialogue verbatim — the
+composite founding message, the dialogue's excerpted products, a
 what-became-what ledger, and the 2026-08-08 revision as its coda.
+**Authorship correction (owner, 2026-08-08, recorded in the lore
+entry):** the thesis sentence, the nine possession questions, and
+the iterative loop were not minted by the owner in that dialogue —
+the message was a composite of the owner's own words (through the
+practice description) and pasted text from an external naming
+conversation in which another agent coined the sentence in reply to
+the owner. The owner stated the practice and the risk diagnosis; the
+external agent compressed the practice into the sentence; the owner
+recognized it as true and adopted it. The naming came second, and
+not from the practitioner — itself an instance of the practice-first
+admission test.
 This repository's theory will cite that lore entry by name (foreign)
 in its founding-continuity section rather than re-quoting at length.
 
@@ -132,10 +143,35 @@ section (final wording ratifies at drafting, rung 3+):
    need checking.
 3. The identity was articulated in dialogue twice: the founding
    plan's wager (2026-06-18, intact into [SC-16]) and the
-   2026-07-29 dialogue (thesis minted; README v2 drafted, never
+   2026-07-29 dialogue (where the thesis entered this lineage's
+   working record — coined earlier by an external agent in reply to
+   the owner, adopted by the owner; README v2 drafted, never
    landed), with the 2026-08-08 revision (D1) superseding the
    "falsify Naur" framing — recorded as a demotion-in-place, not
    smoothed over.
+
+### D3 — Architecture of authority (rung 3; owner-ratified 2026-08-08)
+
+Three layers, no duplication:
+
+- **[SC-16] stays in the core spec** as the contract-tier identity
+  clause. Being tested-against in spec debates is a contract
+  function; the working mechanism is not moved to satisfy filing.
+- **`docs/program-theory.md`** (created at crystallization) owns what
+  the contract cannot: the thesis (D1), founding continuity (D2,
+  citing the hub lore entry by name), the mental model at
+  concept-and-ownership altitude, durable alternatives (rung 5),
+  falsifiers (rung 4), and revisions. It cites [SC-16] as the
+  contract-tier expression of the identity and does not restate it
+  (the theory-may-not-duplicate-exact-behavior boundary applied to
+  the identity itself).
+- **The hub lore tier** holds the narrative primary sources, cited
+  from the founding section — theory stays short under progressive
+  disclosure.
+- Split-authority mitigation: the theory's Required-action header
+  names [SC-16] explicitly; the incoming wave's judgment paragraph
+  and startup-order wiring make the theory load for product-scope
+  judgment.
 
 ## Deviation Log
 
