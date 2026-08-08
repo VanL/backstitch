@@ -44,8 +44,15 @@ refusals-don't-transfer failure mode operating at the theory tier.
 2. Founding continuity and provenance — DECIDED 2026-08-08 (D2).
 3. Architecture of authority ([SC-16] placement) — DECIDED
    2026-08-08 (D3).
-4. Falsifiers for a zero-to-one product — in progress (D4 partial;
-   owner evidence recorded, slate disposition pending).
+4. Falsifiers for a zero-to-one product — DECIDED 2026-08-08 (D4;
+   slate of six accepted — falsifier 1 with recorded SimpleBroker
+   evidence and the two-phase split, falsifiers 2–6 accepted as
+   predeclared with no evidence yet, per the owner: "I think 2-6 are
+   still good tests. I don't have any evidence for them yet." The
+   self-corpus item is framed as live-tension-with-resolution-path.
+   Venue for external-contact falsifiers: mm. A gut falsifier from
+   the owner remains an open slot, not a blocker — falsifiers are
+   first-class when real, no quota).
 5. Durable-alternative selection (twelve-plus-one register) — pending.
 6. The README program (the unlanded 2026-07-29 v2 vision draft) —
    pending.
