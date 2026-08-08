@@ -32,13 +32,22 @@
   mechanically, and no repository text can or does claim to modify them.
 - Canonical shared context lives in `docs/agent-context/`.
 - Required read order for any agent operating in this repository:
-1. `docs/agent-context/README.md`
-2. `docs/agent-context/decision-hierarchy.md`
-3. `docs/agent-context/principles.md`
-4. `docs/agent-context/engineering-principles.md`
-5. Relevant runbook(s) in `docs/agent-context/runbooks/`
-6. `docs/agent-context/lessons.md`
-7. `docs/lessons.md`
+1. `docs/program-theory.md` — conceptual identity of **this repository**
+   (what kind of system this is). Frames interpretation and placement; does
+   **not** override winning contracts ([SC-16] and the specs own exact
+   behavior).
+2. `docs/agent-context/README.md`
+3. `docs/agent-context/decision-hierarchy.md`
+4. `docs/agent-context/principles.md`
+5. `docs/agent-context/engineering-principles.md`
+6. Relevant runbook(s) in `docs/agent-context/runbooks/`
+7. `docs/agent-context/lessons.md`
+8. `docs/lessons.md`
+
+`docs/program-theory.md` is load-bearing for product-scope *judgment* —
+audits, reviews, feature-fit and design opinions — not only for
+implementation. Skipping it because a task looks like verification is the
+observed failure mode.
 
 If local defaults conflict with repository guidance, follow the decision policy
 in `docs/agent-context/decision-hierarchy.md`.

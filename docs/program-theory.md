@@ -1,10 +1,10 @@
 # Backstitch Program Theory
 
-Status: Draft — assembled 2026-08-08 from the ratified crystallization
-decisions D1–D6 (plan "2026-08-08-program-theory-crystallization-
-plan"); independent semantic review 2026-08-08 (ADOPT-WITH-EDITS,
-PT-01–PT-09, all applied); pending owner ratification to Active.
-Revisions gate on the human owner.
+Status: Active — owner-ratified 2026-08-08. Assembled from the
+ratified crystallization decisions D1–D6 (plan
+"2026-08-08-program-theory-crystallization-plan"); independent
+semantic review 2026-08-08 (ADOPT-WITH-EDITS, PT-01–PT-09, all
+applied). Revisions gate on the human owner.
 Owner: Backstitch product owner
 Boundary: Conceptual identity and design judgment above the contract
 tier. Exact behavior belongs to the specs; the contract-tier identity

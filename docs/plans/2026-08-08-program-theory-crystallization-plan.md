@@ -1,8 +1,10 @@
 # Program Theory Crystallization Plan
 
-Status: draft — interview complete (D1–D6 ratified); theory draft
-written, independently reviewed (ADOPT-WITH-EDITS, all edits
-applied); awaiting owner ratification to Active.
+Status: completed — interview complete (D1–D6 ratified); theory
+drafted, independently reviewed (ADOPT-WITH-EDITS, all edits
+applied), owner-ratified to Active 2026-08-08, and wired into the
+AGENTS.md read order. Follow-on units (propagation wave, README)
+are their own plans per Out of Scope.
 Decisions recorded here promote into `docs/program-theory.md` at
 crystallization with this plan as the source record.
 Class: 5 — will create `docs/program-theory.md` (new normative
@@ -415,6 +417,10 @@ attributable to a theory statement"). Mapping, with honest status:
     corpus-substrate spine).
   - Reviewer observation: this plan's header still said "rung 1 of
     7" — reconciled this entry's same change.
-- 2026-08-08: Awaiting owner ratification (Draft → Active), then
-  startup wiring, then the wave and README units per the agreed
-  execution order.
+- 2026-08-08: Owner ratified ("Commit and close"): theory Status
+  flipped Draft → Active; startup wiring added (`docs/
+  program-theory.md` as read-order item 1 in AGENTS.md with the
+  load-bearing-for-judgment note; the full kernel block arrives
+  with the propagation wave). Plan closed — Status Index row
+  flipped to completed. The wave and README units proceed as their
+  own plans.
