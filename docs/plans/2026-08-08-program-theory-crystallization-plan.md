@@ -52,7 +52,19 @@ refusals-don't-transfer failure mode operating at the theory tier.
    self-corpus item is framed as live-tension-with-resolution-path.
    Venue for external-contact falsifiers: mm. The owner's gut
    falsifier was supplied 2026-08-08 — see the D4 amendment below).
-5. Durable-alternative selection (twelve-plus-one register) — pending.
+5. Durable-alternative selection — DECIDED 2026-08-08 (D5): the
+   six-and-seven split ratified as proposed. Theory tier:
+   zero-warning-self-corpus-as-definition-of-done; never-guess-an-
+   edge; gate-authority-never-invocation-overridable; a-governance-
+   tool-may-not-suppress-itself; the-product-must-not-define-its-
+   own-expected-result; anti-Goodhart coverage. Routed elsewhere:
+   Strategy-A's falsified premise → runbook correction in backstitch
+   AND the hub (both still carry the disproven info-class-only
+   claim; wave-mechanics work, rung 7); per-file classification,
+   reciprocity asymmetry, claim-context split, config model,
+   performance model → spec-owned where they live; parser
+   boundaries → Golden Rule 14, engineering-principle tier. Nothing
+   recorded twice.
 6. The README program (the unlanded 2026-07-29 v2 vision draft) —
    pending.
 7. Wave mechanics (separate execution; interacts via the term-
