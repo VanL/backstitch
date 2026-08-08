@@ -50,9 +50,8 @@ refusals-don't-transfer failure mode operating at the theory tier.
    predeclared with no evidence yet, per the owner: "I think 2-6 are
    still good tests. I don't have any evidence for them yet." The
    self-corpus item is framed as live-tension-with-resolution-path.
-   Venue for external-contact falsifiers: mm. A gut falsifier from
-   the owner remains an open slot, not a blocker — falsifiers are
-   first-class when real, no quota).
+   Venue for external-contact falsifiers: mm. The owner's gut
+   falsifier was supplied 2026-08-08 — see the D4 amendment below).
 5. Durable-alternative selection (twelve-plus-one register) — pending.
 6. The README program (the unlanded 2026-07-29 v2 vision draft) —
    pending.
@@ -232,6 +231,49 @@ What this establishes:
   cost phase two, anti-Goodhart on a non-self-authored corpus,
   articulation convergence off the home repo) resolve their venue to
   mm accordingly.
+
+### D4 amendment — The gut falsifier: undetected drift (owner, 2026-08-08)
+
+Owner statement, verbatim:
+
+> The kind of evidence that would falsify D1 would be drift: either
+> the code or the theory changed meaningfully, but backstitch didn't
+> flag it.
+>
+> I think that one corollary is that the discovery phase has to run
+> regularly and be validated by a human. What I am thinking of here
+> is dead code - the code, the tests, and the theory all are aligned,
+> but they are silently routed-around by an if-statement somewhere.
+> We need to see if we can find the places where there are decision
+> points as part of discovery.
+
+What this establishes:
+
+- **The thesis-level falsifier is the silent false negative**:
+  meaningful change in code or theory that the instrument does not
+  flag. This is the instrument's own version of its severity
+  philosophy turned on itself — claims rot silently, contracts fail
+  loudly, and D1 is falsified the day backstitch rots silently. It
+  subsumes drift in either direction (code moved under a stable
+  articulation; articulation moved over stable code).
+- **The canonical blind-spot case is routed-around alignment**: code,
+  tests, and theory all aligned — every tool in the ladder green
+  (ruff: well-formed; mypy: well-typed; coverage: test-exercised,
+  since tests call the code directly; backstitch: intent-aligned) —
+  while a decision point in a caller silently bypasses the aligned
+  code in production. The exposure exists and evaluates true, but
+  the exposed code is not live. Alignment measurement does not prove
+  liveness; the theory must state this limitation plainly.
+- **Corollary (owner):** the discovery phase must run recurrently
+  and be human-validated — a one-shot bootstrap cannot catch drift
+  that postdates it. The named direction: extend discovery to
+  surface **decision points** — the guards that determine whether an
+  exposed region executes — as deterministic candidates for human
+  disposition, in the existing bootstrap-loop shape (candidates
+  carry no authority; dispositions do). This is roadmap-grade
+  product work ([EVC]/[COV]-adjacent, its own future spec work), not
+  a landed capability; the theory records the blind spot and the
+  direction, never implying the capability exists.
 
 ## Deviation Log
 
