@@ -225,6 +225,13 @@ codes = []
 declaration = "docs/specs/04-backstitch-traceability-exclusions.md#SUP-DOM-META"
 
 [[tool.backstitch.lint.suppressions]]
+mechanism = "meta"
+path = "docs/specs/09-agent-theory-and-program-theory.md"
+sections = []
+codes = []
+declaration = "docs/specs/04-backstitch-traceability-exclusions.md#SUP-AT-PRIMER-META"
+
+[[tool.backstitch.lint.suppressions]]
 mechanism = "ignore"
 path = "docs/specs/07-verification-and-evidence-cases.md"
 sections = ["EVC-8.6"]

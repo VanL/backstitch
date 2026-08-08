@@ -25,6 +25,8 @@ stay aligned instead of competing.
 6. `06-semantic-gates.md` (Status: Active)
 7. `07-verification-and-evidence-cases.md` (Status: Active)
 8. `08-intent-coverage.md` (Status: Proposed)
+9. `09-agent-theory-and-program-theory.md` (Status: Reference —
+   definitional primer; read on demand, not session-start)
 
 Product identity — the boundary rule, evidence-class rule, the two lanes and
 policy layer, the metric identity rule, and the contract-coverage matrix — is

@@ -21,10 +21,12 @@ silently accept incompatible shapes unless compatibility is explicitly required.
 
 Do not infer behavior from file names or mental models alone. Read:
 
-1. the relevant spec
-2. the current implementation
-3. the closest existing test
-4. the active plan or implementation note
+1. the program theory when product scope, concepts, or ownership are at
+   issue
+2. the relevant spec
+3. the current implementation and its rationale
+4. the closest existing test
+5. the active plan or implementation note
 
 Then decide what to change.
 
@@ -55,6 +57,9 @@ cleanup.
   Prose `Status:` headers and globs are different mechanisms. After promotion,
   `docs/specs/` is the single governing contract — not plan appendix text. See
   `runbooks/writing-plans.md` §4b–4d and `runbooks/writing-specs.md` §9.
+- Theory-changing plans cite the governing theory and decision records.
+- Program theory can constrain a contract or architecture, but it cannot
+  silently replace exact behavior or concrete realization rationale.
 
 ## 6. Reuse Local Paths and Helpers Before Inventing New Ones
 
@@ -145,6 +150,13 @@ comply uniformly with automated gates and unevenly with everything else — so
 a contract element without a gate is a contract element that will silently
 diverge. A declared element with no firing test is an untested contract and a
 verification failure, not a style nit.
+
+Gates do not gate gates. Every verification chain terminates in a declared
+claim plus independent review: a gate's own correctness is established at
+authoring — by a failing-first proof and review — not by a meta-gate over the
+gate. When a gate checks that citations or manifests match a contract, the
+gate itself is reviewed, not recursively gated; verification chains need a
+floor or they never close.
 
 ## 13. Variation Is Declared; Deficiency Is Gated
 

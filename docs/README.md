@@ -5,7 +5,8 @@ This repository uses a docs-first operating model for agentic development.
 ## Structure
 
 - `agent-context/`: shared context loaded by agents at session start
-- `specs/`: intended behavior, invariants, boundaries, and verification rules
+- `specs/`: behavioral contracts (intended behavior, invariants, verification)
+  and definitional reference docs (e.g. what Agent Theory / program theory are)
 - `plans/`: dated execution documents for concrete changes
 - `implementation/`: current rationale, ownership, repository maps, and
   architecture notes
@@ -14,17 +15,32 @@ This repository uses a docs-first operating model for agentic development.
 
 ## Use By Task
 
+### Understanding Agent Theory / program theory
+
+Read (on demand — not every session start):
+
+- `specs/09-agent-theory-and-program-theory.md` — definitional primer
+- `program-theory.md` — conceptual identity of **this repository** (product
+  theory in application repos; hub theory only in the Agent Theory hub)
+- `../skills/crystallize-program-theory/SKILL.md` — interview to write one
+
 ### Starting a Session
 
 Read:
 
 1. `../AGENTS.md`
-2. `agent-context/README.md`
-3. `implementation/03-agent-inventory.md`, if it exists
-4. the relevant spec in `specs/`
-5. the active plan in `plans/`, if one exists
-6. the relevant implementation note in `implementation/`
-7. the relevant skill in `../skills/`, if one exists
+2. `program-theory.md` — conceptual identity of **this repository**. In the
+   Agent Theory hub it describes the guidance system; in a product
+   repository it must describe the product. Replace a `Status: Stub` file
+   before committing product-scope behavior or architecture (see
+   `../skills/crystallize-program-theory/SKILL.md`). Humans may skim
+   `../README.md` first.
+3. `agent-context/README.md`
+4. `implementation/03-agent-inventory.md`, if it exists
+5. the relevant spec in `specs/`
+6. the active plan in `plans/`, if one exists
+7. the relevant implementation note in `implementation/`
+8. the relevant skill in `../skills/`, if one exists
 
 ### Planning a Change
 

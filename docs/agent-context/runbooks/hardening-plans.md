@@ -270,6 +270,10 @@ Better:
 - state what the implementer should understand afterward
 - include one or two comprehension questions for the riskiest areas
 
+The binding mechanics (answers written in the execution log, expected
+answers in the plan, wrong answer blocks implementation) are normative
+in `writing-plans.md` §3 — this section only motivates them.
+
 Good comprehension checks:
 
 - when is an existing row reused?
@@ -277,6 +281,35 @@ Good comprehension checks:
 - which layer owns the public response shape?
 
 This turns reading from a passive step into an active gate.
+
+## 15. Release Plans Carry Stop-Gates
+
+For plans whose endpoint is a release or publication, each rule below is
+general; adapt the wiring to the repository's actual release identity,
+driver, and CI:
+
+- **The executable release driver, where one exists, outranks plan
+  prose.** Before accepting a plan's proposed release order or
+  collection roots, compare them to the executable driver; a
+  contradiction is a plan defect, not a driver bug to work around.
+- **Final gates rerun from the release identifier.** A prior green run
+  is not evidence; the gate that authorizes the irreversible step runs
+  against the exact identifier being released.
+- **The irreversible publication step comes only after
+  exact-identifier green.** Publishing (or tagging, where tags trigger
+  publication) before validation turns a correctable build defect into
+  repository-history repair.
+- **Recovery reruns the failed mechanism for the same immutable
+  identifier.** A published identifier with no run record means stop
+  and investigate — never move or force-push it; a corrective version
+  is a new plan.
+- **State rollback honestly.** When publication cannot be rolled back,
+  the plan says so plainly; asynchronous transients (windows where
+  pairings are temporarily uninstallable) are documented as accepted,
+  not promised away.
+- **Post-release acceptance runs against the built release artifacts,
+  not the source tree**, and absence of warnings alone is not proof —
+  name the positive signal that confirms the release worked.
 
 ## When To Stop and Re-Plan
 

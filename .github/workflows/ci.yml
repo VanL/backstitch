@@ -13,6 +13,30 @@ permissions:
   contents: read
 
 jobs:
+  # Gate-wiring rule (writing-specs runbook): every gate names its
+  # execution path. These three were previously lint-only in CI — the
+  # "silently never runs anywhere" defect. stdlib-only, no uv needed.
+  doc-gates:
+    name: doc gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # coalesce-check resolves SHA claims and retrieval cues from
+          # history; on a shallow clone it skips loudly by design, which
+          # would make this job vacuous.
+          fetch-depth: 0
+      - name: Path-claim integrity (self-test, then real run)
+        run: |
+          python3 bin/check-doc-paths --self-test
+          python3 bin/check-doc-paths
+      - name: DOM-15 fixture gate (self-test, then real run)
+        run: |
+          python3 bin/check-dom15-fixtures --self-test
+          python3 bin/check-dom15-fixtures
+      - name: Coalescing SHA/cue provenance trail
+        run: python3 bin/coalesce-check
+
   test:
     name: hermetic py${{ matrix.python-version }}
     runs-on: ubuntu-latest

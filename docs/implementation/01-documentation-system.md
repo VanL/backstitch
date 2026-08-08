@@ -10,6 +10,11 @@ This file is part of the starter scaffold installed from the agent-guidance
 repository. Keep it project-owned and adapt it as real product code and
 repo-specific boundaries appear.
 
+Conceptual identity of this repository (what backstitch is, its two
+lanes and policy authority, its non-goals and falsifiers) lives in
+`docs/program-theory.md` (Active, 2026-08-08). This file remains
+realization rationale for the doc layout, not a second program theory.
+
 ## Governing Spec References
 
 - `docs/specs/01-development-documentation-operating-model.md` [DOM-2]

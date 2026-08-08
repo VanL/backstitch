@@ -18,6 +18,7 @@ Common candidates:
 - testing
 - debugging
 - release or deployment
+- crystallizing product program theory (`crystallize-program-theory`)
 
 ## Layout
 

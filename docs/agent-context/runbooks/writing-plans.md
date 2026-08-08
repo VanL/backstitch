@@ -56,6 +56,16 @@ Plans are executable documents, not rough notes.
 - Prefer red-green TDD when the behavior can be expressed cleanly as a failing
   test first. If not, say why and name the smallest concrete proof that should
   replace it.
+- **Every surface a plan names must exist.** Before a plan is offered
+  for review, the author existence-checks every named flag, file path,
+  test seam, citation, and driver order against the executable code and
+  pinned sources — form fluency carries no information about
+  correctness, and a fluent plan can name nonexistent surfaces with
+  full confidence. Reviewers repeat the check first
+  (see `review-loops-and-agent-bootstrap.md` §3). (Promoted 2026-08-07
+  by owner direction from a single-repository citation — the
+  2026-08-06 lessons entries — corroborated in-hub the same day when
+  the check caught ten citation defects in the plan that carried it.)
 - **Plans record completed work and evidence, never transient repository
   state.** "X is uncommitted," "currently in the worktree," "awaiting
   staging" are claims that fall false the moment the work lands — and a
@@ -136,7 +146,12 @@ For the change, list:
 
 For complex or risky changes, required reading should not stop at file paths.
 Add one or two comprehension questions so the implementer can verify they
-understood the load-bearing behavior before editing.
+understood the load-bearing behavior before editing. Comprehension
+questions have teeth: the plan writes the **expected answers**, the
+implementer writes their answers **in the execution log** before
+editing, and an incorrect answer blocks implementation until the cited
+owner text is reread. A question with no recorded answer and no failure
+consequence is an ungated convention.
 
 Do not make the implementer infer the file list from later prose.
 If the reader could still open the file cold and guess wrong about where or how
@@ -662,9 +677,20 @@ ceremony inside the plan file.
   classification and review — the reviewer's unit is the delta from the
   reviewed text plus the stated reason for it, never the revised text
   standalone. (Evidence: mm's July 2026 lifecycle incident propagated
-  entirely through in-place revisions of an approved plan; mm's revision
-  re-gate, reviewed-baseline pin, and Revision Log are the fold-up
-  candidates — see `docs/coalescing.md`.)
+  entirely through in-place revisions of an approved plan; mm's
+  reviewed-baseline pin and Revision Log remain fold-up candidates —
+  see `docs/coalescing.md`.)
+- **Superseded in-plan decisions are demoted in place.** When a
+  revision supersedes an earlier decision recorded in the same plan,
+  edit the superseded text where it stands to say it is historical and
+  not implementation authority — do not leave outranked text reading
+  as current. (Promoted 2026-08-07 by owner direction; lineages: mm's
+  lifecycle incident and SimpleBroker's pre-release plan
+  "Superseded Owner Amendment" section at pin `a38e6a9`.)
+- **Class ≥3 completion is not claimed until the Status Index row exists
+  and is `completed` or `superseded`.** Update `docs/plans/README.md` in
+  the same change as the completion claim. Do not require a binary
+  status checker; the index is the contract.
 - **Completed and superseded plans are harvest candidates.** They stay in
   the tree until the coalescing sweep retires them.
 - **The harvest gate — all four before deletion, no exceptions:**
@@ -676,15 +702,25 @@ ceremony inside the plan file.
      citation form (see `maintaining-traceability.md`)
 - **Superseded plans additionally require** the superseding plan to name
   what it inherits (open deviation rows, decided-but-unbuilt behavior)
-  before the predecessor retires.
+  before the predecessor retires. Flip the predecessor's index status to
+  `superseded` in the same change as the successor is accepted —
+  otherwise both remain "open" in the inventory.
 - **Retirement is two-step: soft-retire, then delete.** The sweep performs
   the soft retirement — status flips to `retired-pending` in the index,
   backlinks convert to the retired citation form, and the ledger line is
   written (name, date range, one-sentence outcome, what absorbed it,
-  source SHA). Physical deletion happens in a dedicated follow-up change only
-  after a second agent or the user verifies the harvest gate. Never
-  soft-retire and delete in the same change, and never create a
-  retired/archived plans directory — git is the archive.
+  source SHA). Physical deletion happens in a dedicated follow-up
+  change after the harvest-gate results recorded at soft-retirement
+  are re-checked from the current tree, with retrieval from the source
+  SHA verified. A second-agent verification is optional, not required:
+  deletion of a source-pinned plan reachable from a retained ref is
+  reversible archive maintenance (owner decision 2026-08-07 — git is
+  the archive). Git-backed
+  retirement is routine [DOM-14] maintenance: it needs neither a
+  separate task plan nor separate commit authorization when every source
+  SHA resolves and no durable guidance is promoted or materially
+  revised. Never soft-retire and delete in the same change, and never
+  create a retired/archived plans directory — git is the archive.
 - **Exemplar plans are exempt.** The status index may mark a plan
   `exemplar` (bootstrap or operating-model foundation plans that serve as
   onboarding examples). Exemplars are not retirement candidates until the
@@ -692,6 +728,10 @@ ceremony inside the plan file.
 - Record the source SHA as a mainline commit that actually contains the
   plan's final state; with squash merges, the squashed mainline commit is
   the one to cite.
+- **The recorded source SHA must be reachable from a retained ref.** A
+  loose object that can be pruned is not a durable archive. Physical
+  deletion is blocked until retrieval from that SHA
+  (`git show <source-sha>:docs/plans/<plan>.md`) has been verified.
 
 ## Anti-Patterns
 

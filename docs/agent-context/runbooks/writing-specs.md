@@ -1,7 +1,21 @@
 # Writing Specs
 
-Specs define intended behavior. They are the source of truth for what the
-system should do, not a narration of how the current code happens to work.
+Specs define exact intended behavior. They are the source of truth for
+what the system should do now, not a narration of how the current code
+happens to work. Program theory (`docs/program-theory.md`) supplies the
+conceptual model and design judgment; it does not replace these
+contracts, and they do not restate it.
+
+## Theory Boundary
+
+Before specifying behavior that changes a core concept, its owner, a
+durable principle, or a non-goal, read `docs/program-theory.md` and
+cite the governing account. A spec may refine a theory principle into
+observable obligations. It may not silently contradict theory, and
+theory may not duplicate the resulting exact behavior — when the two
+diverge, revise one or the other explicitly. (In backstitch the theory
+itself binds this both ways: its D3 rule is cite-don't-restate against
+[SC-16] and the spec tree.)
 
 ## Purpose
 
@@ -169,6 +183,27 @@ appendix.
   boundaries.
 - When you notice that kind of ambiguity during work, notify the user and
   suggest a concrete improvement.
+- Adding or editing a normative enumerated list (exit codes, issue codes,
+  config keys, flag sets, command inventories) lands its executable gate in
+  the **same change** — a new or updated firing test, manifest, or checker —
+  or names an explicit judgment floor for why the list stays ungated. New
+  prose enumerations drift fastest precisely because no existing gate covers
+  them yet (see `engineering-principles.md` §12, Enumerable Contracts Get
+  Executable Gates — this repo's numbering).
+- Writing a gate is not wiring it: every gate names its execution
+  path — CI where wired, explicit manual execution otherwise; an
+  **unstated** path is the same ungated-convention defect one level
+  up. The defect this rule targets is a gate that silently never runs
+  anywhere, not the existence of deliberate manual tooling. Wiring
+  examples (not the exhaustive set — adapt to the repository's actual
+  CI): a test-suite-borne subprocess check invoked portably, or a
+  dedicated workflow. A history-dependent gate (one that resolves
+  commit SHAs or retrieval cues) must either run on full history or
+  detect a shallow clone and skip loudly with a printed reason —
+  silently passing and falsely failing on a shallow clone are both
+  invalid. (Wording clarified 2026-08-07 by owner direction after the
+  taut landing; was: "names its execution path to CI", which read as
+  mandating CI for every tool.)
 
 ## Anti-Patterns
 
@@ -192,3 +227,7 @@ appendix.
   may still classify the file as active
 - assigning a planned/exploratory glob to an existing active corpus file just
   to stage one section — rungs are per-file
+- promoting rule-form spec text without verifying each rule against what
+  the implementation actually enforces — memory-drafted rules overclaim
+- adding or editing a normative enumerated list without its executable gate
+  in the same change — a fresh enumeration is an ungated contract at birth

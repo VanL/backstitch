@@ -1,15 +1,16 @@
 # Interface Review
 
 Status: Active — adopted into backstitch 2026-07-17 from agent-guidance
-@ `b248e1c` via
+(now agent-theory) @ `b248e1c` via
 `docs/plans/2026-07-17-agent-guidance-delta-wave-propagation-plan.md`.
 Promoted in the hub 2026-07-15 per the [DOM-14] promotion tier at 3
 distinct citations of this workflow theme (taut MCP plan §16.3–§16.4;
 mm `implementation/41` RiskEvaluationApi contract; mm external-API/MCP
 contract plan §4/§5/§9); the hub provenance and citation SHAs live in
-agent-guidance's `docs/coalescing.md` run log and its
-`2026-07-15-interface-review-skill-promotion-plan.md` (both quoted by
-name, not backstitch paths).
+agent-theory's `docs/coalescing.md` run log and its
+"2026-07-15-interface-review-skill-promotion-plan" (retired hub-side,
+source `2415252`; see that repository's plans ledger — quoted names,
+not backstitch paths).
 
 **This skill is the repeatable procedure for reviewing an agent-facing
 surface against `runbooks/designing-agent-facing-interfaces.md`. The

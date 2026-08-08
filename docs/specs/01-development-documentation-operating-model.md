@@ -33,6 +33,22 @@ Agent-usable documentation should make these explicit whenever they matter:
 
 The repository documentation surface is split by role:
 
+- `docs/program-theory.md`: conceptual identity of **this repository** — the
+  current externalized account of what kind of system this is, why it has its
+  shape, what it deliberately is not, and what would falsify that account.
+  Program theory **frames** interpretation and placement; it is not a
+  behavioral contract and does not override winning specs or product contracts.
+  Status values include `Stub` (bootstrap placeholder), `Draft` (provisional
+  account under refinement), and `Active` (current account in force). A `Stub`
+  must not be treated as product authority. Operational procedures for writing
+  theory (interview spine, ALT/REV field templates, module-theory drafting
+  checklist) live in skills, not in the theory account itself. A product
+  repository's theory file describes **that product** and is under no
+  obligation to explain the concept; the definitional reference for what a
+  program theory is, how it differs from a spec, and why it matters is
+  `docs/specs/09-agent-theory-and-program-theory.md` (reference, not
+  session-start mandatory; the hub's `02-` slot is backstitch's core spec).
+  Read it when the term is unfamiliar or before crystallizing an account.
 - `docs/agent-context/`: canonical shared context and reusable runbooks
 - `docs/specs/`: intended behavior, invariants, and verification expectations
 - `docs/plans/`: dated execution documents for concrete work
@@ -43,15 +59,35 @@ The repository documentation surface is split by role:
 
 The roles should remain distinct. A document may link to another role, but it
 should not collapse multiple roles into one file without a strong reason.
+Theory is not a second operating manual: keep operational procedure in skills
+and runbooks; keep exact behavior in specs.
+
+**Module theory** (conventional path `MODULE-THEORY.md` next to owning code) is
+a scoped extension of product program theory for one subsystem. It is not a
+separate taxonomy tier and is not loaded at every session start — only on
+entry to that module.
 
 ## 3. Agent Startup Context [DOM-3]
 
 At the start of a session, agents should load:
 
-1. the root agent entry point
-2. the read order defined in `docs/agent-context/README.md`
-3. the current agent availability inventory, if one exists
-4. the relevant spec, active plan, implementation note, and skill for the task
+1. the root agent entry point (`AGENTS.md` or thin alias)
+2. `docs/program-theory.md` — conceptual identity of this repository (see
+   [DOM-2]); if Status is `Stub`, begin crystallization before committing
+   product-scope behavior or architecture; exploration may proceed without
+   treating the stub as authority
+3. the remainder of the read order defined in `docs/agent-context/README.md`
+   and `docs/agent-context/context.index.yaml` (decision hierarchy, principles,
+   engineering principles, relevant runbooks, lessons)
+4. the current agent availability inventory, if one exists
+5. the relevant spec, active plan, implementation note, and skill for the task
+
+Program theory frames placement and refusal. When theory and a winning contract
+appear to conflict, follow the decision hierarchy: contracts govern current
+intended behavior; call out the mismatch and revise theory or contract
+explicitly rather than citing theory to override a coded clause. (In this
+repository the theory's own D3 rule binds the same boundary from the theory
+side: cite [SC-16], never restate it.)
 
 The shared agent context should stay repository-owned so multiple agent tools
 can consume the same durable guidance.
@@ -67,6 +103,12 @@ preserve the chain:
 
 `spec section <-> plan <-> implementation doc <-> code`
 
+When work changes product or process **identity** (generative model, ownership
+of concepts, non-goals, or falsifiers), also keep program theory aligned with
+that chain — as the conceptual frame, not as a substitute for the behavioral
+spec link. Routine behavioral work need not open with a theory revision; theory
+revisions when identity moves.
+
 Requirements:
 
 - plans cite exact spec files and reference codes when they exist
@@ -74,6 +116,8 @@ Requirements:
 - implementation docs cite governing spec sections and key files or modules
 - code should point back to the governing spec where ownership would otherwise
   be ambiguous
+- theory-changing work records the theory pressure and, when stable, a REV
+  (or promotion from module theory) so the current account stays honest
 
 _Implementation snapshot_: the current repository setup models this chain with
 the documentation system itself because product code has not been added yet.
@@ -117,6 +161,21 @@ For this operating model, treat a change as risky when any of these are true:
 - rollback depends on backward compatibility or rollout order
 - it introduces a one-way door, destructive edge, new persistence, temp-file,
   cleanup, or deferred-input lifecycle
+
+Git-backed coalescing is not a destructive edge for classification
+purposes when every removed item has a verified pre-fold source SHA
+reachable from a retained Git ref and the repository's doc-traceability
+gate (`bin/check-doc-paths`) passes. An ordinary authorized sweep does
+not require a task
+plan merely because it soft-retires or physically removes plans,
+removes already-distilled or expired raw ledger entries, advances
+watermarks, or updates the run log. A plan is required when the
+sweep promotes or materially changes durable guidance (for example a
+golden rule, principle, runbook, skill, or cross-repository rule),
+or when some other [DOM-5] trigger independently fires. The routine
+sweep is Class 2: explicit authorization supplies intent, Git makes
+it reversible, and this paragraph excludes the coalescing removals
+themselves from [DOM-5]'s triggers.
 
 Risky plans are not review-ready until they also make explicit:
 
@@ -313,10 +372,21 @@ Requirements:
   maintenance task (user request, or agreed completion-boundary work).
   Silently ignoring a trip is the only invalid response; reporting costs
   one sentence
-- coalescing is additive-first across commit boundaries: distillation
-  drafts and retirement candidates may exist uncommitted; deleting raw
-  material, advancing watermarks, and retiring plans require a
-  landing-authorized phase with a durable checkpoint
+- coalescing removals are Git-backed archive maintenance, not
+  permanently destructive, when a verified pre-fold source SHA
+  reachable from a retained ref contains every removed item. The
+  authorized sweep may delete already-distilled, expired, or
+  otherwise nonnormative raw material, advance watermarks, and
+  retire plans without a separate task plan or coalescing-specific
+  commit authorization; an item that exists only in the worktree
+  remains ineligible because it has no archive cue
+- routine coalescing maintenance is plan-exempt. Promotion or
+  material revision of durable guidance (golden rules, principles,
+  runbooks, skills, or cross-repository rules) follows the ordinary
+  [DOM-5]/[DOM-15] planning and review requirements before that
+  promotion is written, and its gate is the human owner — agent
+  review supports the promotion decision but does not substitute for
+  owner ratification
 - deferrals have real state: a checked-deferred record carries
   `checked_through` (date and SHA), the derived counts, the reason, and a
   reconsideration condition — so an unchanged count does not re-nag every
@@ -335,7 +405,11 @@ Requirements:
   (status `retired-pending`, backlinks converted, ledger line written)
   only after the harvest gate in `runbooks/writing-plans.md` passes, and
   physical deletion happens in a dedicated follow-up change after the
-  gate is independently verified; plans marked `exemplar` in the status
+  recorded gate results are re-checked from the current tree with
+  retrieval from the source SHA verified. Deletion of source-pinned
+  plans reachable from a retained ref is reversible archive
+  maintenance, so second-agent verification is optional, not required
+  (owner decision 2026-08-07); plans marked `exemplar` in the status
   index are exempt until their exemplar role is superseded
 - run-log entries are claims: each fold line must be spot-checkable
   against the diff of the fold commit
@@ -376,6 +450,14 @@ change requires — not by what the author chooses to produce:
 
 Rules:
 
+- ordinary maintenance — repairs, cleanups, and reversible
+  housekeeping performed under an existing procedure — defaults to
+  Class 2 when intent is evidenced and the work is reversible; it
+  escalates only when it explicitly changes ongoing procedure or
+  durable guidance, or another [DOM-5]/[DOM-6] trigger independently
+  fires. For durable-guidance promotions the gate is the **human
+  owner**: agent review supports the decision but does not substitute
+  for owner ratification (owner decision 2026-08-07)
 - the review and verification floors accumulate; planning artifacts
   **subsume**: a higher-class plan replaces the lower-class records, it
   does not add to them (a class-3 plan is the planning record — no
@@ -444,6 +526,8 @@ checker enforces presence, review enforces meaning.
 | Materially change a skill, runbook, or gate — [DOM-6]-material to future process; base class 3 | Class 3+P (effective 5) |
 | Typo fix inside a skill file — not [DOM-6]-material | 1 |
 | Class-2 fix discovers a storage-format edit is needed — a [DOM-5] risky trigger fires mid-flight | Escalate to 4 at that moment, declared |
+| Authorized coalescing run that only removes already-distilled, expired, or nonnormative source-pinned raw entries, retires or deletes source-pinned plans, advances watermarks, and updates its run log — explicit user intent, reversible through a retained Git ref, and no [DOM-5] trigger fires because this section excludes those archive removals | 2 |
+| Coalescing run that promotes a lesson into a golden rule or materially changes a runbook/skill — durable guidance changes | Class 3+P (effective 5) |
 
 Owner: the agent starting the work declares the class; any reviewer
 may challenge it. Boundary: every unit of work from promotion of this
@@ -457,8 +541,10 @@ edit; escalate loudly the moment a trigger fires.
 ## Related Plans
 
 - `docs/plans/2026-06-18-backstitch-style-spec-code-traceability-tool-plan.md`
-- `docs/plans/2026-04-07-development-documentation-foundation-plan.md`
-- `docs/plans/2026-04-07-plan-hardening-guidance-plan.md`
-- `docs/plans/2026-04-07-review-skills-bootstrap-plan.md`
-- `docs/plans/2026-04-07-specs-index-renumbering-plan.md`
+- hub plans (agent-theory repository, not local paths):
+  "2026-04-07-development-documentation-foundation-plan",
+  "2026-04-07-plan-hardening-guidance-plan",
+  "2026-04-07-review-skills-bootstrap-plan", and
+  "2026-04-07-specs-index-renumbering-plan" (the last retired hub-side,
+  source `2415252`; see that repository's plans ledger)
 - `docs/plans/2026-07-14-agent-guidance-propagation-plan.md`

@@ -13,12 +13,34 @@ agents, and human contributors working in this repository.
 
 ## Read Order
 
-1. `decision-hierarchy.md`
-2. `principles.md`
-3. `engineering-principles.md`
-4. Relevant runbook(s) in `runbooks/`
-5. `lessons.md`
-6. `../lessons.md`
+Start with the conceptual account, then process. This list, root
+`AGENTS.md`, and `context.index.yaml` `read_order` name the same
+sequence element-for-element.
+
+1. `../program-theory.md` — conceptual identity of **this repository**
+   (what kind of system this is; frames placement and refusal). Program
+   theory does not override winning contracts. If Status is `Stub`, begin
+   crystallization before committing product-scope behavior; exploration
+   may proceed. Extend local depth with **module theory** on entry, not by
+   bulking this file.
+2. This file — `README.md` (the hub overview you are reading).
+3. `decision-hierarchy.md`
+4. `principles.md`
+5. `engineering-principles.md`
+6. Relevant runbook(s) in `runbooks/`
+7. `lessons.md`
+8. `../lessons.md` — required startup reading is the **Golden Rules section
+   plus dated entries after the lessons watermark** (see `../coalescing.md`).
+   Older entries are searchable reference material, not startup context.
+
+Machine-readable order: `context.index.yaml` `read_order`.
+
+Read-order compliance is a declared-claim floor, not a gate: when you produce
+product-scope judgment — a plan, review, audit, or design opinion — declare
+which of these surfaces you consulted. Plans do this via their
+source-documents section; plan-free work declares it in its report. The
+declaration is checked by review, like task classification ([DOM-15]), not
+by tooling.
 
 ## Runbooks
 

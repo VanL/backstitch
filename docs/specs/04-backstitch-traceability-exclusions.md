@@ -618,6 +618,8 @@ decoded rationale.
 
 _Traceability: suppression-declaration [SUP-DOM-META] "The development-documentation operating model defines repository process rather than runtime behavior, so its sections remain addressable but do not require implementation mappings."_
 
+_Traceability: suppression-declaration [SUP-AT-PRIMER-META] "The Agent Theory definitional primer (adopted from the agent-theory hub, wave 2026-08-08) documents the discipline rather than runtime behavior; its AT-REF sections are citation-only and require no implementation mappings."_
+
 _Traceability: suppression-declaration [SUP-EVC-PROCESS] "The EVC purpose and coordinated promotion record define scope and documentation process; neither claims a direct runtime implementation owner."_
 
 _Traceability: suppression-declaration [SUP-EVC-DEFERRED-MCP] "The optional local MCP adapter is explicitly deferred and has no implementation mapping until that product phase is promoted."_

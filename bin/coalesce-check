@@ -16,8 +16,13 @@ found cues that resolve locally but not in published history. This tool:
   4. derives the lessons-tier count with this repository's documented
      derivation so a session-start check can quote real numbers.
 
-Adopted from agent-guidance @ e42762c via
-`docs/plans/2026-07-28-agent-guidance-delta-wave-propagation-plan.md`.
+Adopted from agent-guidance (now agent-theory) @ e42762c via
+`docs/plans/2026-07-28-agent-guidance-delta-wave-propagation-plan.md`;
+shallow-clone skip and known-limitation note adopted from agent-theory
+@ ec716e8 via
+`docs/plans/2026-08-08-agent-theory-delta-wave-propagation-plan.md`.
+The foreign-attribution and sibling-opt-in design predates the hub's
+copy here — it was back-ported hub-side from this repository's landing.
 
 Local adaptation — LESSONS DERIVATION. This repository's ledger uses
 dated H2 sections in TWO shapes, and both are eligible material:
@@ -36,6 +41,11 @@ script is the defect.
 Read-only by construction. Exit 1 only on an unresolvable local cue
 (a broken retrieval contract); local-only pins and count reports are
 informational — publication discipline is the owner's call.
+
+On a shallow clone the SHA-resolution and retrieval-cue legs cannot be
+truthful (history is absent), so they are SKIPPED loudly with exit 0 —
+a false BROKEN is as invalid as a silent pass. Enforcement CI must run
+this gate on full history (checkout with fetch-depth: 0).
 """
 
 from __future__ import annotations
@@ -209,9 +219,31 @@ def main() -> int:
         return 0
     text = STATE.read_text()
 
+    if git("rev-parse", "--is-shallow-repository").stdout.strip() == "true":
+        # History-dependent legs cannot be truthful here; skip loudly.
+        leading, trailing = _lesson_counts()
+        cues = sorted(set(CUE_RE.findall(text)))
+        print(
+            "coalesce-check: shallow clone detected — SHA-resolution and "
+            "retrieval-cue checks SKIPPED (history absent; cues cannot be "
+            "verified here). Enforcement requires full history "
+            "(fetch-depth: 0)."
+        )
+        print(f"  retrieval cues found (syntax only, unverified here): {len(cues)}")
+        print(
+            "  lessons dated H2 sections: "
+            f"{leading + trailing} ({leading} leading-date, {trailing} trailing-date)"
+        )
+        return 0
+
     sha_hits = [(m.group(1), m.start()) for m in SHA_RE.finditer(text)]
     cues = sorted(set(CUE_RE.findall(text)))
 
+    # Known limitation (hub docs/lessons.md 2026-08-07): the ancestry
+    # check in _claim_dispositions hardcodes origin/main; a repository
+    # with a different default branch gets false local-only-pin reports.
+    # Fix candidate: resolve the default via origin/HEAD, falling back
+    # to origin/main.
     remote_ok = (
         git("rev-parse", "--verify", "origin/HEAD").returncode == 0
         or git("rev-parse", "--verify", "origin/main").returncode == 0

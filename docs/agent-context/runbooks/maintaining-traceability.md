@@ -59,6 +59,10 @@ Before calling the work done, check:
 - the implementation doc still explains the current rationale
 - independent review findings were answered explicitly for non-trivial work
 - verification evidence exists and is named explicitly
+- closure review diffs **every planned task** against an executable
+  verification result: a checked box, a passing default suite, or a
+  test that exists but is gated off is not verification — a
+  skipped-everything run exits 0
 - any central skill or runbook used during the work was evaluated for possible
   improvement
 - any residual risk or skipped verification is called out
@@ -80,7 +84,10 @@ spec's plan history remains part of its record.
 
 For any material feature or behavior change, maintain this chain:
 
-`spec section <-> plan <-> implementation doc <-> code`
+`spec section <-> plan <-> implementation doc <-> code/test evidence`
+
+The terminus is code **with** its test evidence: a chain that ends at
+code lets an unverified change look fully traceable.
 
 For docs-only or tooling-only changes where no spec exists, the minimum chain
 is:

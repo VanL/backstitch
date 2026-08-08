@@ -23,9 +23,9 @@ judgment above that test. Conform, or propose a revision here.
 "Program theory" follows Peter Naur's "Programming as Theory
 Building" (1985): this file is the current externalized account of
 what kind of system Backstitch is, not a substitute for possessing
-that model in practice. The definitional primer lives in the
-agent-theory hub (cited by name; it arrives locally with the pending
-propagation wave).
+that model in practice. The definitional primer is
+`docs/specs/09-agent-theory-and-program-theory.md`, adopted from the
+agent-theory hub.
 
 Terminology note (this repository's homonyms): in this file,
 `evidence class` and `intent coverage` are Backstitch product terms.

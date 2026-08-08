@@ -14,9 +14,12 @@ script; it is a consumer, not the hub).
 
 Modes:
   check-doc-paths [--root DIR]   scan a tree (default: this repo)
+  check-doc-paths --self-test    firing tests for the claim scan and
+                                 the DECLARED_FUTURE_ARTIFACTS contract
 
 Exit 0 when every claim resolves; exit 1 listing the danglers.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -38,6 +41,25 @@ CLAIM_RE = re.compile(r"`((?:docs|skills|bin|backstitch|tests)/[A-Za-z0-9_./-]+)
 # Suffixes/patterns that are templates or globs, not claims.
 NON_CLAIM = re.compile(r"[*{}<>]|YYYY|<[a-z]|\.\.\.")
 
+# Declared future artifacts — governed suppression, this repository's
+# [EXC-*] idiom applied to this gate. Each path below is CONTRACTUALLY
+# named as a committed artifact that intentionally does not exist yet:
+# the owning clauses state that wall-clock qualification reports
+# `unavailable` until these are reviewed and committed ([SC-10] wall-clock
+# runner contract in docs/specs/02-backstitch-core.md; [EVC-10] pinned
+# runner identity in docs/specs/07-verification-and-evidence-cases.md;
+# the serial benchmark lane in docs/implementation/05-release-publishing.md,
+# its Verification section).
+# Creating placeholder files to green this gate is rejected — the product
+# must not define its own expected result. REMOVE each entry in the same
+# change that commits the real artifact; a stale entry over an existing
+# file is itself a gate failure (see check_tree).
+DECLARED_FUTURE_ARTIFACTS = {
+    "tests/performance/wall-clock-runner-contract.json",
+    "tests/performance/wall-clock-baseline.json",
+    "tests/performance/runner-contract.json",
+}
+
 
 def iter_files(root: Path):
     for d in SCAN_DIRS:
@@ -51,18 +73,47 @@ def iter_files(root: Path):
             yield p
 
 
-def check_tree(root: Path) -> int:
-    failures = []
+def _stale_allowlist_failures(root: Path) -> list[str]:
+    return [
+        f"bin/check-doc-paths: `{declared}` exists but is still "
+        "listed in DECLARED_FUTURE_ARTIFACTS — remove the stale "
+        "suppression entry"
+        for declared in sorted(DECLARED_FUTURE_ARTIFACTS)
+        if (root / declared).exists() or (root / declared).is_symlink()
+    ]
+
+
+def _scan_claims(root: Path) -> tuple[list[str], set[str]]:
+    failures: list[str] = []
+    claimed_allowlisted: set[str] = set()
     for f in iter_files(root):
         text = f.read_text(errors="replace")
         for m in CLAIM_RE.finditer(text):
             claim = m.group(1)
             if NON_CLAIM.search(claim):
                 continue
+            if claim in DECLARED_FUTURE_ARTIFACTS:
+                claimed_allowlisted.add(claim)
+                continue
             target = root / claim
             if not (target.exists() or target.is_symlink()):
                 line = text.count("\n", 0, m.start()) + 1
-                failures.append(f"{f.relative_to(root)}:{line}: `{claim}` does not resolve")
+                failures.append(
+                    f"{f.relative_to(root)}:{line}: `{claim}` does not resolve"
+                )
+    return failures, claimed_allowlisted
+
+
+def check_tree(root: Path) -> int:
+    failures = _stale_allowlist_failures(root)
+    scan_failures, claimed_allowlisted = _scan_claims(root)
+    failures.extend(scan_failures)
+    failures.extend(
+        f"bin/check-doc-paths: `{unused}` is allowlisted in "
+        "DECLARED_FUTURE_ARTIFACTS but no scanned surface claims it — "
+        "remove the unused suppression entry"
+        for unused in sorted(DECLARED_FUTURE_ARTIFACTS - claimed_allowlisted)
+    )
     if failures:
         print(f"check-doc-paths: {len(failures)} dangling path claim(s):")
         for fail in failures:
@@ -72,10 +123,84 @@ def check_tree(root: Path) -> int:
     return 0
 
 
+def self_test() -> int:
+    """Firing tests for the claim scan and the allowlist contract."""
+    import contextlib
+    import io
+    import tempfile
+
+    def quiet_check(root: Path) -> int:
+        with contextlib.redirect_stdout(io.StringIO()):
+            return check_tree(root)
+
+    failures = []
+    declared = sorted(DECLARED_FUTURE_ARTIFACTS)[0]
+
+    def build(tmp: str, *, spec_text: str, materialize: str | None = None) -> Path:
+        root = Path(tmp)
+        (root / "docs" / "specs").mkdir(parents=True)
+        (root / "docs" / "specs" / "01-sample.md").write_text(spec_text)
+        if materialize is not None:
+            target = root / materialize
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("{}")
+        return root
+
+    all_claims = "".join(f"`{path}`\n" for path in declared_all())
+
+    # (probe name reported on failure, spec text, materialized path,
+    #  symlink to create, expected exit)
+    probes = [
+        (
+            "unlisted missing claim was not flagged",
+            all_claims + "`docs/specs/missing.md`\n",
+            None,
+            None,
+            1,
+        ),
+        ("allowlisted missing claim was wrongly flagged", all_claims, None, None, 0),
+        (
+            "stale allowlist entry over an existing file passed",
+            all_claims,
+            declared,
+            None,
+            1,
+        ),
+        ("unused allowlist entry passed", "`docs/specs/01-sample.md`\n", None, None, 1),
+        (
+            "symlink claim target was not treated as present",
+            all_claims + "`docs/specs/link.md`\n",
+            None,
+            ("docs/specs/link.md", "01-sample.md"),
+            0,
+        ),
+    ]
+    for name, spec_text, materialize, symlink, expected in probes:
+        with tempfile.TemporaryDirectory() as td:
+            root = build(td, spec_text=spec_text, materialize=materialize)
+            if symlink is not None:
+                (root / symlink[0]).symlink_to(symlink[1])
+            if quiet_check(root) != expected:
+                failures.append(name)
+    if failures:
+        for f in failures:
+            print(f"check-doc-paths self-test FAIL: {f}")
+        return 1
+    print("check-doc-paths self-test: all claim and allowlist probes pass")
+    return 0
+
+
+def declared_all() -> list[str]:
+    return sorted(DECLARED_FUTURE_ARTIFACTS)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=str(REPO_ROOT))
+    ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
+    if args.self_test:
+        return self_test()
     return check_tree(Path(args.root))
 
 
