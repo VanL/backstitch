@@ -46,7 +46,7 @@ Risky plans are blocked if they do not make explicit:
 
 | Plan | Status |
 |------|--------|
-| 2026-08-08-agent-theory-delta-wave-propagation-plan.md | active — landing the hub delta `e42762c..ec716e8` (source `ec716e8`) |
+| 2026-08-08-agent-theory-delta-wave-propagation-plan.md | completed |
 | 2026-08-08-program-theory-crystallization-plan.md | completed |
 | 2026-07-11-deterministic-semantic-gate-plan.md | active |
 | 2026-07-14-agent-guidance-propagation-plan.md | active |

@@ -1,6 +1,7 @@
 # Agent-Theory Delta Wave Propagation Plan (2026-08-08)
 
-Status: active
+Status: completed — landed `bd4a8cd`, pinned `32b87ce`; sweep ran
+checked-deferred; hub back-port committed (agent-theory `d52e12a`).
 Class: 3+P (effective 5) — spec text and durable guidance land.
 Owner: propagating agent under the hub's `skills/propagate-guidance/SKILL.md`;
 adaptation decisions recorded here; owner authorized the wave 2026-08-08
@@ -299,6 +300,16 @@ wave time pressure.
   Reviewer also confirmed the session-start cues fire (8 harvest
   candidates at threshold 8, 21 unindexed, lessons derivation change
   1 → 22) — carried into the sweep section.
+- 2026-08-08: Landed. Wave commit `bd4a8cd` (staged-list equality
+  gate passed; 30 files, two new). Pin commit `32b87ce`
+  (`docs/coalescing.md` run-log row + deferral refresh; provenance
+  source agent-theory @ `ec716e8`). First-sweep-after-propagation ran
+  checked-deferred (counts and reconsideration conditions in the
+  state file). Back-port: the primer hub-label adaptation rule added
+  to the hub's propagate-guidance step-4 table (agent-theory
+  `d52e12a`) — observed at taut (adapted) and here (missed, caught by
+  review A-01); simplebroker has no primer copy, no sibling repair
+  needed. Plan closed; index row flipped in the same change.
 - 2026-08-08: Gate results at transplant end: `check-doc-paths` OK
   (allowlist live, stale-entry self-check included);
   `check-dom15-fixtures --self-test` + real run OK; `coalesce-check`
