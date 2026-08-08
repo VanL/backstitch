@@ -275,6 +275,35 @@ What this establishes:
   a landed capability; the theory records the blind spot and the
   direction, never implying the capability exists.
 
+### D5 preamble — Exposure geometry: the owner's two imagined
+instruments mapped to the existing frame (2026-08-08)
+
+Owner: a **locality checker** ("one theory constraint being routed to
+lots of different places seems like it might be meaningful") and a
+**direct coverage analogue** ("how much of the codebase is directly
+attributable to a theory statement"). Mapping, with honest status:
+
+- The coverage analogue is landed as [COV-*] intent coverage, with
+  the known open denominator problem (nested definitions and test
+  internals inflate the uncovered count; the ratchet is blocked on
+  its own stop condition until that exclusion decision is made —
+  coverage.py's `# pragma: no cover` precedent).
+- The locality checker is the **scatter projection** of the same
+  graph — computed exactly once, ad hoc, in the 2026-07-29 session,
+  where the dual (fan-in / concentration) independently reproduced
+  the architecture review's two grab-bag-module findings from the
+  intent graph alone. Not landed. Required refinement before it can
+  carry weight: sections declare themselves cross-cutting; outliers
+  are flagged relative to siblings — raw fan-out conflates a smeared
+  constraint with a universal rule.
+- The unifying frame is already a D1 consequence: reach, scatter,
+  and concentration are three projections of one exposure graph —
+  zero new concepts, one command. The theory's mental model states
+  the geometry; the projections are roadmap-grade spec work.
+- Boundary with the erosion axis: locality **through intent** is
+  backstitch's graph and belongs in backstitch; locality of code
+  structure alone is the decomplex/erosion experiment's territory.
+
 ## Deviation Log
 
 | Spec ref | Planned behavior | Actual behavior | Rationale | Spec proposal |
