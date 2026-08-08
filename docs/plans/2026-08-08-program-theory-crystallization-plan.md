@@ -41,7 +41,7 @@ refusals-don't-transfer failure mode operating at the theory tier.
 ## Interview ladder (most theoretical → most concrete)
 
 1. The bet itself — RATIFIED 2026-08-08 (Decision Log D1).
-2. Founding continuity and provenance — pending.
+2. Founding continuity and provenance — DECIDED 2026-08-08 (D2).
 3. Architecture of authority ([SC-16] placement) — pending.
 4. Falsifiers for a zero-to-one product — pending.
 5. Durable-alternative selection (twelve-plus-one register) — pending.
@@ -99,6 +99,43 @@ Consequences accepted with the ratification:
   understands anything — the same epistemics the operating model
   already holds at process scale, enforced product-side by [SC-16]'s
   evidence-class rule.
+
+### D2 — Founding continuity and provenance (rung 2; owner-directed 2026-08-08)
+
+Provenance routing: rather than a one-line evidence enrichment, the
+owner directed **extract, annotate, and summarize as agent-theory
+lore** — the hub's `docs/lore/` tier (curated primary-source
+excerpts; non-normative; owner-established with two prior entries).
+Executed: the hub lore entry
+"2026-07-29-backstitch-readme-dialogue-founding-text" (agent-theory
+repository) now carries the founding dialogue verbatim — the owner's
+founding message (thesis sentence, nine possession questions,
+iterative loop), the dialogue's excerpted products, a
+what-became-what ledger, and the 2026-08-08 revision as its coda.
+This repository's theory will cite that lore entry by name (foreign)
+in its founding-continuity section rather than re-quoting at length.
+
+Founding facts assembled for the theory's founding-continuity
+section (final wording ratifies at drafting, rung 3+):
+
+1. Docs preceded code (agent docs and specs before any
+   implementation) — the fleet's third practice-precedes-name
+   instance.
+2. The implementation was born as a four-way bake-off
+   reconciliation, and that event simultaneously seeded the
+   discipline's verification doctrine (the hub's 2026-07-02 lessons
+   fold: Golden Rule 13, engineering principles §12/§13, testing
+   Patterns 5–6, the adversarial-acceptance-probes runbook, the
+   deviation-log machinery — "full incident record: the backstitch
+   repo's docs/lessons.md"). A tool for making agent claims
+   checkable was born from the experiment that proved agent claims
+   need checking.
+3. The identity was articulated in dialogue twice: the founding
+   plan's wager (2026-06-18, intact into [SC-16]) and the
+   2026-07-29 dialogue (thesis minted; README v2 drafted, never
+   landed), with the 2026-08-08 revision (D1) superseding the
+   "falsify Naur" framing — recorded as a demotion-in-place, not
+   smoothed over.
 
 ## Deviation Log
 
