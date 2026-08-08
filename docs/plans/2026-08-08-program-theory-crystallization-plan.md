@@ -65,10 +65,32 @@ refusals-don't-transfer failure mode operating at the theory tier.
    performance model → spec-owned where they live; parser
    boundaries → Golden Rule 14, engineering-principle tier. Nothing
    recorded twice.
-6. The README program (the unlanded 2026-07-29 v2 vision draft) —
-   pending.
-7. Wave mechanics (separate execution; interacts via the term-
-   collision adaptation and the red `check-doc-paths` gate) — pending.
+6. The README program — DECIDED 2026-08-08 (D6): its own unit,
+   sequenced theory → wave → README. The v2 draft is source
+   material only — its corpus-substrate spine is superseded by D1
+   and must be rewritten against the ratified thesis. Opening
+   order: stitch epigraph, then the [COV-2] ladder pitch (concrete
+   category claim), then the why (Naur, hourly theory death,
+   claims-rot-silently) — resolving the draft-vs-audit tension by
+   putting the concrete before the philosophical with philosophy
+   still above the fold. Included dialogue products: the epigraph;
+   claims-rot-silently/contracts-fail-loudly; hourly theory death;
+   the analyze-centered spine with `ambiguous` billed as the
+   distinctive signal; the nine-questions table with per-row honest
+   status refreshed against the current tree. The erosion/decomplex
+   division stays an unnamed idea per the owner's standing steer.
+7. Wave mechanics — execution tier, decisions carried by the wave
+   plan itself: Strategy-A runbook corrections in both repositories
+   (per D5); the red `check-doc-paths` gate (phantom foreign-plan
+   cites + the missing performance-baseline files — fix-vs-suppress
+   decided at wave time with owner calls where needed); CI wiring
+   under the gate-wiring rule; plan-status reconciliation scope;
+   the term-collision adaptation pass.
+
+Discussion ladder complete 2026-08-08. Execution order: draft
+`docs/program-theory.md` from D1–D5 (independent semantic review,
+then owner ratification to Active, then startup wiring) → the
+propagation wave → the README unit.
 
 ## Decision Log
 
