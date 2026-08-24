@@ -9,7 +9,8 @@ Quick pointers to the key guidance documents in this repository.
 | `AGENTS.md` | Canonical agent entry point |
 | `CLAUDE.md` | Alias for tools that expect Claude-style root guidance |
 | `pyproject.toml` | Package metadata, dependency declarations, console script, Python tool configuration, and the repository's provider-capable bare `analyze` default |
-| `bin/release.py` | Maintainer release helper for version updates, checks, release commit, and tag push |
+| `bin/release.py` | Maintainer release driver for GitHub policy checks, version updates, local checks, exact-SHA CI waits, release commit, and immutable tag push |
+| `bin/bump_uv.py` | Transactional updater and consistency gate for workflow UV pins, the root uv version constraint, and `uv.lock` |
 | `bin/check-doc-paths` | Guidance-corpus gate: every backticked repo-relative path claim in agent-context, specs, implementation docs, and skills must resolve |
 | `bin/coalesce-check` | Coalescing-layer gate: resolves `docs/coalescing.md` SHA claims and retrieval cues (locally, in siblings, and against `origin/main`) and derives the lessons-tier count |
 
@@ -82,8 +83,10 @@ Quick pointers to the key guidance documents in this repository.
 | `.github/workflows/ci.yml` | Hermetic secret-free CI; live LLM tests are explicitly deselected |
 | `.github/workflows/semantic-refresh.yml` | Default-branch `repository_dispatch` cloud refresh with required secret and artifact-only review output ([SEM-9]) |
 | `.github/workflows/local-llm.yml` | Separate manual Ollama live-LLM canary outside the release-gated `CI` workflow |
-| `.github/workflows/release-gate.yml` | Tag-triggered PyPI/GitHub release gate |
-| `.github/scripts/require_green_workflows.py` | Release-gate helper that waits for required green workflow runs |
+| `.github/workflows/release-gate.yml` | Tag-triggered locked build, attestation, draft-first PyPI/GitHub publication gate |
+| `.github/scripts/require_green_workflows.py` | Release helper that waits for required green workflow runs on one exact commit SHA |
+| `.github/scripts/release_publication.py` | Exact-tag, exact-SHA GitHub Release draft replacement and immutable publication state machine |
+| `.github/dependabot.yml` | Weekly review-only root uv and GitHub Actions update proposals |
 
 ## Shared Agent Context
 

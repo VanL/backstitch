@@ -19,6 +19,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  UV_VERSION: "0.12.5"
   # llama3.2:3b remains the bounded local canary. The 2026-07-06 bake-off
   # recorded 7/8 passes, but a 2026-07-10 audit found Ollama's OpenAI route
   # overrode the stored temperature-0 parameter with request default 1.0.
@@ -48,13 +49,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
+          version: ${{ env.UV_VERSION }}
           python-version: "3.11"
           enable-cache: false
 
@@ -66,7 +68,7 @@ jobs:
 
       - name: Restore Ollama model cache
         id: restore
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.OLLAMA_CACHE_DIR }}
           key: ollama-${{ runner.os }}-${{ runner.arch }}-${{ env.BACKSTITCH_LOCAL_LLM_BASE_MODEL }}-${{ env.OLLAMA_CONTEXT_LENGTH }}-${{ env.OLLAMA_IMAGE }}-${{ env.OLLAMA_CACHE_EPOCH }}
@@ -206,14 +208,14 @@ jobs:
       - name: Save Ollama model cache
         id: save
         if: ${{ !cancelled() && steps.pull.outcome == 'success' && steps.model-poll.outcome == 'success' && steps.restore.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main' }}
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         continue-on-error: true
         with:
           path: ${{ env.OLLAMA_CACHE_DIR }}
           key: ollama-${{ runner.os }}-${{ runner.arch }}-${{ env.BACKSTITCH_LOCAL_LLM_BASE_MODEL }}-${{ env.OLLAMA_CONTEXT_LENGTH }}-${{ env.OLLAMA_IMAGE }}-${{ env.OLLAMA_CACHE_EPOCH }}
 
       - name: Fail on broken cache save
-        # actions/cache/save@v5 does not fail on "key already exists" (a
+        # actions/cache/save does not fail on "key already exists" (a
         # concurrent run winning the race logs a warning and succeeds), so a
         # failure outcome means a real problem: permissions or unreadable
         # files. Without this check, continue-on-error hides it and every

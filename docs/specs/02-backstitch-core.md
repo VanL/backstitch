@@ -1952,7 +1952,6 @@ and reviewing every changed disposition.
 | `RUFF-SUP-129` | `C901` | `1` | `C901=1` | permanent | The explicit closed analyze descriptor, cache, budget, alias, cost, and cross-field contract remains beside final construction. | tests/test_semantic_settings.py every field/type/range, cache identity, cost input, packet bound, and alias cases. | Reflection or dataclass auto-loading would hide field and cross-field firing obligations. | owner task reply Approve 2026-08-05 |
 | `RUFF-SUP-134` | `C901` | `1` | `C901=1` | permanent | One effective-origin mirror preserves replacement, append, floor reset, and packaged empty-default semantics. | tests/test_settings.py coverage-policy provenance and ratchet trust plus tests/test_config_parity.py equality. | A generic provenance-event framework or a second merge implementation. | owner task reply Approve 2026-08-05 |
 | `RUFF-SUP-139` | `C901` | `1` | `C901=1` | permanent | One enumerable fixture-table audit owns class grammar, cumulative coverage, negative facts, and subsume-cue validation. | bin/check-dom15-fixtures --self-test and the live DOM-15 gate with one mutation probe per declared rule. | A general Markdown policy engine or removal of a mutation probe. | owner task reply Approve 2026-08-05 |
-| `RUFF-SUP-142` | `C901` | `1` | `C901=1` | permanent | The explicit fail-closed publication, local-tag, remote-tag, version-change, and retag decision table remains one audit surface. | tests/test_release_script.py plan-tag, published-version, refreshed-state, and conflict cases. | A generic rule engine or one helper per branch. | owner task reply Approve 2026-08-05 |
 | `RUFF-SUP-145` | `C901` | `1` | `C901=1` | permanent | One end-to-end packets, analyze, cache replay, check, and summary story preserves same-corpus causal assertions and row-level validation. | The live analysis contract plus helper-driven hermetic preflight and real transport tests. | Stage splitting that loses same-corpus causality or mocks the CLI, provider, or cache. | owner task reply Approve 2026-08-05 |
 | `RUFF-SUP-147` | `C901` | `1` | `C901=1` | permanent | One static AST edge collector includes direct, relative, function-local, and TYPE_CHECKING imports so the conservative graph remains authoritative. | Focused local-edge and TYPE_CHECKING tests plus live DAG and ranked-layer gates. | Runtime import probing or a visitor abstraction that can hide local edges. | owner task reply Approve 2026-08-05 |
 | `RUFF-SUP-148` | `C901` | `1` | `C901=1` | permanent | One cross-rank private-import audit covers direct imports and module-attribute aliases using the same rank and alias state. | Module-attribute discovery test plus the live layer gate in tests/test_architecture.py. | Runtime reflection or separating alias collection from attribute scanning. | owner task reply Approve 2026-08-05 |
@@ -1962,7 +1961,7 @@ and reviewing every changed disposition.
 | `RUFF-SUP-153` | `F401` | `1` | `F401=1` | permanent | The doctor intentionally imports llm to prove importability, then obtains the installed version through the package metadata owner. | tests/test_doctor.py import success, import failure containment, version reporting, and no-traceback cases. | Removing the probe import or adding a fake use would stop testing the dependency boundary. | owner task reply Approve 2026-08-05 |
 
 <!-- BEGIN GENERATED RUFF SUPPRESSION INDEX -->
-Global active-rule raw inventory: `C901=109`, `F401=1`
+Global active-rule raw inventory: `C901=108`, `F401=1`
 
 | Group | Source symbols | Directives | Raw diagnostics by rule |
 | --- | --- | ---: | --- |
@@ -2068,7 +2067,6 @@ Global active-rule raw inventory: `C901=109`, `F401=1`
 | `RUFF-SUP-129` | `backstitch/settings.py::_parse_analyze_settings` | `1` | `C901=1` |
 | `RUFF-SUP-134` | `backstitch/settings.py::_ratchet_policy_provenance` | `1` | `C901=1` |
 | `RUFF-SUP-139` | `bin/check-dom15-fixtures::check` | `1` | `C901=1` |
-| `RUFF-SUP-142` | `bin/release.py::plan_tag_action` | `1` | `C901=1` |
 | `RUFF-SUP-145` | `tests/live/test_live_llm.py::_exercise_live_llm_analysis_contract` | `1` | `C901=1` |
 | `RUFF-SUP-147` | `tests/test_architecture.py::_internal_imports` | `1` | `C901=1` |
 | `RUFF-SUP-148` | `tests/test_architecture.py::_private_imports` | `1` | `C901=1` |

@@ -46,6 +46,7 @@ Risky plans are blocked if they do not make explicit:
 
 | Plan | Status |
 |------|--------|
+| 2026-08-24-release-supply-chain-and-publication-hardening-plan.md | completed |
 | 2026-08-08-agent-theory-delta-wave-propagation-plan.md | completed |
 | 2026-08-08-program-theory-crystallization-plan.md | completed |
 | 2026-08-23-gpt-5-6-luna-responses-plan.md | active; implementation complete and locally verified; independent implementation review PASS; remote Linux/macOS/Windows CI evidence pending |

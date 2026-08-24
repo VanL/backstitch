@@ -54,8 +54,12 @@ REVIEWED_EXCLUSIONS = (
 # an unexpected untracked Python file is not silently promoted to authority.
 PLANNED_PRELANDING_PYTHON = frozenset(
     {
+        ".github/scripts/release_publication.py",
+        "bin/bump_uv.py",
         "bin/ruff_suppression_index.py",
+        "tests/test_bump_uv.py",
         "tests/test_coalesce_check.py",
+        "tests/test_release_publication_script.py",
         "tests/test_ruff_policy.py",
         "tests/test_ruff_suppression_index.py",
     }
@@ -104,7 +108,7 @@ LEDGER_COLUMNS = (
     "approval",
     "freeze_status",
 )
-ACTIVE_RAW_COUNTS = Counter({"C901": 109, "F401": 1})
+ACTIVE_RAW_COUNTS = Counter({"C901": 108, "F401": 1})
 DISABLED_TEXTUAL_NOQA_COUNTS = Counter({"BLE001": 22, "N802": 17, "S310": 9})
 
 
@@ -419,7 +423,7 @@ def test_lint_vector_does_not_expand_the_formatter_scope() -> None:
         Path(line).resolve().relative_to(ROOT).as_posix()
         for line in default_bin.stdout.splitlines()
         if line
-    } == {"bin/release.py", "bin/ruff_suppression_index.py"}
+    } == {"bin/bump_uv.py", "bin/release.py", "bin/ruff_suppression_index.py"}
 
 
 def test_frozen_activation_ledger_has_the_owner_approved_inventory() -> None:

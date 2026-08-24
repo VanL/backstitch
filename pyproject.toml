@@ -48,12 +48,22 @@ dev = [
     "ruff==0.15.21",
 ]
 
+[dependency-groups]
+release = [
+    "build==1.5.0",
+    "hatchling==1.32.0",
+]
+
 [project.scripts]
 backstitch = "backstitch.cli:main"
 
 [project.urls]
 Repository = "https://github.com/VanL/backstitch"
 Issues = "https://github.com/VanL/backstitch/issues"
+
+[tool.uv]
+required-version = ">=0.12.5,<0.13"
+default-groups = []
 
 [tool.hatch.build.targets.wheel]
 packages = ["backstitch"]

@@ -20,6 +20,13 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_DIR = ROOT / ".github" / "workflows"
+UV_WORKFLOWS = (
+    "ci.yml",
+    "local-llm.yml",
+    "release-gate.yml",
+    "semantic-pr-report.yml",
+    "semantic-refresh.yml",
+)
 
 
 def _workflow_text(path: str) -> str:
@@ -48,6 +55,55 @@ def _named_workflow_steps(text: str) -> dict[str, str]:
         name, _, body = chunk.partition("\n")
         steps[name] = body
     return steps
+
+
+def test_all_external_actions_are_full_shas_with_selected_third_party_owners() -> None:
+    repositories: set[str] = set()
+    workflow_paths = sorted(WORKFLOW_DIR.glob("*.yml")) + sorted(
+        WORKFLOW_DIR.glob("*.yaml")
+    )
+    for workflow_path in workflow_paths:
+        workflow_text = workflow_path.read_text(encoding="utf-8")
+        for reference in re.findall(
+            r"(?m)^\s*(?:-\s*)?uses:\s*([^\s#]+)", workflow_text
+        ):
+            if reference.startswith("./"):
+                continue
+            match = re.fullmatch(r"([^@\s]+)@[0-9a-f]{40}", reference)
+            assert match is not None, f"mutable action reference: {reference}"
+            repositories.add(match.group(1))
+
+    third_party_patterns = {
+        f"{repository}@*"
+        for repository in repositories
+        if repository.split("/", maxsplit=1)[0] not in {"actions", "github"}
+    }
+    assert third_party_patterns == {
+        "astral-sh/setup-uv@*",
+        "codecov/codecov-action@*",
+        "pypa/gh-action-pypi-publish@*",
+        "softprops/action-gh-release@*",
+    }
+
+
+def test_every_uv_workflow_uses_the_repository_pin() -> None:
+    for workflow_name in UV_WORKFLOWS:
+        workflow_text = _workflow_text(workflow_name)
+        setup_count = workflow_text.count("uses: astral-sh/setup-uv@")
+
+        assert setup_count > 0
+        assert workflow_text.count('UV_VERSION: "0.12.5"') == 1
+        assert workflow_text.count("version: ${{ env.UV_VERSION }}") == setup_count
+
+
+def test_dependabot_maintains_root_uv_and_github_actions_without_auto_merge() -> None:
+    dependabot = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+
+    assert 'package-ecosystem: "uv"' in dependabot
+    assert 'package-ecosystem: "github-actions"' in dependabot
+    assert dependabot.count('interval: "weekly"') == 2
+    assert "labels:" not in dependabot
+    assert not (WORKFLOW_DIR / "dependabot.yml").exists()
 
 
 def test_provider_dependency_floor_and_lock_are_responses_capable() -> None:
@@ -93,8 +149,14 @@ def test_backstitch_runtime_directory_is_ignored_and_untracked() -> None:
 def test_ci_checks_release_helper_format_and_types() -> None:
     workflow = _workflow_text("ci.yml")
 
-    assert workflow.count("uses: astral-sh/setup-uv@v7") == 4
+    assert (
+        workflow.count(
+            "uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d"
+        )
+        == 4
+    )
     assert workflow.count("enable-cache: false") == 4
+    assert workflow.count("run: python bin/bump_uv.py --check") == 1
     assert workflow.count("run: uv sync --frozen --extra dev") == 3
     assert "uv run ruff format --check" in workflow
     assert "tests\n" in workflow
@@ -219,10 +281,10 @@ def test_trusted_semantic_refresh_separates_reports_from_disposable_cache() -> N
     assert "submodules: false" in active
     assert "lfs: false" in active
     assert 'test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"' in active
-    assert "actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd" in active
-    assert "astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78" in active
+    assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in active
+    assert "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d" in active
     cache_action = "actions/cache"
-    cache_pin = "caa296126883cff596d87d8935842f9db880ef25"
+    cache_pin = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
     assert f"{cache_action}/restore@{cache_pin}" in active
     assert f"{cache_action}/save@{cache_pin}" in active
     assert "actions/checkout@v5" not in active
@@ -234,8 +296,8 @@ def test_trusted_semantic_refresh_separates_reports_from_disposable_cache() -> N
         for line in active.splitlines()
         if line.strip().startswith("uses: ")
     } == {
-        "actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd",
-        "astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78",
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d",
         f"{cache_action}/restore@{cache_pin}",
         f"{cache_action}/save@{cache_pin}",
         "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
@@ -514,12 +576,12 @@ def test_trusted_semantic_pr_report_has_closed_hostile_target_boundary() -> None
         for line in active.splitlines()
         if line.strip().startswith("uses: ")
     ]
-    assert uses.count("actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd") == 2
+    assert uses.count("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1") == 2
     assert set(uses) == {
-        "actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd",
-        "astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78",
-        "actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25",
-        "actions/cache/save@caa296126883cff596d87d8935842f9db880ef25",
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d",
+        "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+        "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
         "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     }
     for prohibited in (
@@ -781,7 +843,8 @@ def test_local_llm_workflow_is_separate_and_guarded() -> None:
     assert "cancel-in-progress: false" in active
     assert "2 vCPU / 8 GB" in workflow
 
-    assert "uses: astral-sh/setup-uv@v7" in active
+    assert "uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d" in active
+    assert "version: ${{ env.UV_VERSION }}" in active
     assert 'python-version: "3.11"' in active
     assert "enable-cache: false" in active
     assert "ollama/ollama@sha256:" in active
@@ -883,18 +946,83 @@ def test_release_gate_uses_trusted_publishing_and_attestations() -> None:
     assert "id-token: write" in workflow
 
 
-def test_release_gate_builds_with_backstitch_python_version() -> None:
+def test_release_gate_builds_with_the_exact_locked_frontend() -> None:
     workflow = _workflow_text("release-gate.yml")
+    build_section = workflow.split("  build:", 1)[1].split(
+        "  stage-github-release:", 1
+    )[0]
 
-    assert "uses: astral-sh/setup-uv@v7" in workflow
+    assert "uses: actions/setup-python@" in build_section
+    assert "uses: astral-sh/setup-uv@" in build_section
     assert 'python-version: "3.11"' in workflow
     assert "enable-cache: false" in workflow
-    assert "uv build" in workflow
+    assert "uv sync --frozen --group release" in build_section
+    assert (
+        'uv run --frozen --no-sync python -m build --no-isolation "${PACKAGE_DIR}"'
+        in build_section
+    )
+    assert "uv build" not in build_section
+
+
+def test_release_gate_stages_draft_before_pypi_and_publishes_last() -> None:
+    workflow = _workflow_text("release-gate.yml")
+
+    build_index = workflow.index("  build:")
+    stage_index = workflow.index("  stage-github-release:")
+    pypi_index = workflow.index("  publish-to-pypi:")
+    publish_index = workflow.index("  publish-github-release:")
+
+    assert build_index < stage_index < pypi_index < publish_index
+    stage_section = workflow[stage_index:pypi_index]
+    pypi_section = workflow[pypi_index:publish_index]
+    publish_section = workflow[publish_index:]
+    assert "- build" in stage_section
+    assert "replace-draft" in stage_section
+    assert "draft: true" in stage_section
+    assert "uses: softprops/action-gh-release@" in stage_section
+    assert "- stage-github-release" in pypi_section
+    assert "- stage-github-release" in publish_section
+    assert "- publish-to-pypi" in publish_section
+    assert "publish-draft" in publish_section
+    assert "uses: softprops/action-gh-release@" not in publish_section
+
+
+def test_release_gate_uses_one_shared_publication_state_machine() -> None:
+    workflow = _workflow_text("release-gate.yml")
+
+    assert workflow.count(".github/scripts/release_publication.py") == 2
+    assert "gh api" not in workflow
+    assert "gh release edit" not in workflow
+
+
+def test_release_gate_downloads_artifacts_without_an_extra_node_action() -> None:
+    workflow = _workflow_text("release-gate.yml")
+
+    assert "actions/download-artifact@" not in workflow
+    assert "gh run download" in workflow
+    assert "GH_TOKEN: ${{ github.token }}" in workflow
+
+
+def test_release_gate_pypi_job_keeps_tokenless_minimum_permissions() -> None:
+    workflow = _workflow_text("release-gate.yml")
+    pypi_section = workflow.split("  publish-to-pypi:", 1)[1].split(
+        "  publish-github-release:", 1
+    )[0]
+
+    assert "permissions:\n      actions: read\n      id-token: write" in pypi_section
+    assert "contents: write" not in pypi_section
+    assert "actions: write" not in pypi_section
+    assert all(
+        secret not in workflow
+        for secret in ("PYPI_TOKEN", "TWINE_PASSWORD", "password:", "api-token")
+    )
 
 
 def test_github_release_uploads_only_distributions_and_attestation() -> None:
     workflow = _workflow_text("release-gate.yml")
-    github_release_section = workflow.split("  github-release:", 1)[1]
+    github_release_section = workflow.split("  stage-github-release:", 1)[1].split(
+        "  publish-to-pypi:", 1
+    )[0]
 
     assert "dist/*.tar.gz" in github_release_section
     assert "dist/*.whl" in github_release_section

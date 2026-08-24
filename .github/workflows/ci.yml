@@ -12,6 +12,9 @@ on:
 permissions:
   contents: read
 
+env:
+  UV_VERSION: "0.12.5"
+
 jobs:
   # Gate-wiring rule (writing-specs runbook): every gate names its
   # execution path. These three were previously lint-only in CI — the
@@ -20,7 +23,7 @@ jobs:
     name: doc gates
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # coalesce-check resolves SHA claims and retrieval cues from
           # history; on a shallow clone it skips loudly by design, which
@@ -45,14 +48,17 @@ jobs:
       matrix:
         python-version: ["3.11", "3.14"]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Pin reviewed at implementation time; re-check the action's latest major
       # when touching this workflow.
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
+          version: ${{ env.UV_VERSION }}
           python-version: ${{ matrix.python-version }}
           enable-cache: false
+      - name: Check uv policy and lockfile
+        run: python bin/bump_uv.py --check
       - name: Install dependencies
         run: uv sync --frozen --extra dev
       - name: Hermetic tests (live LLM deselected)
@@ -83,10 +89,11 @@ jobs:
     name: benchmarks py3.12
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
+          version: ${{ env.UV_VERSION }}
           python-version: "3.12"
           enable-cache: false
       - name: Install dependencies
@@ -98,10 +105,11 @@ jobs:
     name: coverage py3.12
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
+          version: ${{ env.UV_VERSION }}
           python-version: "3.12"
           enable-cache: false
       - name: Install dependencies
@@ -113,7 +121,7 @@ jobs:
           uv run coverage report --show-missing
           uv run coverage xml
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: ./coverage.xml
           flags: unittests
@@ -149,10 +157,11 @@ jobs:
             arch: arm64
             runner: windows-11-arm
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
+          version: ${{ env.UV_VERSION }}
           python-version: ${{ matrix.python-version }}
           enable-cache: false
       - name: Prove dependencies install from wheels
