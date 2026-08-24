@@ -204,9 +204,12 @@ def _capability_descriptor_lines() -> list[str]:
         (
             "request_constraints = { "
             'json_mode = { presence = "required", allowed_values = ["require", "off"] }, '
-            'temperature = { presence = "required", allowed_values = [0.0, 0.25] }, '
-            'seed = { presence = "required", minimum = 0, maximum = 2147483647 }, '
-            'max_tokens = { presence = "required", minimum = 1, maximum = 16384 }'
+            'temperature = { presence = "optional", allowed_values = [0.0, 0.25] }, '
+            'seed = { presence = "optional", minimum = 0, maximum = 2147483647 }, '
+            'max_tokens = { presence = "required", minimum = 1, maximum = 16384 }, '
+            'reasoning_effort = { presence = "optional", '
+            'allowed_values = ["none", "minimal", "low", "medium", "high", '
+            '"xhigh", "max"] }'
             " }"
         ),
     ]
@@ -223,6 +226,7 @@ VERIFY_BASE_VALUES = {
     "temperature": "0.25",
     "seed": "7",
     "max_tokens": "513",
+    "reasoning_effort": '"high"',
     "required_verdicts": "2",
     "minimum_support_score": "0.75",
     "indeterminate": '"allow"',
@@ -247,7 +251,9 @@ VERIFY_PROVIDER_VALUES = {
         'json_mode = { presence = "required", allowed_values = ["require"] }, '
         'temperature = { presence = "required", allowed_values = [0.25] }, '
         'seed = { presence = "required", minimum = 0, maximum = 2147483647 }, '
-        'max_tokens = { presence = "required", minimum = 1, maximum = 16384 }'
+        'max_tokens = { presence = "required", minimum = 1, maximum = 16384 }, '
+        'reasoning_effort = { presence = "optional", '
+        'allowed_values = ["high", "max"] }'
         " }"
     ),
     "input_cost_microusd_per_million_tokens": "10",
@@ -358,13 +364,13 @@ def test_packaged_semantic_defaults_are_exact(tmp_path: Path) -> None:
                 "maximum": None,
             },
             "temperature": {
-                "presence": "required",
+                "presence": "optional",
                 "allowed_values": (0.0,),
                 "minimum": None,
                 "maximum": None,
             },
             "seed": {
-                "presence": "required",
+                "presence": "optional",
                 "allowed_values": None,
                 "minimum": 0,
                 "maximum": 9223372036854775807,
@@ -375,13 +381,20 @@ def test_packaged_semantic_defaults_are_exact(tmp_path: Path) -> None:
                 "minimum": 1,
                 "maximum": 2147483647,
             },
+            "reasoning_effort": {
+                "presence": "forbidden",
+                "allowed_values": None,
+                "minimum": None,
+                "maximum": None,
+            },
         },
         "maximum_input_bytes": 10_000_000,
         "concurrency": 1,
         "json_mode": "prefer",
-        "temperature": 0.0,
-        "seed": 42,
+        "temperature": None,
+        "seed": None,
         "max_tokens": 512,
+        "reasoning_effort": None,
         "cache_path": str(
             (
                 Path(__file__).parents[1] / "backstitch/.backstitch/semantic-cache"
@@ -408,6 +421,120 @@ def test_packaged_semantic_defaults_are_exact(tmp_path: Path) -> None:
     }
     assert dispositions == ()
     assert asdict(settings.verify) == {"enabled": False}
+    rendered = json.loads(settings_to_json(settings))["analyze"]
+    assert "temperature" not in rendered
+    assert "seed" not in rendered
+    assert "reasoning_effort" not in rendered
+
+
+def test_config_json_omits_absent_enabled_verify_request_values(
+    tmp_path: Path,
+) -> None:
+    config = _write_config(
+        tmp_path,
+        "\n".join(_analyze_provider_lines())
+        + "\n"
+        + _enabled_verify_body(
+            base_overrides={"provider_source": '"analyze"'},
+            remove_base={"temperature", "seed", "reasoning_effort"},
+            include_provider=False,
+        ),
+    )
+
+    rendered = json.loads(settings_to_json(resolve_config(tmp_path, explicit=config)))[
+        "verify"
+    ]
+
+    assert "temperature" not in rendered
+    assert "seed" not in rendered
+    assert "reasoning_effort" not in rendered
+
+
+@pytest.mark.parametrize(
+    "reasoning_effort",
+    ("none", "minimal", "low", "medium", "high", "xhigh", "max"),
+)
+def test_analyze_accepts_every_reasoning_effort(
+    tmp_path: Path,
+    reasoning_effort: str,
+) -> None:
+    config = _write_config(
+        tmp_path,
+        f'[analyze]\nreasoning_effort = "{reasoning_effort}"\n',
+    )
+
+    settings = resolve_config(tmp_path, explicit=config)
+
+    assert settings.analyze.reasoning_effort == reasoning_effort
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        'reasoning_effort = { presence = "optional", allowed_values = [false] }',
+        'reasoning_effort = { presence = "optional", allowed_values = [1] }',
+        'reasoning_effort = { presence = "optional", allowed_values = [""] }',
+        'reasoning_effort = { presence = "optional", allowed_values = ["extreme"] }',
+        'reasoning_effort = { presence = "optional", allowed_values = ["max", "max"] }',
+        'reasoning_effort = { presence = "optional", minimum = 0, maximum = 1 }',
+        'reasoning_effort = { presence = "forbidden", allowed_values = ["max"] }',
+    ),
+)
+def test_reasoning_effort_constraint_shape_and_values_are_strict(
+    tmp_path: Path,
+    replacement: str,
+) -> None:
+    lines = _flat_analyze_descriptor_lines()
+    constraint_index = next(
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("request_constraints")
+    )
+    lines[constraint_index] = lines[constraint_index].replace(
+        'reasoning_effort = { presence = "optional", allowed_values = '
+        '["none", "minimal", "low", "medium", "high", "xhigh", "max"] }',
+        replacement,
+    )
+    config = _write_config(tmp_path, "\n".join(["[analyze]", *lines]) + "\n")
+
+    with pytest.raises(ConfigLoadError, match="reasoning_effort"):
+        resolve_config(tmp_path, explicit=config)
+
+
+@pytest.mark.parametrize("mutation", ("missing", "replaced", "extra"))
+def test_capability_schema_has_exactly_five_request_fields(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    lines = _flat_analyze_descriptor_lines()
+    constraint_index = next(
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("request_constraints")
+    )
+    reasoning = (
+        'reasoning_effort = { presence = "optional", allowed_values = '
+        '["none", "minimal", "low", "medium", "high", "xhigh", "max"] }'
+    )
+    if mutation == "replaced":
+        lines[constraint_index] = lines[constraint_index].replace(
+            reasoning,
+            'unknown_control = { presence = "forbidden" }',
+        )
+    elif mutation == "extra":
+        lines[constraint_index] = lines[constraint_index].replace(
+            reasoning,
+            'unknown_control = { presence = "forbidden" }, ' + reasoning,
+        )
+    else:
+        lines[constraint_index] = lines[constraint_index].replace(
+            ", " + reasoning,
+            "",
+        )
+    config = _write_config(tmp_path, "\n".join(["[analyze]", *lines]) + "\n")
+
+    with pytest.raises(ConfigLoadError, match="exactly five fields"):
+        resolve_config(tmp_path, explicit=config)
 
 
 def test_repository_dogfood_semantic_configuration_is_explicit() -> None:
@@ -420,11 +547,11 @@ def test_repository_dogfood_semantic_configuration_is_explicit() -> None:
         "backend_id": "llm",
         "plugin_id": "openai",
         "plugin_distribution_name": "llm",
-        "model": "pkg:service/openai.com/gpt-5.4-mini",
-        "adapter_model_id": "gpt-5.4-mini",
-        "model_revision": "gpt-5.4-mini-2026-03-17",
+        "model": "pkg:service/openai.com/gpt-5.6-luna",
+        "adapter_model_id": "gpt-5.6-luna",
+        "model_revision": "gpt-5.6-luna",
         "capability_schema_version": 1,
-        "capability_revision": "openai-gpt-5.4-mini-2026-07-29",
+        "capability_revision": "openai-gpt-5.6-luna-2026-08-23",
         "maximum_input_bytes": 1_600_000,
         "request_constraints": {
             "json_mode": {
@@ -432,18 +559,19 @@ def test_repository_dogfood_semantic_configuration_is_explicit() -> None:
                 "allowed_values": ["require"],
             },
             "temperature": {
-                "presence": "required",
-                "allowed_values": [0.0],
+                "presence": "forbidden",
             },
             "seed": {
-                "presence": "required",
-                "minimum": 0,
-                "maximum": 2147483647,
+                "presence": "forbidden",
             },
             "max_tokens": {
                 "presence": "required",
                 "minimum": 1,
                 "maximum": 16384,
+            },
+            "reasoning_effort": {
+                "presence": "optional",
+                "allowed_values": ["max"],
             },
         },
         "concurrency": 1,
@@ -452,9 +580,8 @@ def test_repository_dogfood_semantic_configuration_is_explicit() -> None:
         "result_reuse": "evidence-stable",
         "search_epoch": "1",
         "json_mode": "require",
-        "temperature": 0.0,
-        "seed": 42,
-        "max_tokens": 512,
+        "max_tokens": 16384,
+        "reasoning_effort": "max",
         "require_complete": True,
         "required_kinds": ["section", "invariant", "suppression"],
         "minimum_packets": 1,
@@ -465,13 +592,12 @@ def test_repository_dogfood_semantic_configuration_is_explicit() -> None:
         "lock_wait_timeout_seconds": 300,
         "maximum_runtime_seconds": 1800,
         "maximum_estimated_cost_microusd": 30_000_000,
-        "input_cost_microusd_per_million_tokens": 750_000,
-        "output_cost_microusd_per_million_tokens": 4_500_000,
+        "input_cost_microusd_per_million_tokens": 400_000,
+        "output_cost_microusd_per_million_tokens": 1_800_000,
         "input_token_overhead": 256,
         "cost_rate_source": (
-            "OpenAI GPT-5.4 mini model page "
-            "(https://developers.openai.com/api/docs/models/gpt-5.4-mini), "
-            "reviewed 2026-07-28"
+            "OpenAI GPT-5.6 Luna model page, reviewed 2026-08-23; conservative "
+            "rates include the published long-prompt multiplier"
         ),
     }
     assert backstitch["verify"] == {
@@ -482,8 +608,6 @@ def test_repository_dogfood_semantic_configuration_is_explicit() -> None:
         "cache_mode": "require",
         "search_epochs": ["1"],
         "json_mode": "require",
-        "temperature": 0.0,
-        "seed": 42,
         "max_tokens": 512,
         "required_verdicts": 1,
         "minimum_support_score": 0.90,
@@ -553,10 +677,13 @@ def test_capability_descriptor_rejects_incompatible_request_before_adapter(
         if line.startswith("request_constraints")
     )
     lines[constraint_index] = lines[constraint_index].replace(
-        'temperature = { presence = "required", allowed_values = [0.0, 0.25] }',
+        'temperature = { presence = "optional", allowed_values = [0.0, 0.25] }',
         'temperature = { presence = "forbidden" }',
     )
-    config = _write_config(tmp_path, "\n".join(["[analyze]", *lines]) + "\n")
+    config = _write_config(
+        tmp_path,
+        "\n".join(["[analyze]", *lines, "temperature = 0.25"]) + "\n",
+    )
     settings = resolve_config(tmp_path, explicit=config)
 
     with pytest.raises(ValueError, match=r"analyze\.temperature is forbidden"):
@@ -601,6 +728,7 @@ def test_enabled_verify_override_parses_every_base_and_provider_key(
         "temperature": 0.25,
         "seed": 7,
         "max_tokens": 513,
+        "reasoning_effort": "high",
         "required_verdicts": 2,
         "minimum_support_score": 0.75,
         "indeterminate": "allow",
@@ -643,6 +771,12 @@ def test_enabled_verify_override_parses_every_base_and_provider_key(
                     "minimum": 1,
                     "maximum": 16384,
                 },
+                "reasoning_effort": {
+                    "presence": "optional",
+                    "allowed_values": ("high", "max"),
+                    "minimum": None,
+                    "maximum": None,
+                },
             },
             "maximum_input_bytes": 1000000,
             "input_cost_microusd_per_million_tokens": 10,
@@ -659,7 +793,10 @@ def test_disabled_verify_accepts_a_complete_dormant_descriptor(
 ) -> None:
     config = _write_config(
         tmp_path,
-        _enabled_verify_body(base_overrides={"enabled": "false"}),
+        _enabled_verify_body(
+            base_overrides={"enabled": "false"},
+            remove_base={"temperature", "seed", "reasoning_effort"},
+        ),
     )
 
     settings = resolve_config(tmp_path, explicit=config, environment={})
@@ -672,7 +809,10 @@ def test_cli_option_activates_a_complete_dormant_descriptor(
 ) -> None:
     config = _write_config(
         tmp_path,
-        _enabled_verify_body(base_overrides={"enabled": "false"}),
+        _enabled_verify_body(
+            base_overrides={"enabled": "false"},
+            remove_base={"temperature", "seed", "reasoning_effort"},
+        ),
     )
 
     settings = resolve_config(
@@ -699,7 +839,12 @@ def test_cli_option_cannot_activate_minimal_disabled_verification(
 
 
 @pytest.mark.parametrize(
-    "key", tuple(key for key in VERIFY_BASE_VALUES if key != "enabled")
+    "key",
+    tuple(
+        key
+        for key in VERIFY_BASE_VALUES
+        if key not in {"enabled", "temperature", "seed", "reasoning_effort"}
+    ),
 )
 def test_enabled_verify_requires_every_base_key(tmp_path: Path, key: str) -> None:
     config = _write_config(
@@ -781,8 +926,8 @@ def test_analyze_inherited_verifier_request_must_satisfy_capability(
             'plugin_distribution_name = "analyze-dist"',
             'plugin_distribution_name = "llm"',
         ).replace(
-            'temperature = { presence = "required", allowed_values = [0.0, 0.25] }',
-            'temperature = { presence = "required", allowed_values = [0.0] }',
+            'temperature = { presence = "optional", allowed_values = [0.0, 0.25] }',
+            'temperature = { presence = "optional", allowed_values = [0.0] }',
         )
         for line in analyze_lines
     ]
@@ -819,6 +964,8 @@ def test_analyze_inherited_verifier_request_must_satisfy_capability(
         ("temperature", "2.1"),
         ("seed", "-1"),
         ("max_tokens", "0"),
+        ("reasoning_effort", '"extreme"'),
+        ("reasoning_effort", "false"),
         ("required_verdicts", "0"),
         ("minimum_support_score", "1.1"),
         ("indeterminate", '"error"'),
@@ -1767,6 +1914,8 @@ def test_unknown_key_in_replaced_parent_disposition_is_rejected(
         ("temperature", "2.1"),
         ("seed", "-1"),
         ("max_tokens", "0"),
+        ("reasoning_effort", '"extreme"'),
+        ("reasoning_effort", "false"),
         ("minimum_packets", "-1"),
         ("maximum_provider_calls", "-1"),
         ("lock_wait_timeout_seconds", "0"),

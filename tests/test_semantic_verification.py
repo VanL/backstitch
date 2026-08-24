@@ -702,6 +702,7 @@ def test_every_provider_and_request_composition_field_invalidates_its_side() -> 
         replace(REQUEST, temperature=0.1),
         replace(REQUEST, seed=43),
         replace(REQUEST, max_tokens=513),
+        replace(REQUEST, reasoning_effort="max"),
     )
     for changed_request in request_variants:
         assert (

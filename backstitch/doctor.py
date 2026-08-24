@@ -194,8 +194,8 @@ def _check_credential(model: Any | None) -> CheckResult:
             "keyless model (local api_base registration); no credential needed",
         )
     # Same discovery order the analyze call path uses: a key already
-    # attached to the resolved model wins before stored/env lookup (llm 0.31
-    # checks self.key first when executing a prompt).
+    # attached to the resolved model wins before stored/env lookup (the llm
+    # execution path checks self.key first when executing a prompt).
     if getattr(model, "key", None):
         return CheckResult(
             "credential", "pass", "credential attached to the resolved model"
@@ -224,7 +224,12 @@ def _check_json_mode(
         exact_request = inference.effective_request.to_dict()
         required_options: set[str] = {
             name
-            for name in ("temperature", "seed", "max_tokens")
+            for name in (
+                "temperature",
+                "seed",
+                "max_tokens",
+                "reasoning_effort",
+            )
             if name in exact_request
         }
         if exact_request.get("json_mode") == "require":
@@ -241,8 +246,10 @@ def _check_json_mode(
         return CheckResult(
             "json-mode",
             "pass",
-            "resolved model accepts the exact frozen request described by "
-            f"capability {inference.capability.capability_revision}",
+            "installed model wrapper can serialize the exact frozen request "
+            "described by capability "
+            f"{inference.capability.capability_revision}; provider acceptance "
+            "requires live qualification",
         )
     if "json_object" in option_fields:
         return CheckResult(

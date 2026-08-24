@@ -48,6 +48,7 @@ Risky plans are blocked if they do not make explicit:
 |------|--------|
 | 2026-08-08-agent-theory-delta-wave-propagation-plan.md | completed |
 | 2026-08-08-program-theory-crystallization-plan.md | completed |
+| 2026-08-23-gpt-5-6-luna-responses-plan.md | active; implementation complete and locally verified; independent implementation review PASS; remote Linux/macOS/Windows CI evidence pending |
 | 2026-07-11-deterministic-semantic-gate-plan.md | active |
 | 2026-07-14-agent-guidance-propagation-plan.md | active |
 | 2026-07-15-agent-interfaces-runbook-adoption-plan.md | completed — runbook adopted from agent-guidance @ a4b4345 |

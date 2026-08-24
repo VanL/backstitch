@@ -290,9 +290,8 @@ Before cache lookup, Backstitch constructs this offline inference contract:
   },
   "request": {
     "json_mode": "require",
-    "temperature": 0.0,
-    "seed": 42,
-    "max_tokens": 512
+    "max_tokens": 16384,
+    "reasoning_effort": "max"
   },
   "search_epoch": "1"
 }
@@ -332,15 +331,17 @@ renormalize an inference-affecting request field after `RequestIdentity` is
 derived.
 
 `EffectiveRequest` makes a presence decision for every known request field:
-`json_mode`, `temperature`, `seed`, and `max_tokens`. A present field carries
-its canonical validated value. An absent optional or forbidden field is
-recorded as absent by the immutable resolved value and is omitted from both the
-transport body and the closed `RequestIdentity` JSON projection. Because the
-field vocabulary is closed, omission is an unambiguous identity decision, not
-an adapter default. The request projection for an existing logical request
-whose four fields remain present is byte-for-byte the request object shown
-above. A protocol-required constant is present in `EffectiveRequest`,
-`RequestIdentity`, and the transport body.
+`json_mode`, `temperature`, `seed`, `max_tokens`, and `reasoning_effort`. A
+present field carries its canonical validated value. An absent optional or
+forbidden field is recorded as absent by the immutable resolved value and is
+omitted from both the transport body and the closed `RequestIdentity` JSON
+projection. Because the field vocabulary is closed, omission is an
+unambiguous identity decision, not an adapter default. Adding
+`reasoning_effort` to the vocabulary does not add it to an existing logical
+request that omits it; such a four-field request keeps byte-for-byte request
+projection compatibility. A protocol serialization constant that is not a
+user request control is code-owned and must be covered by the keyed adapter
+version.
 
 Capability authority is a trusted committed descriptor selected before
 inference resolution. Its closed shape is:
@@ -351,10 +352,11 @@ inference resolution. Its closed shape is:
   capability_revision,
   provider: {model_id, model_revision},
   request_constraints: {
-    json_mode:  {presence, allowed_values, minimum, maximum},
-    temperature:{presence, allowed_values, minimum, maximum},
-    seed:       {presence, allowed_values, minimum, maximum},
-    max_tokens: {presence, allowed_values, minimum, maximum}
+    json_mode:       {presence, allowed_values, minimum, maximum},
+    temperature:     {presence, allowed_values, minimum, maximum},
+    seed:            {presence, allowed_values, minimum, maximum},
+    max_tokens:      {presence, allowed_values, minimum, maximum},
+    reasoning_effort:{presence, allowed_values, minimum, maximum}
   },
   maximum_input_bytes
 }
@@ -362,7 +364,9 @@ inference resolution. Its closed shape is:
 
 `capability_revision`, provider values, and `model_id` are nonblank;
 `model_id` is the canonical Model Monster PURL and `maximum_input_bytes` is a
-positive integer. Every field rule contains exactly the four shown members.
+positive integer. The five constraint children are exact; reasoning effort
+uses [CFG-6.5]'s closed string domain. Every field rule contains exactly the
+four shown members.
 `presence` is `required`, `optional`, or `forbidden`; `allowed_values` is null
 or a nonempty canonical list in the field's existing value domain; and
 `minimum`/`maximum` are both null or form valid inclusive numeric bounds.
@@ -381,7 +385,7 @@ value; it does not silently correct that value. The complete model-request byte
 length must not exceed the descriptor's `maximum_input_bytes`.
 
 Mutable provider metadata, local wrapper introspection, and live qualification
-receipts are not capability authority. A local wrapper may be constructed to
+observations are not capability authority. A local wrapper may be constructed to
 check the committed descriptor only when doing so is provider-free: it may not
 read or transmit a credential, perform network traffic, mutate cache state, or
 publish an artifact. A descriptor change is reviewed committed input. If it
@@ -390,38 +394,13 @@ ordinary inference-identity rules re-key the request; validation-only
 descriptor revision or provenance does not enter `RequestIdentity`,
 `analysis_key`, or `review_key`.
 
-A live capability qualification receipt is release evidence, not semantic
-input. Its closed shape is:
-
-```text
-{
-  schema_version: 1,
-  artifact: "backstitch-capability-qualification",
-  stable_model_id,
-  model_revision,
-  adapter_model_id,
-  capability_revision,
-  descriptor_provenance: {source, source_sha256},
-  runtime: {
-    llm_distribution_version,
-    plugin_distribution_name,
-    plugin_distribution_version
-  },
-  request_identity,
-  outcome: "compatible" | "incompatible" | "unavailable",
-  observed_at_utc,
-  details
-}
-```
-
-All identifier, version, path, timestamp, and detail strings are nonblank;
-hashes are canonical lowercase SHA-256; `request_identity` is the exact closed
-identity attempted by the lane; and `details` is a bounded operator-facing
-observation, not provider authority. A receipt never edits or overrides a
-descriptor and never enters packet, prompt, request, inference, review, cache,
-result, report, or finding identity. Refreshing only the receipt therefore
-cannot create a cache miss or relabel a historical result. The protected live
-qualification and maximum receipt age are [SEM-9]/[SC-10].
+Live capability qualification is bounded release-process evidence, not
+semantic input or persistent Backstitch artifact authority. It executes the
+exact selected descriptor and frozen request under [SEM-9]/[SC-10]. Its
+outcome never edits a capability descriptor and never enters packet, prompt,
+request, inference, review, cache, result, report, or finding identity.
+Elapsed time alone therefore creates neither a cache miss nor a need to
+relabel historical results.
 
 `backend_id`, `plugin_id`, `model_id`, and `model_revision` must be nonblank in
 `read-write` and `require` modes. They may be blank in `off` mode, where no
@@ -448,6 +427,15 @@ response closed and restricts each evidence item to one exact
 `evidence_regions` choice. This is a generation constraint only. Provider
 schema enforcement is not trusted; [SEM-5] normalization independently
 revalidates the returned role, path, and span against packet bytes.
+
+The `llm` OpenAI Responses adapter may emit its supported JSON Schema envelope
+with `strict = false`. This is a generation aid, not authority. Backstitch does
+not patch a private provider builder to change that flag; the closed [SEM-5]
+normalizer independently rejects unknown fields, invalid values, and evidence
+outside the packet. For a Responses reasoning model the adapter also uses the
+wrapper's public reasoning-hiding control so no unused reasoning summary is
+requested. That protocol serialization constant is code-owned and covered by
+the keyed adapter version, not exposed as a request setting.
 
 The untrusted model response is one closed object with exactly `packet_id`,
 `classification`, `confidence`, `rationale`, `summary`, and `evidence`.
@@ -590,6 +578,12 @@ provider's exact `analysis_key` may hit. Exact-inference runs do not replace or
 repoint an existing baseline. Changing `search_epoch` creates a new review key
 and is the supported way to establish a new evidence-stable decision after
 explicit resampling.
+
+A newer model selection, provider qualification observation, or passage of
+time does not by itself invalidate an evidence-stable baseline. Packet,
+prompt, request, analysis-contract, search-epoch, or normalization changes
+continue to re-key under [SEM-3]; explicit resampling continues to use
+`search_epoch`.
 
 Legacy cache roots remain readable for exact `analysis_key` hits. They have no
 baseline objects and therefore grant no cross-provider carry-forward by
@@ -1698,6 +1692,7 @@ json_mode = "require"          # prefer | require | off
 temperature = 0.0
 seed = 42
 max_tokens = 512
+reasoning_effort = "max"       # optional; none | minimal | low | medium | high | xhigh | max
 cache_path = ".backstitch/semantic-cache"
 cache_mode = "require"         # off | read-write | require
 result_reuse = "evidence-stable" # evidence-stable | exact-inference
@@ -1746,7 +1741,8 @@ existing optional model resolution. `read-write` and `require` require the
 selected descriptor's five provider identity strings to be nonblank before
 adapter construction. Packaged defaults use `cache_mode = "off"`,
 `json_mode = "prefer"` and a zero cost ceiling. Backstitch's applied dogfood
-config sets every shown analyze key explicitly. Every `[verify]` and
+config sets every required key and each intended optional value explicitly;
+the omitted optional request fields remain absent. Every `[verify]` and
 `[verify.eval]` key is strict and closed; the disabled packaged verify table
 supplies no implicit provider or qualification value.
 
@@ -1777,10 +1773,12 @@ The normative value contract is:
 | `backend_id`, `plugin_id`, `plugin_distribution_name`, `model`, `model_revision` | strings; nonblank after trimming in cached modes |
 | `adapter_model_id` | raw provider model string; nonblank in catalog descriptors; optional for flat legacy descriptors and defaults to `model` |
 | `search_epoch` | string; nonblank after trimming in every mode |
-| `concurrency`, `max_tokens` | integers excluding booleans, at least 1 |
-| `json_mode` | `prefer`, `require`, or `off` |
-| `temperature` | finite number from 0 through 2 |
-| `seed` | integer excluding booleans, at least 0 |
+| `concurrency` | integer excluding booleans, at least 1 |
+| `json_mode` | required; `prefer`, `require`, or `off` |
+| `max_tokens` | required integer excluding booleans, at least 1 |
+| `temperature` | optional finite number from 0 through 2 |
+| `seed` | optional integer excluding booleans, at least 0 |
+| `reasoning_effort` | optional `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; absence accepts the provider default |
 | `cache_path` | nonblank path string, resolved relative to the file that contributed the winning value; CLI values resolve from cwd |
 | `cache_mode` | `off`, `read-write`, or `require` |
 | `result_reuse` | `evidence-stable` or `exact-inference` |
@@ -1812,8 +1810,10 @@ all invalid combinations exit `2` before cache or adapter work.
 
 Packaged defaults are exact: `backend_id = "llm"`; blank `plugin_id`,
 `plugin_distribution_name`, `model`, `adapter_model_id`, and `model_revision`;
-`concurrency = 1`;
-`json_mode = "prefer"`; `temperature = 0.0`; `seed = 42`; `max_tokens = 512`;
+`concurrency = 1`. Packaged request defaults are exact:
+`json_mode = "prefer"` and `max_tokens = 512`. Packaged defaults omit
+`temperature`, `seed`, and `reasoning_effort`; their absence remains explicit
+through resolution. Other exact defaults are
 `cache_path = ".backstitch/semantic-cache"`; `cache_mode = "off"`;
 `search_epoch = "1"`; `require_complete = false`; `required_kinds = []`;
 `minimum_packets = 0`; `maximum_packets = 1000`;
@@ -1838,17 +1838,38 @@ runtime overlays in [SEM-9.1]. A clean checkout may therefore miss in the
 zero-call profile until a validated external cache has been restored; this is
 an honest availability failure, not a reason to commit cache objects.
 
-Protected scheduled qualification and every release candidate exercise one
-bounded accepted request for the committed default model and one for the
-committed override through their production stable/raw selections and
-capability descriptors. Each successful call is immediately replayed from
-immutable cache with zero provider calls. The resulting qualification receipt
-is valid for seven days from its UTC observation time. Release evidence must
-contain a compatible receipt for each selection that is no older than seven
-days; provider unavailability is recorded distinctly from request
-incompatibility and satisfies neither selection. These receipts remain
-non-normative evidence under [SEM-3] and cannot update descriptors or semantic
-identity.
+Every release candidate exercises one bounded accepted request for the
+committed default model and one for the committed GPT-5.5 override through
+their production stable/raw selections and capability descriptors. Each
+successful call is immediately replayed from immutable cache with zero
+provider calls. The complete event is capped at two provider calls, one per
+descriptor, and $0.10 USD estimated cost. Automatic provider-client retries
+are disabled, so one provider call is one remote wire attempt. Selected-model,
+revision, request,
+descriptor, adapter, provider-dependency, or qualification-logic changes
+require this proof before release. The release precheck invokes qualification
+unconditionally, so this rule needs no persisted change fingerprint.
+An installed-adapter serialization failure, provider HTTP 400, 404 for the
+selected model/operation, HTTP 422, or accepted output that fails the closed
+normalizer is incompatible. Missing or rejected credentials, absent
+authorization, provider HTTP 401/403, rate limiting, DNS/TLS/connection
+failure, timeout, and provider 5xx are unavailable. An invalid descriptor,
+violated local call/cost preflight, corrupt cache, or test/setup failure is a
+qualification error, not a provider outcome. All three classes block release.
+Qualification passes only when both descriptors are compatible; otherwise it
+emits a bounded secret-free failure prefixed `incompatible:`, `unavailable:`,
+or `qualification error:` and names the stable/raw selection. If the first
+descriptor fails, the process may stop without calling the second; the call
+and cost ceilings remain upper bounds. No outcome edits a descriptor or
+semantic identity. No elapsed-time limit applies and no dated qualification
+receipt is a Backstitch artifact.
+A scheduled invocation of the same live path is monitoring and alerting only;
+it grants no release waiver or age-based currency, and inactivity is not a
+violation.
+
+Backstitch's applied dogfood default is GPT-5.6 Luna through its stable/raw
+selection, with `reasoning_effort = "max"`, `max_tokens = 16384`, and
+temperature and seed absent. It retains `result_reuse = "evidence-stable"`.
 
 For required kinds, `suppression` follows `invariant` in canonical order. A
 valid current packet report already proves that every eligible suppression
@@ -1931,8 +1952,6 @@ cache_path = ".backstitch/semantic-cache"
 cache_mode = "require"
 search_epochs = ["1"]
 json_mode = "require"
-temperature = 0.0
-seed = 42
 max_tokens = 512
 required_verdicts = 1
 minimum_support_score = 0.90
@@ -2021,9 +2040,9 @@ Executable gates cover:
 - the aggregate `maximum_prompt_bytes` ceiling fires only on the sum across
   selected requests, each descriptor `maximum_input_bytes` ceiling fires on
   one complete request, and the exact measured bytes are the bytes sent
-- qualification receipts fire for compatible, incompatible, unavailable,
-  current, and older-than-seven-days cases; receipt-only mutation leaves all
-  semantic and cache identities unchanged
+- qualification fires for compatible, incompatible, and unavailable outcomes,
+  bounded call/cost enforcement, unconditional release invocation, the exact
+  selected contract, and zero-call replay; no wall-clock-age case exists
 - mutation matrices proving every model-visible semantic-projection field
   changes `packet_hash`, code-owned prompt instructions change prompt identity
   and `analysis_key` without changing packet hash, and policy/render/
@@ -2143,6 +2162,9 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-08-23-gpt-5-6-luna-responses-plan.md`
+  (active implementation plan; request capabilities, Responses migration,
+  and release qualification)
 - `docs/plans/2026-08-04-semantic-preparation-performance-plan.md`
   (implementation plan; [SEM-10])
 - `docs/plans/2026-07-29-usability-remediation-plan.md`

@@ -13,6 +13,7 @@ Plans:
 - `docs/plans/2026-07-27-semantic-analysis-lifecycle-plan.md`
 - `docs/plans/2026-07-28-documented-suppression-governance-plan.md`
 - `docs/plans/2026-07-29-architecture-quality-remediation-plan.md`
+- `docs/plans/2026-08-23-gpt-5-6-luna-responses-plan.md`
 
 Backstitch turns aligned intent into an executable gate in two stages. The
 deterministic stage identifies executable obligations and builds a closed,
@@ -41,7 +42,7 @@ No component may silently acquire authority owned by another layer:
 | `semantic_packets.py` | Canonical model-visible projection, prompt identity, and historical packet validation | Change packet or prompt identity whenever model-visible input changes |
 | `semantic_identity.py` | Offline provider and request fingerprint before adapter construction | Use a new identity for any inference-affecting change |
 | `semantic_verification_contract.py` | Verifier prompt metadata and cache-independent immutable claim, request, identity, and work records | Change the closed verifier contract or prompt identity whenever verifier-visible input changes; import no cache or analysis runtime |
-| `analysis_llm.py` | Provider request construction and wire adaptation | Preserve the logical request identity; reject unsupported or malformed provider behavior |
+| `analysis_llm.py` | Provider request construction and Responses/Chat wire adaptation | Preserve the frozen logical request identity; reject unsupported or malformed provider behavior without field deletion, endpoint fallback, or a lower-effort retry |
 | `analysis_results.py` and `semantic_evidence.py` | Closed output normalization and packet-local evidence reconstruction | Reject malformed output; never repair JSON or widen evidence |
 | `semantic_cache.py` | Immutable untrusted cache, shared analyzer/review/verifier ownership coordination, and audited lock cleanup | Treat corrupt, stale, conflicting, or incomplete objects as exit `2`; keep cache state disposable and non-authoritative |
 | `semantic_verification.py` | Blinded adversarial verification over a reason-free claim projection | Keep the verifier result evidence-bound and replayable; model identity need not differ from the analyzer |
@@ -72,6 +73,21 @@ Missing, incomplete, reordered, or identity-mismatched current plans fail
 before cache or provider work. Historical replay has no current preparation,
 so it composes its ordered request bytes once from the validated historical
 packets and frozen inference identities.
+
+The current cloud adapter resolves GPT-5.6 Luna through `llm` 0.33's Responses
+model. Backstitch's frozen request contains JSON mode, logical `max_tokens`,
+and optional `reasoning_effort`; absent temperature, seed, or reasoning effort
+is omitted from both identity and transport. The wrapper owns the provider
+spellings `max_output_tokens` and `reasoning.effort` plus its code-owned
+`store = false` behavior. Backstitch also uses the wrapper's public reasoning-
+hiding control, so the request does not ask for an unused reasoning summary.
+Backstitch clones the wrapper's OpenAI client with `max_retries = 0`; one
+logical provider call is therefore one wire attempt under the qualification
+call and cost ceilings. Retryable provider failures are surfaced to the
+qualification outcome classifier instead of being replayed by the SDK.
+Its JSON Schema envelope uses the supported `strict = false` form. None of
+those generation aids gain trust: the local closed result and packet-evidence
+normalizers remain the sole acceptance authority.
 
 `semantic_budget.py` applies the same reviewed cost validation and per-request
 ceiling sum used by execution. `semantic_application.py` joins those facts to
@@ -233,9 +249,8 @@ precision could produce a stable rubber stamp.
 
 The 2026-07-16 live hosted contract passed with `gpt-5.4-mini`. It exercised
 the packet-bound JSON Schema, provider request, local normalization, report
-loading, evidence summary, and reload path. GPT-5 and o-family requests keep
-the logical `max_tokens` identity while adapter version 3 translates it to the
-wire-level `max_completion_tokens` field required by the OpenAI adapter.
+loading, evidence summary, and reload path. That run is a historical Chat
+Completions observation, not evidence for the current Luna Responses request.
 
 The 2026-07-28 hosted contract also passed with `gpt-5.4-mini`. Its bounded
 source-aligned fixture emitted one section packet and one documented
@@ -243,6 +258,22 @@ suppression packet, made two real provider calls in `read-write` mode, then
 replayed byte-identical results in `require` mode with zero provider calls and
 zero cache misses. The summary consumer accepted the suppression result only
 when paired with the `--show-suppressions` deterministic audit.
+
+The current applied contract instead selects stable
+`pkg:service/openai.com/gpt-5.6-luna`, raw `gpt-5.6-luna`, 16,384 logical
+output tokens, and explicit `max` reasoning, with temperature and seed absent.
+Each release candidate exercises that exact selection and the protected
+GPT-5.5 override, immediately proves zero-call immutable replay, and blocks on
+incompatible, unavailable, or local setup/preflight failure. Qualification is
+not persisted as a dated Backstitch artifact and has no age rule. Provider or
+model age likewise does not replace an unchanged evidence-stable baseline;
+request, packet, prompt, contract, normalization, or search-epoch changes own
+re-keying and deliberate resampling.
+
+The 2026-08-23 bounded protected qualification passed both the exact Luna
+request and the protected GPT-5.5 snapshot. Each descriptor made one accepted
+wire attempt, then replayed its byte-identical immutable result with zero
+provider calls. The event stayed below its $0.10 preflight ceiling.
 
 The authorized local `llama3.2:3b` contract accepted the request and schema but
 returned non-JSON text for both small obligations after roughly six minutes.

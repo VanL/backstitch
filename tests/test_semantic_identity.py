@@ -25,6 +25,7 @@ from backstitch.semantic_identity import (
     build_inference_identity,
     build_review_identity,
     resolve_inference,
+    resolve_provider_identity,
 )
 from backstitch.semantic_packets import semantic_packet_hash
 
@@ -65,6 +66,7 @@ def _provider() -> ProviderIdentity:
 def _capability(
     *,
     temperature: RequestFieldConstraint | None = None,
+    reasoning_effort: RequestFieldConstraint | None = None,
 ) -> CapabilityDescriptor:
     return CapabilityDescriptor(
         1,
@@ -77,6 +79,8 @@ def _capability(
             or RequestFieldConstraint("optional", (0.0,), None, None),
             seed=RequestFieldConstraint("required", None, 0, 100),
             max_tokens=RequestFieldConstraint("required", None, 1, 1024),
+            reasoning_effort=reasoning_effort
+            or RequestFieldConstraint("optional", ("max",), None, None),
         ),
         1_000_000,
     )
@@ -153,6 +157,12 @@ def test_inference_identity_is_the_hash_of_the_closed_offline_contract() -> None
         {"max_tokens": True},
         {"max_tokens": 1.5},
         {"max_tokens": 0},
+        {"reasoning_effort": True},
+        {"reasoning_effort": 1},
+        {"reasoning_effort": []},
+        {"reasoning_effort": {}},
+        {"reasoning_effort": ""},
+        {"reasoning_effort": "extreme"},
     ],
 )
 def test_request_identity_rejects_noncanonical_runtime_values(
@@ -163,10 +173,49 @@ def test_request_identity_rejects_noncanonical_runtime_values(
         "temperature": 0.0,
         "seed": 42,
         "max_tokens": 512,
+        "reasoning_effort": "max",
     }
     values.update(kwargs)
     with pytest.raises(ValueError):
         RequestIdentity(**values)
+
+
+@pytest.mark.parametrize(
+    "reasoning_effort",
+    ("none", "minimal", "low", "medium", "high", "xhigh", "max"),
+)
+def test_request_identity_accepts_every_reasoning_effort(
+    reasoning_effort: str,
+) -> None:
+    request = RequestIdentity(
+        "require",
+        None,
+        None,
+        512,
+        cast(Any, reasoning_effort),
+    )
+
+    assert request.to_dict() == {
+        "json_mode": "require",
+        "max_tokens": 512,
+        "reasoning_effort": reasoning_effort,
+    }
+
+
+def test_resolved_provider_identity_uses_adapter_version_four(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("backstitch.semantic_identity.version", lambda name: "0.33")
+
+    identity = resolve_provider_identity(
+        backend_id="llm",
+        plugin_id="openai",
+        model_id="pkg:service/openai.com/gpt-5.6-luna",
+        model_revision="gpt-5.6-luna",
+        plugin_distribution_name="llm",
+    )
+
+    assert identity.adapter_version == 4
 
 
 def test_capability_presence_is_resolved_before_request_identity() -> None:
@@ -183,6 +232,12 @@ def test_capability_presence_is_resolved_before_request_identity() -> None:
         optional_absent.effective_request.to_dict()
     )
 
+    max_reasoning = _resolve(
+        EffectiveRequest("require", None, 42, 512, "max"),
+        _capability(),
+    )
+    assert max_reasoning.request_identity.to_dict()["reasoning_effort"] == "max"
+
     with pytest.raises(ValueError, match=r"analyze\.temperature is forbidden"):
         _resolve(
             EffectiveRequest("require", 0.0, 42, 512),
@@ -194,6 +249,22 @@ def test_capability_presence_is_resolved_before_request_identity() -> None:
         _resolve(
             EffectiveRequest("require", None, None, 512),
             _capability(),
+        )
+    with pytest.raises(ValueError, match=r"analyze\.reasoning_effort is forbidden"):
+        _resolve(
+            EffectiveRequest("require", None, 42, 512, "max"),
+            _capability(
+                reasoning_effort=RequestFieldConstraint("forbidden", None, None, None)
+            ),
+        )
+    with pytest.raises(ValueError, match=r"analyze\.reasoning_effort is required"):
+        _resolve(
+            EffectiveRequest("require", None, 42, 512),
+            _capability(
+                reasoning_effort=RequestFieldConstraint(
+                    "required", ("max",), None, None
+                )
+            ),
         )
 
 
@@ -215,6 +286,10 @@ def test_capability_presence_is_resolved_before_request_identity() -> None:
         (
             EffectiveRequest("require", None, 42, 1025),
             r"analyze\.max_tokens must be from",
+        ),
+        (
+            EffectiveRequest("require", None, 42, 512, "high"),
+            r"analyze\.reasoning_effort must be one of",
         ),
     ),
 )
@@ -374,6 +449,7 @@ def test_every_inference_contract_field_changes_analysis_key(
         "temperature": 0.5,
         "seed": 43,
         "max_tokens": 513,
+        "reasoning_effort": "max",
     }
     for field, value in request_changes.items():
         changed_request = cast(Any, replace)(request, **{field: value})
@@ -458,6 +534,16 @@ def test_every_review_contract_field_changes_review_key_but_provider_does_not(
     assert (
         build_review_identity(packet, replace(request, seed=43)).review_key
         != baseline[1].review_key
+    )
+    reasoning_review = build_review_identity(
+        packet, replace(request, reasoning_effort="max")
+    )
+    assert reasoning_review.review_key != baseline[1].review_key
+    assert (
+        build_review_identity(
+            packet, replace(request, reasoning_effort="high")
+        ).review_key
+        != reasoning_review.review_key
     )
     assert (
         build_review_identity(packet, request, analysis_contract_version=2).review_key

@@ -53,6 +53,8 @@ from backstitch.grammar import (
 )
 from backstitch.models import SuppressionOrigin, SuppressionRule
 from backstitch.semantic_identity import (
+    REASONING_EFFORT_VALUES,
+    ReasoningEffort,
     RequestConstraints,
     RequestFieldConstraint,
 )
@@ -227,6 +229,7 @@ _ANALYZE_KEYS = frozenset(
         "temperature",
         "seed",
         "max_tokens",
+        "reasoning_effort",
         "cache_path",
         "cache_mode",
         "result_reuse",
@@ -262,6 +265,7 @@ _VERIFY_KEYS = frozenset(
         "temperature",
         "seed",
         "max_tokens",
+        "reasoning_effort",
         "required_verdicts",
         "minimum_support_score",
         "indeterminate",
@@ -603,17 +607,19 @@ class AnalyzeSettings:
             json_mode=RequestFieldConstraint(
                 "required", ("require", "off"), None, None
             ),
-            temperature=RequestFieldConstraint("required", None, 0.0, 2.0),
-            seed=RequestFieldConstraint("required", None, 0, 2**63 - 1),
+            temperature=RequestFieldConstraint("optional", (0.0,), None, None),
+            seed=RequestFieldConstraint("optional", None, 0, 2**63 - 1),
             max_tokens=RequestFieldConstraint("required", None, 1, 2**31 - 1),
+            reasoning_effort=RequestFieldConstraint("forbidden", None, None, None),
         )
     )
     maximum_input_bytes: int = 10_000_000
     concurrency: int = 1
     json_mode: str = "prefer"
-    temperature: float = 0.0
-    seed: int = 42
+    temperature: float | None = None
+    seed: int | None = None
     max_tokens: int = 512
+    reasoning_effort: ReasoningEffort | None = None
     cache_path: str = ".backstitch/semantic-cache"
     cache_mode: str = "off"
     result_reuse: str = "evidence-stable"
@@ -694,9 +700,10 @@ class VerifySettings:
     cache_mode: str
     search_epochs: tuple[str, ...]
     json_mode: str
-    temperature: float
-    seed: int
+    temperature: float | None
+    seed: int | None
     max_tokens: int
+    reasoning_effort: ReasoningEffort | None
     required_verdicts: int
     minimum_support_score: float
     indeterminate: str
@@ -1721,6 +1728,15 @@ def _parse_allowed_request_values(
             raise ConfigLoadError(
                 f"{field_label}.allowed_values may contain require and off"
             )
+    elif field_name == "reasoning_effort":
+        if any(
+            not isinstance(item, str) or item not in REASONING_EFFORT_VALUES
+            for item in allowed_raw
+        ):
+            raise ConfigLoadError(
+                f"{field_label}.allowed_values may contain none, minimal, low, "
+                "medium, high, xhigh, and max"
+            )
     elif any(
         isinstance(item, bool)
         or not isinstance(item, (int, float))
@@ -1793,7 +1809,7 @@ def _parse_request_field_constraint(
                 f"{field_label} forbidden form contains only presence"
             )
         allowed: tuple[object, ...] | None = None
-    elif field_name in {"json_mode", "temperature"}:
+    elif field_name in {"json_mode", "temperature", "reasoning_effort"}:
         if not _request_constraint_keys_are_valid(
             raw,
             authored_keys={"presence", "allowed_values"},
@@ -1846,7 +1862,13 @@ def _parse_request_constraints(
 
     if not isinstance(value, dict):
         raise ConfigLoadError(f"{label} must be a table")
-    field_names = ("json_mode", "temperature", "seed", "max_tokens")
+    field_names = (
+        "json_mode",
+        "temperature",
+        "seed",
+        "max_tokens",
+        "reasoning_effort",
+    )
     if set(value) != set(field_names):
         missing = sorted(set(field_names) - set(value))
         unknown = sorted(set(value) - set(field_names))
@@ -1855,7 +1877,7 @@ def _parse_request_constraints(
             if missing
             else f"unknown: {', '.join(unknown)}"
         )
-        raise ConfigLoadError(f"{label} must contain exactly four fields; {detail}")
+        raise ConfigLoadError(f"{label} must contain exactly five fields; {detail}")
 
     parsed = {
         field_name: _parse_request_field_constraint(
@@ -1870,6 +1892,12 @@ def _parse_request_constraints(
 
 
 def settings_to_json(settings: BackstitchSettings) -> str:
+    analyze = asdict(settings.analyze)
+    verify = asdict(settings.verify)
+    for request in (analyze, verify):
+        for field_name in ("temperature", "seed", "reasoning_effort"):
+            if request.get(field_name) is None:
+                request.pop(field_name, None)
     payload = {
         "config_path": (
             str(settings.config_path) if settings.config_path is not None else None
@@ -1907,8 +1935,8 @@ def settings_to_json(settings: BackstitchSettings) -> str:
         "check": asdict(settings.check),
         "packets": asdict(settings.packets),
         "coverage": asdict(settings.coverage),
-        "analyze": asdict(settings.analyze),
-        "verify": asdict(settings.verify),
+        "analyze": analyze,
+        "verify": verify,
         "obligations": asdict(settings.obligations),
         "target_roots": asdict(settings.target_roots),
         "diagnostics": policy_to_dict(settings.diagnostics),
@@ -3055,15 +3083,34 @@ def _parse_analyze_settings(  # noqa: C901 approved [SC-17.1] RUFF-SUP-129 excep
     json_mode = _require_enum(
         table, "json_mode", "analyze", {"prefer", "require", "off"}
     )
-    temperature = _require_number(
-        table,
-        "temperature",
-        "analyze",
-        minimum=0.0,
-        maximum=2.0,
+    temperature = (
+        _require_number(
+            table,
+            "temperature",
+            "analyze",
+            minimum=0.0,
+            maximum=2.0,
+        )
+        if "temperature" in table
+        else None
     )
-    seed = _require_int(table, "seed", "analyze", minimum=0)
+    seed = (
+        _require_int(table, "seed", "analyze", minimum=0) if "seed" in table else None
+    )
     max_tokens = _require_int(table, "max_tokens", "analyze", minimum=1)
+    reasoning_effort = (
+        cast(
+            ReasoningEffort,
+            _require_enum(
+                table,
+                "reasoning_effort",
+                "analyze",
+                set(REASONING_EFFORT_VALUES),
+            ),
+        )
+        if "reasoning_effort" in table
+        else None
+    )
     cache_path = _require_string(table, "cache_path", "analyze")
     if not cache_path.strip():
         raise ConfigLoadError("analyze.cache_path must be a nonblank path string")
@@ -3193,6 +3240,7 @@ def _parse_analyze_settings(  # noqa: C901 approved [SC-17.1] RUFF-SUP-129 excep
         temperature=temperature,
         seed=seed,
         max_tokens=max_tokens,
+        reasoning_effort=reasoning_effort,
         cache_path=cache_path,
         cache_mode=cache_mode,
         result_reuse=result_reuse,
@@ -3346,15 +3394,32 @@ def _parse_verify_settings(
     json_mode = _require_enum(
         table, "json_mode", "verify", {"prefer", "require", "off"}
     )
-    temperature = _require_number(
-        table,
-        "temperature",
-        "verify",
-        minimum=0.0,
-        maximum=2.0,
+    temperature = (
+        _require_number(
+            table,
+            "temperature",
+            "verify",
+            minimum=0.0,
+            maximum=2.0,
+        )
+        if "temperature" in table
+        else None
     )
-    seed = _require_int(table, "seed", "verify", minimum=0)
+    seed = _require_int(table, "seed", "verify", minimum=0) if "seed" in table else None
     max_tokens = _require_int(table, "max_tokens", "verify", minimum=1)
+    reasoning_effort = (
+        cast(
+            ReasoningEffort,
+            _require_enum(
+                table,
+                "reasoning_effort",
+                "verify",
+                set(REASONING_EFFORT_VALUES),
+            ),
+        )
+        if "reasoning_effort" in table
+        else None
+    )
     required_verdicts = _require_int(table, "required_verdicts", "verify", minimum=1)
     minimum_support_score = _require_number(
         table,
@@ -3411,6 +3476,7 @@ def _parse_verify_settings(
         temperature=temperature,
         seed=seed,
         max_tokens=max_tokens,
+        reasoning_effort=reasoning_effort,
         required_verdicts=required_verdicts,
         minimum_support_score=minimum_support_score,
         indeterminate=indeterminate,

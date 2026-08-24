@@ -50,6 +50,22 @@ def _named_workflow_steps(text: str) -> dict[str, str]:
     return steps
 
 
+def test_provider_dependency_floor_and_lock_are_responses_capable() -> None:
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        project = tomllib.load(handle)["project"]
+    with (ROOT / "uv.lock").open("rb") as handle:
+        locked = tomllib.load(handle)["package"]
+
+    assert "llm>=0.33,<0.34" in project["dependencies"]
+    versions = {package["name"]: package["version"] for package in locked}
+    assert versions["llm"] == "0.33"
+    assert versions["openai"].startswith("3.")
+    assert "openai" not in {
+        dependency.split("=", 1)[0].split("<", 1)[0].split(">", 1)[0]
+        for dependency in project["dependencies"]
+    }
+
+
 def test_backstitch_runtime_directory_is_ignored_and_untracked() -> None:
     ignored = [
         subprocess.run(

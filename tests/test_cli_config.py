@@ -21,9 +21,10 @@ CAPABILITY_CONFIG_LINES = (
     (
         "request_constraints = { "
         'json_mode = { presence = "required", allowed_values = ["require", "off"] }, '
-        'temperature = { presence = "required", allowed_values = [0.0] }, '
-        'seed = { presence = "required", minimum = 0, maximum = 2147483647 }, '
-        'max_tokens = { presence = "required", minimum = 1, maximum = 16384 }'
+        'temperature = { presence = "optional", allowed_values = [0.0] }, '
+        'seed = { presence = "optional", minimum = 0, maximum = 2147483647 }, '
+        'max_tokens = { presence = "required", minimum = 1, maximum = 16384 }, '
+        'reasoning_effort = { presence = "forbidden" }'
         " }"
     ),
 )

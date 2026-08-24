@@ -157,7 +157,9 @@ _PROVIDER_FIELDS = frozenset(
         "plugin_distribution_version",
     }
 )
-_REQUEST_FIELDS = frozenset({"json_mode", "temperature", "seed", "max_tokens"})
+_REQUEST_FIELDS = frozenset(
+    {"json_mode", "temperature", "seed", "max_tokens", "reasoning_effort"}
+)
 _GUARD_FIELDS = frozenset({"schema_version", "object_type", "analysis_key"})
 _REVIEW_CONTRACT_FIELDS = frozenset(
     {

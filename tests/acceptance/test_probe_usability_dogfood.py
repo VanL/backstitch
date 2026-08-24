@@ -72,7 +72,9 @@ def _write_readiness_debt_repo(root: Path) -> None:
         "[analyze.request_constraints.max_tokens]\n"
         'presence = "required"\n'
         "minimum = 1\n"
-        "maximum = 16384\n",
+        "maximum = 16384\n\n"
+        "[analyze.request_constraints.reasoning_effort]\n"
+        'presence = "forbidden"\n',
         encoding="utf-8",
     )
 

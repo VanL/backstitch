@@ -178,6 +178,9 @@ def _write_local_model_repo(root: Path) -> None:
                 "minimum = 1",
                 "maximum = 16384",
                 "",
+                "[analyze.request_constraints.reasoning_effort]",
+                'presence = "forbidden"',
+                "",
                 "[verify]",
                 "enabled = true",
                 'provider_source = "override"',
@@ -230,6 +233,9 @@ def _write_local_model_repo(root: Path) -> None:
                 'presence = "required"',
                 "minimum = 1",
                 "maximum = 16384",
+                "",
+                "[verify.provider.request_constraints.reasoning_effort]",
+                'presence = "forbidden"',
                 "",
                 "[verify.eval]",
                 'mode = "report"',
@@ -429,16 +435,37 @@ def _copy_self_repository(destination: Path) -> Path:
 
     config = destination / "pyproject.toml"
     config_text = config.read_text(encoding="utf-8")
-    old = 'adapter_model_id = "gpt-5.4-mini"'
+    old = 'adapter_model_id = "gpt-5.6-luna"'
     assert config_text.count(old) == 1
-    config.write_text(
-        config_text.replace(
-            old,
-            f'adapter_model_id = "{LOCAL_LLM_MODEL}"',
-            1,
+    replacements = (
+        (old, f'adapter_model_id = "{LOCAL_LLM_MODEL}"'),
+        (
+            'reasoning_effort = "max"',
+            "temperature = 0.0\nseed = 42",
         ),
-        encoding="utf-8",
+        (
+            "[tool.backstitch.analyze.request_constraints.temperature]\n"
+            'presence = "forbidden"',
+            "[tool.backstitch.analyze.request_constraints.temperature]\n"
+            'presence = "required"\nallowed_values = [0.0]',
+        ),
+        (
+            "[tool.backstitch.analyze.request_constraints.seed]\n"
+            'presence = "forbidden"',
+            "[tool.backstitch.analyze.request_constraints.seed]\n"
+            'presence = "required"\nminimum = 0\nmaximum = 2147483647',
+        ),
+        (
+            "[tool.backstitch.analyze.request_constraints.reasoning_effort]\n"
+            'presence = "optional"\nallowed_values = ["max"]',
+            "[tool.backstitch.analyze.request_constraints.reasoning_effort]\n"
+            'presence = "forbidden"',
+        ),
     )
+    for before, after in replacements:
+        assert config_text.count(before) == 1
+        config_text = config_text.replace(before, after, 1)
+    config.write_text(config_text, encoding="utf-8")
     return destination
 
 
@@ -1170,7 +1197,7 @@ def test_isolated_self_repository_dogfood_uses_committed_budgets(
     )
     assert prepared["budgets"]["analyzer"]["estimated_cost_status"] == "within_limit"
     assert prepared["budgets"]["analyzer"]["cost_rate_source"].startswith(
-        "OpenAI GPT-5.4 mini model page"
+        "OpenAI GPT-5.6 Luna model page"
     )
     assert prepared["budgets"]["verifier"] == {
         "status": "disabled",
@@ -1182,7 +1209,7 @@ def test_isolated_self_repository_dogfood_uses_committed_budgets(
     }
     assert prepared["budgets"]["call_cost_status"] == "within_limits"
     assert prepared["inference"]["analyzer"]["stable_model_id"] == (
-        "pkg:service/openai.com/gpt-5.4-mini"
+        "pkg:service/openai.com/gpt-5.6-luna"
     )
     assert prepared["inference"]["analyzer"]["adapter_model_id"] == LOCAL_LLM_MODEL
 

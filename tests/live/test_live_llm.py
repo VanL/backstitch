@@ -27,11 +27,13 @@ import fnmatch
 import http.server
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -57,14 +59,20 @@ pytestmark = pytest.mark.live_llm
 
 # Keep this reviewed default aligned with the repository descriptor. Live cloud
 # probes normalize aliases to exact snapshots before provider construction.
-DEFAULT_BACKSTITCH_LIVE_LLM_MODEL = "gpt-5.4-mini"
+DEFAULT_BACKSTITCH_LIVE_LLM_MODEL = "gpt-5.6-luna"
+OPENAI_QUALIFICATION_MODELS = (
+    "gpt-5.6-luna",
+    "gpt-5.5-2026-04-23",
+)
 DEFAULT_BACKSTITCH_LOCAL_LLM_BASE_MODEL = "llama3.2:3b"
 DEFAULT_BACKSTITCH_LOCAL_LLM_SERVED_MODEL = DEFAULT_BACKSTITCH_LOCAL_LLM_BASE_MODEL
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LIVE_SPEC = "docs/specs/02-backstitch-core.md"
-DEFAULT_LIVE_PACKETS = 2
 MAX_LIVE_PACKETS = 5
+OPENAI_QUALIFICATION_MAX_CALLS = 2
+OPENAI_QUALIFICATION_MAX_ESTIMATED_COST_MICROUSD = 100_000
+OPENAI_QUALIFICATION_TIMEOUT_SECONDS = 300
 LOCAL_LIVE_PACKET_IDS = (
     "invariant::INV.RES.1",
     "invariant::INV.RES.2",
@@ -414,7 +422,9 @@ def _run_cli(
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        pytest.fail(f"{label} timed out after {timeout} seconds: {exc.cmd}")
+        raise RuntimeError(
+            f"{label} timed out after {timeout} seconds: {exc.cmd}"
+        ) from exc
 
 
 def _assert_no_traceback(result: subprocess.CompletedProcess[str], label: str) -> None:
@@ -432,17 +442,25 @@ def _live_kind() -> str:
     return kind
 
 
-def _resolve_live_model() -> str:
+def _resolve_live_model(requested_model: str | None = None) -> str:
     import llm
 
-    requested_model = os.environ.get("LLM_MODEL") or DEFAULT_BACKSTITCH_LIVE_LLM_MODEL
+    fixed_selection = requested_model is not None
+    requested_model = (
+        requested_model
+        or os.environ.get("LLM_MODEL")
+        or DEFAULT_BACKSTITCH_LIVE_LLM_MODEL
+    )
     model_name = {
-        "gpt-5.4-mini": "gpt-5.4-mini-2026-03-17",
         "gpt-5.5": "gpt-5.5-2026-04-23",
     }.get(requested_model, requested_model)
     try:
         model = llm.get_model(model_name)
     except llm.UnknownModelError as exc:
+        if fixed_selection:
+            raise RuntimeError(
+                f"adapter cannot resolve selected model {model_name!r}"
+            ) from exc
         pytest.fail(
             f"live model {model_name!r} is not registered in llm; set LLM_MODEL "
             f"or update DEFAULT_BACKSTITCH_LIVE_LLM_MODEL ({exc})"
@@ -455,12 +473,146 @@ def _resolve_live_model() -> str:
         env_var = getattr(model, "key_env_var", None) or ""
         key = llm.get_key(key_alias=needs_key, env_var=env_var)
         if not key:
+            if fixed_selection:
+                raise RuntimeError(
+                    f"missing credential for selected model {model_name!r}"
+                )
             hint = f" or `{env_var}`" if env_var else ""
             pytest.fail(
                 f"live gate enabled but no credential for provider key "
                 f"{needs_key!r}; store one with `llm keys set {needs_key}`{hint}"
             )
     return model_name
+
+
+def _qualification_failure_category(error: BaseException) -> tuple[str, str]:
+    """Map a bounded live failure to its release-process outcome."""
+
+    detail = str(error).lower()
+    status_match = re.search(
+        r"(?:http|status(?: code)?|error code)\s*[:=]?\s*(\d{3})", detail
+    )
+    status = int(status_match.group(1)) if status_match is not None else None
+    if status in {400, 404, 422} or any(
+        marker in detail
+        for marker in (
+            "provider request incompatible",
+            "does not support request options",
+            "cannot resolve selected model",
+            "error fields",
+            "invalid result row",
+            "closed schema",
+            "normalization",
+            "malformed_result",
+        )
+    ):
+        return "incompatible", "exact request or closed response contract rejected"
+    if status in {401, 403, 408, 409, 429} or status is not None and status >= 500:
+        return "unavailable", "provider access or service unavailable"
+    if any(
+        marker in detail
+        for marker in (
+            "credential",
+            "api key",
+            "authorization",
+            "rate limit",
+            "timeout",
+            "timed out",
+            "connection",
+            "connect",
+            "dns",
+            "tls",
+            "network",
+            "temporarily unavailable",
+            "provider_failure",
+        )
+    ):
+        return "unavailable", "provider access or service unavailable"
+    return "qualification error", "local qualification setup or preflight failed"
+
+
+def _qualification_selection_label(adapter_model_id: str) -> str:
+    stable_model_id = {
+        "gpt-5.6-luna": "pkg:service/openai.com/gpt-5.6-luna",
+        "gpt-5.5-2026-04-23": "pkg:service/openai.com/gpt-5.5",
+    }.get(adapter_model_id, "stable model unavailable")
+    return f"{stable_model_id} / {adapter_model_id}"
+
+
+def _assert_openai_qualification_bounds(
+    *, provider_calls: int, estimated_cost_microusd: int
+) -> None:
+    if provider_calls > OPENAI_QUALIFICATION_MAX_CALLS:
+        raise ValueError("OpenAI qualification exceeds its two-call ceiling")
+    if estimated_cost_microusd > OPENAI_QUALIFICATION_MAX_ESTIMATED_COST_MICROUSD:
+        raise ValueError("OpenAI qualification exceeds its $0.10 cost ceiling")
+
+
+def _openai_qualification_estimated_cost_microusd(
+    request_byte_count: int,
+) -> int:
+    """Project both fixed calls with the production conservative estimator."""
+
+    if request_byte_count < 0:
+        raise ValueError("qualification request byte count must be nonnegative")
+    input_tokens = request_byte_count + 256
+
+    def ceil_million(value: int) -> int:
+        return (value + 999_999) // 1_000_000
+
+    return sum(
+        ceil_million(input_tokens * input_rate) + ceil_million(max_tokens * output_rate)
+        for max_tokens, input_rate, output_rate in (
+            (16_384, 400_000, 1_800_000),
+            (1_024, 5_000_000, 30_000_000),
+        )
+    )
+
+
+class _QualificationProcessFailure(RuntimeError):
+    """One bounded, already-categorized release qualification failure."""
+
+
+def _run_openai_qualifications(
+    exercise: Callable[[str], tuple[int, int]],
+) -> tuple[str, ...]:
+    """Run both fixed selections and enforce event-wide bounds."""
+
+    provider_calls = 0
+    estimated_cost_microusd = 0
+    messages: list[str] = []
+    for model_name in OPENAI_QUALIFICATION_MODELS:
+        selection = _qualification_selection_label(model_name)
+        try:
+            calls, cost = exercise(model_name)
+        except Exception as exc:
+            category, reason = _qualification_failure_category(exc)
+            raise _QualificationProcessFailure(
+                f"{category}: {selection} ({reason})"
+            ) from exc
+        if calls != 1:
+            raise _QualificationProcessFailure(
+                f"qualification error: {selection} "
+                "(descriptor did not make exactly one provider call)"
+            )
+        provider_calls += calls
+        estimated_cost_microusd += cost
+        try:
+            _assert_openai_qualification_bounds(
+                provider_calls=provider_calls,
+                estimated_cost_microusd=estimated_cost_microusd,
+            )
+        except ValueError as exc:
+            raise _QualificationProcessFailure(
+                f"qualification error: {selection} "
+                "(OpenAI qualification budget preflight failed)"
+            ) from exc
+        messages.append(f"compatible: {selection}")
+    if provider_calls != OPENAI_QUALIFICATION_MAX_CALLS:
+        raise _QualificationProcessFailure(
+            "qualification error: OpenAI qualification did not make two calls"
+        )
+    return tuple(messages)
 
 
 def _live_descriptor_lines(*, kind: str, adapter_model_id: str) -> list[str]:
@@ -477,44 +629,63 @@ def _live_descriptor_lines(*, kind: str, adapter_model_id: str) -> list[str]:
         maximum_cost = 0
         max_tokens = LOCAL_ANALYZE_MAX_TOKENS
         cost_source = "non-billable loopback live-contract endpoint"
-    elif adapter_model_id == "gpt-5.4-mini-2026-03-17":
-        stable_model_id = "pkg:service/openai.com/gpt-5.4-mini"
+    elif adapter_model_id == "gpt-5.6-luna":
+        stable_model_id = "pkg:service/openai.com/gpt-5.6-luna"
         plugin_id = "openai"
-        capability_revision = "openai-gpt-5.4-mini-2026-07-29"
+        capability_revision = "openai-gpt-5.6-luna-2026-08-23"
         maximum_input_bytes = 1_600_000
-        temperature = 0.0
-        input_rate = 750_000
-        output_rate = 4_500_000
+        temperature = None
+        input_rate = 400_000
+        output_rate = 1_800_000
         maximum_cost = 100_000
-        max_tokens = 512
-        cost_source = "OpenAI GPT-5.4 mini model page, reviewed 2026-07-28"
+        max_tokens = 16_384
+        reasoning_effort = "max"
+        cost_source = (
+            "OpenAI GPT-5.6 Luna model page, reviewed 2026-08-23; "
+            "conservative rates include the published long-prompt multiplier"
+        )
     elif adapter_model_id == "gpt-5.5-2026-04-23":
         stable_model_id = "pkg:service/openai.com/gpt-5.5"
         plugin_id = "openai"
-        capability_revision = "openai-gpt-5.5-2026-07-29"
+        capability_revision = "openai-gpt-5.5-responses-2026-08-23"
         maximum_input_bytes = 1_600_000
-        # A real qualification rejected 0.0 and accepted 1.0 for this snapshot.
-        temperature = 1.0
+        temperature = None
         input_rate = 5_000_000
         output_rate = 30_000_000
         maximum_cost = 100_000
         max_tokens = 1_024
+        reasoning_effort = None
         cost_source = "OpenAI GPT-5.5 model page, reviewed 2026-07-29"
     else:
-        pytest.fail(
+        raise ValueError(
             f"live model {adapter_model_id!r} has no reviewed Backstitch "
             "capability and cost descriptor"
         )
 
+    if kind == "local":
+        reasoning_effort = None
+        temperature_constraint = (
+            f'{{ presence = "required", allowed_values = [{temperature}] }}'
+        )
+        seed_constraint = '{ presence = "required", minimum = 0, maximum = 2147483647 }'
+    else:
+        temperature_constraint = '{ presence = "forbidden" }'
+        seed_constraint = '{ presence = "forbidden" }'
+    reasoning_constraint = (
+        '{ presence = "optional", allowed_values = ["max"] }'
+        if reasoning_effort == "max"
+        else '{ presence = "forbidden" }'
+    )
     request_constraints = (
         "{ "
         'json_mode = { presence = "required", allowed_values = ["require"] }, '
-        f'temperature = {{ presence = "required", allowed_values = [{temperature}] }}, '
-        'seed = { presence = "required", minimum = 0, maximum = 2147483647 }, '
-        'max_tokens = { presence = "required", minimum = 1, maximum = 16384 } '
+        f"temperature = {temperature_constraint}, "
+        f"seed = {seed_constraint}, "
+        'max_tokens = { presence = "required", minimum = 1, maximum = 16384 }, '
+        f"reasoning_effort = {reasoning_constraint} "
         "}"
     )
-    return [
+    lines = [
         'backend_id = "llm"',
         f"plugin_id = {json.dumps(plugin_id)}",
         'plugin_distribution_name = "llm"',
@@ -525,8 +696,6 @@ def _live_descriptor_lines(*, kind: str, adapter_model_id: str) -> list[str]:
         f"capability_revision = {json.dumps(capability_revision)}",
         f"request_constraints = {request_constraints}",
         f"maximum_input_bytes = {maximum_input_bytes}",
-        f"temperature = {temperature}",
-        f"seed = {LOCAL_INFERENCE_SEED}",
         f"max_tokens = {max_tokens}",
         f"maximum_estimated_cost_microusd = {maximum_cost}",
         f"input_cost_microusd_per_million_tokens = {input_rate}",
@@ -534,6 +703,21 @@ def _live_descriptor_lines(*, kind: str, adapter_model_id: str) -> list[str]:
         "input_token_overhead = 256",
         f"cost_rate_source = {json.dumps(cost_source)}",
     ]
+    if temperature is not None:
+        lines.append(f"temperature = {temperature}")
+        lines.append(f"seed = {LOCAL_INFERENCE_SEED}")
+    if reasoning_effort is not None:
+        lines.append(f"reasoning_effort = {json.dumps(reasoning_effort)}")
+    if kind == "openai":
+        lines.extend(
+            (
+                'required_kinds = ["section"]',
+                "minimum_packets = 1",
+                "maximum_packets = 1",
+                "maximum_provider_calls = 1",
+            )
+        )
+    return lines
 
 
 def _select_live_packets(
@@ -591,7 +775,10 @@ def _write_live_contract_repo(root: Path, *, kind: str = "openai") -> Path:
     (root / "tests").mkdir()
     (root / "docs/plans/.keep").write_text("", encoding="utf-8")
     (root / ".backstitch.toml").write_text(
-        '[analyze]\njson_mode = "require"\ncache_path = ".backstitch/semantic-cache"\n',
+        '[profile]\nspec_roots = ["docs/specs"]\n'
+        'plan_roots = ["docs/plans"]\ncode_roots = ["pkg", "tests"]\n'
+        'test_roots = ["tests"]\n\n[analyze]\njson_mode = "require"\n'
+        'cache_path = ".backstitch/semantic-cache"\n',
         encoding="utf-8",
     )
     if kind == "local":
@@ -619,34 +806,32 @@ def _write_live_contract_repo(root: Path, *, kind: str = "openai") -> Path:
         )
     else:
         (root / ".backstitch.toml").write_text(
-            '[analyze]\njson_mode = "require"\n'
-            'cache_path = ".backstitch/semantic-cache"\n\n'
-            "[lint]\n"
-            "require_suppression_declarations = true\n\n"
-            "[[lint.suppressions]]\n"
-            'mechanism = "ignore"\n'
-            'path = "docs/specs/01-live.md"\n'
-            "sections = []\n"
-            'codes = ["MAPPING_BLOCK_OWNERLESS"]\n'
-            'declaration = "docs/specs/01-live.md#SUP-LIVE"\n',
+            '[profile]\nspec_roots = ["docs/specs"]\n'
+            'plan_roots = ["docs/plans"]\ncode_roots = ["pkg", "tests"]\n'
+            'test_roots = ["tests"]\n\n[analyze]\njson_mode = "require"\n'
+            'cache_path = ".backstitch/semantic-cache"\n',
             encoding="utf-8",
         )
         (root / "docs/specs/01-live.md").write_text(
-            "_Implementation mapping_:\n\n"
-            "- `pkg/ownerless.py`\n\n"
             "# Live contract\n\n"
             "## Return one [LIVE-1]\n\n"
             "The live contract returns one.\n\n"
-            '_Traceability: suppression-declaration [SUP-LIVE] "The ownerless '
-            "preamble fixture is retained to exercise the live documented "
-            'suppression lifecycle."_\n\n'
-            "_Implementation mapping_:\n\n- `pkg/live.py::return_one`\n",
+            "_Implementation mapping_:\n\n"
+            "- `pkg/live.py::return_one`\n"
+            "- `tests/test_live.py::test_return_one`\n",
             encoding="utf-8",
         )
         (root / "pkg/live.py").write_text(
             "def return_one() -> int:\n"
             '    """Spec: docs/specs/01-live.md [LIVE-1]"""\n'
             "    return 1\n",
+            encoding="utf-8",
+        )
+        (root / "tests/test_live.py").write_text(
+            "from pkg.live import return_one\n\n\n"
+            "def test_return_one() -> None:\n"
+            '    """Spec: docs/specs/01-live.md [LIVE-1]"""\n'
+            "    assert return_one() == 1\n",
             encoding="utf-8",
         )
     return root
@@ -1180,12 +1365,46 @@ def test_live_llm_analysis_contract(
             )
         return
 
-    _exercise_live_llm_analysis_contract(
-        tmp_path,
-        monkeypatch,
-        kind=kind,
-        proxy=None,
-    )
+    def exercise(model_name: str) -> tuple[int, int]:
+        return _exercise_live_llm_analysis_contract(
+            tmp_path / model_name,
+            monkeypatch,
+            kind=kind,
+            proxy=None,
+            requested_model=model_name,
+        )
+
+    try:
+        messages = _run_openai_qualifications(exercise)
+    except _QualificationProcessFailure as exc:
+        pytest.fail(str(exc), pytrace=False)
+    for message in messages:
+        print(message)
+
+
+def _live_packet_generation_args(
+    kind: str,
+    scan_args: list[str],
+    *,
+    output: Path,
+    report: Path,
+) -> list[str]:
+    """Build the report-compatible packet-generation command."""
+
+    args = [
+        "packets",
+        *scan_args,
+        "--kind",
+        "all" if kind == "local" else "section",
+        "--output",
+        str(output),
+    ]
+    # Packet reports describe the complete generated packet set. The CLI
+    # therefore permits ``--report`` only with ``--kind all``. The bounded
+    # OpenAI lane does not need a packet report for its one section packet.
+    if kind == "local":
+        args.extend(("--report", str(report)))
+    return args
 
 
 def _exercise_live_llm_analysis_contract(  # noqa: C901 approved [SC-17.1] RUFF-SUP-145 exception
@@ -1194,7 +1413,8 @@ def _exercise_live_llm_analysis_contract(  # noqa: C901 approved [SC-17.1] RUFF-
     *,
     kind: str,
     proxy: _CountingProxy | None,
-) -> None:
+    requested_model: str | None = None,
+) -> tuple[int, int]:
     local_config: _LocalConfig | None = None
     if kind == "local":
         assert proxy is not None
@@ -1216,6 +1436,11 @@ def _exercise_live_llm_analysis_contract(  # noqa: C901 approved [SC-17.1] RUFF-
 
     live_packets = tmp_path / "live-packets.jsonl"
     live_packet_report = tmp_path / "live-packet-report.json"
+    selection_packets = (
+        live_packets
+        if kind == "local"
+        else tmp_path / "qualification-preflight-packets.jsonl"
+    )
     analysis = tmp_path / "analysis.jsonl"
     analysis_report = tmp_path / "analysis-report.json"
     replay_analysis = tmp_path / "replay-analysis.jsonl"
@@ -1223,20 +1448,16 @@ def _exercise_live_llm_analysis_contract(  # noqa: C901 approved [SC-17.1] RUFF-
     report = tmp_path / "report.json"
 
     # 1. Generate a small source-aligned contract corpus through the real CLI.
-    packet_args = [
-        "packets",
-        *scan_args,
-        "--kind",
-        "all",
-        "--output",
-        str(live_packets),
-        "--report",
-        str(live_packet_report),
-    ]
+    packet_args = _live_packet_generation_args(
+        kind,
+        scan_args,
+        output=selection_packets,
+        report=live_packet_report,
+    )
     gen = _run_cli(*packet_args)
     _assert_no_traceback(gen, "packets")
     assert gen.returncode == 0, gen.stderr
-    all_text = live_packets.read_text(encoding="utf-8")
+    all_text = selection_packets.read_text(encoding="utf-8")
     assert all_text.strip(), "packets produced empty output"
 
     # 2. Build the bounded live subset in-process and write it out.
@@ -1245,11 +1466,11 @@ def _exercise_live_llm_analysis_contract(  # noqa: C901 approved [SC-17.1] RUFF-
     else:
         subset = _select_live_packets(
             all_text,
-            DEFAULT_LIVE_PACKETS,
+            1,
             require_semantic_owner=False,
         )
         assert subset, "live contract corpus produced no selectable section packet"
-        assert {packet["kind"] for packet in subset} == {"section", "suppression"}
+        assert {packet["kind"] for packet in subset} == {"section"}
     assert len(subset) <= MAX_LIVE_PACKETS
     if kind == "local":
         assert len(subset) >= 2, (
@@ -1264,10 +1485,24 @@ def _exercise_live_llm_analysis_contract(  # noqa: C901 approved [SC-17.1] RUFF-
     }
     expected_packet_ids = {str(packet["packet_id"]) for packet in subset}
     assert expected_packet_ids == generated_packet_ids
+    if kind == "openai":
+        assert len(subset) == 1
+        request_byte_count = len(
+            model_request_bytes(
+                subset[0],
+                instruction_bytes=prompt_instruction_bytes("section"),
+            )
+        )
+        _assert_openai_qualification_bounds(
+            provider_calls=2,
+            estimated_cost_microusd=(
+                _openai_qualification_estimated_cost_microusd(request_byte_count)
+            ),
+        )
 
     # Curated corpus validity is a precondition for provider activity. Resolve
     # and probe the model only after packet generation, selection, and bounds.
-    live_model = _resolve_live_model()
+    live_model = _resolve_live_model(requested_model)
     if local_config is not None:
         _assert_model_listed(local_config)
         _assert_local_transport(local_config)
@@ -1284,16 +1519,29 @@ def _exercise_live_llm_analysis_contract(  # noqa: C901 approved [SC-17.1] RUFF-
         ),
         encoding="utf-8",
     )
+    if kind == "local":
+        analyze_source_args = [
+            "--packets",
+            str(live_packets),
+            "--packet-report",
+            str(live_packet_report),
+        ]
+    else:
+        analyze_source_args = [
+            "--repo-root",
+            str(live_root),
+            "--packets-output",
+            str(live_packets),
+            "--packet-report-output",
+            str(live_packet_report),
+        ]
 
     # 3. Real provider call through the public analyze command.
     if proxy is not None:
         proxy.start_analyze_phase()
     ana = _run_cli(
         "analyze",
-        "--packets",
-        str(live_packets),
-        "--packet-report",
-        str(live_packet_report),
+        *analyze_source_args,
         "--model",
         live_model,
         "--concurrency",
@@ -1308,16 +1556,47 @@ def _exercise_live_llm_analysis_contract(  # noqa: C901 approved [SC-17.1] RUFF-
         "--report",
         str(analysis_report),
         label="analyze",
-        timeout=LOCAL_ANALYZE_TIMEOUT_SECONDS if kind == "local" else None,
+        timeout=(
+            LOCAL_ANALYZE_TIMEOUT_SECONDS
+            if kind == "local"
+            else OPENAI_QUALIFICATION_TIMEOUT_SECONDS
+        ),
     )
     if proxy is not None:
         proxy.stop_analyze_phase()
     _assert_no_traceback(ana, "analyze")
-    assert ana.returncode == 0, ana.stderr
+    if not analysis_report.is_file():
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "returncode": ana.returncode,
+                    "stderr": ana.stderr[-2_000:],
+                },
+                sort_keys=True,
+            )
+        )
+    if kind != "openai":
+        assert ana.returncode == 0, ana.stderr
     analysis_report_data = json.loads(analysis_report.read_text(encoding="utf-8"))
+    if kind == "openai" and (
+        ana.returncode != 0
+        or analysis_report_data["status"] != "complete"
+        or analysis_report_data["problems"]
+    ):
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "stderr": ana.stderr[-2_000:],
+                    "problems": analysis_report_data["problems"],
+                },
+                sort_keys=True,
+            )
+        )
     assert analysis_report_data["status"] == "complete"
     assert analysis_report_data["problems"] == []
     assert analysis_report_data["result_count"] == len(subset)
+    if kind == "openai":
+        assert analysis_report_data["provider_calls"] == 1
     if local_config is not None and proxy is not None:
         _assert_analyze_hit_local_endpoint(
             proxy,
@@ -1392,6 +1671,11 @@ def _exercise_live_llm_analysis_contract(  # noqa: C901 approved [SC-17.1] RUFF-
     errored = [row for row in raw_rows if "error" in row]
     strict = os.environ.get("BACKSTITCH_LIVE_LLM_STRICT") == "1"
     if kind == "openai" or strict:
+        if kind == "openai" and errored:
+            raise RuntimeError(
+                "live analysis rows carry error fields: "
+                + json.dumps(errored, sort_keys=True)[-2_000:]
+            )
         assert not errored, f"live analysis rows carry error fields: {errored}"
     else:
         non_error_count = sum(1 for row in raw_rows if "error" not in row)
@@ -1418,3 +1702,7 @@ def _exercise_live_llm_analysis_contract(  # noqa: C901 approved [SC-17.1] RUFF-
     # problems and still exits 0 when the report is valid.
     load = load_analysis_results(analysis_text, expected_packet_ids)
     assert load.errors == (), f"analysis load errors: {load.errors}"
+    return (
+        int(analysis_report_data["provider_calls"]),
+        int(analysis_report_data["estimated_cost_microusd"] or 0),
+    )

@@ -56,13 +56,14 @@ def test_self_corpus_suppressions_are_auditable() -> None:
     suppressed = data["suppressed_issues"]
     expected_counts = {
         "docs/specs/04-backstitch-traceability-exclusions.md#SUP-DOM-META": 15,
+        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-AT-PRIMER-META": 5,
         "docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-PROCESS": 2,
         "docs/specs/04-backstitch-traceability-exclusions.md#SUP-EVC-DEFERRED-MCP": 2,
         "docs/specs/04-backstitch-traceability-exclusions.md#SUP-DOCUMENTATION-META": 2,
         "docs/specs/04-backstitch-traceability-exclusions.md#SUP-RUFF-REGISTRY-SEMANTIC": 1,
         # T4 adds governed Ruff policy/spec backlinks while the test-only
         # citation policy keeps their non-owning trace records auditable.
-        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-TEST-CITATIONS": 238,
+        "docs/specs/04-backstitch-traceability-exclusions.md#SUP-TEST-CITATIONS": 240,
         "docs/specs/04-backstitch-traceability-exclusions.md#SUP-VERIFICATION-META": 7,
     }
     assert Counter(record["declaration"] for record in suppressed) == expected_counts
@@ -75,6 +76,11 @@ def test_self_corpus_suppressions_are_auditable() -> None:
             assert record["path"] == (
                 "docs/specs/01-development-documentation-operating-model.md"
             )
+        elif declaration.endswith("#SUP-AT-PRIMER-META"):
+            assert record["path"] == (
+                "docs/specs/09-agent-theory-and-program-theory.md"
+            )
+            assert record["code"] == "SPEC_SECTION_UNMAPPED"
         elif declaration.endswith("#SUP-EVC-PROCESS"):
             assert record["path"] == (
                 "docs/specs/07-verification-and-evidence-cases.md"
@@ -149,7 +155,7 @@ def test_dogfood_enables_documented_suppression_governance() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     config = json.loads(result.stdout)
     assert config["lint"]["require_suppression_declarations"] is True
-    assert len(config["lint"]["suppressions"]) == 4
+    assert len(config["lint"]["suppressions"]) == 5
     ruff_registry = next(
         item
         for item in config["lint"]["suppressions"]

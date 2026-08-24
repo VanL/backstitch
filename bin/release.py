@@ -78,6 +78,7 @@ LIVE_LLM_TEST_COMMAND: Final[tuple[str, ...]] = (
     "pytest",
     "tests/live/test_live_llm.py",
     "-q",
+    "-s",
 )
 LOCAL_LLM_TEST_COMMAND: Final[tuple[str, ...]] = (
     "uv",

@@ -60,9 +60,13 @@ def _fake_model(
     json_object: bool = True,
     model_name: str | None = None,
     model_id: str = "fake-model",
+    request_options: tuple[str, ...] = (),
 ) -> object:
     class Options:
-        model_fields = {"json_object": object()} if json_object else {}
+        model_fields = {
+            **({"json_object": object()} if json_object else {}),
+            **{name: object() for name in request_options},
+        }
 
     model = type(
         "FakeModel",
@@ -188,6 +192,7 @@ def test_doctor_checks_wrapper_against_frozen_capability(
             RequestFieldConstraint("required", (0.0,), None, None),
             RequestFieldConstraint("required", None, 0, 100),
             RequestFieldConstraint("required", None, 1, 1024),
+            RequestFieldConstraint("optional", ("max",), None, None),
         ),
         1_000_000,
     )
@@ -213,6 +218,64 @@ def test_doctor_checks_wrapper_against_frozen_capability(
     compatibility = _by_name(results)["json-mode"]
     assert compatibility.status == "fail"
     assert "temperature" in compatibility.detail
+
+
+def test_doctor_checks_only_present_optional_request_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_llm(
+        monkeypatch,
+        _fake_model(request_options=("max_tokens", "reasoning_effort")),
+    )
+    provider = ProviderIdentity(
+        "llm",
+        "openai",
+        "pkg:service/openai.com/fake",
+        "fake-v1",
+        "backstitch.llm",
+        4,
+        "0.33",
+        "llm",
+        "0.33",
+    )
+    capability = CapabilityDescriptor(
+        1,
+        "fake-v1",
+        provider.model_id,
+        provider.model_revision,
+        RequestConstraints(
+            RequestFieldConstraint("required", ("require",), None, None),
+            RequestFieldConstraint("forbidden", None, None, None),
+            RequestFieldConstraint("forbidden", None, None, None),
+            RequestFieldConstraint("required", None, 1, 1024),
+            RequestFieldConstraint("optional", ("max",), None, None),
+        ),
+        1_000_000,
+    )
+    inference = resolve_inference(
+        provider_identity=provider,
+        adapter_model_id="fake-model",
+        requested=EffectiveRequest("require", None, None, 512, "max"),
+        capability=capability,
+        capability_provenance=build_capability_provenance(
+            capability,
+            source="packaged:test",
+        ),
+        key_prefix="analyze",
+    )
+
+    compatibility = _by_name(
+        run_doctor(
+            "fake-model",
+            model_source="test",
+            probe=False,
+            inference=inference,
+        )
+    )["json-mode"]
+
+    assert compatibility.status == "pass"
+    assert "wrapper can serialize" in compatibility.detail
+    assert "provider acceptance requires live qualification" in compatibility.detail
 
 
 def test_unresolvable_model_fails_and_dependents_skip(
@@ -257,7 +320,7 @@ def test_present_credential_passes(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_credential_attached_to_model_passes_before_stored_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # llm 0.31's execution path honors a key already attached to the model
+    # llm's execution path honors a key already attached to the model
     # before stored/env lookup — doctor must match analyze's discovery, so
     # an attached key passes even when get_key finds nothing.
     model = cast(Any, _fake_model(needs_key="provider-alias"))

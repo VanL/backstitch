@@ -76,7 +76,8 @@ def _capability_descriptor_lines() -> list[str]:
             'allowed_values = ["require", "off"] }, '
             'temperature = { presence = "required", allowed_values = [0.0, 1.0] }, '
             'seed = { presence = "required", minimum = 0, maximum = 2147483647 }, '
-            'max_tokens = { presence = "required", minimum = 1, maximum = 16384 }'
+            'max_tokens = { presence = "required", minimum = 1, maximum = 16384 }, '
+            'reasoning_effort = { presence = "forbidden" }'
             " }"
         ),
     ]
@@ -669,6 +670,7 @@ def test_resolve_config_rejects_duplicate_and_dedicated_option_conflicts(
         ("analyze.model", '""', "model", ""),
         ("analyze.concurrency", "3", "concurrency", 3),
         ("analyze.temperature", "0.25", "temperature", 0.25),
+        ("analyze.reasoning_effort", '"max"', "reasoning_effort", "max"),
         (
             "analyze.required_kinds",
             '["suppression", "section"]',

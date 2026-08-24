@@ -887,8 +887,8 @@ the same complete/no-problem assertion.
 
 A test-owned local proxy may observe and record exact requests but may not
 inject controls, replace response format, retry a packet, or repair content.
-Provider-neutral temperature, seed, JSON mode, and token controls are production
-request settings under [SEM-3], not proxy patches. Local-endpoint automation on
+Provider-neutral temperature, seed, reasoning effort, JSON mode, and token
+controls are production request settings under [SEM-3], not proxy patches. Local-endpoint automation on
 forked pull requests remains disabled until a separate threat-model review.
 This optional live lane is distinct from [SEM-9]'s required cache replay, which
 cannot be disabled by an Actions variable.
@@ -1135,15 +1135,37 @@ Required proof surfaces:
   analyze, explicit analyze, and preflight must report the same preparation
   identity, debt count, canonical reason groups, bounded IDs, exact recovery
   command, and zero model calls
-- protected scheduled qualification and every release candidate exercise the
-  committed GPT-5.4-mini default and GPT-5.5 override through their production
-  stable/raw identity split. One event makes at most two generation calls
-  total, at most one per descriptor, and has a hard $0.10 USD estimated-cost
-  ceiling. A successful receipt is current for seven days; release requires a
-  compatible receipt no older than seven days for each descriptor. Receipts
-  are operational evidence and never enter cache identity. Provider
-  unavailability is recorded as `unavailable`, not `incompatible`; neither
-  outcome edits a descriptor or satisfies the release receipt gate
+- every release candidate runs protected live qualification for the complete
+  committed GPT-5.6 Luna default descriptor and the protected GPT-5.5
+  override through their production stable/raw selections. A change to a
+  selected model, model revision, effective request, capability descriptor,
+  adapter, provider dependency, or qualification logic requires the same
+  bounded qualification before the changed contract is treated as release-
+  ready. One qualification event makes at most two generation calls total and
+  at most one per descriptor, with a hard $0.10 USD estimated-cost ceiling.
+  The provider client disables automatic transport retries for these requests,
+  so the limit bounds wire attempts rather than only logical adapter calls.
+  Each accepted call is immediately replayed from immutable cache with zero
+  provider calls. Provider unavailability is reported as `unavailable`, not
+  `incompatible`. Exact-request serialization/rejection or a provider-accepted
+  response that fails Backstitch's closed normalizer is `incompatible`;
+  missing/rejected credentials, absent authorization, rate limiting,
+  transport failure, timeout, and provider 5xx are `unavailable`. Both block
+  release, as do local qualification setup and preflight errors. Neither
+  outcome edits a descriptor. Elapsed time and repository inactivity do not
+  invalidate a prior semantic evaluation and do not create a process
+  violation. Qualification is execution evidence for the current release
+  event; Backstitch does not define or persist a dated capability-receipt
+  artifact
+- one hermetic test using the real installed `llm` Responses adapter and a
+  test-owned HTTP transport proves the Luna request wire shape, exactly one
+  call, the independent closed response normalizer, and exactly one wire
+  attempt when the transport returns a retryable provider error
+- qualification tests fire for compatible, incompatible, and unavailable
+  outcomes, the two-call and $0.10 ceilings, zero-call replay, and the release
+  precheck's unconditional invocation; selected descriptor/request fixtures
+  prove that a changed current contract is the contract exercised, and no
+  wall-clock-age case exists
 - every implemented diagnostic code in the default registry has at least one
   test that proves it fires. Reserved codes may appear in the registry only
   with `status = "reserved"` and must not be accepted as emitted issue codes or
@@ -2109,6 +2131,9 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-08-23-gpt-5-6-luna-responses-plan.md`
+  (active implementation plan; request capabilities, Responses migration,
+  and release qualification)
 - `docs/plans/2026-08-05-ruff-complexity-and-suppression-registry-plan.md`
   (active implementation plan; [SC-17], [SC-17.1])
 - `docs/plans/2026-08-04-semantic-preparation-performance-plan.md`

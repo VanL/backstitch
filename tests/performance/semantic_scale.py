@@ -296,9 +296,10 @@ def _fixture_config(shape: ScaleShape) -> bytes:
         "maximum_input_bytes = 500000000\n"
         "request_constraints = { "
         'json_mode = { presence = "required", allowed_values = ["require"] }, '
-        'temperature = { presence = "required", allowed_values = [0.0] }, '
-        'seed = { presence = "required", minimum = 0, maximum = 2147483647 }, '
-        'max_tokens = { presence = "required", minimum = 1, maximum = 16384 }'
+        'temperature = { presence = "optional", allowed_values = [0.0] }, '
+        'seed = { presence = "optional", minimum = 0, maximum = 2147483647 }, '
+        'max_tokens = { presence = "required", minimum = 1, maximum = 16384 }, '
+        'reasoning_effort = { presence = "forbidden" }'
         " }\n"
         "input_cost_microusd_per_million_tokens = 0\n"
         "output_cost_microusd_per_million_tokens = 0\n"

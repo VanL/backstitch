@@ -178,7 +178,9 @@ _ANALYSIS_PROVIDER_FIELDS = frozenset(
         "plugin_distribution_version",
     }
 )
-_ANALYSIS_REQUEST_FIELDS = frozenset({"json_mode", "temperature", "seed", "max_tokens"})
+_ANALYSIS_REQUEST_FIELDS = frozenset(
+    {"json_mode", "temperature", "seed", "max_tokens", "reasoning_effort"}
+)
 _ANALYSIS_PROMPT_FIELDS = frozenset({"id", "version", "sha256"})
 _SELECTED_INFERENCE_FIELDS = frozenset(
     {
@@ -1445,7 +1447,9 @@ def _validate_verification_contract(value: object) -> dict[str, Any]:  # noqa: C
     ):
         raise AnalysisReportError("verification.provider is not canonical and nonblank")
     request_value = row["request"]
-    request_fields = frozenset({"json_mode", "temperature", "seed", "max_tokens"})
+    request_fields = frozenset(
+        {"json_mode", "temperature", "seed", "max_tokens", "reasoning_effort"}
+    )
     if not isinstance(request_value, dict) or not set(request_value) <= request_fields:
         raise AnalysisReportError(
             "verification.request has invalid closed request shape"

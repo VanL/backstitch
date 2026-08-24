@@ -147,7 +147,8 @@ def test_file_model_selection_matches_across_sources(tmp_path: Path) -> None:
                 'seed = { presence = "required", minimum = 0, '
                 "maximum = 2147483647 }, "
                 'max_tokens = { presence = "required", minimum = 1, '
-                "maximum = 16384 } }"
+                "maximum = 16384 }, "
+                'reasoning_effort = { presence = "forbidden" } }'
             ),
             "input_cost_microusd_per_million_tokens = 10",
             "output_cost_microusd_per_million_tokens = 20",

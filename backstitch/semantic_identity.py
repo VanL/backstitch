@@ -22,6 +22,19 @@ from backstitch.semantic_verification_contract import (
     verification_prompt_descriptor,
 )
 
+ReasoningEffort = Literal[
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+]
+REASONING_EFFORT_VALUES = frozenset(
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ProviderIdentity:
@@ -77,14 +90,16 @@ class RequestIdentity:
     """Closed identity projection of the exact provider request.
 
     ``None`` means that the trusted capability descriptor resolved the field
-    as absent.  The projection helper below omits absent fields rather than
-    relying on an adapter or provider default.
+    as absent. The projection helper below omits absent fields, making provider
+    default behavior an explicit descriptor-approved choice rather than an
+    adapter guess.
     """
 
     json_mode: Literal["require", "off"] | None = None
     temperature: float | None = None
     seed: int | None = None
     max_tokens: int | None = None
+    reasoning_effort: ReasoningEffort | None = None
 
     def __post_init__(self) -> None:
         if self.json_mode is not None and self.json_mode not in ("require", "off"):
@@ -110,6 +125,14 @@ class RequestIdentity:
             or self.max_tokens < 1
         ):
             raise ValueError("max_tokens must be a positive integer")
+        if self.reasoning_effort is not None and (
+            not isinstance(self.reasoning_effort, str)
+            or self.reasoning_effort not in REASONING_EFFORT_VALUES
+        ):
+            raise ValueError(
+                "reasoning_effort must be none, minimal, low, medium, high, xhigh, "
+                "or max"
+            )
 
     def to_dict(self) -> dict[str, object]:
         """Return the exact closed projection, omitting resolved-absent fields."""
@@ -121,6 +144,7 @@ class RequestIdentity:
                 ("temperature", self.temperature),
                 ("seed", self.seed),
                 ("max_tokens", self.max_tokens),
+                ("reasoning_effort", self.reasoning_effort),
             )
             if value is not None
         }
@@ -134,6 +158,7 @@ class EffectiveRequest:
     temperature: float | None = None
     seed: int | None = None
     max_tokens: int | None = None
+    reasoning_effort: ReasoningEffort | None = None
 
     def __post_init__(self) -> None:
         # Reuse the identity validator so request and identity cannot drift.
@@ -142,6 +167,7 @@ class EffectiveRequest:
             self.temperature,
             self.seed,
             self.max_tokens,
+            self.reasoning_effort,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -152,6 +178,7 @@ class EffectiveRequest:
                 ("temperature", self.temperature),
                 ("seed", self.seed),
                 ("max_tokens", self.max_tokens),
+                ("reasoning_effort", self.reasoning_effort),
             )
             if value is not None
         }
@@ -162,6 +189,7 @@ class EffectiveRequest:
             self.temperature,
             self.seed,
             self.max_tokens,
+            self.reasoning_effort,
         )
 
 
@@ -225,6 +253,7 @@ class RequestConstraints:
     temperature: RequestFieldConstraint
     seed: RequestFieldConstraint
     max_tokens: RequestFieldConstraint
+    reasoning_effort: RequestFieldConstraint
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,7 +300,13 @@ class CapabilityDescriptor:
             },
             "request_constraints": {
                 name: asdict(getattr(self.request_constraints, name))
-                for name in ("json_mode", "temperature", "seed", "max_tokens")
+                for name in (
+                    "json_mode",
+                    "temperature",
+                    "seed",
+                    "max_tokens",
+                    "reasoning_effort",
+                )
             },
             "maximum_input_bytes": self.maximum_input_bytes,
         }
@@ -377,7 +412,13 @@ def resolve_inference(
     """Validate capability, then freeze the exact request and its identity."""
 
     constraints = capability.request_constraints
-    for field_name in ("json_mode", "temperature", "seed", "max_tokens"):
+    for field_name in (
+        "json_mode",
+        "temperature",
+        "seed",
+        "max_tokens",
+        "reasoning_effort",
+    ):
         _validate_request_constraint(
             field_name,
             getattr(requested, field_name),
@@ -689,7 +730,7 @@ def resolve_provider_identity(
         model_id=model_id,
         model_revision=model_revision,
         adapter_id="backstitch.llm",
-        adapter_version=3,
+        adapter_version=4,
         llm_distribution_version=llm_version,
         plugin_distribution_name=plugin_distribution_name,
         plugin_distribution_version=plugin_version,

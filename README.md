@@ -356,7 +356,7 @@ defaults use `false`, so a repository must opt in. `"check"` is equivalent to
 a shell command or a list, and it cannot contain arguments. Arguments typed
 after `backstitch` are forwarded to the selected command. A leading path is
 `--repo-root` shorthand, so `backstitch .` works, and an analyze default accepts
-the usual flags such as `backstitch --model gpt-5.4-mini`. Set `false` in a
+the usual flags such as `backstitch --model gpt-5.6-luna`. Set `false` in a
 child config to disable an inherited default.
 
 Bare `"analyze"` has the same credential reads, cache writes, bounded provider
@@ -415,6 +415,16 @@ packet-derived response schema, but model output remains untrusted: Backstitch
 owns packet identity, validates structured rows and evidence locality, and
 contains malformed output per packet.
 
+The committed cloud default selects GPT-5.6 Luna through `llm` 0.33's OpenAI
+Responses adapter. Backstitch sends logical `max_tokens = 16384` and
+`reasoning_effort = "max"`; the adapter serializes those as
+`max_output_tokens` and `reasoning.effort`. Temperature and seed are absent.
+Optional request fields have no omission sentinel: an absent key accepts the
+provider default, while any present value is validated, identity-bearing, and
+frozen before the adapter applies provider wire spelling. The provider's JSON
+Schema envelope may use `strict = false`;
+Backstitch's closed, packet-local normalizer remains authoritative.
+
 Semantic verdicts can be stored in an immutable, content-addressed cache.
 `cache_mode = "read-write"` calls the provider only for misses; `"require"`
 forbids provider calls and fails on a miss. Cache identity includes the packet,
@@ -429,9 +439,13 @@ an ordinary miss under the newly selected model. Set
 `result_reuse = "exact-inference"` to require the selected provider's exact
 cache key, or change `search_epoch` to resample the evidence-stable decision.
 Reports preserve the original producing provider for carried results.
+Model age, provider qualification, and elapsed time do not invalidate an
+unchanged evidence-stable baseline. Release candidates qualify the exact
+current Luna and protected GPT-5.5 requests live; qualification is bounded
+event evidence, not a persisted or expiring Backstitch artifact.
 
 Trusted model descriptors use Model Monster `pkg:service` PURLs as stable
-identity, for example `pkg:service/openai.com/gpt-5.4-mini`. The separate
+identity, for example `pkg:service/openai.com/gpt-5.6-luna`. The separate
 `adapter_model_id` is the raw name passed to `llm`. `LLM_MODEL` and `--model`
 may select a trusted descriptor by its PURL or by an unambiguous adapter model
 ID; provider identity remains the PURL.

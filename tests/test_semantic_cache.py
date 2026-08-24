@@ -275,6 +275,36 @@ def test_read_write_publishes_exact_canonical_packet_and_result_objects(
     assert result_path.read_bytes() == canonical_json_bytes(result_object)
 
 
+def test_reasoning_effort_is_part_of_closed_cache_identity_and_replay(
+    tmp_path: Path,
+) -> None:
+    cache_path = tmp_path / "cache"
+    request = replace(REQUEST, reasoning_effort="max")
+
+    populated = _run(
+        cache_path,
+        (_validated(),),
+        request_identity=request,
+    )
+    replay = _run(
+        cache_path,
+        (_validated(),),
+        cache_mode="require",
+        request_identity=request,
+    )
+
+    assert populated.problems == ()
+    assert populated.provider_calls == 1
+    assert replay.problems == ()
+    assert replay.cache_hits == 1
+    assert replay.provider_calls == 0
+    identity = build_inference_identity(_packet(), PROVIDER, request)
+    cached = json.loads(
+        (cache_path / "results" / f"{identity.analysis_key}.json").read_bytes()
+    )
+    assert cached["inference_contract"]["request"]["reasoning_effort"] == "max"
+
+
 def test_evidence_stable_preparation_backfills_and_carries_immutable_baseline(
     tmp_path: Path,
 ) -> None:

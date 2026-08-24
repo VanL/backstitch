@@ -317,8 +317,8 @@ another filesystem operation; physical symlink and no-follow enforcement
 belongs to repository capture. Given equal defaults, environment, and layer
 bytes with no CLI overlay, both adapters yield equal non-operational settings
 and identical profile-root containment. Operational output, cache,
-qualification-artifact, and target-root addresses may differ only in adapter
-normalization: the filesystem adapter may preserve its physical
+verification-evaluation-report, and target-root addresses may differ only in
+adapter normalization: the filesystem adapter may preserve its physical
 canonicalization, while the blob adapter validates and normalizes them
 lexically because they are not historical gate authority. Operational source
 provenance may also differ. Blob-backed resolution never consults the checkout
@@ -366,6 +366,11 @@ The analyze descriptor leaves `backend_id`, `plugin_id`,
 selectors and conflict under the ordinary same-key rule. Either selects one
 complete trusted descriptor; no CLI form constructs or partially edits a
 descriptor.
+
+`analyze.reasoning_effort` and `verify.reasoning_effort` are ordinary known
+request-value leaves, not descriptor leaves. A trusted static option such as
+`--option analyze.reasoning_effort '"max"'` may set one under the same scalar
+precedence and same-key conflict rules as the other request settings.
 
 Every leaf below `verify.provider` is likewise reserved from generic
 `--option`, including `backend_id`, `plugin_id`,
@@ -581,24 +586,38 @@ complete provider request, not the aggregate corpus prompt budget. A request
 larger than that ceiling fails before credential access or a provider call.
 
 `request_constraints` is a closed mapping with exactly `json_mode`,
-`temperature`, `seed`, and `max_tokens`. Each authored TOML value is a closed
-record containing `presence` plus only its applicable constraint keys.
-`presence` is `required`, `optional`, or `forbidden`. `json_mode` uses
-nonempty duplicate-free `allowed_values` drawn from `require` and `off`;
-configured `prefer` is a resolution instruction and must resolve to one of
-those effective wire values before validation. `temperature` uses nonempty
-duplicate-free finite-number `allowed_values`; `seed` and `max_tokens` use
-integer `minimum` and `maximum`, with minimum no greater than maximum. An
+`temperature`, `seed`, `max_tokens`, and `reasoning_effort`. Each authored
+TOML value is a closed record containing `presence` plus only its applicable
+constraint keys. `presence` is `required`, `optional`, or `forbidden`.
+`json_mode` uses nonempty duplicate-free `allowed_values` drawn from
+`require` and `off`; configured `prefer` is a resolution instruction and must
+resolve to one of those effective wire values before validation. `temperature`
+uses nonempty duplicate-free finite-number `allowed_values`. `seed` and
+`max_tokens` use integer `minimum` and `maximum`, with minimum no greater than
+maximum. `reasoning_effort` uses nonempty duplicate-free `allowed_values`
+drawn from `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. An
 allowed-value constraint omits both bounds. A range constraint omits
 `allowed_values`. A forbidden field omits all three constraint members.
-Unknown or inapplicable authored keys are invalid. The resolver expands the
-authored TOML into [SEM-3]'s exact runtime record by inserting null for every
-omitted inapplicable member. Thus TOML does not need a null literal and the
-normalized descriptor still has one closed canonical shape. A required field
-must be present in the frozen effective request; a forbidden field must be
-absent; an optional field is validated when present. Backstitch validates but
-never silently corrects, adds, or removes an explicitly configured
-incompatible value.
+Unknown or inapplicable authored keys are invalid. The resolver expands
+authored TOML into [SEM-3]'s one exact runtime record by inserting null for
+every omitted inapplicable member. Thus TOML needs no null literal and the
+normalized descriptor has one closed canonical shape. A required field must
+be present in the frozen effective request; a forbidden field must be absent;
+an optional field is validated when present. Backstitch validates but never
+silently corrects, adds, or removes an explicitly configured incompatible
+value.
+
+`json_mode` and `max_tokens` are required request settings in analyze and an
+enabled verifier. `temperature`, `seed`, and `reasoning_effort` are optional
+request settings. When no effective config layer supplies an optional setting,
+it is absent from `EffectiveRequest`, `RequestIdentity`, and the provider
+request. Absence of `reasoning_effort` accepts the provider default; no
+sentinel value represents omission. Ordinary scalar precedence applies when a
+layer supplies an optional value. Because this schema has no deletion
+sentinel, a child config cannot erase an optional value inherited through
+`extend`; it must stop extending that source or the inherited value must
+satisfy the newly selected descriptor. An incompatible inherited value fails
+with its exact config key before provider work.
 
 `adapter_model_id` is the analyzer's raw transport selector and resolves to
 `analyzer_model_id`; it never replaces the catalog PURL's stable
@@ -694,7 +713,7 @@ enabled base-table key required by [EVC-5], the provider table required by
 `[verify.eval]` table. Partial dormant tables are invalid. Dormant fields
 receive the same unknown-key, type, range, nonblank, provider-identity, cost,
 path, and internal cross-field validation as enabled fields, while disabled
-verification performs no adapter construction, qualification-artifact load,
+verification performs no adapter construction, evaluation-corpus/report load,
 cache access, or provider call. CLI layers apply before final shape
 validation, so `--option verify.enabled true` can activate a dormant complete
 table but makes a minimal disabled table fail for missing required keys.
@@ -708,8 +727,9 @@ canonical-PURL `model`, nonblank raw `adapter_model_id`, `model_revision`,
 `maximum_input_bytes`, both cost-rate fields, `input_token_overhead`, and
 `cost_rate_source`. Its authored capability constraints use [CFG-6.5]'s
 concise TOML form and normalize to [SEM-3]'s closed null-bearing runtime
-record. If any group member is present, every member must be present in that
-same file layer. The group replaces an inherited override as a unit; partial
+record; the `request_constraints` child set contains exactly the five fields
+defined in [CFG-6.5]. If any group member is present, every member must be
+present in that same file layer. The group replaces an inherited override as a unit; partial
 inheritance, unknown or blank members, and generic-option edits are exit `2`.
 This is a strict backward break for prior override tables with the historical
 raw `model` spelling or without capability fields; Backstitch does not guess
@@ -1262,6 +1282,9 @@ Implementation must update:
 
 ## Related Plans
 
+- `docs/plans/2026-08-23-gpt-5-6-luna-responses-plan.md`
+  (active implementation plan; request capabilities, Responses migration,
+  and release qualification)
 - `docs/plans/2026-07-29-usability-remediation-plan.md`
   (active usability implementation plan; [CFG-5.1] and [CFG-6.5])
 - `docs/plans/2026-07-29-architecture-quality-remediation-plan.md`

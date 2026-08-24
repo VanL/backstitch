@@ -123,6 +123,14 @@ def test_precheck_commands_match_release_contract() -> None:
         "-m",
         "benchmark",
     )
+    assert release.LIVE_LLM_TEST_COMMAND == (
+        "uv",
+        "run",
+        "pytest",
+        "tests/live/test_live_llm.py",
+        "-q",
+        "-s",
+    )
     assert release.RUFF_CHECK_COMMAND == (
         "uv",
         "run",
@@ -155,6 +163,40 @@ def test_precheck_commands_match_release_contract() -> None:
         release.MYPY_COMMAND,
         release.SELF_CORPUS_COMMAND,
     )
+
+
+def test_precheck_propagates_protected_live_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+
+    def fake_run_command(
+        command: tuple[str, ...],
+        *,
+        cwd: Path = release.PROJECT_ROOT,
+        dry_run: bool = False,
+        env_overrides: dict[str, str] | None = None,
+    ) -> None:
+        assert cwd == release.PROJECT_ROOT
+        assert dry_run is False
+        commands.append(command)
+        if command == release.LIVE_LLM_TEST_COMMAND:
+            assert env_overrides == {
+                "PYTEST_ADDOPTS": "-x --maxfail=1",
+                "BACKSTITCH_LIVE_LLM": "1",
+                "BACKSTITCH_LIVE_LLM_KIND": "openai",
+            }
+            raise subprocess.CalledProcessError(7, command)
+
+    monkeypatch.setattr(release, "_start_local_llm_prewarm", lambda **_kwargs: None)
+    monkeypatch.setattr(release, "run_command", fake_run_command)
+
+    with pytest.raises(subprocess.CalledProcessError) as excinfo:
+        release.run_precheck_commands()
+
+    assert excinfo.value.returncode == 7
+    assert commands[-1] == release.LIVE_LLM_TEST_COMMAND
+    assert release.LOCAL_LLM_TEST_COMMAND not in commands
 
 
 def test_benchmark_precheck_disables_ambient_xdist(

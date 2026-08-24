@@ -619,6 +619,7 @@ def _verification_contract() -> dict[str, Any]:
             "temperature": 0.0,
             "seed": 42,
             "max_tokens": 512,
+            "reasoning_effort": "max",
         },
         "search_epochs": ["1"],
         "required_verdicts": 1,

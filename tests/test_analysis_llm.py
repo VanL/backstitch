@@ -6,9 +6,11 @@ Spec: docs/specs/06-semantic-gates.md [SEM-3]
 
 from __future__ import annotations
 
+import http.server
 import json
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any, cast
 
@@ -19,10 +21,13 @@ from backstitch.analysis_llm import (
     _semantic_response_schema,
     default_provider_adapter,
 )
+from backstitch.semantic_analysis import resolve_semantic_settings
+from backstitch.semantic_evidence import SemanticResultError, normalize_model_result
 from backstitch.semantic_identity import (
     CapabilityDescriptor,
     EffectiveRequest,
     ProviderIdentity,
+    ReasoningEffort,
     RequestConstraints,
     RequestFieldConstraint,
     RequestIdentity,
@@ -36,8 +41,10 @@ from backstitch.semantic_packets import (
     semantic_packet_hash,
     semantic_packet_projection,
 )
+from backstitch.settings import resolve_config
 
 HERMETIC_MODEL = "backstitch-hermetic-model-that-must-not-exist"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _section_packet() -> dict[str, Any]:
@@ -85,6 +92,7 @@ def _resolved_inference(
     *,
     adapter_model_id: str,
     temperature: float | None = 0.0,
+    reasoning_effort: ReasoningEffort | None = None,
 ) -> ResolvedInference:
     constraints = RequestConstraints(
         json_mode=RequestFieldConstraint("required", ("require",), None, None),
@@ -95,6 +103,11 @@ def _resolved_inference(
         ),
         seed=RequestFieldConstraint("required", None, 0, 2**31 - 1),
         max_tokens=RequestFieldConstraint("required", None, 1, 16_384),
+        reasoning_effort=(
+            RequestFieldConstraint("forbidden", None, None, None)
+            if reasoning_effort is None
+            else RequestFieldConstraint("required", (reasoning_effort,), None, None)
+        ),
     )
     capability = CapabilityDescriptor(
         1,
@@ -112,6 +125,7 @@ def _resolved_inference(
             temperature=temperature,
             seed=42,
             max_tokens=256,
+            reasoning_effort=reasoning_effort,
         ),
         capability=capability,
         capability_provenance=build_capability_provenance(
@@ -168,6 +182,32 @@ def test_openai_reasoning_model_uses_max_completion_tokens_on_the_wire() -> None
     }
 
 
+def test_openai_responses_model_does_not_receive_chat_completion_shim() -> None:
+    from llm.default_plugins.openai_models import Responses
+
+    model = Responses("gpt-5.6-luna")
+    provider = ProviderIdentity(
+        "llm",
+        "openai",
+        "pkg:service/openai.com/gpt-5.6-luna",
+        "gpt-5.6-luna",
+        "backstitch.llm",
+        4,
+        "0.33",
+        "llm",
+        "0.33",
+    )
+    original_build_kwargs = model.build_kwargs
+
+    _install_completion_limit_shim(
+        model,
+        provider,
+        adapter_model_id="gpt-5.6-luna",
+    )
+
+    assert model.build_kwargs == original_build_kwargs
+
+
 def test_provider_adapter_sends_exact_request_and_closed_provenance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -202,6 +242,7 @@ def test_provider_adapter_sends_exact_request_and_closed_provenance(
                 "temperature": object(),
                 "seed": object(),
                 "max_tokens": object(),
+                "reasoning_effort": object(),
             }
 
         def prompt(self, text: str, **options: object) -> _Response:
@@ -209,7 +250,7 @@ def test_provider_adapter_sends_exact_request_and_closed_provenance(
             return _Response()
 
     monkeypatch.setattr(llm, "get_model", lambda *args: _Model())
-    request = RequestIdentity("require", 0.0, 42, 256)
+    request = RequestIdentity("require", 0.0, 42, 256, "max")
     adapter = default_provider_adapter(
         "declared-model",
         provider_identity=_provider(),
@@ -245,8 +286,168 @@ def test_provider_adapter_sends_exact_request_and_closed_provenance(
     assert prompts[0][1]["temperature"] == 0.0
     assert prompts[0][1]["seed"] == 42
     assert prompts[0][1]["max_tokens"] == 256
+    assert prompts[0][1]["reasoning_effort"] == "max"
     assert "schema" in prompts[0][1]
     assert "json_object" not in prompts[0][1]
+
+
+def test_real_llm_responses_wire_shape_and_closed_normalizer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[SC-10]: prove the real wrapper wire path with only HTTP faked."""
+
+    import llm
+
+    packet = _section_packet()
+    requirement = semantic_packet_projection(packet)["evidence_regions"][0]
+    model_response = {
+        "packet_id": packet["packet_id"],
+        "classification": "ambiguous",
+        "confidence": 0.8,
+        "rationale": "The bounded evidence does not settle the requirement.",
+        "evidence": [requirement],
+        "summary": "Evidence remains ambiguous.",
+    }
+    requests: list[tuple[str, dict[str, Any]]] = []
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - stdlib hook name
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            body = json.loads(self.rfile.read(length))
+            requests.append((self.path, body))
+            event = {
+                "type": "response.output_text.delta",
+                "sequence_number": 1,
+                "item_id": "msg_backstitch",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": json.dumps(model_response, separators=(",", ":")),
+                "logprobs": [],
+            }
+            payload = (f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setenv(
+            "OPENAI_BASE_URL", f"http://127.0.0.1:{server.server_port}/v1"
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "test-owned-no-network-key")
+        model = llm.get_model("gpt-5.6-luna")
+        assert (
+            f"{type(model).__module__}.{type(model).__qualname__}"
+            == "llm.default_plugins.openai_models.Responses"
+        )
+
+        settings = resolve_config(REPO_ROOT, environment={}).analyze
+        resolved = resolve_semantic_settings(settings)
+        assert resolved.inference is not None
+        assert (
+            resolved.inference.capability.request_constraints.temperature.presence
+            == ("forbidden")
+        )
+        result = default_provider_adapter(resolved.inference)(_prompt(packet))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert len(requests) == 1
+    path, body = requests[0]
+    assert path == "/v1/responses"
+    assert body["model"] == "gpt-5.6-luna"
+    assert body["max_output_tokens"] == 16_384
+    assert "max_tokens" not in body
+    assert "max_completion_tokens" not in body
+    assert body["reasoning"] == {"effort": "max"}
+    assert "summary" not in body["reasoning"]
+    assert "temperature" not in body
+    assert "seed" not in body
+    assert body["store"] is False
+    response_format = body["text"]["format"]
+    assert response_format["schema"] == _semantic_response_schema(_prompt(packet))
+    assert response_format["strict"] is False
+
+    parsed = json.loads(result.raw_response)
+    normalized = normalize_model_result(packet, parsed, analysis_key="a" * 64)
+    assert normalized.packet_id == packet["packet_id"]
+
+    with pytest.raises(SemanticResultError, match="closed schema"):
+        normalize_model_result(
+            packet,
+            {**parsed, "unexpected": True},
+            analysis_key="a" * 64,
+        )
+    outside = json.loads(json.dumps(parsed))
+    outside["evidence"][0]["path"] = "outside.py"
+    with pytest.raises(SemanticResultError):
+        normalize_model_result(packet, outside, analysis_key="a" * 64)
+    assert len(requests) == 1
+
+
+def test_real_llm_responses_disables_sdk_transport_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[SC-10]: one logical qualification call is one HTTP attempt."""
+
+    import openai
+
+    request_count = 0
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - stdlib hook name
+            nonlocal request_count
+            request_count += 1
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            self.rfile.read(length)
+            payload = json.dumps(
+                {
+                    "error": {
+                        "message": "test-owned unavailable response",
+                        "type": "server_error",
+                        "code": "server_error",
+                    }
+                }
+            ).encode()
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setenv(
+            "OPENAI_BASE_URL", f"http://127.0.0.1:{server.server_port}/v1"
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "test-owned-no-network-key")
+        settings = resolve_config(REPO_ROOT, environment={}).analyze
+        resolved = resolve_semantic_settings(settings)
+        assert resolved.inference is not None
+        adapter = default_provider_adapter(resolved.inference)
+
+        with pytest.raises(openai.InternalServerError):
+            adapter(_prompt(_section_packet()))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert request_count == 1
 
 
 def test_provider_adapter_uses_raw_transport_without_replacing_stable_identity(

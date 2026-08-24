@@ -10,6 +10,7 @@ Plan: docs/plans/2026-07-02-backstitch-four-way-reconciliation-plan.md
 Plan: docs/plans/2026-07-07-tree-sitter-code-parser-plan.md
 Plan: docs/plans/2026-07-28-configured-default-command-plan.md
 Plan: docs/plans/2026-07-29-architecture-quality-remediation-plan.md
+Plan: docs/plans/2026-08-23-gpt-5-6-luna-responses-plan.md
 
 This document explains why the reconciled implementation is shaped the way
 it is — boundaries, tradeoffs, and provenance — not a narration of the code.
@@ -241,12 +242,23 @@ committed repository overlay. Choices and their reasons:
   secret-bearing workflows still invoke `analyze` and trusted config
   explicitly.
 - The analyzer identity is the Model Monster service PURL
-  `pkg:service/openai.com/gpt-5.4-mini`; `adapter_model_id = "gpt-5.4-mini"`
-  is only the raw `llm` transport name. The repository uses `read-write` with
-  evidence-stable reuse: unchanged evidence keeps the immutable first-writer
-  result and changed evidence calls the currently selected model. Review locks
-  are acquired for the complete run in lexical order and remain held through
-  qualification and budget preflight.
+  `pkg:service/openai.com/gpt-5.6-luna`; `adapter_model_id = "gpt-5.6-luna"`
+  is only the raw `llm` transport name. The committed request uses the OpenAI
+  Responses path with logical `max_tokens = 16384` and
+  `reasoning_effort = "max"`; `llm` owns their wire translation to
+  `max_output_tokens` and `reasoning.effort`. Temperature and seed are absent.
+  Optional request-field absence is frozen before adapter construction, enters
+  neither the request projection nor the wire body, and means accepting the
+  provider default. The repository uses `read-write` with evidence-stable
+  reuse: unchanged evidence keeps the immutable first-writer result even when
+  model selection or time changes, while changed evidence calls the currently
+  selected model. Review locks are acquired for the complete run in lexical
+  order and remain held through qualification and budget preflight.
+- Release qualification runs the exact current Luna and protected GPT-5.5
+  selections as a bounded release-candidate event. It writes no dated
+  capability receipt. Compatible, incompatible, unavailable, and local
+  preflight outcomes are process evidence only; time and repository inactivity
+  do not alter semantic cache identity or invalidate an evidence-stable result.
 - `extend_exclude` (never bare `exclude`): the packaged defaults already exclude
   `.worktrees`; replacing them would scan four archived bake-off
   implementations into the corpus.

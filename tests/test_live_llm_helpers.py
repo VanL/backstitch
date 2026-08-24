@@ -37,27 +37,229 @@ live_llm = _load_live_module()
 
 
 @pytest.mark.parametrize(
+    ("error", "category"),
+    (
+        (RuntimeError("Error code: 400"), "incompatible"),
+        (RuntimeError("HTTP 404"), "incompatible"),
+        (RuntimeError("HTTP 422"), "incompatible"),
+        (RuntimeError("model output normalization failed"), "incompatible"),
+        (RuntimeError("missing credential"), "unavailable"),
+        (RuntimeError("Error code: 401"), "unavailable"),
+        (RuntimeError("HTTP 403"), "unavailable"),
+        (RuntimeError("rate limit"), "unavailable"),
+        (RuntimeError("connection timed out"), "unavailable"),
+        (RuntimeError("DNS resolution failed"), "unavailable"),
+        (RuntimeError("TLS handshake failed"), "unavailable"),
+        (RuntimeError("HTTP 503"), "unavailable"),
+        (
+            RuntimeError(
+                "provider request incompatible: cannot prove hide_reasoning support"
+            ),
+            "incompatible",
+        ),
+        (
+            RuntimeError(
+                "provider request incompatible: does not support "
+                "schema-constrained output"
+            ),
+            "incompatible",
+        ),
+        (RuntimeError("invalid descriptor"), "qualification error"),
+        (RuntimeError("corrupt cache object"), "qualification error"),
+        (RuntimeError("bad fixture"), "qualification error"),
+    ),
+)
+def test_openai_qualification_failure_categories(
+    error: BaseException,
+    category: str,
+) -> None:
+    actual, reason = live_llm._qualification_failure_category(error)
+
+    assert actual == category
+    assert reason
+    assert str(error) not in reason
+
+
+def test_openai_qualification_bounds_and_selection_labels() -> None:
+    bounded_cost = live_llm._openai_qualification_estimated_cost_microusd(1_000)
+    live_llm._assert_openai_qualification_bounds(
+        provider_calls=2,
+        estimated_cost_microusd=bounded_cost,
+    )
+    assert bounded_cost <= 100_000
+    oversized_cost = live_llm._openai_qualification_estimated_cost_microusd(100_000)
+    assert oversized_cost > 100_000
+
+    with pytest.raises(ValueError, match="two-call"):
+        live_llm._assert_openai_qualification_bounds(
+            provider_calls=3,
+            estimated_cost_microusd=100_000,
+        )
+    with pytest.raises(ValueError, match=r"\$0\.10"):
+        live_llm._assert_openai_qualification_bounds(
+            provider_calls=2,
+            estimated_cost_microusd=100_001,
+        )
+    assert live_llm.OPENAI_QUALIFICATION_MODELS == (
+        "gpt-5.6-luna",
+        "gpt-5.5-2026-04-23",
+    )
+    assert live_llm._qualification_selection_label("gpt-5.6-luna") == (
+        "pkg:service/openai.com/gpt-5.6-luna / gpt-5.6-luna"
+    )
+
+
+def test_live_packet_generation_respects_report_kind_contract(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "packets.jsonl"
+    report = tmp_path / "packet-report.json"
+
+    assert live_llm._live_packet_generation_args(
+        "local",
+        ["--repo-root", str(tmp_path)],
+        output=output,
+        report=report,
+    ) == [
+        "packets",
+        "--repo-root",
+        str(tmp_path),
+        "--kind",
+        "all",
+        "--output",
+        str(output),
+        "--report",
+        str(report),
+    ]
+    assert live_llm._live_packet_generation_args(
+        "openai",
+        ["--repo-root", str(tmp_path)],
+        output=output,
+        report=report,
+    ) == [
+        "packets",
+        "--repo-root",
+        str(tmp_path),
+        "--kind",
+        "section",
+        "--output",
+        str(output),
+    ]
+
+
+def test_openai_qualification_requires_both_exact_selections() -> None:
+    seen: list[str] = []
+
+    def compatible(model_name: str) -> tuple[int, int]:
+        seen.append(model_name)
+        return 1, 25_000
+
+    messages = live_llm._run_openai_qualifications(compatible)
+
+    assert tuple(seen) == live_llm.OPENAI_QUALIFICATION_MODELS
+    assert messages == (
+        "compatible: pkg:service/openai.com/gpt-5.6-luna / gpt-5.6-luna",
+        "compatible: pkg:service/openai.com/gpt-5.5 / gpt-5.5-2026-04-23",
+    )
+
+
+@pytest.mark.parametrize(
+    ("error", "prefix"),
+    (
+        (RuntimeError("HTTP 400"), "incompatible:"),
+        (RuntimeError("connection timeout"), "unavailable:"),
+        (RuntimeError("fixture broke"), "qualification error:"),
+    ),
+)
+def test_openai_qualification_blocks_with_bounded_categorized_message(
+    error: Exception,
+    prefix: str,
+) -> None:
+    def fail(_model_name: str) -> tuple[int, int]:
+        raise error
+
+    with pytest.raises(live_llm._QualificationProcessFailure) as excinfo:
+        live_llm._run_openai_qualifications(fail)
+
+    message = str(excinfo.value)
+    assert message.startswith(prefix)
+    assert "pkg:service/openai.com/gpt-5.6-luna / gpt-5.6-luna" in message
+    assert str(error) not in message
+
+
+def test_openai_qualification_blocks_if_second_descriptor_or_budget_fails() -> None:
+    attempts: list[str] = []
+
+    def second_unavailable(model_name: str) -> tuple[int, int]:
+        attempts.append(model_name)
+        if model_name == "gpt-5.5-2026-04-23":
+            raise RuntimeError("missing credential")
+        return 1, 25_000
+
+    with pytest.raises(
+        live_llm._QualificationProcessFailure,
+        match=r"^unavailable: pkg:service/openai\.com/gpt-5\.5 /",
+    ):
+        live_llm._run_openai_qualifications(second_unavailable)
+    assert attempts == list(live_llm.OPENAI_QUALIFICATION_MODELS)
+
+    with pytest.raises(
+        live_llm._QualificationProcessFailure,
+        match=r"^qualification error:.*budget preflight failed",
+    ):
+        live_llm._run_openai_qualifications(lambda _model: (1, 100_001))
+
+    with pytest.raises(
+        live_llm._QualificationProcessFailure,
+        match=r"^qualification error:.*exactly one provider call",
+    ):
+        live_llm._run_openai_qualifications(lambda _model: (0, 0))
+
+
+def test_openai_qualification_categorizes_invalid_selected_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(live_llm, "OPENAI_QUALIFICATION_MODELS", ("unknown-model",))
+
+    def invalid_descriptor(model_name: str) -> tuple[int, int]:
+        live_llm._live_descriptor_lines(
+            kind="openai",
+            adapter_model_id=model_name,
+        )
+        raise AssertionError("invalid descriptor construction unexpectedly returned")
+
+    with pytest.raises(
+        live_llm._QualificationProcessFailure,
+        match=(
+            r"^qualification error: stable model unavailable / unknown-model "
+            r"\(local qualification setup or preflight failed\)$"
+        ),
+    ):
+        live_llm._run_openai_qualifications(invalid_descriptor)
+
+
+@pytest.mark.parametrize(
     (
         "adapter_model_id",
         "stable_model_id",
-        "temperature",
+        "reasoning_effort",
         "max_tokens",
         "input_rate",
         "output_rate",
     ),
     (
         (
-            "gpt-5.4-mini-2026-03-17",
-            "pkg:service/openai.com/gpt-5.4-mini",
-            0.0,
-            512,
-            750_000,
-            4_500_000,
+            "gpt-5.6-luna",
+            "pkg:service/openai.com/gpt-5.6-luna",
+            "max",
+            16_384,
+            400_000,
+            1_800_000,
         ),
         (
             "gpt-5.5-2026-04-23",
             "pkg:service/openai.com/gpt-5.5",
-            1.0,
+            None,
             1_024,
             5_000_000,
             30_000_000,
@@ -68,7 +270,7 @@ def test_cloud_live_descriptor_is_complete_and_costed(
     tmp_path: Path,
     adapter_model_id: str,
     stable_model_id: str,
-    temperature: float,
+    reasoning_effort: str | None,
     max_tokens: int,
     input_rate: int,
     output_rate: int,
@@ -97,15 +299,59 @@ def test_cloud_live_descriptor_is_complete_and_costed(
     assert analyze.plugin_id == "openai"
     assert analyze.model_revision == adapter_model_id
     assert analyze.capability_schema_version == 1
-    assert analyze.capability_revision
+    assert (
+        analyze.capability_revision
+        == {
+            "gpt-5.6-luna": "openai-gpt-5.6-luna-2026-08-23",
+            "gpt-5.5-2026-04-23": "openai-gpt-5.5-responses-2026-08-23",
+        }[adapter_model_id]
+    )
     assert analyze.maximum_input_bytes == 1_600_000
-    assert analyze.temperature == temperature
+    assert analyze.temperature is None
+    assert analyze.seed is None
+    assert analyze.reasoning_effort == reasoning_effort
     assert analyze.max_tokens == max_tokens
-    assert analyze.request_constraints.temperature.allowed_values == (temperature,)
+    assert analyze.request_constraints.temperature.presence == "forbidden"
+    assert analyze.request_constraints.seed.presence == "forbidden"
+    assert analyze.request_constraints.reasoning_effort.presence == (
+        "optional" if reasoning_effort is not None else "forbidden"
+    )
+    assert analyze.request_constraints.reasoning_effort.allowed_values == (
+        ("max",) if reasoning_effort is not None else None
+    )
     assert analyze.maximum_estimated_cost_microusd == 100_000
+    assert analyze.required_kinds == ("section",)
+    assert analyze.minimum_packets == 1
+    assert analyze.maximum_packets == 1
+    assert analyze.maximum_provider_calls == 1
     assert analyze.input_cost_microusd_per_million_tokens == input_rate
     assert analyze.output_cost_microusd_per_million_tokens == output_rate
     assert analyze.cost_rate_source
+
+
+def test_local_live_descriptor_keeps_controls_and_forbids_reasoning(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / ".backstitch.toml"
+    descriptor = live_llm._live_descriptor_lines(
+        kind="local",
+        adapter_model_id="backstitch-local",
+    )
+    config.write_text(
+        "[analyze]\n"
+        + "\n".join(descriptor)
+        + '\njson_mode = "require"\n'
+        + 'cache_path = ".backstitch/semantic-cache"\n',
+        encoding="utf-8",
+    )
+
+    analyze = resolve_config(tmp_path, explicit=config, environment={}).analyze
+
+    assert analyze.temperature == 0
+    assert analyze.seed == 42
+    assert analyze.max_tokens == 128
+    assert analyze.reasoning_effort is None
+    assert analyze.request_constraints.reasoning_effort.presence == "forbidden"
 
 
 def _local_packet(packet_id: str) -> dict[str, object]:
@@ -1075,7 +1321,6 @@ def test_local_live_packet_selector_matches_real_contract_corpus(
         check=False,
     )
     assert result.returncode == 0, result.stderr
-
     selected = live_llm._select_local_live_packets(
         packets_path.read_text(encoding="utf-8")
     )
@@ -1084,6 +1329,214 @@ def test_local_live_packet_selector_matches_real_contract_corpus(
         "invariant::INV.RES.1",
         "invariant::INV.RES.2",
     )
+
+
+def test_openai_live_contract_is_ready_in_current_preflight(
+    tmp_path: Path,
+) -> None:
+    contract_root = live_llm._write_live_contract_repo(
+        tmp_path / "contract",
+        kind="openai",
+    )
+    config = contract_root / ".backstitch.toml"
+    descriptor = live_llm._live_descriptor_lines(
+        kind="openai",
+        adapter_model_id="gpt-5.6-luna",
+    )
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "[analyze]\n",
+            "[analyze]\n" + "\n".join(descriptor) + "\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "backstitch",
+            "analyze",
+            "--repo-root",
+            str(contract_root),
+            "--preflight",
+            "--format",
+            "json",
+            "--config",
+            str(config),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    prepared = json.loads(result.stdout)
+    assert prepared["ready"] is True
+    assert prepared["packet_plan"]["packet_count"] == 1
+    assert prepared["budgets"]["analyzer"]["provider_calls"] == 1
+
+
+def test_openai_cost_overage_fails_before_model_or_provider_activity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_resolutions = 0
+
+    def unexpected_model_resolution(requested_model: str | None = None) -> str:
+        nonlocal model_resolutions
+        model_resolutions += 1
+        return requested_model or "unexpected"
+
+    monkeypatch.setattr(
+        live_llm,
+        "_openai_qualification_estimated_cost_microusd",
+        lambda _request_bytes: (
+            live_llm.OPENAI_QUALIFICATION_MAX_ESTIMATED_COST_MICROUSD + 1
+        ),
+    )
+    monkeypatch.setattr(
+        live_llm,
+        "_resolve_live_model",
+        unexpected_model_resolution,
+    )
+
+    with pytest.raises(ValueError, match=r"\$0\.10"):
+        live_llm._exercise_live_llm_analysis_contract(
+            tmp_path,
+            monkeypatch,
+            kind="openai",
+            proxy=None,
+            requested_model="gpt-5.6-luna",
+        )
+
+    assert model_resolutions == 0
+
+
+def test_openai_qualification_replays_and_rejects_corrupt_cache_hermetically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise accepted replay and corrupt replay through the real CLI/cache."""
+
+    requests: list[dict[str, object]] = []
+
+    def strings(value: object) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, dict):
+            return [text for child in value.values() for text in strings(child)]
+        if isinstance(value, list):
+            return [text for child in value for text in strings(child)]
+        return []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - stdlib hook name
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            body = json.loads(self.rfile.read(length))
+            requests.append(body)
+            prompt = next(
+                text
+                for text in strings(body.get("input"))
+                if '"packet_id"' in text and '"evidence_regions"' in text
+            )
+            projection = json.loads(prompt.rsplit("\n\n", 1)[1])
+            model_response = {
+                "packet_id": projection["packet_id"],
+                "classification": "ambiguous",
+                "confidence": 0.5,
+                "rationale": "The bounded evidence does not settle the requirement.",
+                "evidence": [projection["evidence_regions"][0]],
+                "summary": "Evidence remains ambiguous.",
+            }
+            event = {
+                "type": "response.output_text.delta",
+                "sequence_number": 1,
+                "item_id": "msg_backstitch",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": json.dumps(model_response, separators=(",", ":")),
+                "logprobs": [],
+            }
+            payload = (f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setenv(
+            "OPENAI_BASE_URL", f"http://127.0.0.1:{server.server_port}/v1"
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "test-owned-no-network-key")
+        provider_calls, estimated_cost = live_llm._exercise_live_llm_analysis_contract(
+            tmp_path,
+            monkeypatch,
+            kind="openai",
+            proxy=None,
+            requested_model="gpt-5.6-luna",
+        )
+
+        assert provider_calls == 1
+        assert estimated_cost <= (
+            live_llm.OPENAI_QUALIFICATION_MAX_ESTIMATED_COST_MICROUSD
+        )
+        assert len(requests) == 1
+
+        cache_root = tmp_path / "live-contract-repo" / ".backstitch" / "semantic-cache"
+        result_objects = sorted((cache_root / "results").glob("*.json"))
+        assert len(result_objects) == 1
+        result_objects[0].write_text("{", encoding="utf-8")
+
+        corrupt_report = tmp_path / "corrupt-replay-report.json"
+        corrupt = live_llm._run_cli(
+            "analyze",
+            "--packets",
+            str(tmp_path / "live-packets.jsonl"),
+            "--packet-report",
+            str(tmp_path / "live-packet-report.json"),
+            "--model",
+            "gpt-5.6-luna",
+            "--concurrency",
+            "1",
+            "--config",
+            str(tmp_path / "live-contract-repo" / ".backstitch.toml"),
+            "--option",
+            "analyze.cache_mode",
+            "require",
+            "--output",
+            str(tmp_path / "corrupt-replay.jsonl"),
+            "--report",
+            str(corrupt_report),
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    corrupt_data = json.loads(corrupt_report.read_text(encoding="utf-8"))
+    assert corrupt.returncode == 2
+    assert corrupt_data["provider_calls"] == 0
+    assert corrupt_data["problems"][0]["code"] == "corrupt_cache"
+    assert len(requests) == 1
+
+    def corrupt_replay(_model_name: str) -> tuple[int, int]:
+        raise RuntimeError(json.dumps(corrupt_data["problems"], sort_keys=True))
+
+    with pytest.raises(
+        live_llm._QualificationProcessFailure,
+        match=r"^qualification error:.*local qualification setup or preflight failed",
+    ):
+        live_llm._run_openai_qualifications(corrupt_replay)
 
 
 def test_invalid_local_corpus_fails_before_provider_activity(

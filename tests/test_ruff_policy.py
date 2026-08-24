@@ -105,7 +105,7 @@ LEDGER_COLUMNS = (
     "freeze_status",
 )
 ACTIVE_RAW_COUNTS = Counter({"C901": 109, "F401": 1})
-DISABLED_TEXTUAL_NOQA_COUNTS = Counter({"BLE001": 22, "N802": 14, "S310": 9})
+DISABLED_TEXTUAL_NOQA_COUNTS = Counter({"BLE001": 22, "N802": 17, "S310": 9})
 
 
 def _ruff(*args: str) -> subprocess.CompletedProcess[str]:

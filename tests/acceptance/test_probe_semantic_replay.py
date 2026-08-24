@@ -69,11 +69,11 @@ def _analyzer_descriptor_lines(revision: str) -> list[str]:
         'allowed_values = ["require"]',
         "",
         "[analyze.request_constraints.temperature]",
-        'presence = "required"',
+        'presence = "optional"',
         "allowed_values = [0.0]",
         "",
         "[analyze.request_constraints.seed]",
-        'presence = "required"',
+        'presence = "optional"',
         "minimum = 0",
         "maximum = 2147483647",
         "",
@@ -81,6 +81,9 @@ def _analyzer_descriptor_lines(revision: str) -> list[str]:
         'presence = "required"',
         "minimum = 1",
         "maximum = 16384",
+        "",
+        "[analyze.request_constraints.reasoning_effort]",
+        'presence = "forbidden"',
     ]
 
 

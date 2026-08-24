@@ -307,6 +307,7 @@ def resolve_semantic_settings(settings: AnalyzeSettings) -> ResolvedSemanticSett
         temperature=settings.temperature,
         seed=settings.seed,
         max_tokens=settings.max_tokens,
+        reasoning_effort=settings.reasoning_effort,
     )
     inference = None
     if (
@@ -385,6 +386,7 @@ def resolve_verification_settings(
         temperature=settings.temperature,
         seed=settings.seed,
         max_tokens=settings.max_tokens,
+        reasoning_effort=settings.reasoning_effort,
     )
     if settings.provider_source == "analyze":
         provider_identity = analyze.provider_identity
@@ -401,6 +403,7 @@ def resolve_verification_settings(
                     temperature=settings.temperature,
                     seed=settings.seed,
                     max_tokens=settings.max_tokens,
+                    reasoning_effort=settings.reasoning_effort,
                 ),
                 capability=analyze.inference.capability,
                 capability_provenance=analyze.inference.capability_provenance,
@@ -440,6 +443,7 @@ def resolve_verification_settings(
                 temperature=settings.temperature,
                 seed=settings.seed,
                 max_tokens=settings.max_tokens,
+                reasoning_effort=settings.reasoning_effort,
             ),
             capability=capability,
             capability_provenance=build_capability_provenance(

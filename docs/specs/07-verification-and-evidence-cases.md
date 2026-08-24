@@ -492,7 +492,7 @@ contract:
     llm_distribution_version,
     plugin_distribution_name, plugin_distribution_version
   },
-  request: {json_mode, temperature, seed, max_tokens},
+  request: {json_mode, temperature, seed, max_tokens, reasoning_effort},
   base_search_epoch,
   effective_search_epoch
 }
@@ -769,6 +769,9 @@ maximum_runtime_seconds = 1800
 maximum_estimated_cost_microusd = 1000000
 ```
 
+The enabled base may also contain optional `reasoning_effort` with the exact
+[SEM-9] value domain. Its absence accepts the selected provider's default.
+
 A repository that wants another provider or model uses
 `provider_source = "override"` and supplies exactly one complete nested table:
 
@@ -805,18 +808,25 @@ maximum = 9223372036854775807
 presence = "required"
 minimum = 1
 maximum = 2147483647
+
+[tool.backstitch.verify.provider.request_constraints.reasoning_effort]
+presence = "forbidden"
 ```
 
 When disabled, Backstitch makes no verify call, reads or writes no verifier
 cache object, and projects no independent verification context. Two disabled
-shapes are valid. Minimal disabled contains exactly `enabled = false`.
-Dormant complete contains `enabled = false` plus every enabled base-table key
-shown above, the provider table required by `provider_source` when applicable,
-and an optional but complete `verify.eval` table. Partial dormant forms are
-invalid. Dormant fields receive the same unknown-key, type, range, nonblank,
-provider-identity, cost, path, and internal cross-field validation as enabled
-fields, but disabled state performs no adapter construction,
-qualification-artifact load, cache access, or provider call.
+shapes are valid. Minimal disabled contains exactly `enabled = false`. An
+enabled or dormant-complete verifier contains every non-request base key shown
+above, required request keys `json_mode` and `max_tokens`, and zero or more
+optional request keys `temperature`, `seed`, and `reasoning_effort`. Provider
+constraints decide which optional fields may be present. A dormant table is
+complete when this shape and its selected provider descriptor are complete;
+omission of an optional request key is not partial configuration. A dormant
+complete table may also contain an optional but complete `verify.eval` table.
+Dormant fields receive the same unknown-key, type, range, nonblank, provider-
+identity, cost, path, and internal cross-field validation as enabled fields,
+but disabled state performs no adapter construction, evaluation-corpus/report
+load, cache access, or provider call.
 
 Config/environment/CLI layers apply before final verify-shape validation.
 Therefore `--option verify.enabled true` activates a dormant complete
@@ -2995,7 +3005,7 @@ with exactly:
     llm_distribution_version,
     plugin_distribution_name, plugin_distribution_version
   },
-  request: {json_mode, temperature, seed, max_tokens},
+  request: {json_mode, temperature, seed, max_tokens, reasoning_effort},
   search_epochs,
   required_verdicts,
   minimum_support_score,
@@ -3467,7 +3477,7 @@ composition_provider = {
   plugin_distribution_name, plugin_distribution_version
 }
 
-composition_request = {json_mode, temperature, seed, max_tokens}
+composition_request = {json_mode, temperature, seed, max_tokens, reasoning_effort}
 
 analysis_composition = {
   analysis_contract_version,
@@ -3562,6 +3572,11 @@ qualification = {
   checks, passed, failure_reasons
 }
 ```
+
+These request notations name the one closed five-field vocabulary, not five
+mandatory values. Each canonical inference, report, evaluation composition,
+load, and equality check omits an optional field that is absent from the
+resolved request.
 
 `claim_evidence` is the exact canonical claim `evidence` array from [EVC-3.1],
 not verifier response evidence. `checks` is an array of the numeric/boolean
@@ -4767,6 +4782,9 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-08-23-gpt-5-6-luna-responses-plan.md`
+  (active implementation plan; request capabilities, Responses migration,
+  and release qualification)
 - `docs/plans/2026-08-04-semantic-preparation-performance-plan.md`
   (implementation plan; [EVC-9.1])
 - `docs/plans/2026-07-29-usability-remediation-plan.md`

@@ -604,7 +604,7 @@ def _analysis_attempt(
 
 def _negative_report(corpus_sha256: str, packet_id: str) -> dict[str, Any]:
     provider = _provider()
-    request = RequestIdentity("require", 0.0, 42, 512)
+    request = RequestIdentity("require", 0.0, 42, 512, "max")
     composition_identity = build_composition_identity(
         provider,
         request,
