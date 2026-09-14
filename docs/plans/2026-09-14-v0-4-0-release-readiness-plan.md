@@ -187,3 +187,8 @@ temporary freshness rule.
   hosted Linux `local-llm` lane must pass at the candidate SHA within its own
   15-minute step limit before release work may continue; neither timeout is
   being raised without runner evidence.
+- Hosted Linux at `5b02612` completed both real-model analyses in about 158
+  seconds. Results reached the post-analysis wire assertion, where the run
+  correctly exposed one stale expectation for the deleted nonstream bridge:
+  actual production requests used `stream = true` with usage enabled. The
+  assertion now pins that production behavior; no timeout or model bound changed.

@@ -1254,7 +1254,7 @@ def _assert_analyze_hit_local_endpoint(
         if controls != (LOCAL_INFERENCE_TEMPERATURE, LOCAL_INFERENCE_SEED):
             wrong_controls.append(controls)
         stream_mode = (payload.get("stream"), payload.get("stream_options"))
-        if stream_mode != (False, None):
+        if stream_mode != (True, {"include_usage": True}):
             wrong_stream_modes.append(stream_mode)
         if payload.get("max_tokens") != LOCAL_ANALYZE_MAX_TOKENS:
             wrong_token_limits.append(payload.get("max_tokens"))
@@ -1268,7 +1268,7 @@ def _assert_analyze_hit_local_endpoint(
         f"seed={LOCAL_INFERENCE_SEED}"
     )
     assert not wrong_stream_modes, (
-        "local analyze upstream requests did not use the nonstream schema path: "
+        "local analyze upstream requests did not preserve production streaming: "
         f"{wrong_stream_modes}"
     )
     assert not wrong_token_limits, (
