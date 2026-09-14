@@ -83,7 +83,7 @@ LOCAL_SUBPROCESS_TIMEOUT_SECONDS = 300
 LOCAL_ANALYZE_TIMEOUT_SECONDS = 900
 LOCAL_INFERENCE_TEMPERATURE = 0
 LOCAL_INFERENCE_SEED = 42
-LOCAL_ANALYZE_MAX_TOKENS = 128
+LOCAL_ANALYZE_MAX_TOKENS = 1024
 # Conservative top of the plan's ~3-4 bytes/token range. Assumed, not measured:
 # a target-runner bake-off has not produced a K figure yet (recorded in the
 # plan); replace with the measured value when one exists.
@@ -167,13 +167,12 @@ class _CountingProxyHandler(http.server.BaseHTTPRequestHandler):
         prepared = self._prepare_completion(body)
         if prepared is None:
             return
-        body, bridge_analyze_response, analyze_model = prepared
-        request = self._upstream_request(body)
-        self._relay(request, bridge_analyze_response, analyze_model)
+        request = self._upstream_request(prepared)
+        self._relay(request)
 
-    def _prepare_completion(self, body: bytes) -> tuple[bytes, bool, str] | None:
+    def _prepare_completion(self, body: bytes) -> bytes | None:
         if self.command != "POST" or not _is_completion_path(self.path):
-            return body, False, ""
+            return body
         try:
             payload = json.loads(body)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -182,27 +181,20 @@ class _CountingProxyHandler(http.server.BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             self._send_400("invalid completion request JSON: expected an object")
             return None
-        payload["temperature"] = LOCAL_INFERENCE_TEMPERATURE
-        payload["seed"] = LOCAL_INFERENCE_SEED
-        bridge_analyze_response = False
-        analyze_model = ""
         if self.proxy.recording:
-            prepared_model = self._prepare_recorded_analyze(payload)
-            if prepared_model is None:
+            if not self._prepare_recorded_analyze(payload):
                 return None
-            analyze_model = prepared_model
-            bridge_analyze_response = True
         normalized = json.dumps(payload).encode("utf-8")
         if self.proxy.recording:
             self.proxy.request_bodies.append(normalized.decode("utf-8"))
-        return normalized, bridge_analyze_response, analyze_model
+        return normalized
 
-    def _prepare_recorded_analyze(self, payload: dict[str, Any]) -> str | None:
+    def _prepare_recorded_analyze(self, payload: dict[str, Any]) -> bool:
         if payload.get("stream") is not True:
             self._send_400(
                 "local analyze request must use the adapter's streaming path"
             )
-            return None
+            return False
         try:
             packet = _local_analyze_packet(payload)
             packet_id = str(packet["packet_id"])
@@ -211,18 +203,15 @@ class _CountingProxyHandler(http.server.BaseHTTPRequestHandler):
                     "local analyze packet may be forwarded upstream only once: "
                     f"{packet_id}"
                 )
-            if not self._preserve_response_format(payload, packet):
-                return None
+            if not self._has_expected_response_format(payload, packet):
+                return False
         except ValueError as exc:
             self._send_400(str(exc))
-            return None
-        payload["stream"] = False
-        payload.pop("stream_options", None)
-        payload["max_tokens"] = LOCAL_ANALYZE_MAX_TOKENS
+            return False
         self.proxy.analyze_packet_ids.add(packet_id)
-        return str(payload.get("model", ""))
+        return True
 
-    def _preserve_response_format(
+    def _has_expected_response_format(
         self, payload: dict[str, Any], packet: dict[str, Any]
     ) -> bool:
         if packet.get("packet_contract_version") != 3:
@@ -232,7 +221,6 @@ class _CountingProxyHandler(http.server.BaseHTTPRequestHandler):
                     "json_object response format"
                 )
                 return False
-            payload["response_format"] = _local_analyze_response_format(payload)
             return True
         response_format = payload.get("response_format")
         json_schema = (
@@ -245,13 +233,16 @@ class _CountingProxyHandler(http.server.BaseHTTPRequestHandler):
             and response_format.get("type") == "json_schema"
             and isinstance(json_schema, dict)
             and isinstance(json_schema.get("schema"), dict)
+            and json_schema["schema"]
+            == _semantic_response_schema(_local_analyze_prompt(payload))
         )
         if not valid:
             self._send_400(
                 "local analyze request must preserve the adapter's packet-bound "
                 "JSON schema; got " + repr(response_format)[:500]
             )
-        return valid
+            return False
+        return True
 
     def _upstream_request(self, body: bytes) -> Any:
         headers = {
@@ -267,21 +258,16 @@ class _CountingProxyHandler(http.server.BaseHTTPRequestHandler):
             method=self.command,
         )
 
-    def _relay(self, request: Any, bridge: bool, model: str) -> None:
+    def _relay(self, request: Any) -> None:
         self._response_started = False
         try:
             try:
                 with urllib.request.urlopen(
                     request, timeout=LOCAL_ANALYZE_TIMEOUT_SECONDS
                 ) as response:
-                    if bridge:
-                        self._send_json_completion_as_sse(
-                            response.status, response, model=model
-                        )
-                    else:
-                        self._send_streaming_response(
-                            response.status, response.headers.items(), response
-                        )
+                    self._send_streaming_response(
+                        response.status, response.headers.items(), response
+                    )
             except urllib.error.HTTPError as exc:
                 self._send_streaming_response(exc.code, exc.headers.items(), exc)
         except Exception as exc:  # noqa: BLE001 - preserve proxy diagnostics
@@ -326,60 +312,6 @@ class _CountingProxyHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         while chunk := source.readline():
             self.wfile.write(chunk)
-            self.wfile.flush()
-        self.close_connection = True
-
-    def _send_json_completion_as_sse(
-        self,
-        status: int,
-        source: Any,
-        *,
-        model: str,
-    ) -> None:
-        if status < 200 or status >= 300:
-            raise ValueError(
-                f"local analyze upstream returned unexpected HTTP {status}"
-            )
-        raw = source.read()
-        try:
-            payload = json.loads(raw)
-            content = payload["choices"][0]["message"]["content"]
-        except (
-            UnicodeDecodeError,
-            json.JSONDecodeError,
-            KeyError,
-            IndexError,
-            TypeError,
-        ) as exc:
-            raise ValueError(
-                "local analyze upstream returned a malformed completion"
-            ) from exc
-        if not isinstance(content, str):
-            raise ValueError("local analyze upstream returned a malformed completion")
-        chunk = {
-            "id": "chatcmpl-backstitch-local",
-            "object": "chat.completion.chunk",
-            "created": 0,
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"role": "assistant", "content": content},
-                    "finish_reason": "stop",
-                }
-            ],
-        }
-        events = (
-            f"data: {json.dumps(chunk)}\n\n".encode(),
-            b"data: [DONE]\n\n",
-        )
-        self._response_started = True
-        self.send_response(status)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Connection", "close")
-        self.end_headers()
-        for event in events:
-            self.wfile.write(event)
             self.wfile.flush()
         self.close_connection = True
 
@@ -981,25 +913,11 @@ def _local_analyze_response_format(
 
     packet = _local_analyze_packet(payload)
     if packet.get("packet_contract_version") == 3:
-        messages = payload.get("messages")
-        prompts = (
-            [
-                message.get("content")
-                for message in messages
-                if isinstance(message, dict)
-                and message.get("role") == "user"
-                and isinstance(message.get("content"), str)
-            ]
-            if isinstance(messages, list)
-            else []
-        )
-        if len(prompts) != 1 or not isinstance(prompts[0], str):
-            raise ValueError("local analyze request must contain one user prompt")
         return {
             "type": "json_schema",
             "json_schema": {
                 "name": "output",
-                "schema": _semantic_response_schema(prompts[0]),
+                "schema": _semantic_response_schema(_local_analyze_prompt(payload)),
             },
         }
     evidence_variants = _local_evidence_schema(packet)
@@ -1048,6 +966,24 @@ def _local_analyze_response_format(
             },
         },
     }
+
+
+def _local_analyze_prompt(payload: dict[str, object]) -> str:
+    messages = payload.get("messages")
+    prompts = (
+        [
+            message.get("content")
+            for message in messages
+            if isinstance(message, dict)
+            and message.get("role") == "user"
+            and isinstance(message.get("content"), str)
+        ]
+        if isinstance(messages, list)
+        else []
+    )
+    if len(prompts) != 1 or not isinstance(prompts[0], str):
+        raise ValueError("local analyze request must contain one user prompt")
+    return prompts[0]
 
 
 def _local_response_schema_matches(payload: dict[str, object]) -> bool:

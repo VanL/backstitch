@@ -1229,3 +1229,9 @@ T1.
 - Not available locally: Linux/macOS/Windows post-push CI. Windows remains the
   required remote portability gate. Keep the plan and index active until the
   remote matrix supplies that evidence.
+- 2026-09-14 release qualification exposed a local-lane regression from the
+  packet-v3 transition and an older contract violation: the proxy mutated
+  production requests and its stale 128-token override truncated valid JSON.
+  The proxy is now observational, validates the production schema without
+  replacing it, and lets the production descriptor supply the already
+  configured 1024-token limit. Production normalization remains unchanged.

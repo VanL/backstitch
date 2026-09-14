@@ -18,8 +18,9 @@ and obtain exact-SHA hosted evidence before tagging.
 
 - `docs/implementation/05-release-publishing.md` owns the release flow and
   repository policy.
-- `docs/specs/02-backstitch-core.md` [SC-10], [SC-12] own self-corpus and
-  target-root behavior. Production discovery is not changed.
+- `docs/specs/02-backstitch-core.md` [SC-7], [SC-10], [SC-12] own the live
+  proxy boundary, self-corpus behavior, and target-root behavior. Production
+  discovery is not changed.
 - `docs/plans/2026-08-23-gpt-5-6-luna-responses-plan.md` owns the pending
   model migration evidence.
 - `docs/plans/2026-09-14-review-findings-remediation-plan.md` owns the seven
@@ -72,6 +73,7 @@ movement, or publication bypass is allowed.
 
 | Baseline | Planned behavior | Actual behavior | Rationale |
 |---|---|---|---|
+| `5afb7e3` hosted pre-release gate | Existing local-LLM gate passes before release | The proxy was mutating production requests despite [SC-7], and its stale 128-token override truncated JSON mid-summary. The proxy is now observational: production configuration owns the existing 1024-token bound and the proxy only validates and records the exact request. | A failing release gate is a stop condition. Removing test-only transport behavior restores the specified ownership boundary and is simpler than maintaining a parallel decoder contract. |
 
 ## Tasks
 
@@ -172,3 +174,16 @@ temporary freshness rule.
 - Independent source review found one formatting defect in the adjusted
   self-corpus count. It was corrected and folded into the Weft-decoupling
   commit. No source or GitHub-policy blocker remained.
+- The canonical release helper's first attempt stopped before mutation because
+  no local Ollama endpoint was running. With the workflow-pinned image and
+  model configuration running, both macOS and hosted Linux reproduced the same
+  malformed invariant results. Exact response capture showed the local proxy's
+  stale 128-token request limit truncating JSON mid-summary. Review then found
+  the proxy's request mutation violated [SC-7]. The correction removes proxy
+  mutation, validates the adapter's exact production schema, and lets the
+  production descriptor supply the workflow's existing 1024-token limit.
+- The corrected exact local lane exceeded its 900-second aggregate analyze
+  timeout on this macOS host. This does not qualify the change. The existing
+  hosted Linux `local-llm` lane must pass at the candidate SHA within its own
+  15-minute step limit before release work may continue; neither timeout is
+  being raised without runner evidence.

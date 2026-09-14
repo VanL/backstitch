@@ -354,23 +354,14 @@ Boundary and rationale:
 - **Local endpoint proof.** With `BACKSTITCH_LIVE_LLM_KIND=local`, the test writes
   a temporary `llm` `extra-openai-models.yaml` entry pointing
   `backstitch-local` at a loopback counting proxy. The proxy forwards to the
-  configured upstream Ollama endpoint. For every completion it replaces
-  endpoint defaults with request-level `temperature = 0` and seed `42`; it
-  records the exact forwarded bodies only during `analyze`. Ollama does not
-  reliably enforce JSON Schema on the adapter's streaming route across CPU
-  implementations, so recorded analyze calls cross a test-owned bridge: the
-  proxy derives a strict schema from the real packet's result vocabulary and
-  evidence bounds, forwards exactly one nonstreaming request, then relays the
-  assistant content unchanged as SSE to `default_provider_adapter`. The
-  ordinary result normalizer remains the sole validator; the proxy never
+  configured upstream Ollama endpoint without changing the request or response.
+  Production configuration supplies `temperature = 0`, seed `42`, required
+  schema output, and the 1024-token output bound. The proxy records exact
+  forwarded bodies only during `analyze`, validates the packet-bound production
+  schema, and rejects SDK retries or adapter compatibility fallback before a
+  second upstream request. The ordinary result normalizer remains the sole
+  validator; the proxy never injects controls, replaces response format, or
   repairs model output.
-  Summary and rationale length, evidence count, and request output are bounded
-  (`48`, `72`, one item, and `128` tokens respectively) so constrained
-  nonstream generation cannot run to the served model's broader 1024-token
-  ceiling.
-  Before replacement, the proxy requires the adapter's original
-  `json_object`; it tracks packet IDs and rejects SDK retries or adapter
-  compatibility fallback before a second upstream request.
   The test validates the curated corpus before provider activity, verifies
   `/v1/models`, requires a subprocess transport probe through
   `default_provider_adapter`, at least one non-error row, and exact analyze bodies
