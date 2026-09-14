@@ -34,7 +34,7 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
 ]
 dependencies = [
-    "llm>=0.33,<0.34",
+    "llm>=0.33,<0.35",
     "markdown-it-py>=4.2.0",
     "tree-sitter==0.26.0",
     "tree-sitter-python==0.25.0",
