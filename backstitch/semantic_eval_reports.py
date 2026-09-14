@@ -2627,6 +2627,12 @@ def _validate_metric_row(value: object, name: str) -> dict[str, Any]:
     return row
 
 
+def _canonical_wilson_bound(value: float) -> float:
+    """Keep persisted Wilson bounds stable across supported Python runtimes."""
+
+    return round(value, 15)
+
+
 def _wilson_upper(successes: int, total: int, confidence: float) -> float | None:
     if total == 0:
         return None
@@ -2639,7 +2645,7 @@ def _wilson_upper(successes: int, total: int, confidence: float) -> float | None
     margin = z * math.sqrt(
         proportion * (1 - proportion) / total + z * z / (4 * total * total)
     )
-    return (center + margin) / denominator
+    return _canonical_wilson_bound((center + margin) / denominator)
 
 
 def _wilson_lower(successes: int, total: int, confidence: float) -> float | None:
@@ -2654,7 +2660,7 @@ def _wilson_lower(successes: int, total: int, confidence: float) -> float | None
     margin = z * math.sqrt(
         proportion * (1 - proportion) / total + z * z / (4 * total * total)
     )
-    return (center - margin) / denominator
+    return _canonical_wilson_bound((center - margin) / denominator)
 
 
 def _fraction(numerator: int, denominator: int) -> float | None:

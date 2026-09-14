@@ -1573,13 +1573,16 @@ and Wilson upper. With denominator zero, value/bounds are `null`. Otherwise
 value is numerator/denominator and Wilson uses the standard score formula with
 `statistics.NormalDist().inv_cdf(min(0.5 + confidence_level / 2,
 math.nextafter(1.0, 0.0)))`. The clamp keeps the allowed near-one finite input
-defined. Qualification records the exact finite `confidence_level` strictly
+defined. Wilson lower and upper bounds are canonicalized with
+`round(value, 15)` before serialization, authoritative recomputation
+comparison, or qualification threshold comparison. Qualification records the
+exact finite `confidence_level` strictly
 between zero and one and `interval_method = "wilson"`; the public validator
 uses those recorded controls for every interval and never infers a
 policy-critical confidence level from reported bounds. Because producer and
-validator use the same deterministic formula and JSON preserves the emitted
-float, reported rate values and Wilson bounds must equal recomputation exactly;
-validation tolerances cannot turn a failing threshold into a pass.
+validator use the same formula and canonical operation, reported rate values
+and Wilson bounds must equal recomputation exactly; validation tolerances
+cannot turn a failing threshold into a pass.
 Composite latency count, total, and maximum likewise equal exact recomputation
 from the ordered per-trial observations.
 
