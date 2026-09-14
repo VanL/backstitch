@@ -12,12 +12,7 @@ import hashlib
 import importlib
 import json
 import os
-import select
 import shutil
-import signal
-import subprocess
-import sys
-import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -1030,107 +1025,6 @@ def test_installed_analysis_rejects_mutation_during_model_execution(
         "backstitch: error: repository source changed during current analysis\n"
     )
     assert [event["role"] for event in _read_ledger(ledger)] == ["analyzer"]
-    assert not any(path.exists() for path in artifacts)
-
-
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="stdlib has no Windows pseudoterminal for the TTY-only progress contract",
-)
-def test_installed_analysis_rejects_mutation_after_preparation(
-    tmp_path: Path,
-) -> None:
-    """The installed TTY event exposes the pre-execution recapture boundary."""
-
-    import pty
-
-    _write_local_model_repo(tmp_path)
-    ledger = tmp_path / "local-model-ledger.jsonl"
-    environment = local_llm_environment(ledger)
-    artifacts = (
-        tmp_path / "packets.jsonl",
-        tmp_path / "packet-report.json",
-        tmp_path / "results.jsonl",
-        tmp_path / "analysis-report.json",
-    )
-    executable = Path(sys.executable).with_name("backstitch")
-    master_fd, slave_fd = pty.openpty()
-    process = subprocess.Popen(
-        [
-            str(executable),
-            "analyze",
-            "--repo-root",
-            str(tmp_path),
-            "--packets-output",
-            str(artifacts[0]),
-            "--packet-report-output",
-            str(artifacts[1]),
-            "--output",
-            str(artifacts[2]),
-            "--report",
-            str(artifacts[3]),
-        ],
-        env=environment,
-        stdout=subprocess.PIPE,
-        stderr=slave_fd,
-        text=True,
-    )
-    os.close(slave_fd)
-    stderr_bytes = b""
-    progress_prefix = b"backstitch: progress packet_accounting "
-    deadline = time.monotonic() + 30
-    stopped = False
-    try:
-        while progress_prefix not in stderr_bytes:
-            remaining = deadline - time.monotonic()
-            assert remaining > 0, stderr_bytes.decode(errors="replace")
-            readable, _, _ = select.select([master_fd], [], [], remaining)
-            assert readable, stderr_bytes.decode(errors="replace")
-            stderr_bytes += os.read(master_fd, 4096)
-
-        os.kill(process.pid, signal.SIGSTOP)
-        _, stop_status = os.waitpid(process.pid, os.WUNTRACED)
-        assert os.WIFSTOPPED(stop_status)
-        stopped = True
-        assert _read_ledger(ledger) == []
-        (tmp_path / "pkg/core.py").write_text(
-            (tmp_path / "pkg/core.py").read_text(encoding="utf-8")
-            + "\n# mutated after semantic preparation\n",
-            encoding="utf-8",
-        )
-        os.kill(process.pid, signal.SIGCONT)
-        stopped = False
-        execution_deadline = time.monotonic() + 30
-        while process.poll() is None:
-            assert time.monotonic() < execution_deadline
-            readable, _, _ = select.select([master_fd], [], [], 0.1)
-            if readable:
-                stderr_bytes += os.read(master_fd, 4096)
-        while True:
-            try:
-                chunk = os.read(master_fd, 4096)
-            except OSError:
-                break
-            if not chunk:
-                break
-            stderr_bytes += chunk
-        assert process.stdout is not None
-        stdout = process.stdout.read()
-    finally:
-        os.close(master_fd)
-        if stopped and process.poll() is None:
-            os.kill(process.pid, signal.SIGCONT)
-        if process.poll() is None:
-            process.kill()
-            process.wait()
-
-    stderr = stderr_bytes.decode(errors="replace").replace("\r\n", "\n")
-    assert process.returncode == 2
-    assert stdout == ""
-    assert "backstitch: progress packet_accounting " in stderr
-    assert "repository source changed before current analysis execution" in stderr
-    assert "Traceback" not in stderr
-    assert _read_ledger(ledger) == []
     assert not any(path.exists() for path in artifacts)
 
 

@@ -60,8 +60,6 @@ PSEUDO_SURFACE_CASES: dict[str, tuple[str, ...]] = {
     ),
     "currentness_race": (
         "tests.acceptance.test_probe_full_dogfood:"
-        "test_installed_analysis_rejects_mutation_after_preparation",
-        "tests.acceptance.test_probe_full_dogfood:"
         "test_installed_analysis_rejects_mutation_during_model_execution",
     ),
 }

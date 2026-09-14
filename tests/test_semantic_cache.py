@@ -2116,7 +2116,7 @@ def test_symlink_loop_cache_root_is_a_structured_error_for_analysis_and_cleanup(
     assert run.results == ()
     assert run.problems[0].code == "corrupt_cache"
     assert run.provider_calls == 0
-    with pytest.raises(CacheProtocolError, match="cannot resolve"):
+    with pytest.raises(CacheProtocolError):
         cleanup_lock(
             cache_path=first,
             analysis_key="5" * 64,

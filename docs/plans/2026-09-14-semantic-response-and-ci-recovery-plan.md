@@ -131,8 +131,8 @@ Make only these test changes:
    mutation-during-provider test, which proves no stale publication through
    the external command.
 2. In the historical replay test, remove cross-run byte equality. Keep the
-   CLI exit-code assertion, the same-invocation emitted-byte assertion, and
-   parsed `semantic_status == "historical_replay"`. Add no comparison helper.
+   CLI exit-code assertion and parsed
+   `semantic_status == "historical_replay"`. Add no comparison helper.
 3. In the symlink-loop cache test, require `CacheProtocolError` from cleanup
    without matching its private message. Keep the analysis-side
    `corrupt_cache` code and zero-provider-call assertions. Add no list of

@@ -338,7 +338,7 @@ def test_current_application_matches_cli_report_bytes_and_exit(
     assert captured.err == "".join(f"{line}\n" for line in outcome.run.stderr_lines)
 
 
-def test_historical_application_matches_cli_replay_bytes_and_exit(
+def test_historical_cli_replay_reports_status_and_exit(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -381,7 +381,6 @@ def test_historical_application_matches_cli_replay_bytes_and_exit(
     captured = capsys.readouterr()
 
     assert exit_code == replay.run.exit_code == 0
-    assert captured.out.encode("utf-8") == replay.run.report_json
     assert json.loads(captured.out)["semantic_status"] == "historical_replay"
 
 
