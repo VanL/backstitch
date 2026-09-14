@@ -1550,11 +1550,58 @@ def test_json_format_and_output_file(tmp_path: Path) -> None:
 
 
 def test_check_unwritable_output_exits_two(tmp_path: Path) -> None:
-    target = tmp_path / "no-such-dir" / "report.json"
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("blocker", encoding="utf-8")
+    target = blocker / "report.json"
     result = check_clean("--output", str(target))
     assert result.returncode == 2
     assert "backstitch: error:" in result.stderr
     assert "Traceback" not in result.stderr
+    assert blocker.read_text(encoding="utf-8") == "blocker"
+
+
+@pytest.mark.parametrize("format_name", ("text", "json"))
+def test_check_output_creates_missing_parent_directories(
+    tmp_path: Path,
+    format_name: str,
+) -> None:
+    target = tmp_path / "new" / "nested" / "report.json"
+    result = check_clean("--format", format_name, "--output", str(target))
+    assert result.returncode == 0, result.stderr
+    rendered = target.read_text(encoding="utf-8")
+    if format_name == "json":
+        assert json.loads(rendered)["summary"]["errors"] == 0
+    else:
+        assert "issues: 0 errors, 0 warnings, 0 infos" in rendered
+
+
+def test_check_atomic_failure_preserves_previous_complete_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import backstitch.cli as cli
+
+    target = tmp_path / "report.json"
+    target.write_bytes(b"previous complete report\n")
+    args = cli.build_parser().parse_args(
+        ["check", "--repo-root", str(CLEAN), "--output", str(target)]
+    )
+    settings = BackstitchSettings(
+        profile_overrides=ProfileSettings(
+            spec_roots=("docs/specs",),
+            plan_roots=(),
+            code_roots=("pkg",),
+            test_roots=(),
+        )
+    )
+
+    def fail_replace(*_args: object, **_kwargs: object) -> None:
+        raise OSError("injected replace failure")
+
+    monkeypatch.setattr(cli.artifact_publication.os, "replace", fail_replace)
+    assert cli._cmd_check(args, settings) == 2
+    assert target.read_bytes() == b"previous complete report\n"
+    assert tuple(tmp_path.glob(".*.tmp")) == ()
 
 
 def test_deterministic_commands_do_not_import_llm(tmp_path: Path) -> None:

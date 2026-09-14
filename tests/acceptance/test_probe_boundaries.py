@@ -66,6 +66,7 @@ def test_probe_11_malformed_inputs_exit_two_with_one_line_errors(
     )
     assert outcome.returncode == 2
     assert "backstitch: error:" in outcome.stderr
+    assert "Traceback" not in outcome.stderr
 
     bad_packets = tmp_path / "bad.jsonl"
     bad_packets.write_text("not json {\n", encoding="utf-8")
@@ -81,8 +82,11 @@ def test_probe_11_malformed_inputs_exit_two_with_one_line_errors(
     )
     assert outcome.returncode == 2
     assert "backstitch: error:" in outcome.stderr
+    assert "Traceback" not in outcome.stderr
 
-    unwritable = tmp_path / "no-dir" / "out.json"
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("blocker", encoding="utf-8")
+    unwritable = blocker / "out.json"
     outcome = run_cli(
         "check",
         "--repo-root",
@@ -93,6 +97,8 @@ def test_probe_11_malformed_inputs_exit_two_with_one_line_errors(
     )
     assert outcome.returncode == 2
     assert "backstitch: error:" in outcome.stderr
+    assert "Traceback" not in outcome.stderr
+    assert blocker.read_text(encoding="utf-8") == "blocker"
 
 
 def test_probe_12_path_ladder_ambiguous_and_inexact(mini_repo: Path) -> None:

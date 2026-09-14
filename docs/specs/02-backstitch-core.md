@@ -368,6 +368,14 @@ The command returns `0` when no issue meets `fail_on`, `1` for selected target
 findings, and `2` for invocation, configuration, Git, budget, validation, or
 publication failure. It never changes `check` behavior or report bytes.
 
+When `check --output PATH` is present, Backstitch publishes the selected
+complete report with a same-directory staged replacement, creating missing
+parent directories for the explicitly selected output path. `coverage`
+uses the same parent-directory behavior. A failed
+publication returns exit `2` and leaves the previous state, including
+absence, or a complete new file; it never leaves a partially written final
+report.
+
 Required obligation, packet, and result commands:
 
 ```bash

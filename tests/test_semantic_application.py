@@ -35,6 +35,7 @@ from backstitch.semantic_application import (
     analyze_semantics,
     preflight_semantics,
 )
+from backstitch.semantic_cache import ProviderAdapter
 from backstitch.semantic_policy import materialize_semantic_policy
 from backstitch.settings import BackstitchSettings, resolve_config
 
@@ -563,7 +564,7 @@ def test_cache_parent_of_source_root_is_rejected_before_provider_or_writes(
     paths_before = {path.relative_to(tmp_path) for path in tmp_path.rglob("*")}
     constructions = 0
 
-    def forbidden_adapter(*_args: object, **_kwargs: object) -> object:
+    def forbidden_adapter() -> ProviderAdapter:
         nonlocal constructions
         constructions += 1
         raise AssertionError("overlap failure constructed a provider")

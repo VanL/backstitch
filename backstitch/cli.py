@@ -35,7 +35,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
 
-from backstitch import __version__
+from backstitch import __version__, artifact_publication
 from backstitch.config import ProfileConfig, uncontained_test_root
 from backstitch.grammar import candidate_ref_digest
 from backstitch.profiles import configured_profile
@@ -638,7 +638,7 @@ def _cmd_check(args: argparse.Namespace, settings: BackstitchSettings) -> int:
         # Known fable defect fixed at port time: an unwritable --output path
         # must be exit 2 with a one-line error, never a traceback/exit 1.
         try:
-            output.write_text(rendered, encoding="utf-8")
+            artifact_publication.atomic_replace_bytes(output, rendered.encode("utf-8"))
         except OSError as exc:
             return _error(f"cannot write --output {output}: {exc}")
     else:

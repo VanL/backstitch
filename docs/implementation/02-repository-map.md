@@ -74,7 +74,7 @@ Quick pointers to the key guidance documents in this repository.
 | `backstitch/semantic_eval_reports.py` | Ordered closed corpus/fixture validation, closed eval-report validation, independent identity/metric recomputation, and self-acceptance loading ([SEM-8], [SC-13], [EVC-10.1]) |
 | `backstitch/prompts/` | Packaged section, invariant, and suppression semantic-review prompts ([SC-7], [INV-5]) |
 | `backstitch/doctor.py` | Environment doctor checks ([SC-14]) |
-| `backstitch/cli.py` | Parser/dispatch, fixed bare `check`/`analyze` delegation, one-shot settings resolution and injection, argument validation, presentation, remaining direct output writes, and exit-code mapping ([SC-5], [SC-5.1], [CFG-5.1], [CFG-7]) |
+| `backstitch/cli.py` | Parser/dispatch, fixed bare `check`/`analyze` delegation, one-shot settings resolution and injection, argument validation, presentation, publication delegation, and exit-code mapping ([SC-5], [SC-5.1], [CFG-5.1], [CFG-7]) |
 | `tests/acceptance/` | Black-box [SC-10] probes, including invariant and suppression lifecycle dogfood and artifact compatibility |
 | `tests/semantic_eval/v1/` | Historical analyzer-only mutation corpus retained for migration tests ([SEM-8]) |
 | `tests/semantic_eval/v3/` | Current schema-3 runner smoke corpus and non-authoritative qualification candidate ([EVC-10.1]) |
