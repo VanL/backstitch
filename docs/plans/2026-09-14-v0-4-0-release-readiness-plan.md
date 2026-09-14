@@ -40,8 +40,9 @@ Source spec baseline: `7c6d293`. No normative spec delta is proposed.
   creating the tag.
 - `.github/workflows/release-gate.yml` installs the exact wheel and sdist
   before attestation and publication.
-- `bin/release.py --check-repository-settings` currently reports that the
-  documented external GitHub controls are absent.
+- At plan entry, `bin/release.py --check-repository-settings` reported that
+  the documented external GitHub controls were absent. The execution log
+  records their later rollout and current verified state.
 
 Comprehension check: production Weft discovery is a supported target-root
 feature and is outside this release cleanup. The cross-repository debt test is
@@ -88,9 +89,10 @@ movement, or publication bypass is allowed.
    semantic features, supply-chain hardening, seven remediation fixes, and
    truthful POSIX support. Prepare version 0.4.0 through the release helper,
    not by hand.
-4. Run focused tests, the full local release gate, actual protected OpenAI
-   qualification, artifact build/install smokes, and the zero-warning
-   self-corpus check. Independent review the completed source delta.
+4. Run focused tests, actual protected OpenAI qualification, and the
+   zero-warning self-corpus check. Independently review the completed source
+   delta. The release helper owns the one final full local gate; do not run a
+   duplicate full release suite as ceremony.
 5. The user's instruction to implement the identified release steps authorizes
    the required GitHub settings mutation. Before mutation, capture the current
    repository immutable-release flag, Actions permissions and SHA-pinning
@@ -147,3 +149,26 @@ Before implementation, review the Weft decoupling boundary for correctness
 and YAGNI. Before release, review the complete delta and every
 gate result. Tests must enforce correctness, not review choreography or a
 temporary freshness rule.
+
+## Execution Log
+
+- The pre-change Weft failure was reproduced against the incidental sibling
+  checkout. Backstitch's mutable Weft debt test was deleted without a copied,
+  vendored, pinned, environment-enrolled, or absence-enforcing replacement.
+  Production target-root tests remained green. The self-corpus suppression
+  count moved from 240 to the observed 237 records.
+- The 2026-08-27 publication plan was preserved and indexed as superseded by
+  the completed remediation plan. `CHANGELOG.md` now describes the 0.4.0
+  payload.
+- The protected real-provider qualification passed for GPT-5.6 Luna and the
+  GPT-5.5 comparison, one accepted attempt each.
+- Before GitHub mutation, immutable releases were disabled; Actions allowed
+  all actions without SHA pinning; the `pypi` environment had no deployment
+  policy; and no repository rulesets existed. The reversible Actions policy,
+  exact four-pattern allowlist, `pypi` custom `v*` tag policy, and exact
+  release-tag ruleset were applied and inspected first. Immutable releases
+  were then enabled. The final live repository-settings checker passed all
+  four groups.
+- Independent source review found one formatting defect in the adjusted
+  self-corpus count. It was corrected and folded into the Weft-decoupling
+  commit. No source or GitHub-policy blocker remained.
