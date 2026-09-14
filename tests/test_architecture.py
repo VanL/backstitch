@@ -16,31 +16,51 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).parents[1] / "backstitch"
 
-# This is intentionally a small table of architectural owners, not a forced
-# classification of every package module. An owner may import its own or a
-# lower rank. Adding a new cross-layer owner requires an explicit table edit.
+# Every substantive package module has a reviewed rank. A module may import its
+# own or a lower rank. New modules require an explicit architectural placement.
 _LAYER_RANK = {
     # Leaf primitives and closed value contracts.
     "backstitch.artifact_publication": 0,
     "backstitch.canonical": 0,
     "backstitch.config": 0,
+    "backstitch.contract_validation": 0,
+    "backstitch.diagnostics": 0,
     "backstitch.filesystem_io": 0,
     "backstitch.grammar": 0,
+    "backstitch.models": 0,
+    "backstitch.operation_progress": 0,
     "backstitch.scan_exclusions": 0,
     "backstitch.semantic_eval_identity": 0,
     "backstitch.semantic_packets": 0,
     "backstitch.semantic_verification_contract": 0,
     # Source and configuration adapters.
     "backstitch.artifact_contracts": 1,
+    "backstitch.alignment_guide": 1,
+    "backstitch.code_parser": 1,
+    "backstitch.exclusions": 1,
+    "backstitch.git_baseline": 1,
+    "backstitch.markdown_specs": 1,
+    "backstitch.profiles": 1,
+    "backstitch.python_refs": 1,
     "backstitch.repository_snapshot": 1,
     "backstitch.semantic_identity": 1,
     "backstitch.settings": 1,
+    "backstitch.target_roots": 1,
     # Domain computation.
     "backstitch.analysis_packets": 2,
+    "backstitch.analysis_results": 2,
     "backstitch.check_pipeline": 2,
+    "backstitch.evidence_discovery": 2,
+    "backstitch.evidence_summary": 2,
+    "backstitch.intent_coverage": 2,
+    "backstitch.intent_coverage_reporting": 2,
+    "backstitch.intent_history": 2,
     "backstitch.obligation_runtime": 2,
+    "backstitch.obligations": 2,
+    "backstitch.reporting": 2,
     "backstitch.resolver": 2,
     "backstitch.semantic_analysis": 2,
+    "backstitch.semantic_budget": 2,
     "backstitch.semantic_cache": 2,
     "backstitch.semantic_evidence": 2,
     "backstitch.semantic_eval_observation": 2,
@@ -49,13 +69,17 @@ _LAYER_RANK = {
     "backstitch.semantic_reports": 2,
     "backstitch.semantic_verification": 2,
     # Application workflows.
+    "backstitch.alignment_eval": 3,
+    "backstitch.analysis_llm": 3,
     "backstitch.check_application": 3,
     "backstitch.coverage_application": 3,
+    "backstitch.doctor": 3,
     "backstitch.obligation_api": 3,
     "backstitch.packet_application": 3,
     "backstitch.semantic_application": 3,
     "backstitch.semantic_eval": 3,
     # Public adapter.
+    "backstitch.__main__": 4,
     "backstitch.cli": 4,
 }
 
@@ -287,6 +311,11 @@ def test_settings_and_snapshot_are_not_one_component() -> None:
 def test_internal_import_graph_has_no_multimodule_components() -> None:
     components = _strongly_connected_components(_import_graph())
     assert [component for component in components if len(component) > 1] == []
+
+
+def test_every_substantive_package_module_has_exactly_one_rank() -> None:
+    modules = set(_import_graph()) - {"backstitch.__init__"}
+    assert set(_LAYER_RANK) == modules
 
 
 def test_mapped_layers_do_not_import_upward() -> None:
