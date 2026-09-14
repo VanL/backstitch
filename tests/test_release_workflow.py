@@ -167,6 +167,29 @@ def test_ci_checks_release_helper_format_and_types() -> None:
     assert "uv run backstitch check --repo-root ." in workflow
 
 
+def test_release_smokes_exact_built_distributions_before_attestation() -> None:
+    workflow = _active_workflow_text("release-gate.yml")
+    build = _index(workflow, "python -m build --no-isolation")
+    wheel = _index(workflow, 'wheels=("${PACKAGE_DIR}"/dist/*.whl)')
+    sdist = _index(workflow, 'sdists=("${PACKAGE_DIR}"/dist/*.tar.gz)')
+    wheel_smoke = _index(workflow, 'smoke_distribution "${wheel}"')
+    sdist_smoke = _index(workflow, 'smoke_distribution "${sdist}"')
+    attest = _index(workflow, "uses: actions/attest@")
+
+    assert build < wheel < attest
+    assert build < sdist < attest
+    assert build < wheel_smoke < sdist_smoke < attest
+    assert 'test "${#wheels[@]}" -eq 1' in workflow
+    assert 'test "${#sdists[@]}" -eq 1' in workflow
+    assert 'smoke_distribution "${wheel}"' in workflow
+    assert 'smoke_distribution "${sdist}"' in workflow
+    assert 'pip install --disable-pip-version-check "${artifact}"' in workflow
+    assert "import backstitch" in workflow
+    assert "backstitch.__file__" in workflow
+    assert "guide alignment --format json" in workflow
+    assert 'check --repo-root "${GITHUB_WORKSPACE}"' in workflow
+
+
 def test_ci_runs_exact_lint_then_suppression_policy_commands() -> None:
     workflow = _active_workflow_text("ci.yml")
     lint_command = (

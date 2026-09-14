@@ -594,6 +594,7 @@ behavior, not the number of review rounds, reviewer identity, or plan wording.
 | 2026-09-14 | Slice 2 implementation review: correctness and YAGNI | PASS after correction | Replaced assertions about three named cache directories with a before/after repository path inventory, proving no derived cache artifact without freezing the cache namespace layout. The symmetric preflight predicate and ordering were accepted. |
 | 2026-09-14 | Slice 3 implementation review: correctness and YAGNI | PASS after correction | Relaxed one no-location assertion so it binds the durable issue token and message rather than incidental leading spaces. Text/JSON issue parity, recovery content, and the rank-2 reporting edge were accepted. |
 | 2026-09-14 | Slice 4 implementation review: correctness and YAGNI | PASS after corrections | Added unchanged-blocker and no-traceback acceptance proof, mirrored the blocker check in the unit test, and exercised missing-parent success for both text and JSON. The atomic owner reuse and spec delta were accepted. |
+| 2026-09-14 | Slice 6 implementation review: correctness and YAGNI | PASS after correction | Strengthened the structural test to order both exact artifact smoke calls before attestation and prove the function installs its artifact argument. The workflow implementation and minimal inline shape were accepted. |
 
 Existing engineering principles already require bounded scope and checking
 producer/consumer changes together. No new process rule or test is needed;
@@ -607,7 +608,7 @@ this revision corrects the application of those principles.
 | 2. Semantic cache/source overlap | complete | One mutual overlap predicate rejects equality and either containment direction before snapshot, cache, or provider work; the `cache_path = "."` reverse-containment reproduction preserves source and creates no derived cache namespaces. |
 | 3. Coverage text issues | complete | Coverage text has one renderer that includes typed issues via the shared issue-line formatter; BSN009 names the changed key, event, repository-config acknowledgment, trailer, and rerun action. Renderer and public-ratchet tests pass. |
 | 4. Atomic check publication | complete | Check delegates to the existing fsynced same-directory replacement owner; missing parents succeed, a regular-file parent yields exit 2, and injected replacement failure preserves the prior complete report and removes staging. Acceptance probe 11 uses the portable failure fixture. |
-| 6. Distribution smoke tests | pending | |
+| 6. Distribution smoke tests | complete | The release build resolves exactly one wheel and sdist, installs each exact artifact in a separate fresh environment outside the checkout, proves import provenance, and runs installed version, alignment-guide, and self-check commands before attestation. Static order checks and local artifact smoke pass. |
 | 7. Exact architecture ranks | pending | |
 | 5. Truthful platform declaration | pending | |
 

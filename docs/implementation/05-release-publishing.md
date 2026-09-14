@@ -147,13 +147,17 @@ verifies that the remote tag still points to the tested commit. It then:
 2. performs `uv sync --frozen --group release` against the selected Python
    3.11 interpreter
 3. builds through the locked `build==1.5.0` frontend with isolation disabled
-4. generates an artifact attestation and stores distributions plus the
+4. resolves exactly one wheel and one source distribution, installs each into
+   its own fresh environment outside the checkout, proves the import comes
+   from that environment, and runs version, alignment-guide, and repository
+   check smoke tests from the installed artifact
+5. generates an artifact attestation and stores distributions plus the
    Sigstore bundle as workflow artifacts
-5. downloads those artifacts with authenticated `gh run download`, validates
+6. downloads those artifacts with authenticated `gh run download`, validates
    any matching stale draft, and stages a complete draft GitHub Release
-6. publishes the distributions to PyPI through the `pypi` environment and
+7. publishes the distributions to PyPI through the `pypi` environment and
    OIDC Trusted Publishing
-7. after the PyPI publisher succeeds, downloads the same artifacts again,
+8. after the PyPI publisher succeeds, downloads the same artifacts again,
    verifies the exact draft target and asset set, then publishes the draft as
    the final immutable GitHub Release; an idempotent rerun also verifies the
    exact package/version is visible on PyPI

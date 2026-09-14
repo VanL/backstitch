@@ -117,6 +117,46 @@ jobs:
         run: |
           uv run --frozen --no-sync python -m build --no-isolation "${PACKAGE_DIR}"
 
+      - name: Smoke-test built distributions
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=("${PACKAGE_DIR}"/dist/*.whl)
+          sdists=("${PACKAGE_DIR}"/dist/*.tar.gz)
+          test "${#wheels[@]}" -eq 1
+          test "${#sdists[@]}" -eq 1
+          wheel="$(realpath "${wheels[0]}")"
+          sdist="$(realpath "${sdists[0]}")"
+          smoke_root="$(mktemp -d)"
+          trap 'rm -rf "${smoke_root}"' EXIT
+
+          smoke_distribution() {
+            artifact="$1"
+            environment="$2"
+            python -m venv "${environment}"
+            "${environment}/bin/python" -m pip install --disable-pip-version-check "${artifact}"
+            (
+              cd "${smoke_root}"
+              "${environment}/bin/python" - "${environment}" <<'PY'
+          import pathlib
+          import sys
+
+          import backstitch
+
+          environment = pathlib.Path(sys.argv[1]).resolve()
+          installed = pathlib.Path(backstitch.__file__).resolve()
+          if not installed.is_relative_to(environment):
+              raise SystemExit(f"backstitch imported outside smoke environment: {installed}")
+          PY
+              "${environment}/bin/backstitch" --version
+              "${environment}/bin/backstitch" guide alignment --format json
+              "${environment}/bin/backstitch" check --repo-root "${GITHUB_WORKSPACE}"
+            )
+          }
+
+          smoke_distribution "${wheel}" "${smoke_root}/wheel-env"
+          smoke_distribution "${sdist}" "${smoke_root}/sdist-env"
+
       - name: Generate artifact attestation
         id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
