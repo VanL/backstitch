@@ -29,6 +29,7 @@ from backstitch.intent_coverage import (
     IntentCoverageResult,
 )
 from backstitch.models import Issue, issue_sort_key
+from backstitch.reporting import render_issue_line
 
 _ARTIFACT = "backstitch-intent-coverage-report"
 _SCHEMA_VERSION = 1
@@ -361,6 +362,35 @@ def render_coverage_json(
         spec_growth=spec_growth,
     )
     return json.dumps(payload, indent=2, ensure_ascii=True, allow_nan=False) + "\n"
+
+
+def render_coverage_text(
+    payload: dict[str, Any],
+    *,
+    issues: tuple[Issue, ...] = (),
+) -> str:
+    """Render the coverage summary, worklist, and typed issues as text."""
+
+    summary = payload["summary"]
+    definition_rows = {item["definition_id"]: item for item in payload["definitions"]}
+    lines = [
+        "Intent coverage: "
+        f"{summary['direct']} direct, {summary['inherited']} inherited, "
+        f"{summary['exempt']} exempt, {summary['uncovered']} uncovered, "
+        f"{summary['total']} total"
+    ]
+    lines.extend(
+        "uncovered "
+        f"{definition_rows[definition_id]['role']} "
+        f"{definition_rows[definition_id]['path']} "
+        f"{definition_rows[definition_id]['structural_locator']}"
+        for definition_id in payload["worklist"]
+    )
+    if issues:
+        lines.append("")
+        lines.append("issues:")
+        lines.extend(render_issue_line(issue) for issue in issues)
+    return "\n".join(lines) + "\n"
 
 
 def _require_string(value: Any, label: str, *, nonblank: bool = False) -> str:

@@ -688,7 +688,10 @@ def _cmd_coverage(args: argparse.Namespace, settings: BackstitchSettings) -> int
 
 def _render_coverage_result(result: object, format_name: str) -> str:
     from backstitch.coverage_application import CoverageResult
-    from backstitch.intent_coverage_reporting import render_coverage_json
+    from backstitch.intent_coverage_reporting import (
+        render_coverage_json,
+        render_coverage_text,
+    )
 
     assert isinstance(result, CoverageResult)
     document = result.document
@@ -707,24 +710,7 @@ def _render_coverage_result(result: object, format_name: str) -> str:
             stale_doc_trends=document.stale_doc_trends,
             spec_growth=document.spec_growth,
         )
-    summary = document.payload["summary"]
-    definition_rows = {
-        item["definition_id"]: item for item in document.payload["definitions"]
-    }
-    worklist_lines = "".join(
-        "uncovered "
-        f"{definition_rows[definition_id]['role']} "
-        f"{definition_rows[definition_id]['path']} "
-        f"{definition_rows[definition_id]['structural_locator']}\n"
-        for definition_id in document.payload["worklist"]
-    )
-    return (
-        "Intent coverage: "
-        f"{summary['direct']} direct, {summary['inherited']} inherited, "
-        f"{summary['exempt']} exempt, {summary['uncovered']} uncovered, "
-        f"{summary['total']} total\n"
-        f"{worklist_lines}"
-    )
+    return render_coverage_text(document.payload, issues=document.issues)
 
 
 def _cmd_packets(args: argparse.Namespace, settings: BackstitchSettings) -> int:  # noqa: C901 approved [SC-17.1] RUFF-SUP-029 exception

@@ -28,7 +28,7 @@ _SEVERITY_ORDER = ("error", "warning", "info")
 _GROUP_TITLES = {"error": "errors", "warning": "warnings", "info": "infos"}
 
 
-def _issue_line(issue: Issue) -> str:
+def render_issue_line(issue: Issue) -> str:
     location = issue.path if issue.line is None else f"{issue.path}:{issue.line}"
     if issue.section_id:
         suffix = f" (section [{issue.section_id}])"
@@ -76,7 +76,7 @@ def render_text(
             continue
         lines.append("")
         lines.append(f"{_GROUP_TITLES[severity]}:")
-        lines.extend(_issue_line(issue) for issue in group)
+        lines.extend(render_issue_line(issue) for issue in group)
     if suppressed is not None and suppressed:
         lines.append("")
         lines.append(f"suppressed ({len(suppressed)}):")
@@ -88,7 +88,7 @@ def render_text(
                 details += "; rationale: " + json.dumps(
                     decision.rationale, ensure_ascii=True
                 )
-            lines.append(f"{_issue_line(decision.issue)} [{details}]")
+            lines.append(f"{render_issue_line(decision.issue)} [{details}]")
     if obligation_skips is not None and obligation_skips:
         lines.append("")
         lines.append(f"obligation skips ({len(obligation_skips)}):")

@@ -525,6 +525,20 @@ def test_coverage_ratchet_blocks_unacknowledged_committed_policy_weakening(
     )
     assert issue["severity"] == "error"
 
+    text_result = run_cli(
+        "coverage",
+        str(tmp_path),
+        "--format",
+        "text",
+        "--require-ratchet",
+        "baseline",
+    )
+    assert text_result.returncode == 1
+    assert "/coverage/inherited_counts" in text_result.stdout
+    assert "Backstitch-Coverage-Policy-Ack:" in text_result.stdout
+    assert "repository-owned configuration" in text_result.stdout
+    assert "rerun `backstitch coverage`" in text_result.stdout
+
 
 def test_coverage_ratchet_fires_inherited_repository_and_patch_contexts(
     tmp_path: Path,

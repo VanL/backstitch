@@ -23,7 +23,11 @@ from backstitch.coverage_application import (
     publish_coverage,
     run_coverage,
 )
-from backstitch.intent_coverage_reporting import render_coverage_json
+from backstitch.intent_coverage_reporting import (
+    render_coverage_json,
+    render_coverage_text,
+)
+from backstitch.models import Issue
 from backstitch.profiles import configured_profile
 from backstitch.repository_snapshot import SnapshotCaptureError
 from backstitch.resolver import ScanError
@@ -71,24 +75,30 @@ def _render(result: CoverageResult, format_name: str) -> str:
             stale_doc_trends=document.stale_doc_trends,
             spec_growth=document.spec_growth,
         )
-    summary = document.payload["summary"]
-    definition_rows = {
-        item["definition_id"]: item for item in document.payload["definitions"]
+    return render_coverage_text(document.payload, issues=document.issues)
+
+
+def test_coverage_text_renders_typed_issues_with_and_without_location() -> None:
+    payload = {
+        "summary": {
+            "direct": 0,
+            "inherited": 0,
+            "exempt": 0,
+            "uncovered": 0,
+            "total": 0,
+        },
+        "definitions": [],
+        "worklist": [],
     }
-    worklist_lines = "".join(
-        "uncovered "
-        f"{definition_rows[definition_id]['role']} "
-        f"{definition_rows[definition_id]['path']} "
-        f"{definition_rows[definition_id]['structural_locator']}\n"
-        for definition_id in document.payload["worklist"]
+    rendered = render_coverage_text(
+        payload,
+        issues=(
+            Issue("SPEC_FILE_MISSING", "error", "pkg/mod.py", 7, "missing"),
+            Issue("SPEC_FILE_MISSING", "error", "", None, "global"),
+        ),
     )
-    return (
-        "Intent coverage: "
-        f"{summary['direct']} direct, {summary['inherited']} inherited, "
-        f"{summary['exempt']} exempt, {summary['uncovered']} uncovered, "
-        f"{summary['total']} total\n"
-        f"{worklist_lines}"
-    )
+    assert "pkg/mod.py:7 [BSS001 SPEC_FILE_MISSING] missing" in rendered
+    assert "[BSS001 SPEC_FILE_MISSING] global" in rendered
 
 
 @pytest.mark.parametrize("format_name", ("json", "text"))

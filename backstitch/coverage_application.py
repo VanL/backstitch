@@ -1152,8 +1152,10 @@ def _coverage_result(
             ),
             line=None,
             message=(
-                "unacknowledged intent coverage policy transition "
-                f"{event.key}: {event.event_id}"
+                "unacknowledged intent coverage policy transition for "
+                f"{event.key} ({event.event_id}); commit the repository-owned "
+                "configuration change with `Backstitch-Coverage-Policy-Ack: "
+                f"{event.event_id} -- <reason>`, then rerun `backstitch coverage`"
             ),
         )
         for event in ratchet.policy_events
