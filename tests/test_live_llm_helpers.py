@@ -815,8 +815,7 @@ def test_local_llm_proxy_rejects_v3_schema_drift_before_upstream() -> None:
 
 
 def test_local_llm_counting_proxy_relays_streaming_responses() -> None:
-    # Transport preflight remains an ordinary streaming request. Analyze uses
-    # the separate test-owned nonstream-to-SSE bridge covered above.
+    # The observational proxy relays provider streaming responses unchanged.
     sse_chunks = [
         b'data: {"choices": [{"delta": {"content": "O"}}]}\n\n',
         b'data: {"choices": [{"delta": {"content": "K"}}]}\n\n',

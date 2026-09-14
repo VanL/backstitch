@@ -365,7 +365,7 @@ Boundary and rationale:
   The test validates the curated corpus before provider activity, verifies
   `/v1/models`, requires a subprocess transport probe through
   `default_provider_adapter`, at least one non-error row, and exact analyze bodies
-  showing the packet IDs, served model, temperature, seed, nonstream mode, and
+  showing the packet IDs, served model, temperature, seed, streaming mode, and
   packet-bounded schema. Invalid completion JSON, malformed packet prompts,
   malformed upstream envelopes, and duplicate packet attempts fail locally
   without additional upstream traffic. The CI
