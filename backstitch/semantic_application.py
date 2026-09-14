@@ -304,6 +304,9 @@ def _current_paths(
     request: SemanticApplicationRequest,
     anchor: Path,
 ) -> tuple[str, ...] | SemanticApplicationFailure:
+    def overlaps(left: Path, right: Path) -> bool:
+        return left == right or left.is_relative_to(right) or right.is_relative_to(left)
+
     output_paths = tuple(
         path
         for path in (
@@ -330,14 +333,6 @@ def _current_paths(
             *profile.test_roots,
         )
     )
-    for output in resolved_outputs:
-        if any(
-            output == root or output.is_relative_to(root) for root in semantic_roots
-        ):
-            return SemanticApplicationFailure(
-                stage="validation",
-                message=f"analyze output overlaps a semantic input root: {output}",
-            )
     mutable_paths = [
         *resolved_outputs,
         request.semantic_settings.cache_path.resolve(strict=False),
@@ -358,9 +353,7 @@ def _current_paths(
                     f"analyze mutable path overlaps selected configuration: {mutable}"
                 ),
             )
-        if any(
-            mutable == root or mutable.is_relative_to(root) for root in semantic_roots
-        ):
+        if any(overlaps(mutable, root) for root in semantic_roots):
             return SemanticApplicationFailure(
                 stage="validation",
                 message=f"analyze mutable path overlaps a semantic input root: {mutable}",

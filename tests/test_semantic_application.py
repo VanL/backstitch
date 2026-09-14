@@ -546,6 +546,43 @@ def test_validation_precedes_provider_construction_and_cli_maps_exact_error(
     assert captured.err == f"backstitch: error: {outcome.message}\n"
 
 
+def test_cache_parent_of_source_root_is_rejected_before_provider_or_writes(
+    tmp_path: Path,
+) -> None:
+    _write_all_skipped_repo(tmp_path)
+    source = tmp_path / "docs/specs/01-core.md"
+    before = source.read_bytes()
+    tmp_path.joinpath(".backstitch.toml").write_text(
+        '[analyze]\ncache_path = "."\n', encoding="utf-8"
+    )
+    settings = resolve_config(
+        tmp_path,
+        environment={},
+        invocation_command="analyze",
+    )
+    paths_before = {path.relative_to(tmp_path) for path in tmp_path.rglob("*")}
+    constructions = 0
+
+    def forbidden_adapter(*_args: object, **_kwargs: object) -> object:
+        nonlocal constructions
+        constructions += 1
+        raise AssertionError("overlap failure constructed a provider")
+
+    outcome = analyze_semantics(
+        replace(
+            _request(settings, repo_root=tmp_path),
+            adapter_factory=forbidden_adapter,
+        )
+    )
+
+    assert isinstance(outcome, SemanticApplicationFailure)
+    assert outcome.stage == "validation"
+    assert "mutable path overlaps a semantic input root" in outcome.message
+    assert constructions == 0
+    assert source.read_bytes() == before
+    assert {path.relative_to(tmp_path) for path in tmp_path.rglob("*")} == paths_before
+
+
 def test_currentness_recapture_precedes_every_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

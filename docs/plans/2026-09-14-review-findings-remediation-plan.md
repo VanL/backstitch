@@ -591,6 +591,7 @@ behavior, not the number of review rounds, reviewer identity, or plan wording.
 | 2026-09-14 | Owner-supplied review | Incorporated | Native Windows becomes a separate exploration; slice 5 declares POSIX/macOS support and reconciles [SEM-4]; reporting returns to rank 2; landing order is 1,2,3,4,6,7,5; check adopts parent creation and both unwritable fixtures change; sdist installation explicitly includes its normal build. |
 | 2026-09-14 | Independent revision review: correctness and YAGNI | PASS | Confirmed narrowed platform scope and [SEM-4] reconciliation, planned renderer edge including TYPE_CHECKING, both unwritable-output fixtures, sdist build semantics, landing order, deferred Windows exploration, and matching index statuses. No remaining blocker. |
 | 2026-09-14 | Slice 1 implementation review: correctness and YAGNI | PASS after corrections | Removed a stale `[packets]` defaults claim, applied the exact planned trust-boundary text, removed a duplicate backlink, and added valid `config show` and unknown-key-hatch proof. The reviewer found no retained configuration authority or remaining blocker. |
+| 2026-09-14 | Slice 2 implementation review: correctness and YAGNI | PASS after correction | Replaced assertions about three named cache directories with a before/after repository path inventory, proving no derived cache artifact without freezing the cache namespace layout. The symmetric preflight predicate and ordering were accepted. |
 
 Existing engineering principles already require bounded scope and checking
 producer/consumer changes together. No new process rule or test is needed;
@@ -601,7 +602,7 @@ this revision corrects the application of those principles.
 | Slice | Status | Verification |
 |---|---|---|
 | 1. Invocation-owned publication destinations | complete | Removed all three config keys and projections; filesystem/blob rejection, external-sentinel, explicit-output, focused config/CLI, documentation, and self-corpus checks pass. |
-| 2. Semantic cache/source overlap | pending | |
+| 2. Semantic cache/source overlap | complete | One mutual overlap predicate rejects equality and either containment direction before snapshot, cache, or provider work; the `cache_path = "."` reverse-containment reproduction preserves source and creates no derived cache namespaces. |
 | 3. Coverage text issues | pending | |
 | 4. Atomic check publication | pending | |
 | 6. Distribution smoke tests | pending | |
