@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Changed the default semantic model to GPT-5.6 Luna through the Responses API
+  at maximum reasoning effort. Explicitly omitted reasoning effort continues
+  to accept the selected model's provider default; bounded live release
+  qualification covers Luna and the protected GPT-5.5 comparison.
+- Added configured semantic analysis, immutable evidence and verification
+  caches, evidence-stable reuse, aligned-intent obligations, intent coverage,
+  Git ratchets, and typed recovery guidance across JSON and text reports.
+- Hardened report publication: repository configuration can no longer choose
+  output destinations, semantic cache/source overlap is rejected before any
+  provider work, and `check --output` uses atomic replacement.
+- Hardened the release chain with exact-SHA workflow requirements, immutable
+  tag and release policy checks, pinned Actions, trusted PyPI publication,
+  artifact attestations, and separate clean-install smoke tests for the built
+  wheel and source distribution before attestation.
+- Made architecture enforcement exhaustive for every package module and
+  declared the actual platform boundary: repository commands support POSIX
+  systems, including Linux and macOS; Windows is not currently supported.
+- Removed Backstitch's mutable external Weft debt baseline from the test suite.
+  External repositories own their own Backstitch integration evidence.
+
 - Added opt-in documented suppression governance with spec-owned rationales,
   structured ignore/meta rules, deterministic audit provenance, first-class
   suppression obligations and semantic packets/results, cache replay, policy
