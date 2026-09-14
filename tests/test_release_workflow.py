@@ -122,6 +122,15 @@ def test_provider_dependency_floor_and_lock_are_responses_capable() -> None:
     }
 
 
+def test_package_metadata_declares_current_posix_platform_support() -> None:
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        classifiers = set(tomllib.load(handle)["project"]["classifiers"])
+
+    assert "Operating System :: POSIX" in classifiers
+    assert "Operating System :: MacOS :: MacOS X" in classifiers
+    assert "Operating System :: OS Independent" not in classifiers
+
+
 def test_backstitch_runtime_directory_is_ignored_and_untracked() -> None:
     ignored = [
         subprocess.run(

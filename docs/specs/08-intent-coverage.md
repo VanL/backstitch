@@ -909,7 +909,7 @@ _Implementation mapping_:
 ## Related Plans
 
 - `docs/plans/2026-09-14-review-findings-remediation-plan.md`
-  (active remediation plan; [COV-9])
+  (completed remediation plan; [COV-9])
 - `docs/plans/2026-07-29-usability-remediation-plan.md`
   (active usability implementation plan; [COV-5] and [COV-9])
 - `docs/plans/2026-07-29-architecture-quality-remediation-plan.md`

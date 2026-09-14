@@ -740,9 +740,11 @@ the final path with `os.link`, unlink the temporary file, and fsync the
 directory where supported. `FileExistsError` requires byte-for-byte validation
 of the existing object; different bytes are corruption. Cache roots that do
 not support same-filesystem hard links and atomic directory entry operations
-are unsupported and exit `2`. Windows must exercise the same-file-system
-hard-link path in CI; directory fsync is required only where the platform
-supports opening and syncing directories.
+are unsupported and exit `2`. The same-filesystem hard-link publication path
+must be exercised in hermetic tests. Runtime platform support is defined by
+[EVC-8.2]; a dependency-only Windows CI lane does not establish runtime
+support. Directory fsync is required only where the platform supports opening
+and syncing directories.
 
 An abandoned lock is removed only by:
 
@@ -2162,6 +2164,8 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-09-14-review-findings-remediation-plan.md`
+  (completed remediation plan; [SEM-4])
 - `docs/plans/2026-08-23-gpt-5-6-luna-responses-plan.md`
   (active implementation plan; request capabilities, Responses migration,
   and release qualification)

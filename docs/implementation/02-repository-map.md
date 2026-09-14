@@ -36,7 +36,7 @@ Quick pointers to the key guidance documents in this repository.
 | `backstitch/check_application.py` | Typed deterministic-check application seam: capture, report construction, warnings, and effective gate classification ([SC-5], [EVC-8.2], [EVC-8.7]) |
 | `backstitch/filesystem_io.py` | Generic bounded no-follow regular-file reads and exact six-field stat identity ([CFG-5.1], [EVC-8.2], [INV-11]) |
 | `backstitch/scan_exclusions.py` | Pure component-aware scan-exclusion matching shared by current and historical source adapters ([EVC-8.2], [INV-11]) |
-| `backstitch/repository_snapshot.py` | Immutable whole-capture lifecycle: no-follow inventory, path catalog, target convergence, retry, and clone-independent snapshot identity ([EVC-8.2]) |
+| `backstitch/repository_snapshot.py` | Immutable POSIX whole-capture lifecycle: no-follow inventory, path catalog, target convergence, retry, and clone-independent snapshot identity; repository commands currently require POSIX, including Linux and macOS, and Windows is unsupported ([EVC-8.2]) |
 | `backstitch/operation_progress.py` | Discrete absolute-deadline and ordered best-effort progress state machine shared by snapshot, discovery, and packet owners ([SC-5], [EVC-8.4]) |
 | `backstitch/obligation_runtime.py` | Reusable accepted-snapshot, check-pipeline, obligation-inventory, summary, and candidate-discovery domain runtime ([EVC-8.2]) |
 | `backstitch/obligations.py` | Source-derived section, invariant, and suppression obligation inventory, readiness, disposition, blockers, and bootstrap entries ([EVC-2], [EVC-8.3]) |

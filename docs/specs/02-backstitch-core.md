@@ -2140,7 +2140,7 @@ _Implementation mapping_:
 ## Related Plans
 
 - `docs/plans/2026-09-14-review-findings-remediation-plan.md`
-  (active remediation plan; [SC-5])
+  (completed remediation plan; [SC-5])
 - `docs/plans/2026-08-23-gpt-5-6-luna-responses-plan.md`
   (active implementation plan; request capabilities, Responses migration,
   and release qualification)

@@ -116,6 +116,11 @@ backstitch 0.3.0
 - `llm`, `markdown-it-py`, `tree-sitter`, and `tree-sitter-python` (installed
   automatically)
 
+Repository commands currently require a POSIX system, including Linux and
+macOS, with the no-follow descriptor primitives defined in
+[EVC-8.2](docs/specs/07-verification-and-evidence-cases.md#82-snapshot-capture-and-stateless-addressing-evc-82);
+Windows is not supported.
+
 ## Quick Start
 
 For a project with application code under `src`, create the scan roots and add

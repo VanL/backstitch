@@ -1,6 +1,6 @@
 # Review Findings Remediation Plan (2026-09-14)
 
-**Status:** active; revised plan and spec delta independently reviewed
+**Status:** completed; seven targeted slices implemented, verified, and reviewed
 
 **Class:** 5, spec-changing. The work changes public configuration,
 publication, and platform-support claims. The risky-change checklist applies
@@ -596,6 +596,8 @@ behavior, not the number of review rounds, reviewer identity, or plan wording.
 | 2026-09-14 | Slice 4 implementation review: correctness and YAGNI | PASS after corrections | Added unchanged-blocker and no-traceback acceptance proof, mirrored the blocker check in the unit test, and exercised missing-parent success for both text and JSON. The atomic owner reuse and spec delta were accepted. |
 | 2026-09-14 | Slice 6 implementation review: correctness and YAGNI | PASS after correction | Strengthened the structural test to order both exact artifact smoke calls before attestation and prove the function installs its artifact argument. The workflow implementation and minimal inline shape were accepted. |
 | 2026-09-14 | Slice 7 implementation review: correctness and YAGNI | PASS | All non-`__init__` modules are ranked consistently with the live import graph; dynamic equality, upward-import, and private-cross-rank checks pass with no fixed count, exceptions, or framework. |
+| 2026-09-14 | Slice 5 implementation review: platform truthfulness and YAGNI | PASS | Metadata, README, repository map, and [SEM-4] agree with unchanged [EVC-8.2]; built-wheel metadata and supported-host snapshot/cache tests passed. No Windows runtime promise or process-freezing test was added. |
+| 2026-09-14 | Fresh-eyes final range review | PASS after documentation correction | Corrected three stale `active` backlinks and made the planning-only verification statement historical. The combined targeted suite passed; no code correctness or YAGNI blocker remained. |
 
 Existing engineering principles already require bounded scope and checking
 producer/consumer changes together. No new process rule or test is needed;
@@ -611,7 +613,7 @@ this revision corrects the application of those principles.
 | 4. Atomic check publication | complete | Check delegates to the existing fsynced same-directory replacement owner; missing parents succeed, a regular-file parent yields exit 2, and injected replacement failure preserves the prior complete report and removes staging. Acceptance probe 11 uses the portable failure fixture. |
 | 6. Distribution smoke tests | complete | The release build resolves exactly one wheel and sdist, installs each exact artifact in a separate fresh environment outside the checkout, proves import provenance, and runs installed version, alignment-guide, and self-check commands before attestation. Static order checks and local artifact smoke pass. |
 | 7. Exact architecture ranks | complete | Every non-`__init__` package module has one reviewed rank; dynamic set equality rejects missing and stale entries, while the existing upward-import and private-cross-rank gates pass without exceptions or fixed module counts. |
-| 5. Truthful platform declaration | pending | |
+| 5. Truthful platform declaration | complete | Package metadata, README, repository map, and [SEM-4] now agree with the unchanged POSIX capture boundary; the existing unsupported-capability and cache hard-link tests pass, and built wheel metadata carries only the POSIX/macOS classifiers. |
 
 ## Fresh-Eyes Review
 
@@ -641,5 +643,28 @@ Revision verification on 2026-09-14:
 - `uv run backstitch check --repo-root .`: exit 0, zero errors, warnings,
   and infos (128 sections, 421 mappings, 587 code refs, 1175 edges).
 
-These are planning checks. Product code, specs, and workflows have not been
-changed, and no native Windows support or release run is claimed.
+At plan approval these were planning checks: product code, specs, and workflows
+had not yet changed. Completion evidence is recorded in the execution and
+review logs above. No native Windows support or hosted release run is claimed.
+
+## Completion Verification
+
+Completed on 2026-09-14:
+
+- Ruff formatting and lint, suppression-index validation, and configured mypy
+  passed across the repository.
+- The combined targeted suite and `tests/acceptance` passed. The hermetic CI
+  suite passed except for the separately checked sibling Weft corpus debt
+  baseline, whose current external checkout has a changed error set.
+- Both release distributions built and were installed separately outside the
+  checkout; import provenance, version, alignment-guide, and repository-check
+  smokes passed. The built wheel contains the POSIX and macOS classifiers and
+  not the OS-independent classifier.
+- The deterministic self-corpus check passed with zero errors and warnings.
+- Actual configured semantic analysis was attempted with the stale host
+  `LLM_MODEL=gpt-5.5` override removed so repository `gpt-5.6-luna` at `max`
+  applied. It reached the provider but exited `2`: four responses were not
+  valid JSON, then the serial run exhausted its 1,800-second runtime budget
+  during analysis-lock waits. This is an external/runtime residual, not a
+  skipped or mocked semantic check and not evidence of a seven-slice
+  regression.
