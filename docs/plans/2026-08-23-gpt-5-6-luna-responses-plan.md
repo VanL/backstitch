@@ -1136,11 +1136,11 @@ T1.
   baseline was repaired without adding or widening a production suppression.
   New [SC-10] firing tests account for the separate test-citation and Ruff
   textual-`noqa` count increments.
-- 2026-08-23: the external Weft corpus gate detects drift at sibling Weft HEAD
-  `f5e90e413ede5f2538e4921c3b35304705549b7f`, both from a clean archive and
-  from the working checkout (which also has three unrelated uncommitted source
-  edits). Backstitch's pinned Weft debt set was not rewritten in this Luna
-  change.
+- 2026-08-23: the then-present external Weft corpus gate detected drift at
+  sibling Weft HEAD `f5e90e413ede5f2538e4921c3b35304705549b7f`, both from a clean
+  archive and from the working checkout. That observation remains historical;
+  Backstitch no longer owns or conditionally runs Weft's mutable debt baseline
+  (see the 2026-09-14 v0.4.0 release-readiness plan).
 
 ## Review Log
 
