@@ -132,23 +132,20 @@ def test_bare_default_check_matches_explicit_failing_repository(
     assert "MAPPING_PATH_MISSING" in bare.stdout
 
 
-def test_bare_default_check_preserves_configured_output(config_repo: Path) -> None:
+def test_bare_default_check_uses_stdout(config_repo: Path) -> None:
     config = config_repo / ".backstitch.toml"
     config.write_text(
         (
             'default_command = "check"\n'
             + config.read_text(encoding="utf-8")
-            + '\n[check]\nformat = "json"\noutput = "bare-report.json"\n'
+            + '\n[check]\nformat = "json"\n'
         ),
         encoding="utf-8",
     )
 
     result = run_cli(cwd=config_repo)
-    report = config_repo / "bare-report.json"
-
     assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
-    assert json.loads(report.read_text(encoding="utf-8"))["summary"]["errors"] == 0
+    assert json.loads(result.stdout)["summary"]["errors"] == 0
 
 
 def test_bare_invocation_accepts_global_config_and_option_controls(
@@ -511,9 +508,6 @@ def test_cli_option_paths_use_cwd_while_scan_roots_remain_target_relative(
         "show",
         "--no-config",
         "--option",
-        "check.output",
-        "reports/check.json",
-        "--option",
         "profile.code_roots",
         '["src"]',
         cwd=tmp_path,
@@ -521,9 +515,6 @@ def test_cli_option_paths_use_cwd_while_scan_roots_remain_target_relative(
 
     assert result.returncode == 0, result.stderr
     settings = json.loads(result.stdout)
-    assert settings["check"]["output"] == str(
-        (tmp_path / "reports/check.json").resolve()
-    )
     assert settings["profile_overrides"]["code_roots"] == ["src"]
 
 
@@ -579,7 +570,6 @@ def test_non_config_commands_reject_global_configuration_controls(
         ("check", ("--code-root", "src"), "profile.code_roots", '["src"]'),
         ("check", ("--test-root", "tests"), "profile.test_roots", '["tests"]'),
         ("check", ("--format", "json"), "check.format", "text"),
-        ("check", ("--output", "out.txt"), "check.output", "other.txt"),
         (
             "check",
             ("--warnings-as-errors",),

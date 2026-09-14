@@ -335,18 +335,20 @@ accepts ordinary arguments such as `--model`. An argument invalid for the
 selected default remains a CLI usage error. Other commands require an explicit
 invocation.
 
-For local use, invoking bare `backstitch` explicitly delegates command
-selection and the selected command's documented side effects to the effective
-repository configuration. A configured check output may write its report;
-configured analyze may read credentials, write cache state, make bounded
-provider calls, and incur bounded cost under its existing contract. Bare
-dispatch is forbidden in secret-bearing hostile-target automation: those
-workflows continue to name the semantic command, select trusted tool
-configuration explicitly, and use only workflow-owned static overrides under
-[SEM-9] and [EVC-11].
-The CLI does not infer whether an invocation is local or automated; the
-hostile-target prohibition is a workflow contract enforced by trusted
-workflow source and its firing tests.
+For local use, invoking bare `backstitch` delegates command selection and
+the selected command's documented side effects to effective repository
+configuration. Repository configuration never selects a report or artifact
+publication destination. `check` and `coverage` publish a report only when
+the invocation explicitly supplies `--output`; relative output paths resolve
+from the process working directory. Configured analyze may read credentials,
+write cache state, make bounded provider calls, and incur bounded cost under
+its existing contract. Bare dispatch is forbidden in secret-bearing
+hostile-target automation: those workflows continue to name the semantic
+command, select trusted tool configuration explicitly, and use only
+workflow-owned static overrides under [SEM-9] and [EVC-11]. The CLI does not
+infer whether an invocation is local or automated; the hostile-target
+prohibition is a workflow contract enforced by trusted workflow source and
+its firing tests.
 
 Required deterministic command:
 
@@ -2129,6 +2131,8 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-09-14-review-findings-remediation-plan.md`
+  (active remediation plan; [SC-5])
 - `docs/plans/2026-08-23-gpt-5-6-luna-responses-plan.md`
   (active implementation plan; request capabilities, Responses migration,
   and release qualification)

@@ -116,7 +116,7 @@ def test_heading_with_trailing_html_meta_marker_keeps_section(
 # --- P1: config keys must be consulted, not just parsed ----------------
 
 
-def test_check_format_and_output_from_config_apply(tmp_path: Path) -> None:
+def test_check_format_from_config_and_output_from_cli_apply(tmp_path: Path) -> None:
     _write(tmp_path, "docs/specs/01-x.md", "# X\n\n## One [CX-1]\n")
     _write(tmp_path, "pkg/mod.py", '"""Mod."""\n')
     _write(
@@ -130,17 +130,42 @@ def test_check_format_and_output_from_config_apply(tmp_path: Path) -> None:
                 'code_roots = ["pkg"]',
                 "[check]",
                 'format = "json"',
-                'output = "configured-report.json"',
             ]
         )
         + "\n",
     )
-    result = run_cli("check", "--repo-root", str(tmp_path))
+    written = tmp_path / "cli-report.json"
+    result = run_cli("check", "--repo-root", str(tmp_path), "--output", str(written))
     assert result.returncode == 0, result.stderr
-    written = tmp_path / "configured-report.json"
-    assert written.is_file(), "config check.output was not honored"
+    assert written.is_file()
     data = json.loads(written.read_text(encoding="utf-8"))
     assert "summary" in data, "config check.format=json was not honored"
+
+
+@pytest.mark.parametrize(
+    ("body", "command"),
+    (
+        ('[check]\noutput = "{target}"\n', ("check",)),
+        ('[coverage]\noutput = "{target}"\n', ("coverage",)),
+        ('[packets]\noutput = "{target}"\n', ("packets",)),
+    ),
+)
+def test_repository_config_cannot_publish_to_an_external_absolute_path(
+    tmp_path: Path,
+    body: str,
+    command: tuple[str, ...],
+) -> None:
+    repo = tmp_path / "repo"
+    target = tmp_path / "sentinel.txt"
+    target.write_text("unchanged", encoding="utf-8")
+    _write(repo, ".backstitch.toml", body.format(target=target.as_posix()))
+    arguments = [*command, "--repo-root", str(repo)]
+    if command == ("packets",):
+        arguments.extend(("--output", str(repo / "packets.jsonl")))
+    result = run_cli(*arguments)
+    assert result.returncode == 2
+    assert "unknown config key" in result.stderr
+    assert target.read_text(encoding="utf-8") == "unchanged"
 
 
 def test_analyze_concurrency_from_config_is_validated(tmp_path: Path) -> None:
@@ -317,20 +342,27 @@ def test_check_emits_suppression_diagnostics_as_structured_issues(
     assert "unused per-file-ignore" in messages["SUPPRESSION_UNUSED"]
 
 
-# --- Round 2 P2: config show serializes [packets] -------------------------
+# --- Publication destinations remain invocation-owned --------------------
 
 
-def test_config_show_includes_packets_settings(tmp_path: Path) -> None:
+def test_config_show_rejects_packets_settings(tmp_path: Path) -> None:
     _write(
         tmp_path,
         ".backstitch.toml",
         '[packets]\noutput = "out/packets.jsonl"\n',
     )
     result = run_cli("config", "show", "--repo-root", str(tmp_path))
+    assert result.returncode == 2
+    assert "unknown config key `packets`" in result.stderr
+
+
+def test_config_show_omits_publication_destinations(tmp_path: Path) -> None:
+    result = run_cli("config", "show", "--no-config", "--repo-root", str(tmp_path))
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
-    assert "packets" in data, "config show dropped the [packets] table"
-    assert data["packets"]["output"].endswith("out/packets.jsonl")
+    assert "packets" not in data
+    assert "output" not in data["check"]
+    assert "output" not in data["coverage"]
 
 
 # --- Round 2 P2: malformed noqa directives are never silently accepted ----
@@ -430,7 +462,6 @@ def _custom_config_repo(tmp_path: Path) -> Path:
                 'code_roots = ["pkg"]',
                 "[check]",
                 'format = "json"',
-                'output = "from-custom.json"',
             ]
         )
         + "\n",
@@ -442,9 +473,7 @@ def test_global_config_flag_applies_to_check(tmp_path: Path) -> None:
     custom = _custom_config_repo(tmp_path)
     result = run_cli("--config", str(custom), "check", "--repo-root", str(tmp_path))
     assert result.returncode == 0, result.stderr
-    assert (tmp_path / "from-custom.json").is_file(), (
-        "global --config spelling was not honored"
-    )
+    assert json.loads(result.stdout)["summary"]["errors"] == 0
 
 
 def test_global_no_config_flag_applies_to_check(tmp_path: Path) -> None:
@@ -909,10 +938,9 @@ def test_empty_html_ignore_keeps_section_under_hatch(tmp_path: Path) -> None:
 # --- Round 9 P2: extended config paths anchor at the defining file ----------
 
 
-def test_extended_config_paths_resolve_against_defining_file(
+def test_extended_config_rejects_removed_publication_key(
     tmp_path: Path,
 ) -> None:
-    shared = tmp_path / "shared"
     repo = tmp_path / "repo"
     _write(tmp_path, "shared/parent.toml", '[check]\noutput = "reports/out.json"\n')
     _write(
@@ -921,9 +949,8 @@ def test_extended_config_paths_resolve_against_defining_file(
         'extend = "../shared/parent.toml"\n',
     )
     result = run_cli("config", "show", "--repo-root", str(repo))
-    assert result.returncode == 0, result.stderr
-    output = json.loads(result.stdout)["check"]["output"]
-    assert output == str((shared / "reports/out.json").resolve()), output
+    assert result.returncode == 2
+    assert "unknown config key `check.output`" in result.stderr
 
 
 # --- Round 9 P2: absolute roots fail with a clear diagnostic ---------------

@@ -40,7 +40,6 @@ CLEAN = FIXTURES / "clean_project"
 def _settings(
     *,
     format_name: Literal["text", "json"] = "json",
-    output: Path | None = None,
 ) -> BackstitchSettings:
     return BackstitchSettings(
         profile_overrides=ProfileSettings(
@@ -51,7 +50,6 @@ def _settings(
         ),
         coverage=CoverageSettings(
             format=format_name,
-            output=None if output is None else output.as_posix(),
         ),
     )
 
@@ -124,12 +122,13 @@ def test_coverage_publication_matches_cli_and_cleans_staging(
 ) -> None:
     application_output = tmp_path / "application/report.json"
     cli_output = tmp_path / "cli/report.json"
-    settings = _settings(output=application_output)
+    settings = _settings()
     outcome = run_coverage(
         CoverageRequest(
             repo_root=CLEAN,
             profile=configured_profile(settings),
             settings=settings,
+            output_path=application_output,
         )
     )
     assert isinstance(outcome, CoverageResult)
@@ -139,8 +138,10 @@ def test_coverage_publication_matches_cli_and_cleans_staging(
     assert application_output.read_text(encoding="utf-8") == rendered
     assert tuple(application_output.parent.glob(".*.tmp")) == ()
 
-    cli_settings = _settings(output=cli_output)
-    args = cli.build_parser().parse_args(["coverage", str(CLEAN)])
+    cli_settings = _settings()
+    args = cli.build_parser().parse_args(
+        ["coverage", str(CLEAN), "--output", str(cli_output)]
+    )
     exit_code = cli._cmd_coverage(args, cli_settings)
     captured = capsys.readouterr()
 
@@ -188,9 +189,9 @@ def test_coverage_publication_failure_maps_to_one_cli_error(
 ) -> None:
     output = tmp_path / "report.json"
     output.mkdir()
-    settings = _settings(output=output)
+    settings = _settings()
     outcome = run_coverage(
-        CoverageRequest(CLEAN, configured_profile(settings), settings)
+        CoverageRequest(CLEAN, configured_profile(settings), settings, output)
     )
     assert isinstance(outcome, CoverageResult)
     rendered = _render(outcome, "json")
@@ -198,7 +199,9 @@ def test_coverage_publication_failure_maps_to_one_cli_error(
     assert isinstance(failure, CoverageFailure)
     assert failure.stage == "publication"
 
-    args = cli.build_parser().parse_args(["coverage", str(CLEAN)])
+    args = cli.build_parser().parse_args(
+        ["coverage", str(CLEAN), "--output", str(output)]
+    )
     exit_code = cli._cmd_coverage(args, settings)
     captured = capsys.readouterr()
 

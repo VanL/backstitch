@@ -274,8 +274,9 @@ is narrower: [COV-5]/[COV-9] reject explicit `--config`, `--no-config`,
 `--profile`, every `--option`, home/environment/external layers, and every
 gate-affecting value not owned by packaged defaults or a no-follow
 repository-owned config layer present at both current and merge-base state.
-Only the root alias, `format`, `output`, and `--require-ratchet REF` are
-operational CLI inputs. `--require-ratchet` asserts the literal effective
+Only the root alias, `--format`, `--output`, and `--require-ratchet REF` are
+operational CLI inputs. `--output` has no configuration equivalent.
+`--require-ratchet` asserts the literal effective
 mode/base pair and never overrides either.
 
 _Implementation mapping_:
@@ -316,7 +317,7 @@ ancestry. Containment does not call `Path.resolve`, `realpath`, `stat`, or
 another filesystem operation; physical symlink and no-follow enforcement
 belongs to repository capture. Given equal defaults, environment, and layer
 bytes with no CLI overlay, both adapters yield equal non-operational settings
-and identical profile-root containment. Operational output, cache,
+and identical profile-root containment. Operational cache,
 verification-evaluation-report, and target-root addresses may differ only in
 adapter normalization: the filesystem adapter may preserve its physical
 canonicalization, while the blob adapter validates and normalizes them
@@ -330,8 +331,9 @@ never includes `tool.backstitch`. Split `KEY` on literal dots with no quoted
 segments or escaping; every segment is nonempty. Individual map entries whose
 names contain dots, including `lint.per-file-ignores` and
 `lint.per-section-ignores` entries, are not addressable; traversal stops at a
-non-leaf table and is exit `2`. Reserved/non-consulted leaves such as
-`packets.output` are not runtime-overridable.
+non-leaf table and is exit `2`. Every accepted generic option names a
+runtime-consulted configuration leaf; publication destinations are not
+configuration leaves.
 
 `default_command` is also not a generic-option leaf. It selects whether bare
 invocation dispatches at all and is accepted only from the packaged or
@@ -390,14 +392,13 @@ The complete dedicated-setting alias map is:
 | `--code-root` | `profile.code_roots` | `check`, `packets` |
 | `--test-root` | `profile.test_roots` | `check`, `packets` |
 | `--format` | `check.format` | `check` only |
-| `--output` | `check.output` | `check` only |
 | `--warnings-as-errors` / `--no-warnings-as-errors` | `check.warnings_as_errors` | `check` |
 | `--model` | `analyze.model` | `analyze`, `doctor` |
 | `--concurrency` | `analyze.concurrency` | `analyze` |
 
 All other flags are operational arguments rather than setting aliases.
-`--repo-root`, non-check `--format`/`--output`, analyze report and packet
-paths, packet `--output`, obligation `--limit`, and config selection controls
+`--repo-root`, every `--output`, non-check `--format`, analyze report and packet
+paths, obligation `--limit`, and config selection controls
 therefore never conflict with a generic setting key.
 
 CLI artifact paths are relative to the process working directory. Scan roots
@@ -515,16 +516,10 @@ not suppress invariant diagnostics.
 |-----|------|-----------|
 | `format` | `"text"` \| `"json"` | CLI `--format` |
 | `warnings_as_errors` | bool | CLI `--warnings-as-errors` |
-| `output` | string | CLI `--output` |
 
-### 6.4 `[packets]` / `[tool.backstitch.packets]`
-
-| Key | Type | Maps from |
-|-----|------|-----------|
-| `output` | string | CLI `--output` default only when command allows optional output in a later revision; in v1 store for forward compatibility but require CLI `--output` |
-
-`packets.output` is reserved in v1. The command continues to require
-`--output` on the CLI ([SC-5]).
+`check.output`, `coverage.output`, and the `[packets]` table are not schema.
+Report and packet destinations are operational authority supplied only by the
+invocation's explicit `--output` argument ([SC-5]).
 
 ### 6.5 `[analyze]` / `[tool.backstitch.analyze]` [CFG-6.5]
 
@@ -844,7 +839,7 @@ otherwise.
 
 Circular `extend` chains must error.
 
-`exclude`, `extend_exclude`, `[profile]`, `[check]`, `[packets]`, `[analyze]`,
+`exclude`, `extend_exclude`, `[profile]`, `[check]`, `[analyze]`,
 `[obligations]`, `[verify]`, `[target_roots]`, `[lint]`, `[diagnostics]`, and
 `[coverage]` all have defaults in the packaged default TOML. Python dataclass
 defaults may mirror those values for type construction, but the packaged TOML
@@ -919,7 +914,6 @@ The coverage table is closed:
 |---|---|---|
 | `mode` | `"report"` or `"ratchet"` | `"report"` |
 | `format` | `"text"` or `"json"` | `"text"` |
-| `output` | nonblank path string or absent | absent |
 | `granularity` | exact literal `"definition"` | `"definition"` |
 | `inherited_counts` | boolean | `false` |
 | `ratchet_base` | string; nonblank only when ratchet runs | `""` |
@@ -950,13 +944,13 @@ provenance but not classification priority. `coverage.floors` follows ordinary
 deep-table merge by exact canonical scope, with a later `direct` or
 `accounted` leaf replacing that leaf. Selectors and floor scopes are anchored
 to the accepted repository root, not the contributing config directory.
-Configured `output` follows the existing contributing-layer path anchoring;
 CLI `--output` follows current-working-directory anchoring. The immutable
 settings snapshot retains contributing-layer provenance for every effective
 coverage and policy input required by [COV-5].
 
-`format` and `output` are presentation-only and may be set by dedicated
-coverage flags. All other leaves are behavior or authority inputs. Report mode
+`format` is presentation-only and may be set by a dedicated coverage flag.
+`--output` is an operational input, not a setting. All other leaves are
+behavior or authority inputs. Report mode
 admits normal generic-option precedence for runtime-consulted scalar leaves;
 `exemptions`, `floors`, and their members are non-leaf and cannot be addressed
 through `--option`. Ratchet mode rejects every generic option and explicit
@@ -978,8 +972,9 @@ CLI-over-environment-over-file precedence as explicit analyze.
 Bare invocation is a local convenience over repository configuration, not a
 hostile-target automation primitive. Selecting `"analyze"` authorizes the
 same credential, network, cache, and bounded-cost behavior as explicit
-current-repository analyze. Selecting `"check"` authorizes the same configured
-report output behavior as explicit check. Secret-bearing hostile-target
+current-repository analyze. Selecting `"check"` authorizes deterministic
+scanning but no report publication destination; publication requires an
+explicit invocation `--output`. Secret-bearing hostile-target
 workflows must not use bare invocation; [SEM-9] and [EVC-11]'s explicit
 trusted-command/config/override boundary remains mandatory.
 This restriction is enforced at the workflow contract and test boundary;
@@ -1226,8 +1221,12 @@ actually consults
   evidence-stable selection retains the baseline result and its producer
   provenance, while exact-inference selection uses only the selected
   provider's `analysis_key`
-- a configured `check.output` write and a bounded provider-capable analyze
-  invocation match their explicit-command behavior in local tests, while
+- strict configuration rejects `check.output`, `packets.output`, and
+  `coverage.output` as unknown keys; the `allow_unknown_keys` hatch names and
+  ignores them; explicit check and coverage `--output` still publish to the
+  invocation-selected path
+- a bounded provider-capable analyze invocation matches its explicit-command
+  behavior in local tests, while
   trusted hostile-target workflows are statically checked to retain explicit
   commands and trusted config selection
 - direct resolver tests distinguish legacy non-CLI resolution, explicit
@@ -1240,9 +1239,12 @@ actually consults
   a firing or no-op-prevention test; tests cover packaged values, report-mode
   precedence, `extend` replacement/deep merge, path anchoring, unknown keys,
   invalid types/ranges/shapes, and `config show`
+- filesystem and blob-backed config tests reject `check.output`,
+  `coverage.output`, and `packets.output`; public CLI tests prove those keys
+  cannot change an external sentinel while explicit CLI output still publishes
 - ratchet tests enumerate every forbidden provenance/CLI contribution,
   repository-owned layer condition, literal `--require-ratchet REF` match and
-  mismatch, and show that presentation-only format/output overrides cannot
+  mismatch, and show that presentation-only format and operational output cannot
   change the canonical policy identity
 - `ruff` and `mypy` over new loader modules
 
@@ -1282,6 +1284,8 @@ Implementation must update:
 
 ## Related Plans
 
+- `docs/plans/2026-09-14-review-findings-remediation-plan.md`
+  (active remediation plan; [CFG-5], [CFG-5.1], [CFG-6], [CFG-7], and [CFG-9])
 - `docs/plans/2026-08-23-gpt-5-6-luna-responses-plan.md`
   (active implementation plan; request capabilities, Responses migration,
   and release qualification)

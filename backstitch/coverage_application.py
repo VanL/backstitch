@@ -134,6 +134,7 @@ class CoverageRequest:
     repo_root: Path
     profile: ProfileConfig
     settings: BackstitchSettings
+    output_path: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1089,6 +1090,7 @@ def _coverage_result(
     settings: BackstitchSettings,
     repository: _RepositoryState,
     ratchet: _RatchetState,
+    output_path: Path | None,
 ) -> CoverageResult | CoverageFailure:
     result = classify_intent_coverage(
         tuple(
@@ -1196,11 +1198,7 @@ def _coverage_result(
             stale_doc_trends=ratchet.stale_doc_trends,
             spec_growth=ratchet.spec_growth,
         ),
-        output_path=(
-            Path(settings.coverage.output)
-            if settings.coverage.output is not None
-            else None
-        ),
+        output_path=output_path,
         blocks_gate=bool(policy_issues)
         or any(issue.severity in fail_on for issue in issues),
     )
@@ -1247,6 +1245,7 @@ def run_coverage(request: CoverageRequest) -> CoverageResult | CoverageFailure:
         request.settings,
         repository,
         ratchet,
+        request.output_path,
     )
 
 

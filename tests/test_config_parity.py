@@ -26,9 +26,6 @@ def _nonoperational(settings: BackstitchSettings) -> BackstitchSettings:
         verify = replace(verify, cache_path="")
     return replace(
         settings,
-        check=replace(settings.check, output=None),
-        packets=replace(settings.packets, output=None),
-        coverage=replace(settings.coverage, output=None),
         analyze=replace(settings.analyze, cache_path=""),
         verify=verify,
         target_roots=replace(settings.target_roots, weft=None),
@@ -63,6 +60,28 @@ def _assert_source_parity(
     assert historical.policy_rule_origins == current.policy_rule_origins
     assert historical.ratchet_policy_provenance == current.ratchet_policy_provenance
     assert historical.analyze_model_source == current.analyze_model_source
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        '[check]\noutput = "/tmp/report.json"\n',
+        '[coverage]\noutput = "/tmp/report.json"\n',
+        '[packets]\noutput = "/tmp/packets.jsonl"\n',
+    ),
+)
+def test_removed_publication_keys_are_rejected_by_both_config_adapters(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text(body, encoding="utf-8")
+    with pytest.raises(ConfigLoadError, match="unknown config key"):
+        resolve_config(tmp_path, explicit=config, environment={})
+    with pytest.raises(ConfigLoadError, match="unknown config key"):
+        resolve_repository_config_from_blobs(
+            tmp_path, ".backstitch.toml", {".backstitch.toml": body.encode()}
+        )
 
 
 @pytest.mark.parametrize(

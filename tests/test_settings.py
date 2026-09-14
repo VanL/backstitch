@@ -604,6 +604,8 @@ def test_resolve_config_precedence_fires_at_every_layer(tmp_path: Path) -> None:
         "verify",
         "lint.per-file-ignores.src.module.py",
         "lint.suppressions",
+        "check.output",
+        "coverage.output",
         "packets.output",
         "unknown.value",
     ),
@@ -1030,7 +1032,6 @@ def test_packaged_coverage_defaults_are_closed_and_have_no_repository_floor(
 
     assert settings.coverage.mode == "report"
     assert settings.coverage.format == "text"
-    assert settings.coverage.output is None
     assert settings.coverage.granularity == "definition"
     assert settings.coverage.inherited_counts is False
     assert settings.coverage.ratchet_base == ""
@@ -1060,7 +1061,6 @@ code_roots = ["src"]
 [coverage]
 mode = "report"
 format = "json"
-output = "reports/coverage.json"
 granularity = "definition"
 inherited_counts = true
 ratchet_base = "origin/main"
@@ -1095,9 +1095,6 @@ accounted = 0.75
         invocation_command="coverage",
     )
 
-    assert settings.coverage.output == str(
-        (tmp_path / "reports/coverage.json").resolve()
-    )
     assert settings.coverage.exemptions == (
         CoverageExemption(
             kind="path",
@@ -1117,7 +1114,6 @@ accounted = 0.75
     assert payload["coverage"] == {
         "mode": "report",
         "format": "json",
-        "output": str((tmp_path / "reports/coverage.json").resolve()),
         "granularity": "definition",
         "inherited_counts": True,
         "ratchet_base": "origin/main",
@@ -1190,33 +1186,11 @@ direct = 0.3
     )
 
 
-def test_coverage_output_anchors_to_the_contributing_extend_layer(
-    tmp_path: Path,
-) -> None:
-    parent_dir = tmp_path / "parent"
-    child_dir = tmp_path / "child"
-    parent_dir.mkdir()
-    child_dir.mkdir()
-    parent = parent_dir / "base.toml"
-    child = child_dir / "child.toml"
-    parent.write_text(
-        '[coverage]\noutput = "reports/coverage.json"\n', encoding="utf-8"
-    )
-    child.write_text('extend = "../parent/base.toml"\n', encoding="utf-8")
-
-    settings = resolve_config(tmp_path, explicit=child, environment={})
-
-    assert settings.coverage.output == str(
-        (parent_dir / "reports/coverage.json").resolve()
-    )
-
-
 @pytest.mark.parametrize(
     ("body", "message"),
     (
         ('[coverage]\nmode = "other"\n', "coverage.mode"),
         ('[coverage]\nformat = "yaml"\n', "coverage.format"),
-        ('[coverage]\noutput = ""\n', "coverage.output"),
         ('[coverage]\ngranularity = "line"\n', "coverage.granularity"),
         ("[coverage]\ninherited_counts = 1\n", "coverage.inherited_counts"),
         ('[coverage]\nratchet_base = " main "\n', "coverage.ratchet_base"),
@@ -1466,7 +1440,7 @@ def test_coverage_ratchet_rejects_explicit_config_and_gate_cli_contributions(
         )
 
 
-def test_coverage_ratchet_allows_dedicated_presentation_overrides(
+def test_coverage_ratchet_allows_dedicated_format_override(
     tmp_path: Path,
 ) -> None:
     config = tmp_path / ".backstitch.toml"
@@ -1480,13 +1454,11 @@ def test_coverage_ratchet_allows_dedicated_presentation_overrides(
         environment={},
         cli_overrides={
             "coverage.format": "json",
-            "coverage.output": str(tmp_path / "coverage.json"),
         },
         invocation_command="coverage",
     )
 
     assert settings.coverage.format == "json"
-    assert settings.coverage.output == str(tmp_path / "coverage.json")
 
 
 def test_coverage_policy_provenance_names_each_effective_coverage_key(
@@ -1573,7 +1545,6 @@ def test_flatten_ratchet_policy_layer_has_exact_included_and_excluded_gate_keys(
     for table, key in (
         ("profile", "plan_roots"),
         ("coverage", "format"),
-        ("coverage", "output"),
         ("diagnostics", "registry"),
     ):
         assert (
@@ -1605,7 +1576,6 @@ def test_table_key_names_is_the_exact_closed_table_map() -> None:
         "defaults": settings_module._DEFAULTS_KEYS,
         "profile": settings_module._PROFILE_KEYS,
         "check": settings_module._CHECK_KEYS,
-        "packets": settings_module._PACKETS_KEYS,
         "coverage": settings_module._COVERAGE_KEYS,
         "analyze": settings_module._ANALYZE_KEYS,
         "verify": settings_module._VERIFY_KEYS,
@@ -1792,17 +1762,6 @@ def test_process_spec_globs_alone_populates_meta(tmp_path: Path) -> None:
     assert settings.profile_overrides.meta_spec_globs == ("docs/specs/02-*.md",)
 
 
-def test_packets_output_is_parsed(tmp_path: Path) -> None:
-    # CFG §6.4: packets.output is reserved in v1 but must be stored, not
-    # silently dead schema.
-    config = tmp_path / ".backstitch.toml"
-    config.write_text('[packets]\noutput = "out/packets.jsonl"\n', encoding="utf-8")
-    settings = resolve_config(tmp_path, explicit=config)
-    assert settings.packets.output == str(
-        (tmp_path / "out" / "packets.jsonl").resolve()
-    )
-
-
 # --- Strict unknown keys [CFG-8] ----------------------------------------
 
 
@@ -1829,9 +1788,7 @@ def test_unknown_nested_key_exits_two(tmp_path: Path) -> None:
     assert "check.color" in str(excinfo.value)
 
 
-@pytest.mark.parametrize(
-    "table_name", ["check", "packets", "analyze", "target_roots", "lint"]
-)
+@pytest.mark.parametrize("table_name", ["check", "analyze", "target_roots", "lint"])
 def test_known_table_scalar_reports_type_error(
     tmp_path: Path,
     table_name: str,
@@ -1892,6 +1849,27 @@ def test_allow_unknown_keys_downgrades_to_stderr_warning(
     assert settings.allow_unknown_keys is True
     captured = capsys.readouterr()
     assert "unknown_key" in captured.err
+
+
+@pytest.mark.parametrize(
+    "body,key",
+    (
+        ('[check]\noutput = "elsewhere"\n', "check.output"),
+        ('[coverage]\noutput = "elsewhere"\n', "coverage.output"),
+        ('[packets]\noutput = "elsewhere"\n', "packets"),
+    ),
+)
+def test_allow_unknown_keys_names_and_ignores_removed_publication_keys(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    body: str,
+    key: str,
+) -> None:
+    config = tmp_path / ".backstitch.toml"
+    config.write_text("allow_unknown_keys = true\n" + body, encoding="utf-8")
+    settings = resolve_config(tmp_path, explicit=config)
+    assert settings.allow_unknown_keys is True
+    assert key in capsys.readouterr().err
 
 
 def test_allow_unknown_keys_never_masks_type_errors(tmp_path: Path) -> None:

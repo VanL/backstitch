@@ -50,7 +50,7 @@ Quick pointers to the key guidance documents in this repository.
 | `backstitch/alignment_guide.py` | Installed versioned alignment quick start shared by public agent and human workflows ([EVC-8.1]) |
 | `backstitch/alignment_eval.py` | Closed Phase A/B product preregistration, authoritative product identities, independently source-bound gold, and result recomputation ([EVC-10.2]) |
 | `backstitch/reporting.py` | Text/JSON rendering, suppressed view ([SC-6], [EXC-7]) |
-| `backstitch/settings.py` | Sole invocation-scoped config resolver: packaged defaults, repository TOML, bare/explicit command context, defined environment, generic/dedicated CLI layers, strict validation, and immutable settings provenance ([CFG-5.1], [SC-5.1]) |
+| `backstitch/settings.py` | Sole invocation-scoped config resolver: packaged defaults, repository TOML, bare/explicit command context, defined environment, generic/dedicated setting layers, strict validation, and immutable settings provenance; publication destinations remain outside repository config ([CFG-5.1], [SC-5.1]) |
 | `backstitch/exclusions.py` | Canonical documented-suppression rule engine and decisions ([EXC-*]) |
 | `backstitch/target_roots.py` | Worktree-safe sibling discovery ([SC-12]) |
 | `backstitch/analysis_packets.py` | Sole source-aligned packet producer over one immutable obligation runtime; the former `generate_packets` path is removed ([SC-6], [SC-7], [EVC-9.1], [INV-5]) |

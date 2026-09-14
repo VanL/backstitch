@@ -449,7 +449,7 @@ Every effective gate-affecting value must originate only from packaged
 defaults or such repository-owned layers. Ratchet mode rejects home,
 environment, external include, explicit CLI `--config`, CLI `--no-config`,
 CLI `--profile`, and CLI `--option` contributions to gate inputs as an
-invocation error. Only `format`, `output`, the root alias, and the
+invocation error. Only configured `format`, operational CLI `--output`, the root alias, and the
 `--require-ratchet REF` assertion may be operational invocation overrides.
 
 Coverage help must mark `--profile`, `--config`, `--no-config`, and
@@ -820,7 +820,9 @@ BSN006 row rather than restating code meaning or packaged level.
 controls.
 Positional `PATH` and `--repo-root PATH` are exact aliases and are mutually
 exclusive; when neither is supplied, the root anchor is the current working
-directory. `--format` and `--output` override their config keys. Report mode
+directory. `--format` overrides its configuration key. `--output` is an
+operational invocation argument with no configuration equivalent and does not
+enter ratchet policy identity. Report mode
 accepts the listed config/profile/option controls with ordinary precedence.
 Ratchet mode rejects `--profile`, every `--option`, `--no-config`, and every
 explicit CLI `--config`. Ratchet configuration must come from ordinary
@@ -906,6 +908,8 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-09-14-review-findings-remediation-plan.md`
+  (active remediation plan; [COV-9])
 - `docs/plans/2026-07-29-usability-remediation-plan.md`
   (active usability implementation plan; [COV-5] and [COV-9])
 - `docs/plans/2026-07-29-architecture-quality-remediation-plan.md`

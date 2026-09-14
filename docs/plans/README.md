@@ -46,6 +46,8 @@ Risky plans are blocked if they do not make explicit:
 
 | Plan | Status |
 |------|--------|
+| 2026-09-14-review-findings-remediation-plan.md | active — revised plan and spec delta independently reviewed; seven targeted slices, native Windows deferred |
+| 2026-09-14-native-windows-support-exploration-plan.md | deferred exploration — native Windows product and filesystem questions; independent of remediation |
 | 2026-08-24-release-supply-chain-and-publication-hardening-plan.md | completed |
 | 2026-08-08-agent-theory-delta-wave-propagation-plan.md | completed |
 | 2026-08-08-program-theory-crystallization-plan.md | completed |

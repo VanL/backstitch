@@ -97,7 +97,6 @@ _TABLE_KEYS = frozenset(
         "defaults",
         "profile",
         "check",
-        "packets",
         "analyze",
         "coverage",
         "verify",
@@ -131,13 +130,11 @@ _LINT_KEYS = frozenset(
     }
 )
 _SUPPRESSION_KEYS = frozenset({"mechanism", "path", "sections", "codes", "declaration"})
-_CHECK_KEYS = frozenset({"format", "warnings_as_errors", "output"})
-_PACKETS_KEYS = frozenset({"output"})
+_CHECK_KEYS = frozenset({"format", "warnings_as_errors"})
 _COVERAGE_KEYS = frozenset(
     {
         "mode",
         "format",
-        "output",
         "granularity",
         "inherited_counts",
         "ratchet_base",
@@ -156,7 +153,7 @@ _COVERAGE_KEYS = frozenset(
 )
 _COVERAGE_EXEMPTION_KEYS = frozenset({"path", "glob", "reason"})
 _COVERAGE_FLOOR_KEYS = frozenset({"direct", "accounted"})
-_COVERAGE_PRESENTATION_KEYS = frozenset({"coverage.format", "coverage.output"})
+_COVERAGE_PRESENTATION_KEYS = frozenset({"coverage.format"})
 _ANALYZE_REQUIRED_FLAT_DESCRIPTOR_KEYS = frozenset(
     {
         "backend_id",
@@ -364,7 +361,6 @@ _TABLE_KEY_NAMES: Mapping[str, frozenset[str]] = MappingProxyType(
         "defaults": _DEFAULTS_KEYS,
         "profile": _PROFILE_KEYS,
         "check": _CHECK_KEYS,
-        "packets": _PACKETS_KEYS,
         "coverage": _COVERAGE_KEYS,
         "analyze": _ANALYZE_KEYS,
         "verify": _VERIFY_KEYS,
@@ -489,12 +485,6 @@ class ConfigLayerIdentity:
 class CheckSettings:
     format: str | None = None
     warnings_as_errors: bool | None = None
-    output: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class PacketsSettings:
-    output: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -521,7 +511,6 @@ class CoverageSettings:
 
     mode: Literal["report", "ratchet"] = "report"
     format: Literal["text", "json"] = "text"
-    output: str | None = None
     granularity: Literal["definition"] = "definition"
     inherited_counts: bool = False
     ratchet_base: str = ""
@@ -760,7 +749,6 @@ class BackstitchSettings:
     profile_overrides: ProfileSettings = field(default_factory=ProfileSettings)
     lint: LintSettings = field(default_factory=LintSettings)
     check: CheckSettings = field(default_factory=CheckSettings)
-    packets: PacketsSettings = field(default_factory=PacketsSettings)
     coverage: CoverageSettings = field(default_factory=CoverageSettings)
     analyze: AnalyzeSettings = field(default_factory=AnalyzeSettings)
     verify: DisabledVerifySettings | VerifySettings = field(
@@ -1933,7 +1921,6 @@ def settings_to_json(settings: BackstitchSettings) -> str:
             ],
         },
         "check": asdict(settings.check),
-        "packets": asdict(settings.packets),
         "coverage": asdict(settings.coverage),
         "analyze": analyze,
         "verify": verify,
@@ -2248,7 +2235,7 @@ def _flatten_ratchet_policy_layer(  # noqa: C901 approved [SC-17.1] RUFF-SUP-128
                 continue
             if top_level == "diagnostics" and key == "registry":
                 continue
-            if top_level == "coverage" and key in {"format", "output"}:
+            if top_level == "coverage" and key == "format":
                 continue
             if top_level == "coverage" and key == "floors" and isinstance(value, dict):
                 if not value:
@@ -2345,9 +2332,6 @@ def _expand_named_output_paths(
     resolve_symlinks: bool,
 ) -> None:
     for table_name, key in (
-        ("check", "output"),
-        ("packets", "output"),
-        ("coverage", "output"),
         ("analyze", "cache_path"),
         ("verify", "cache_path"),
     ):
@@ -2392,9 +2376,7 @@ def _expand_raw_paths(
 ) -> None:
     """Expand path values against the file that DEFINED them (CFG §2).
 
-    Must run per file BEFORE `extend` merging: a parent's relative
-    `check.output` anchors at the parent's directory, not at whichever
-    child extended it. expand_path_value is idempotent on the absolute
+    Must run per file BEFORE `extend` merging. expand_path_value is idempotent on the absolute
     results, so the later _parse_settings expansion is a no-op for these.
     """
 
@@ -2565,27 +2547,6 @@ def _parse_profile_settings(
     )
 
 
-def _parse_optional_output_path(
-    table: dict[str, Any],
-    *,
-    field_name: str,
-    source_path: Path,
-    resolve_symlinks: bool,
-    include_source_in_error: bool = False,
-) -> str | None:
-    value = table.get("output")
-    if value is not None and not isinstance(value, str):
-        suffix = f" in {source_path}" if include_source_in_error else ""
-        raise ConfigLoadError(f"{field_name} must be a string{suffix}")
-    if value is None:
-        return None
-    return expand_path_value(
-        value,
-        base_dir=source_path.parent,
-        resolve_symlinks=resolve_symlinks,
-    )
-
-
 def _parse_check_settings(
     table: dict[str, Any],
     *,
@@ -2601,12 +2562,6 @@ def _parse_check_settings(
     return CheckSettings(
         format=check_format,
         warnings_as_errors=warnings_as_errors,
-        output=_parse_optional_output_path(
-            table,
-            field_name="check.output",
-            source_path=source_path,
-            resolve_symlinks=resolve_symlinks,
-        ),
     )
 
 
@@ -2672,7 +2627,6 @@ def _parse_settings(
     excludes = _resolve_excludes(raw)
 
     check_table = _expect_table(raw.get("check"), "check")
-    packets_table = _expect_table(raw.get("packets"), "packets")
     coverage_table = _expect_table(raw.get("coverage"), "coverage")
     analyze_table = _expect_table(raw.get("analyze"), "analyze")
     verify_table = _expect_table(raw.get("verify"), "verify")
@@ -2681,16 +2635,6 @@ def _parse_settings(
     lint_table = _expect_table(raw.get("lint"), "lint")
     diagnostics_table = _expect_table(raw.get("diagnostics"), "diagnostics")
 
-    # CFG §6.4: [packets].output is stored for forward compatibility; the
-    # CLI still requires --output in v1 -- parsed here so the schema key is
-    # never silently dead.
-    packets_output = _parse_optional_output_path(
-        packets_table,
-        field_name="packets.output",
-        source_path=source_path,
-        resolve_symlinks=resolve_symlinks,
-        include_source_in_error=True,
-    )
     coverage_settings = _parse_coverage_settings(
         coverage_table,
         source_path=source_path,
@@ -2744,7 +2688,6 @@ def _parse_settings(
         profile=profile_name,
         allow_unknown_keys=allow_unknown,
         default_command=default_command,
-        packets=PacketsSettings(output=packets_output),
         exclude=excludes,
         profile_overrides=profile_settings,
         lint=lint_settings,
@@ -2800,10 +2743,6 @@ def _parse_coverage_settings(
     format_value = table.get("format", "text")
     if format_value not in {"text", "json"}:
         raise ConfigLoadError("coverage.format must be 'text' or 'json'")
-    output = table.get("output")
-    if output is not None and (not isinstance(output, str) or not output.strip()):
-        raise ConfigLoadError("coverage.output must be a nonblank string when set")
-
     granularity_value = table.get("granularity", "definition")
     if granularity_value != "definition":
         raise ConfigLoadError("coverage.granularity must be 'definition'")
@@ -2841,19 +2780,9 @@ def _parse_coverage_settings(
         "maximum_runtime_seconds",
         default=60.0,
     )
-    parsed_output = (
-        None
-        if output is None
-        else expand_path_value(
-            output,
-            base_dir=source_path.parent,
-            resolve_symlinks=resolve_symlinks,
-        )
-    )
     return CoverageSettings(
         mode=mode,
         format=cast(Literal["text", "json"], format_value),
-        output=parsed_output,
         granularity="definition",
         inherited_counts=inherited_counts,
         ratchet_base=ratchet_base,

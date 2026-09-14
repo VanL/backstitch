@@ -543,15 +543,11 @@ def _dedicated_cli_overrides(args: argparse.Namespace) -> dict[str, Any]:  # noq
     if args.command == "check":
         if args.format is not None:
             overrides["check.format"] = args.format
-        if args.output is not None:
-            overrides["check.output"] = str(args.output)
         if args.warnings_as_errors is not None:
             overrides["check.warnings_as_errors"] = args.warnings_as_errors
     if args.command == "coverage":
         if args.format is not None:
             overrides["coverage.format"] = args.format
-        if args.output is not None:
-            overrides["coverage.output"] = str(args.output)
     if args.command in {"analyze", "doctor"} and args.model is not None:
         overrides["analyze.model"] = args.model
     if args.command == "analyze" and args.concurrency is not None:
@@ -629,10 +625,8 @@ def _cmd_check(args: argparse.Namespace, settings: BackstitchSettings) -> int:
     for warning in outcome.warnings:
         print(f"warning: {warning}", file=sys.stderr)
 
-    # [CFG-5]: config-set check.format and check.output apply when
-    # the CLI flag is omitted; a parsed-but-unconsulted key is dead schema.
     fmt = settings.check.format or "text"
-    output = Path(settings.check.output) if settings.check.output is not None else None
+    output = args.output
     shown = pipeline.suppressed if args.show_suppressions else None
     shown_skips = pipeline.obligation_skip_audit if args.show_suppressions else None
     rendered = (
@@ -676,6 +670,7 @@ def _cmd_coverage(args: argparse.Namespace, settings: BackstitchSettings) -> int
             repo_root=root,
             profile=profile,
             settings=settings,
+            output_path=args.output,
         )
     )
     if isinstance(outcome, CoverageFailure):
