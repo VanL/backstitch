@@ -339,6 +339,7 @@ def _assessment_variants(kind: str, regions: list[object]) -> list[dict[str, obj
                 role: {
                     "type": "array",
                     "items": {"anyOf": variants},
+                    "uniqueItems": True,
                     **({"minItems": 1} if role in required_roles else {}),
                 }
                 for role, variants in regions_by_role.items()

@@ -445,7 +445,8 @@ The untrusted model response is one closed object with exactly `packet_id`,
 exactly `classification` and `evidence`. `evidence` is a closed object keyed
 by the available roles `requirement`, `implementation`, `test`, and
 `counterevidence`; each present role contains an array of coordinates with
-exactly `path`, `start_line`, and `end_line`. The classification branch
+exactly `path`, `start_line`, and `end_line`, with no duplicate coordinates.
+The classification branch
 requires each role in [SEM-5]'s minimum set to be present and nonempty.
 `confidence` is null or a number from zero through one; `rationale` and
 `summary` are strings and `summary` is nonblank. At least one of confidence or
