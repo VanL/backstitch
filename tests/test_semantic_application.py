@@ -10,6 +10,7 @@ Plan: docs/plans/2026-07-29-architecture-quality-remediation-plan.md Slice 5
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -334,7 +335,26 @@ def test_current_application_matches_cli_report_bytes_and_exit(
     captured = capsys.readouterr()
 
     assert exit_code == outcome.run.exit_code == 0
-    assert captured.out.encode("utf-8") == outcome.run.report_json
+    cli_report_bytes = captured.out.encode("utf-8")
+    application_report_bytes = outcome.run.report_json
+    for report_bytes in (cli_report_bytes, application_report_bytes):
+        report = json.loads(report_bytes)
+        elapsed = report.pop("elapsed_milliseconds")
+        assert isinstance(elapsed, int) and not isinstance(elapsed, bool)
+        assert elapsed >= 0
+
+    def without_elapsed_value(report_bytes: bytes) -> bytes:
+        normalized, count = re.subn(
+            rb'("elapsed_milliseconds":)\d+',
+            rb"\g<1>0",
+            report_bytes,
+        )
+        assert count == 1
+        return normalized
+
+    assert without_elapsed_value(cli_report_bytes) == without_elapsed_value(
+        application_report_bytes
+    )
     assert captured.err == "".join(f"{line}\n" for line in outcome.run.stderr_lines)
 
 

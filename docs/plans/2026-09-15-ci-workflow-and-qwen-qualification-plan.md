@@ -193,3 +193,10 @@ semantic qualification.
 - Independent plan review returned `REVISE`: correct hosted dispatch semantics,
   make the real-Qwen probe mandatory, enumerate all status targets, and land the
   plan before implementation. All four corrections were applied.
+- Slice 1 preserves the real CLI/application comparison while excluding only
+  their independently measured elapsed values. Both reports must still contain
+  a nonnegative integer duration; every stable report field remains equal.
+- Slice 1 review rejected decoded-object equality because it would weaken byte
+  parity for key order, separators, and the final newline. The corrected test
+  masks only the validated serialized duration integer, then compares the
+  original byte streams exactly. Rereview is required.
