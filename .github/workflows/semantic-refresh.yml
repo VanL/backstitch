@@ -21,7 +21,6 @@ jobs:
     timeout-minutes: 45
     env:
       BACKSTITCH_CACHE_ROOT: ${{ github.workspace }}/.backstitch/semantic-cache
-      BACKSTITCH_REPORT_ROOT: ${{ runner.temp }}/semantic-refresh/.backstitch/review
     steps:
       - name: Check out trusted main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -32,6 +31,8 @@ jobs:
           lfs: false
       - name: Assert trusted checkout identity
         run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+      - name: Set report root
+        run: echo "BACKSTITCH_REPORT_ROOT=${RUNNER_TEMP}/semantic-refresh/.backstitch/review" >> "${GITHUB_ENV}"
       - name: Require provider credential
         id: credential
         env:

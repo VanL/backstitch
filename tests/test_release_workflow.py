@@ -336,6 +336,16 @@ def test_trusted_semantic_refresh_separates_reports_from_disposable_cache() -> N
     }
     job_preamble = active.split("steps:", 1)[0]
     assert "OPENAI_API_KEY" not in job_preamble
+    assert "${{ runner.temp }}" not in job_preamble
+    report_root = steps["Set report root"]
+    assert (
+        'echo "BACKSTITCH_REPORT_ROOT=${RUNNER_TEMP}/semantic-refresh/'
+        '.backstitch/review" >> "${GITHUB_ENV}"' in report_root
+    )
+    assert "client_payload" not in report_root
+    assert _index(active, "- name: Set report root") < _index(
+        active, "- name: Prepare fresh report root"
+    )
     assert active.count("OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}") == 3
     assert {
         name
@@ -484,9 +494,16 @@ def test_trusted_semantic_pr_report_has_closed_hostile_target_boundary() -> None
         "BACKSTITCH_CACHE_ROOT: "
         "${{ github.workspace }}/tool/.backstitch/semantic-cache" in active
     )
+    job_preamble = active.split("steps:", 1)[0]
+    assert "${{ runner.temp }}" not in job_preamble
+    report_root = steps["Set report root"]
     assert (
-        "BACKSTITCH_REPORT_ROOT: "
-        "${{ runner.temp }}/semantic-pr-report/.backstitch/review" in active
+        'echo "BACKSTITCH_REPORT_ROOT=${RUNNER_TEMP}/semantic-pr-report/'
+        '.backstitch/review" >> "${GITHUB_ENV}"' in report_root
+    )
+    assert "client_payload" not in report_root
+    assert _index(active, "- name: Set report root") < _index(
+        active, "- name: Prepare fresh PR report root"
     )
 
     tool_checkout = steps["Check out trusted Backstitch"]

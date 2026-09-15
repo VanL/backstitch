@@ -200,3 +200,7 @@ semantic qualification.
   parity for key order, separators, and the final newline. The corrected test
   masks only the validated serialized duration integer, then compares the
   original byte streams exactly. Rereview is required.
+- Slice 1 rereview passed. Slice 2's focused tests failed first on the exact
+  invalid job-level `${{ runner.temp }}` expressions in both workflows. The
+  correction moves only report-root initialization to an early trusted-shell
+  step using `${RUNNER_TEMP}` and `${GITHUB_ENV}`.
