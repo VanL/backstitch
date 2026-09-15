@@ -888,7 +888,9 @@ def test_local_llm_workflow_is_separate_and_guarded() -> None:
     assert "PARAMETER num_ctx ${OLLAMA_CONTEXT_LENGTH}" in workflow
     assert "PARAMETER num_predict ${OLLAMA_NUM_PREDICT}" in workflow
     assert "BACKSTITCH_LOCAL_LLM_BASE_MODEL:" in active
-    assert "BACKSTITCH_LOCAL_LLM_BASE_MODEL: llama3.2:3b" in active
+    assert (
+        "BACKSTITCH_LOCAL_LLM_BASE_MODEL: qwen2.5-coder:14b-instruct-q4_K_M" in active
+    )
     assert "BACKSTITCH_LOCAL_LLM_SERVED_MODEL: backstitch-local-model:latest" in active
     # Deterministic-output tuning from the local bake-off: temperature 0 in the
     # Modelfile, proven server-side alongside num_ctx/num_predict.

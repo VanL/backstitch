@@ -264,7 +264,7 @@ def test_local_llm_precheck_opts_in_to_local_provider_path(
         "BACKSTITCH_LIVE_LLM_KIND": "local",
         "BACKSTITCH_LOCAL_LLM_ENDPOINT": "http://127.0.0.1:11434/v1",
         "BACKSTITCH_LOCAL_LLM_UPSTREAM": "http://127.0.0.1:11434/v1",
-        "BACKSTITCH_LOCAL_LLM_BASE_MODEL": "llama3.2:3b",
+        "BACKSTITCH_LOCAL_LLM_BASE_MODEL": "qwen2.5-coder:14b-instruct-q4_K_M",
         "BACKSTITCH_LOCAL_LLM_SERVED_MODEL": "backstitch-local-model:latest",
         "OLLAMA_CONTEXT_LENGTH": "4096",
         "OLLAMA_NUM_PREDICT": "1024",

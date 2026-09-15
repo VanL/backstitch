@@ -207,3 +207,8 @@ temporary freshness rule.
   Backstitch analysis began. The workflow now pins Ollama 0.34.0. Because the
   image digest is part of the existing model-cache key, this update also gets a
   clean model download without adding cache deletion or retry machinery.
+- A hosted Linux bake-off at run `35009892768` qualified
+  `qwen2.5-coder:14b-instruct-q4_K_M` against the unchanged live semantic lane.
+  The test passed in 11:05 within the existing 15-minute limit, with 5 GB of
+  memory available and no swap used. The workflow and release helper now use
+  that code-focused model; context and output bounds remain unchanged.

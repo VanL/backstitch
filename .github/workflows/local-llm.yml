@@ -20,14 +20,15 @@ concurrency:
 
 env:
   UV_VERSION: "0.12.5"
-  # llama3.2:3b remains the bounded local canary. The 2026-07-06 bake-off
-  # recorded 7/8 passes, but a 2026-07-10 audit found Ollama's OpenAI route
-  # overrode the stored temperature-0 parameter with request default 1.0.
+  # Qwen2.5 Coder 14B is the bounded local semantic model. A hosted Linux
+  # run completed the full live lane in 11:05 with 5 GB still available.
+  # A 2026-07-10 audit found Ollama's OpenAI route overrode the stored
+  # temperature-0 parameter with request default 1.0.
   # tests/live/test_live_llm.py now applies temperature 0 + seed 42 on every
   # forwarded completion request. Analyze also uses packet-bounded schema
   # decoding on a test-owned nonstream/SSE bridge, with the production parser
   # still deciding whether the unchanged assistant content is valid.
-  BACKSTITCH_LOCAL_LLM_BASE_MODEL: llama3.2:3b
+  BACKSTITCH_LOCAL_LLM_BASE_MODEL: qwen2.5-coder:14b-instruct-q4_K_M
   BACKSTITCH_LOCAL_LLM_SERVED_MODEL: backstitch-local-model:latest
   BACKSTITCH_LOCAL_LLM_ENDPOINT: http://127.0.0.1:11434/v1
   BACKSTITCH_LOCAL_LLM_UPSTREAM: http://127.0.0.1:11434/v1

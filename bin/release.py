@@ -56,7 +56,7 @@ PYPI_ENVIRONMENT_TAG_PATTERNS: Final[frozenset[tuple[str, str]]] = frozenset(
 )
 REQUIRED_RELEASE_WORKFLOWS: Final[tuple[str, ...]] = ("CI", "local-llm")
 DEFAULT_LOCAL_LLM_ENDPOINT: Final[str] = "http://127.0.0.1:11434/v1"
-DEFAULT_LOCAL_LLM_BASE_MODEL: Final[str] = "llama3.2:3b"
+DEFAULT_LOCAL_LLM_BASE_MODEL: Final[str] = "qwen2.5-coder:14b-instruct-q4_K_M"
 DEFAULT_LOCAL_LLM_SERVED_MODEL: Final[str] = "backstitch-local-model:latest"
 DEFAULT_LOCAL_LLM_CONTEXT_LENGTH: Final[str] = "4096"
 DEFAULT_LOCAL_LLM_NUM_PREDICT: Final[str] = "1024"
