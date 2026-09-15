@@ -151,17 +151,17 @@ test still fails if provider work begins or cleanup stops failing closed.
 ### Slice 2: Canonicalize Wilson bounds at their single owner
 
 Promote [SEM-8] atomically. Keep its existing Wilson formula, then apply
-`round(value, 15)` to lower and upper bounds before serialization,
+`round(value, 14)` to lower and upper bounds before serialization,
 authoritative recomputation comparison, and qualification threshold
-comparison. Fifteen decimal places are chosen narrowly because they collapse
-the observed one-last-bit difference while retaining substantially more
-precision than any configured qualification threshold. Ordinary exact
-proportions remain unchanged.
+comparison. Fourteen decimal places are chosen narrowly because they collapse
+the observed one-last-bit difference while retaining roughly `1e-14` absolute
+resolution. The same rounded value is used for qualification threshold
+comparison. Ordinary exact proportions remain unchanged.
 
 Implement the rule only in `backstitch/semantic_eval_reports.py`; callers use
 that owner. In `tests/test_semantic_eval_reports_v3.py`, keep fixed expected
 vectors independent of production code. Pin the canonical lower bound
-`0.206549314377238` and upper bound `0.793450685622762`; prove the neighboring
+`0.20654931437724` and upper bound `0.79345068562276`; prove the neighboring
 pre-canonical lower values map to the same result. Retain tamper tests so the
 next distinct canonical value and changed source counts are rejected.
 
@@ -295,7 +295,7 @@ new interfaces, and tests that preserve mechanisms rather than contracts.
 | Slice | Planned behavior | Observed behavior | Rationale or follow-up |
 |---|---|---|---|
 | 1 | Remove assertions that are not CLI contracts | Committed as `f4c6c65`; focused tests passed | Deleted the PTY/SIGSTOP probe and retained deterministic mutation coverage; replay and symlink tests now assert stable outcomes only |
-| 2 | Canonicalize Wilson bounds at their single owner | Committed as `28c8720`; focused tests, Ruff, and mypy passed | `round(value, 15)` collapses the observed supported-runtime difference without creating a numeric framework |
+| 2 | Canonicalize Wilson bounds at their single owner | Committed as `28c8720`; CI run `34987625438` showed that 15 places still differed across Linux CI runtimes; the owner now uses 14 places. | Fourteen places collapse both observed runtime variants without creating a numeric framework, retain roughly `1e-14` absolute resolution, and supply the value used for qualification threshold comparison. |
 | 3 | Align analyzer generation with required evidence | One nested `assessment` schema implemented; full hermetic tests, benchmark tests, static gates, self-corpus `check`, and live OpenAI qualification for `gpt-5.6-luna` and `gpt-5.5-2026-04-23` passed. Hosted runs `34984575399` and `34985763273` showed Ollama duplicating coordinates in both responses, including when the schema used `uniqueItems`. | A flat mixed-role array would need a more complex conditional/containment vocabulary. Role-keyed arrays let `anyOf`, `required`, and `minItems` express the existing role matrix directly. Exact duplicate coordinates add no semantic information, so normalization now collapses them to one canonical entry. This is simpler and more provider-tolerant than ineffective schema armor, retry, or repair logic. Requalification is pending. |
 
 Do not mark this plan complete until all three commits exist, local gates pass,

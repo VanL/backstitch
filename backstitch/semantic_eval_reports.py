@@ -2630,7 +2630,7 @@ def _validate_metric_row(value: object, name: str) -> dict[str, Any]:
 def _canonical_wilson_bound(value: float) -> float:
     """Keep persisted Wilson bounds stable across supported Python runtimes."""
 
-    return round(value, 15)
+    return round(value, 14)
 
 
 def _wilson_upper(successes: int, total: int, confidence: float) -> float | None:

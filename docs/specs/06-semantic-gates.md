@@ -1584,7 +1584,7 @@ value is numerator/denominator and Wilson uses the standard score formula with
 `statistics.NormalDist().inv_cdf(min(0.5 + confidence_level / 2,
 math.nextafter(1.0, 0.0)))`. The clamp keeps the allowed near-one finite input
 defined. Wilson lower and upper bounds are canonicalized with
-`round(value, 15)` before serialization, authoritative recomputation
+`round(value, 14)` before serialization, authoritative recomputation
 comparison, or qualification threshold comparison. Qualification records the
 exact finite `confidence_level` strictly
 between zero and one and `interval_method = "wilson"`; the public validator

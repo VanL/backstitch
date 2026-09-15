@@ -219,7 +219,7 @@ latency, calls, and cost. Qualification is about stability and measured
 precision on one content-addressed repository corpus. It does not measure
 cross-model correlation or claim universal correctness.
 
-Wilson bounds are rounded to 15 decimal places by the metric owner before
+Wilson bounds are rounded to 14 decimal places by the metric owner before
 report publication, authoritative recomputation, and qualification comparison.
 This makes an evaluation report portable across Backstitch's supported Python
 runtimes without weakening exact validation or introducing tolerances.

@@ -639,7 +639,7 @@ def _negative_report(corpus_sha256: str, packet_id: str) -> dict[str, Any]:
         "end_to_end_recall": None,
         "recall_lower_bound": None,
         "false_positive_rate": 0.0,
-        "false_positive_upper_bound": 0.793450685622762,
+        "false_positive_upper_bound": 0.79345068562276,
         "indeterminate_rate": None,
         "uncached_flip_rate": None,
         "false_positive_count": 0,
@@ -669,7 +669,7 @@ def _negative_report(corpus_sha256: str, packet_id: str) -> dict[str, Any]:
         None,
         None,
         0.0,
-        0.793450685622762,
+        0.79345068562276,
         None,
         None,
     )
@@ -1035,7 +1035,7 @@ def _positive_report(
         "conditional_precision": 1.0,
         "conditional_recall": 1.0,
         "end_to_end_recall": 1.0,
-        "recall_lower_bound": 0.206549314377238,
+        "recall_lower_bound": 0.20654931437724,
         "false_positive_rate": None,
         "false_positive_upper_bound": None,
         "indeterminate_rate": 0.0,
@@ -1085,9 +1085,30 @@ def test_load_schema3_report_recomputes_local_identity_cache_and_metrics(
 
 
 def test_wilson_bounds_are_canonical_across_observed_runtime_results() -> None:
-    assert _canonical_wilson_bound(0.2065493143772375) == 0.206549314377238
-    assert _canonical_wilson_bound(0.20654931437723753) == 0.206549314377238
-    assert _canonical_wilson_bound(0.7934506856227624) == 0.793450685622762
+    assert _canonical_wilson_bound(0.2065493143772375) == 0.20654931437724
+    assert _canonical_wilson_bound(0.20654931437723753) == 0.20654931437724
+    assert _canonical_wilson_bound(0.7934506856227624) == 0.79345068562276
+    assert _canonical_wilson_bound(0.7934506856227625) == 0.79345068562276
+
+
+def test_load_schema3_report_rejects_changed_canonical_wilson_bound(
+    tmp_path: Path,
+) -> None:
+    manifest_path, manifest = _write_corpus(tmp_path)
+    manifest["cases"][0]["expected_findings"] = []
+    manifest_path.write_bytes(_canonical(manifest) + b"\n")
+    corpus = load_semantic_eval_corpus(manifest_path, mode="report")
+    packet_id = manifest["cases"][0]["gold_obligations"][0]["packet_id"]
+    report_value = _negative_report(corpus.corpus_sha256, packet_id)
+    report_value["metrics"]["false_positive_upper_bound"] += 1e-14
+    report_path = tmp_path / "report.json"
+    report_path.write_bytes(_canonical(report_value) + b"\n")
+
+    with pytest.raises(
+        SemanticEvalContractError,
+        match="negative-control metrics do not recompute",
+    ):
+        load_semantic_eval_report(report_path, corpus=corpus)
 
 
 def test_load_schema3_report_recomputes_events_and_by_code_metrics(
