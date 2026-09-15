@@ -1,6 +1,6 @@
 # CI Workflow And Qwen Qualification Plan (2026-09-15)
 
-Status: active
+Status: completed
 
 Class: 3. This work repairs repository verification, reconciles its plan-status
 ledger, and seeks external model evidence. It does not change a product spec or
@@ -69,6 +69,8 @@ plan rather than hiding that decision in workflow YAML.
 
 | Baseline | Planned behavior | Actual behavior | Rationale |
 |---|---|---|---|
+| Disable the verifier for the bounded smoke assessment when supported | The production evaluator requires verification, so the assessment used one real verifier call and verified its zero-call replay | Keep the production evaluator contract instead of adding a special unverified path for one experiment |
+| Do not raise runtime limits to manufacture a qualification claim | The disposable assessment branch raised only its hosted job/step envelope from 20/15 to 40/30 minutes; it did not change the evaluator runtime budget or any main-branch workflow | The prior step envelope was shorter than the already measured time for three real calls. The larger finite envelope allowed observation, conferred no qualification authority, and was deleted with the temporary branch |
 
 ## Tasks And Commits
 
@@ -213,3 +215,29 @@ semantic qualification.
 - Slice 3 review confirmed the eleven completion decisions but rejected two
   vague landing citations. Both lifecycle/config rows now cite the exact
   integrated commits `59a6d18`, `b697b3d`, and `4659c6b`.
+- Hosted `CI` run `35016655241` and `local-llm` run `35016655235` passed on
+  the landed main revision. Repository-dispatch runs `35016457399` and
+  `35016456007` created their named jobs, proving the zero-job validation bug
+  fixed; both later failed inside real semantic analysis after the configured
+  runtime was exhausted. That operational/model behavior is distinct from the
+  repaired workflow grammar and was not hidden by raising the timeout.
+- Slice 4 used temporary branch `codex/qwen25-quality-assessment` solely to run
+  the production evaluator against the existing v3 clean/mutated smoke pair on
+  the actual public GitHub runner. Run `35020313332` completed in about 13
+  minutes of evaluator time. Qwen detected the sole critical mutation and
+  preserved the negative control: conditional precision, conditional recall,
+  end-to-end recall, and evidence sufficiency were `1.0`; false-positive and
+  indeterminate rates were `0.0`. The primary pass made two analyzer calls and
+  one verifier call; replay made zero calls with three cache hits and byte-stable
+  event evidence.
+- The smoke report did not qualify the model. One trial leaves uncached flip
+  rate unavailable, the confidence bounds are weak, and the two-case corpus is
+  explicitly non-authoritative. Formal qualification remains blocked on a
+  reviewed current-contract corpus with real provenance and enough uncached
+  trials to measure stability. No gold, threshold, evaluator runtime budget,
+  main-branch workflow limit, or product contract was changed to manufacture a
+  pass. The disposable workflow-envelope increase is recorded in the deviation
+  log.
+- Final local gates passed: the full non-live suite, acceptance probes, Ruff
+  format and lint, mypy, documentation-path and DOM-15 checks, coalescing, and
+  the hermetic self-corpus check with zero errors, warnings, or infos.
