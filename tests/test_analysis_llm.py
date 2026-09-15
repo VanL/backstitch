@@ -649,12 +649,6 @@ def test_provider_schema_matches_spec_required_role_matrix(
     }
 
     assert observed == expected
-    for variant in variants:
-        evidence_properties = variant["properties"]["evidence"]["properties"]
-        assert all(
-            role_schema["uniqueItems"] is True
-            for role_schema in evidence_properties.values()
-        )
 
 
 def test_provider_adapter_rejects_model_identity_mismatch_before_resolution(

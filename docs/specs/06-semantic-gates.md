@@ -445,8 +445,7 @@ The untrusted model response is one closed object with exactly `packet_id`,
 exactly `classification` and `evidence`. `evidence` is a closed object keyed
 by the available roles `requirement`, `implementation`, `test`, and
 `counterevidence`; each present role contains an array of coordinates with
-exactly `path`, `start_line`, and `end_line`, with no duplicate coordinates.
-The classification branch
+exactly `path`, `start_line`, and `end_line`. The classification branch
 requires each role in [SEM-5]'s minimum set to be present and nonempty.
 `confidence` is null or a number from zero through one; `rationale` and
 `summary` are strings and `summary` is nonblank. At least one of confidence or
@@ -815,7 +814,8 @@ reconstructs canonical evidence with the exact `excerpt` and
 `excerpt_sha256` from that projected source. Hidden contained or equal source
 records cannot make one model-visible choice ambiguous. Zero or multiple
 matching projected regions is malformed.
-Duplicate evidence is malformed. Canonical evidence sorts by role, path,
+Exact duplicate coordinates normalize to one canonical evidence entry because
+they add no claim or information. Canonical evidence sorts by role, path,
 start line, end line, and excerpt hash.
 
 Current packet-schema-3 role sources are exact and common across obligation
@@ -828,7 +828,7 @@ kinds:
 | `test` | nonblank `declared_evidence[].snippet` whose model role is `test` |
 | `counterevidence` | nonblank `counterevidence[].snippet` |
 
-Every model evidence row must equal one packet `evidence_regions` row.
+Every model evidence coordinate must equal one packet `evidence_regions` row.
 `counterevidence` is advisory evidence only: it may support or challenge an
 analyzer/verifier rationale, but it never satisfies a required
 `implementation` or `test` role. Historical packet-schema-2 owner/target/

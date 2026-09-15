@@ -240,7 +240,7 @@ def _normalize_evidence(
             raise SemanticResultError("invalid evidence role, path, or span")
         identity = (role, path, start_line, end_line)
         if identity in seen:
-            raise SemanticResultError("duplicate evidence item")
+            continue
         seen.add(identity)
         matches = [
             region

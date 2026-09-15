@@ -521,21 +521,23 @@ def test_suppression_kind_requires_packet_contract_4() -> None:
         )
 
 
-def test_duplicate_evidence_items_are_rejected() -> None:
+def test_duplicate_evidence_items_normalize_to_one_coordinate() -> None:
     packet = _section_packet()
     duplicate = [dict(_SECTION_REQUIREMENT), dict(_SECTION_REQUIREMENT)]
-    with pytest.raises(SemanticResultError, match="duplicate"):
-        normalize_model_result(
+    result = normalize_model_result(
+        packet,
+        _model_response(
             packet,
-            _model_response(
-                packet,
-                classification="ambiguous",
-                rationale="ambiguous",
-                summary="Ambiguous.",
-                evidence=duplicate,
-            ),
-            analysis_key="a" * 64,
-        )
+            classification="ambiguous",
+            rationale="ambiguous",
+            summary="Ambiguous.",
+            evidence=duplicate,
+        ),
+        analysis_key="a" * 64,
+    )
+
+    assert len(result.evidence) == 1
+    assert result.evidence[0].role == "requirement"
 
 
 @pytest.mark.parametrize("overlap", ["equal", "nested"])
