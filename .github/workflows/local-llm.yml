@@ -36,7 +36,7 @@ env:
   # 4/5 at 512, 7/8 at 1024); 1024 keeps the output bounded without cutting
   # borderline rows mid-JSON.
   OLLAMA_NUM_PREDICT: "1024"
-  OLLAMA_IMAGE: ollama/ollama@sha256:f1a705f2bd113fb8d15f85f7c217f0dc5f6bebda6b0cc42b82c3ad165ffcb9dc
+  OLLAMA_IMAGE: ollama/ollama@sha256:684d8674b4315fa18f4f0e973a118ec2652ed96f67563277839985175858e0ba
   OLLAMA_CACHE_DIR: /home/runner/.ollama-cache
   OLLAMA_CACHE_EPOCH: v1
 

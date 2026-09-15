@@ -202,3 +202,8 @@ temporary freshness rule.
   scope. The longstanding zero-job
   semantic workflows remain separate diagnosis work until their exact GitHub
   validation error is known; they are not made a release gate here.
+- The documentation-only closure commit then encountered three Ollama 0.31.1
+  `llama-server` segmentation faults while loading the unchanged model, before
+  Backstitch analysis began. The workflow now pins Ollama 0.34.0. Because the
+  image digest is part of the existing model-cache key, this update also gets a
+  clean model download without adding cache deletion or retry machinery.
