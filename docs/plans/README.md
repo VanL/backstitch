@@ -46,6 +46,7 @@ Risky plans are blocked if they do not make explicit:
 
 | Plan | Status |
 |------|--------|
+| 2026-09-15-ci-workflow-and-qwen-qualification-plan.md | active |
 | 2026-09-14-semantic-response-and-ci-recovery-plan.md | completed; three CLI-reachable slices qualified; zero-job workflow diagnosis remains separate |
 | 2026-09-14-v0-4-0-release-readiness-plan.md | active; semantic response and CI recovery prerequisite completed |
 | 2026-09-14-review-findings-remediation-plan.md | completed — seven targeted findings closed; native Windows remains deferred |
