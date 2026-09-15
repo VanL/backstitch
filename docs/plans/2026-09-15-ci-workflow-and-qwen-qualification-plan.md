@@ -204,3 +204,12 @@ semantic qualification.
   invalid job-level `${{ runner.temp }}` expressions in both workflows. The
   correction moves only report-root initialization to an early trusted-shell
   step using `${RUNNER_TEMP}` and `${GITHUB_ENV}`.
+- Slice 2 review passed. After landing `9e912b3`, repository dispatch runs
+  `35016457399` and `35016456007` each created and began their named job,
+  proving the former zero-job workflow validation failures are corrected.
+- Slice 3 reconciled exactly the eleven audit-proved rows listed above. The
+  three genuinely active product/release plans and deferred native Windows
+  exploration remain open.
+- Slice 3 review confirmed the eleven completion decisions but rejected two
+  vague landing citations. Both lifecycle/config rows now cite the exact
+  integrated commits `59a6d18`, `b697b3d`, and `4659c6b`.

@@ -55,22 +55,22 @@ Risky plans are blocked if they do not make explicit:
 | 2026-08-24-release-supply-chain-and-publication-hardening-plan.md | completed |
 | 2026-08-08-agent-theory-delta-wave-propagation-plan.md | completed |
 | 2026-08-08-program-theory-crystallization-plan.md | completed |
-| 2026-08-23-gpt-5-6-luna-responses-plan.md | active; implementation complete and locally verified; independent implementation review PASS; remote Linux/macOS/Windows CI evidence pending |
+| 2026-08-23-gpt-5-6-luna-responses-plan.md | completed — landed in `6adf7aa`; descendant CI run `35006509257` passed Linux, macOS, and Windows evidence |
 | 2026-07-11-deterministic-semantic-gate-plan.md | active |
-| 2026-07-14-agent-guidance-propagation-plan.md | active |
+| 2026-07-14-agent-guidance-propagation-plan.md | completed — landed in `9ddb4d6`; coalescing pin followed in `ecda702` |
 | 2026-07-15-agent-interfaces-runbook-adoption-plan.md | completed — runbook adopted from agent-guidance @ a4b4345 |
-| 2026-07-15-agent-guided-evidence-cases-plan.md | implemented, uncommitted — report-only; current bootstrap/discovery, semantic-policy, and performance qualification remain explicitly unavailable |
-| 2026-07-16-evidence-spike-hardening-plan.md | slices 0-6 implemented, review-confirmed; Slice 7 (post-review residuals) added 2026-07-17, scoped outside review PASS — cleared for implementation |
-| 2026-07-17-agent-guidance-delta-wave-propagation-plan.md | active — landing the hub delta `a4b4345..b248e1c` (source `b248e1c`) |
-| 2026-07-27-semantic-analysis-lifecycle-plan.md | same-model and Claude plan reviews PASS; Slices 1-4 implemented and final review PASS; landing gate pending an owner-authorized commit |
-| 2026-07-27-canonical-config-resolution-plan.md | implemented and verified; Claude implementation findings addressed; uncommitted pending landing authorization |
+| 2026-07-15-agent-guided-evidence-cases-plan.md | completed — report-only implementation landed in `59a6d18`, `b697b3d`, and `4659c6b`; qualification limits remain explicit |
+| 2026-07-16-evidence-spike-hardening-plan.md | completed — slices 0-7 landed in `59a6d18`, `b697b3d`, and `4659c6b` after recorded review PASS |
+| 2026-07-17-agent-guidance-delta-wave-propagation-plan.md | completed — landed in `2a6cc20`; pinned in `66c84d8` |
+| 2026-07-27-semantic-analysis-lifecycle-plan.md | completed — reviewed implementation landed in `59a6d18`, `b697b3d`, and `4659c6b` |
+| 2026-07-27-canonical-config-resolution-plan.md | completed — implementation, docs, and tests landed in `59a6d18`, `b697b3d`, and `4659c6b` |
 | 2026-07-27-serial-benchmark-lane-plan.md | completed — normal xdist and serial benchmark lanes split; independent completed-work review PASS |
 | 2026-07-28-stable-wall-clock-benchmark-plan.md | completed — sampled median reporting, qualified relative limits, and always-on catastrophic ceilings; independent rereview PASS |
-| 2026-07-28-documented-suppression-governance-plan.md | implemented and independently reviewed |
-| 2026-07-28-configured-default-command-plan.md | implemented and verified; final independent review PASS; included in the owner-authorized landing commit |
-| 2026-07-28-evidence-stable-semantic-result-reuse-plan.md | implemented and verified; final independent review PASS; included in the owner-authorized landing commit |
+| 2026-07-28-documented-suppression-governance-plan.md | completed — landed through `ccf16f4`, `b2a736e`, and `b33804a` |
+| 2026-07-28-configured-default-command-plan.md | completed — implementation and review landed in `531d115` |
+| 2026-07-28-evidence-stable-semantic-result-reuse-plan.md | completed — implementation and review landed in `531d115` |
 | 2026-07-28-intent-coverage-implementation-plan.md | deterministic report, Git ratchet, stale-history, and closed-report slices implemented and reviewed; semantic mapping-quality qualification and rollout gates remain open |
-| 2026-07-28-agent-guidance-delta-wave-propagation-plan.md | active — landing the hub delta `b248e1c..e42762c` (source `e42762c`) |
+| 2026-07-28-agent-guidance-delta-wave-propagation-plan.md | completed — landed in `78a6e83`; pinned in `9219d24` |
 | 2026-07-29-architecture-quality-remediation-plan.md | completed — implementation, verification, independent review, and owner-authorized landing |
 | 2026-07-29-usability-remediation-plan.md | completed — implementation, exact-state dogfood, independent review, and owner-authorized landing |
 | 2026-08-04-semantic-preparation-performance-plan.md | completed — implementation, verification, and final independent review PASS |
