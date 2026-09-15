@@ -147,14 +147,25 @@ def _model_response(
     *,
     classification: str = "ok",
     evidence: list[dict[str, object]] | None = None,
+    confidence: float | None = 0.5,
+    rationale: str = "bounded evidence",
+    summary: str = "Reviewed.",
 ) -> dict[str, object]:
+    evidence_by_role: dict[str, list[dict[str, object]]] = {}
+    for item in evidence or []:
+        coordinate = dict(item)
+        role = coordinate.pop("role")
+        assert isinstance(role, str)
+        evidence_by_role.setdefault(role, []).append(coordinate)
     return {
         "packet_id": packet["packet_id"],
-        "classification": classification,
-        "confidence": 0.5,
-        "rationale": "bounded evidence",
-        "summary": "Reviewed.",
-        "evidence": evidence or [],
+        "assessment": {
+            "classification": classification,
+            "evidence": evidence_by_role,
+        },
+        "confidence": confidence,
+        "rationale": rationale,
+        "summary": summary,
     }
 
 
@@ -218,13 +229,13 @@ def test_mismatch_evidence_is_reconstructed_from_exact_packet_spans() -> None:
     packet = _section_packet()
     result = normalize_model_result(
         packet,
-        {
-            "packet_id": packet["packet_id"],
-            "classification": "confirmed_mismatch",
-            "confidence": 0.9,
-            "rationale": "The shown return conflicts with the requirement.",
-            "summary": "The implementation returns two.",
-            "evidence": [
+        _model_response(
+            packet,
+            classification="confirmed_mismatch",
+            confidence=0.9,
+            rationale="The shown return conflicts with the requirement.",
+            summary="The implementation returns two.",
+            evidence=[
                 {
                     "role": "implementation",
                     "path": "pkg/x.py",
@@ -238,7 +249,7 @@ def test_mismatch_evidence_is_reconstructed_from_exact_packet_spans() -> None:
                     "end_line": 6,
                 },
             ],
-        },
+        ),
         analysis_key="a" * 64,
     )
 
@@ -277,7 +288,7 @@ def test_mismatch_evidence_is_reconstructed_from_exact_packet_spans() -> None:
                     "excerpt": "forged",
                 }
             ],
-            "exactly role",
+            "closed schema",
         ),
         (
             [
@@ -310,14 +321,14 @@ def test_mismatch_rejects_extra_forged_and_one_sided_evidence(
     with pytest.raises(SemanticResultError, match=match):
         normalize_model_result(
             packet,
-            {
-                "packet_id": packet["packet_id"],
-                "classification": "confirmed_mismatch",
-                "confidence": None,
-                "rationale": "mismatch",
-                "summary": "Mismatch.",
-                "evidence": evidence,
-            },
+            _model_response(
+                packet,
+                classification="confirmed_mismatch",
+                confidence=None,
+                rationale="mismatch",
+                summary="Mismatch.",
+                evidence=evidence,
+            ),
             analysis_key="a" * 64,
         )
 
@@ -328,16 +339,41 @@ def test_closed_model_response_rejects_trusted_metadata() -> None:
         normalize_model_result(
             packet,
             {
-                "packet_id": packet["packet_id"],
-                "classification": "ok",
-                "confidence": 0.5,
-                "rationale": "fine",
-                "summary": "Fine.",
-                "evidence": [],
+                **_model_response(packet, rationale="fine", summary="Fine."),
                 "verification_state": "human_verified",
             },
             analysis_key="a" * 64,
         )
+
+
+def test_closed_model_response_rejects_role_inside_coordinate() -> None:
+    packet = _section_packet()
+    response = _model_response(packet, evidence=[_SECTION_REQUIREMENT])
+    assessment = response["assessment"]
+    assert isinstance(assessment, dict)
+    evidence = assessment["evidence"]
+    assert isinstance(evidence, dict)
+    requirement = evidence["requirement"]
+    assert isinstance(requirement, list)
+    coordinate = requirement[0]
+    assert isinstance(coordinate, dict)
+    coordinate["role"] = "implementation"
+
+    with pytest.raises(SemanticResultError, match="closed schema"):
+        normalize_model_result(packet, response, analysis_key="a" * 64)
+
+
+def test_closed_model_response_rejects_unavailable_empty_role() -> None:
+    packet = _section_packet()
+    response = _model_response(packet)
+    assessment = response["assessment"]
+    assert isinstance(assessment, dict)
+    evidence = assessment["evidence"]
+    assert isinstance(evidence, dict)
+    evidence["test"] = []
+
+    with pytest.raises(SemanticResultError, match="unavailable in the packet"):
+        normalize_model_result(packet, response, analysis_key="a" * 64)
 
 
 _SECTION_REQUIREMENT = {
@@ -446,14 +482,7 @@ def test_every_kind_classification_minimum_role_set_is_accepted(
     }[kind]()
     result = normalize_model_result(
         packet,
-        {
-            "packet_id": packet["packet_id"],
-            "classification": classification,
-            "confidence": 0.5,
-            "rationale": "bounded evidence",
-            "summary": "Reviewed.",
-            "evidence": evidence,
-        },
+        _model_response(packet, classification=classification, evidence=evidence),
         analysis_key="a" * 64,
     )
     assert result.classification == classification
@@ -469,14 +498,13 @@ def test_suppression_one_sided_risk_finding_is_malformed(
     with pytest.raises(SemanticResultError, match="counterevidence"):
         normalize_model_result(
             packet,
-            {
-                "packet_id": packet["packet_id"],
-                "classification": classification,
-                "confidence": 0.5,
-                "rationale": "The declaration does not address the shown issue.",
-                "summary": "Suppression needs review.",
-                "evidence": [_SUPPRESSION_REQUIREMENT],
-            },
+            _model_response(
+                packet,
+                classification=classification,
+                rationale="The declaration does not address the shown issue.",
+                summary="Suppression needs review.",
+                evidence=[_SUPPRESSION_REQUIREMENT],
+            ),
             analysis_key="a" * 64,
         )
 
@@ -488,14 +516,7 @@ def test_suppression_kind_requires_packet_contract_4() -> None:
     with pytest.raises(SemanticResultError, match="contract version"):
         normalize_model_result(
             packet,
-            {
-                "packet_id": packet["packet_id"],
-                "classification": "ok",
-                "confidence": 0.5,
-                "rationale": "bounded evidence",
-                "summary": "Reviewed.",
-                "evidence": [_SUPPRESSION_REQUIREMENT],
-            },
+            _model_response(packet, evidence=[_SUPPRESSION_REQUIREMENT]),
             analysis_key="a" * 64,
         )
 
@@ -506,14 +527,13 @@ def test_duplicate_evidence_items_are_rejected() -> None:
     with pytest.raises(SemanticResultError, match="duplicate"):
         normalize_model_result(
             packet,
-            {
-                "packet_id": packet["packet_id"],
-                "classification": "ambiguous",
-                "confidence": 0.5,
-                "rationale": "ambiguous",
-                "summary": "Ambiguous.",
-                "evidence": duplicate,
-            },
+            _model_response(
+                packet,
+                classification="ambiguous",
+                rationale="ambiguous",
+                summary="Ambiguous.",
+                evidence=duplicate,
+            ),
             analysis_key="a" * 64,
         )
 
@@ -548,14 +568,7 @@ def test_normalization_uses_the_deduplicated_model_visible_regions(
 
     result = normalize_model_result(
         packet,
-        {
-            "packet_id": packet["packet_id"],
-            "classification": "ok",
-            "confidence": 0.5,
-            "rationale": "fine",
-            "summary": "Fine.",
-            "evidence": evidence,
-        },
+        _model_response(packet, rationale="fine", summary="Fine.", evidence=evidence),
         analysis_key="a" * 64,
     )
 

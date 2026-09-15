@@ -421,12 +421,15 @@ packet causes at most one provider request. Rejection of the resolved request
 mode is exit `2`; there is no automatic bare-call fallback under the same event
 identity.
 
-The analyzer adapter derives a provider JSON Schema from the current canonical
-[EVC-9.1] packet projection when `json_mode = "require"`. The schema keeps the six-field model
-response closed and restricts each evidence item to one exact
-`evidence_regions` choice. This is a generation constraint only. Provider
-schema enforcement is not trusted; [SEM-5] normalization independently
-revalidates the returned role, path, and span against packet bytes.
+The analyzer adapter derives one provider JSON Schema from the current
+canonical [EVC-9.1] packet projection when `json_mode = "require"`. The schema
+keeps the model response closed. Its `assessment` is a discriminated union of
+the classifications whose [SEM-5] required evidence roles exist in the
+packet. Evidence is grouped by role; every coordinate is restricted to one
+exact `evidence_regions` choice for that role. This is a generation constraint
+only. Provider schema enforcement is not trusted; [SEM-5] normalization
+independently revalidates the returned role, path, and span against packet
+bytes.
 
 The `llm` OpenAI Responses adapter may emit its supported JSON Schema envelope
 with `strict = false`. This is a generation aid, not authority. Backstitch does
@@ -438,12 +441,16 @@ requested. That protocol serialization constant is code-owned and covered by
 the keyed adapter version, not exposed as a request setting.
 
 The untrusted model response is one closed object with exactly `packet_id`,
-`classification`, `confidence`, `rationale`, `summary`, and `evidence`.
+`assessment`, `confidence`, `rationale`, and `summary`. `assessment` has
+exactly `classification` and `evidence`. `evidence` is a closed object keyed
+by the available roles `requirement`, `implementation`, `test`, and
+`counterevidence`; each present role contains an array of coordinates with
+exactly `path`, `start_line`, and `end_line`. The classification branch
+requires each role in [SEM-5]'s minimum set to be present and nonempty.
 `confidence` is null or a number from zero through one; `rationale` and
 `summary` are strings and `summary` is nonblank. At least one of confidence or
-a nonblank rationale is required. Each evidence item has exactly the four
-model fields in [SEM-5]. Kind, hashes, verification state, code, and provenance
-are never accepted from the model.
+a nonblank rationale is required. Kind, hashes, verification state, code, and
+provenance are never accepted from the model.
 
 Changing any inference-contract field creates a new analysis key. Policy,
 rendering, concurrency, result/report paths, suppressions, and operational
@@ -796,10 +803,12 @@ _Implementation mapping_:
 
 ### 5. Evidence And Verification State [SEM-5]
 
-Model evidence entries contain `role`, `path`, `start_line`, and `end_line`.
-Spans are inclusive. Any extra model evidence field, including excerpt, hash,
-packet identity, or provenance, is malformed. Trusted normalization requires
-the role/path/span to match exactly one region in the same maximal,
+Model evidence is a closed object keyed by roles available in the packet.
+Each coordinate under a role contains `path`, `start_line`, and `end_line`;
+spans are inclusive. An unavailable role key or any extra coordinate field,
+including role, excerpt, hash, packet identity, or provenance, is malformed.
+Trusted normalization reconstructs canonical entries containing role and
+requires each role/path/span to match exactly one region in the same maximal,
 deduplicated model-visible projection that produced `evidence_regions`, and
 reconstructs canonical evidence with the exact `excerpt` and
 `excerpt_sha256` from that projected source. Hidden contained or equal source

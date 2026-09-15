@@ -1367,10 +1367,19 @@ def test_openai_qualification_replays_and_rejects_corrupt_cache_hermetically(
             projection = json.loads(prompt.rsplit("\n\n", 1)[1])
             model_response = {
                 "packet_id": projection["packet_id"],
-                "classification": "ambiguous",
+                "assessment": {
+                    "classification": "ambiguous",
+                    "evidence": {
+                        projection["evidence_regions"][0]["role"]: [
+                            {
+                                key: projection["evidence_regions"][0][key]
+                                for key in ("path", "start_line", "end_line")
+                            }
+                        ]
+                    },
+                },
                 "confidence": 0.5,
                 "rationale": "The bounded evidence does not settle the requirement.",
-                "evidence": [projection["evidence_regions"][0]],
                 "summary": "Evidence remains ambiguous.",
             }
             event = {

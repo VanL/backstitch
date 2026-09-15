@@ -113,6 +113,18 @@ def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _analyzer_evidence_by_role(
+    evidence: list[dict[str, object]],
+) -> dict[str, list[dict[str, object]]]:
+    by_role: dict[str, list[dict[str, object]]] = {}
+    for region in evidence:
+        role = cast(str, region["role"])
+        by_role.setdefault(role, []).append(
+            {key: region[key] for key in ("path", "start_line", "end_line")}
+        )
+    return by_role
+
+
 def _install_controlled_adapter(
     monkeypatch: pytest.MonkeyPatch,
     before_response: Callable[[dict[str, Any]], None] | None = None,
@@ -142,11 +154,13 @@ def _install_controlled_adapter(
                 json.dumps(
                     {
                         "packet_id": packet["packet_id"],
-                        "classification": "ok",
+                        "assessment": {
+                            "classification": "ok",
+                            "evidence": _analyzer_evidence_by_role(evidence),
+                        },
                         "confidence": 0.9,
                         "rationale": "The controlled Phase C review is supported.",
                         "summary": "The captured obligation is supported.",
-                        "evidence": evidence,
                     }
                 ),
                 SemanticProvenance(
@@ -895,11 +909,13 @@ def test_phase_c_analyzer_and_verifier_replay_is_zero_call_and_byte_identical(
                 json.dumps(
                     {
                         "packet_id": packet["packet_id"],
-                        "classification": classification,
+                        "assessment": {
+                            "classification": classification,
+                            "evidence": _analyzer_evidence_by_role(evidence),
+                        },
                         "confidence": 0.9,
                         "rationale": "Controlled Phase C primary result.",
                         "summary": "Controlled Phase C semantic result.",
-                        "evidence": evidence,
                     }
                 ),
                 provenance(f"analysis-{analyze_calls}"),

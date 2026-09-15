@@ -163,11 +163,10 @@ def _response_for_prompt(prompt: str) -> ProviderCallResult:
     raw = json.dumps(
         {
             "packet_id": packet["packet_id"],
-            "classification": "ok",
+            "assessment": {"classification": "ok", "evidence": {}},
             "confidence": 0.9,
             "rationale": "bounded review",
             "summary": "Looks aligned.",
-            "evidence": [],
         }
     )
     return ProviderCallResult(raw_response=raw, provenance=PROVENANCE)
@@ -846,18 +845,21 @@ def test_invariant_packet_cache_omits_content_hash_but_result_requires_it(
         raw = json.dumps(
             {
                 "packet_id": projection["packet_id"],
-                "classification": "ok",
+                "assessment": {
+                    "classification": "ok",
+                    "evidence": {
+                        "test": [
+                            {
+                                "path": "tests/test_mod.py",
+                                "start_line": 20,
+                                "end_line": 21,
+                            }
+                        ]
+                    },
+                },
                 "confidence": 0.9,
                 "rationale": "the binding assertion is shown",
                 "summary": "The invariant is bound.",
-                "evidence": [
-                    {
-                        "role": "test",
-                        "path": "tests/test_mod.py",
-                        "start_line": 20,
-                        "end_line": 21,
-                    }
-                ],
             }
         )
         return ProviderCallResult(raw, PROVENANCE)

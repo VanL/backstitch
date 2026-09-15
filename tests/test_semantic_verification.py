@@ -230,17 +230,43 @@ def _suppression_packet() -> dict[str, Any]:
     return row
 
 
+def _model_response(
+    packet: dict[str, Any],
+    *,
+    classification: str,
+    evidence: list[dict[str, Any]],
+    confidence: float,
+    rationale: str,
+    summary: str,
+) -> dict[str, Any]:
+    evidence_by_role: dict[str, list[dict[str, Any]]] = {}
+    for item in evidence:
+        coordinate = dict(item)
+        role = coordinate.pop("role")
+        evidence_by_role.setdefault(role, []).append(coordinate)
+    return {
+        "packet_id": packet["packet_id"],
+        "assessment": {
+            "classification": classification,
+            "evidence": evidence_by_role,
+        },
+        "confidence": confidence,
+        "rationale": rationale,
+        "summary": summary,
+    }
+
+
 def _finding(packet: dict[str, Any]) -> CanonicalSemanticResult:
     return normalize_model_result(
         packet,
-        {
-            "packet_id": packet["packet_id"],
-            "classification": "confirmed_mismatch",
-            "confidence": 0.9,
-            "rationale": "This rationale must be blinded.",
-            "summary": "Implementation returns two, not one.",
-            "evidence": packet["evidence_regions"][:2],
-        },
+        _model_response(
+            packet,
+            classification="confirmed_mismatch",
+            confidence=0.9,
+            rationale="This rationale must be blinded.",
+            summary="Implementation returns two, not one.",
+            evidence=packet["evidence_regions"][:2],
+        ),
         analysis_key="7" * 64,
     )
 
@@ -280,14 +306,14 @@ def test_verifier_claim_admits_each_suppression_finding(
         )
     result = normalize_model_result(
         packet,
-        {
-            "packet_id": packet["packet_id"],
-            "classification": classification,
-            "confidence": 0.8,
-            "rationale": "The shown issue is not justified by the declaration.",
-            "summary": "Suppression needs review.",
-            "evidence": evidence,
-        },
+        _model_response(
+            packet,
+            classification=classification,
+            confidence=0.8,
+            rationale="The shown issue is not justified by the declaration.",
+            summary="Suppression needs review.",
+            evidence=evidence,
+        ),
         analysis_key="a" * 64,
     )
 

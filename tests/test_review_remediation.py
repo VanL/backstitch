@@ -709,32 +709,33 @@ def test_evidence_outside_packet_is_rejected() -> None:
     )
     response = {
         "packet_id": packet["packet_id"],
-        "classification": "ok",
+        "assessment": {"classification": "ok", "evidence": {}},
         "confidence": 0.5,
         "summary": "fine",
         "rationale": "because",
-        "evidence": [],
     }
-    response["evidence"] = [
-        {
-            "role": "implementation",
-            "path": "not-in-packet.py",
-            "start_line": 999,
-            "end_line": 999,
-        }
-    ]
+    response["assessment"]["evidence"] = {
+        "implementation": [
+            {
+                "path": "not-in-packet.py",
+                "start_line": 999,
+                "end_line": 999,
+            }
+        ]
+    }
     with pytest.raises(SemanticResultError, match="exactly one shown"):
         normalize_model_result(packet, response, analysis_key="a" * 64)
 
     # bool is an int subclass; line=true must not validate.
-    response["evidence"] = [
-        {
-            "role": "implementation",
-            "path": "pkg/mod.py",
-            "start_line": True,
-            "end_line": 1,
-        }
-    ]
+    response["assessment"]["evidence"] = {
+        "implementation": [
+            {
+                "path": "pkg/mod.py",
+                "start_line": True,
+                "end_line": 1,
+            }
+        ]
+    }
     with pytest.raises(SemanticResultError):
         normalize_model_result(packet, response, analysis_key="a" * 64)
 
@@ -1163,20 +1164,23 @@ def test_empty_owner_snippet_rejects_line_evidence() -> None:
     )
     response = {
         "packet_id": packet["packet_id"],
-        "classification": "ok",
+        "assessment": {
+            "classification": "ok",
+            "evidence": {
+                "implementation": [
+                    {
+                        "path": "pkg/",
+                        "start_line": 1,
+                        "end_line": 1,
+                    }
+                ]
+            },
+        },
         "confidence": 0.5,
         "summary": "fine",
         "rationale": "because",
-        "evidence": [
-            {
-                "role": "implementation",
-                "path": "pkg/",
-                "start_line": 1,
-                "end_line": 1,
-            }
-        ],
     }
-    with pytest.raises(SemanticResultError, match="exactly one shown"):
+    with pytest.raises(SemanticResultError, match="unavailable in the packet"):
         normalize_model_result(packet, response, analysis_key="a" * 64)
 
 
@@ -1194,18 +1198,15 @@ def test_empty_paths_never_become_evidence_paths() -> None:
     )
     response = {
         "packet_id": packet["packet_id"],
-        "classification": "ok",
+        "assessment": {
+            "classification": "ok",
+            "evidence": {
+                "implementation": [{"path": "", "start_line": 1, "end_line": 1}]
+            },
+        },
         "confidence": 0.5,
         "summary": "fine",
         "rationale": "because",
-        "evidence": [
-            {
-                "role": "implementation",
-                "path": "",
-                "start_line": 1,
-                "end_line": 1,
-            }
-        ],
     }
     with pytest.raises(SemanticResultError):
         normalize_model_result(packet, response, analysis_key="a" * 64)
@@ -1252,18 +1253,15 @@ def test_whitespace_paths_never_become_evidence_paths() -> None:
     )
     response = {
         "packet_id": packet["packet_id"],
-        "classification": "ok",
+        "assessment": {
+            "classification": "ok",
+            "evidence": {
+                "implementation": [{"path": "   ", "start_line": 1, "end_line": 1}]
+            },
+        },
         "confidence": 0.5,
         "summary": "fine",
         "rationale": "because",
-        "evidence": [
-            {
-                "role": "implementation",
-                "path": "   ",
-                "start_line": 1,
-                "end_line": 1,
-            }
-        ],
     }
     with pytest.raises(SemanticResultError):
         normalize_model_result(packet, response, analysis_key="a" * 64)

@@ -170,9 +170,10 @@ and current policy. Prior reports are never cache inputs. A failure before
 publication remains an explicit exit and log event rather than a fabricated
 report.
 
-The model may return only packet ID, classification, confidence, rationale,
-summary, and evidence coordinates. Backstitch reconstructs excerpts and hashes
-from packet bytes, then injects packet kind, packet hash, analysis key,
+The model may return only packet ID, a classification/evidence assessment,
+confidence, rationale, and summary. Assessment evidence groups exact packet
+coordinates by role. Backstitch reconstructs excerpts and hashes from packet
+bytes, then injects packet kind, packet hash, analysis key,
 verification state, diagnostic code, and provenance. Provider JSON Schema is
 a generation constraint, not a trust boundary. The local normalizer remains
 authoritative.

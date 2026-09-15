@@ -730,7 +730,7 @@ def resolve_provider_identity(
         model_id=model_id,
         model_revision=model_revision,
         adapter_id="backstitch.llm",
-        adapter_version=4,
+        adapter_version=5,
         llm_distribution_version=llm_version,
         plugin_distribution_name=plugin_distribution_name,
         plugin_distribution_version=plugin_version,

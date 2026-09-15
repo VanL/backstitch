@@ -24,11 +24,10 @@ def _row(pid: str) -> str:
     return json.dumps(
         {
             "packet_id": pid,
-            "classification": "ok",
+            "assessment": {"classification": "ok", "evidence": {}},
             "confidence": 0.9,
             "summary": f"fine {pid}",
             "rationale": "bounded packet is consistent",
-            "evidence": [],
         }
     )
 

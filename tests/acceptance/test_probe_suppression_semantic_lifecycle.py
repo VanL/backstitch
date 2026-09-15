@@ -173,21 +173,25 @@ def test_probe_suppression_semantic_miss_and_zero_call_replay(
         calls += 1
         projection = json.loads(prompt.rsplit("\n\n", 1)[1])
         suppression = projection["kind"] == "suppression"
-        evidence = []
+        evidence = {}
         if suppression:
-            evidence = [
-                {
-                    key: projection["requirement"][key]
-                    for key in ("role", "path", "start_line", "end_line")
-                }
-            ]
+            evidence = {
+                "requirement": [
+                    {
+                        key: projection["requirement"][key]
+                        for key in ("path", "start_line", "end_line")
+                    }
+                ]
+            }
         response = {
             "packet_id": projection["packet_id"],
-            "classification": "rationale_insufficient" if suppression else "ok",
+            "assessment": {
+                "classification": "rationale_insufficient" if suppression else "ok",
+                "evidence": evidence,
+            },
             "confidence": 0.9,
             "rationale": "The rationale does not identify the concrete constraint.",
             "summary": "Reviewed the bounded packet.",
-            "evidence": evidence,
         }
         return ProviderCallResult(json.dumps(response), provenance)
 

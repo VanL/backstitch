@@ -100,11 +100,21 @@ class BackstitchAcceptanceModel(llm.Model):
             )
             result = {
                 "packet_id": request["packet_id"],
-                "classification": "confirmed_mismatch" if mismatch else "ok",
+                "assessment": {
+                    "classification": "confirmed_mismatch" if mismatch else "ok",
+                    "evidence": {
+                        region["role"]: [
+                            {
+                                key: region[key]
+                                for key in ("path", "start_line", "end_line")
+                            }
+                        ]
+                        for region in (finding_evidence if mismatch else ok_evidence)
+                    },
+                },
                 "confidence": 1.0,
                 "summary": "Hermetic analyzer received the closed packet.",
                 "rationale": "The response is deterministic and provider-free.",
-                "evidence": finding_evidence if mismatch else ok_evidence,
             }
             role = "analyzer"
 

@@ -155,6 +155,39 @@ QUALIFICATION_CORPUS = (
 )
 
 
+def _model_evidence_by_role(
+    evidence: list[dict[str, object]],
+) -> dict[str, list[dict[str, object]]]:
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for item in evidence:
+        role = cast(str, item["role"])
+        grouped.setdefault(role, []).append(
+            {key: item[key] for key in ("path", "start_line", "end_line")}
+        )
+    return grouped
+
+
+def _model_response(
+    *,
+    packet_id: object,
+    classification: str = "ok",
+    evidence: list[dict[str, object]] | None = None,
+    confidence: float = 0.9,
+    rationale: str = "Bounded review.",
+    summary: str = "Reviewed one packet.",
+) -> dict[str, object]:
+    return {
+        "packet_id": packet_id,
+        "assessment": {
+            "classification": classification,
+            "evidence": _model_evidence_by_role(evidence or []),
+        },
+        "confidence": confidence,
+        "rationale": rationale,
+        "summary": summary,
+    }
+
+
 def _write_real_qualification(
     tmp_path: Path,
     analyze: ResolvedSemanticSettings,
@@ -220,14 +253,14 @@ def _write_real_qualification(
             classification, evidence = response_by_hash[packet_hash]
             return ProviderCallResult(
                 json.dumps(
-                    {
-                        "packet_id": packet["packet_id"],
-                        "classification": classification,
-                        "confidence": 1.0,
-                        "rationale": "Controlled real qualification artifact.",
-                        "summary": "Controlled qualification result.",
-                        "evidence": evidence,
-                    }
+                    _model_response(
+                        packet_id=packet["packet_id"],
+                        classification=classification,
+                        confidence=1.0,
+                        rationale="Controlled real qualification artifact.",
+                        summary="Controlled qualification result.",
+                        evidence=evidence,
+                    )
                 ),
                 provenance(analyze.provider_identity),
             )
@@ -482,14 +515,11 @@ def _model_row(classification: str = "ok") -> dict[str, object]:
                 "end_line": 11,
             },
         ]
-    return {
-        "packet_id": "docs/specs/01-x.md#X-1",
-        "classification": classification,
-        "confidence": 0.9,
-        "rationale": "Bounded review.",
-        "summary": "Reviewed one packet.",
-        "evidence": evidence,
-    }
+    return _model_response(
+        packet_id="docs/specs/01-x.md#X-1",
+        classification=classification,
+        evidence=evidence,
+    )
 
 
 def _resolved(**overrides: object) -> ResolvedSemanticSettings:
@@ -2586,14 +2616,11 @@ def test_cli_current_analysis_publishes_one_source_bound_artifact_set(
             calls += 1
             return ProviderCallResult(
                 json.dumps(
-                    {
-                        "packet_id": "docs/specs/01-core.md#CORE-1",
-                        "classification": "ok",
-                        "confidence": 0.9,
-                        "rationale": "The declared implementation matches.",
-                        "summary": "The obligation is supported.",
-                        "evidence": [],
-                    }
+                    _model_response(
+                        packet_id="docs/specs/01-core.md#CORE-1",
+                        rationale="The declared implementation matches.",
+                        summary="The obligation is supported.",
+                    )
                 ),
                 SemanticProvenance(
                     adapter_id=provider.adapter_id,
@@ -2693,14 +2720,11 @@ def test_bare_default_analyze_matches_explicit_provider_capable_run(
             calls += 1
             return ProviderCallResult(
                 json.dumps(
-                    {
-                        "packet_id": "docs/specs/01-core.md#CORE-1",
-                        "classification": "ok",
-                        "confidence": 0.9,
-                        "rationale": "The declared implementation matches.",
-                        "summary": "The obligation is supported.",
-                        "evidence": [],
-                    }
+                    _model_response(
+                        packet_id="docs/specs/01-core.md#CORE-1",
+                        rationale="The declared implementation matches.",
+                        summary="The obligation is supported.",
+                    )
                 ),
                 SemanticProvenance(
                     adapter_id=provider.adapter_id,
@@ -2758,14 +2782,11 @@ def test_cli_cache_modes_rebuild_resample_and_fail_closed(
             calls += 1
             return ProviderCallResult(
                 json.dumps(
-                    {
-                        "packet_id": "docs/specs/01-core.md#CORE-1",
-                        "classification": "ok",
-                        "confidence": 0.9,
-                        "rationale": "The declared implementation matches.",
-                        "summary": "The obligation is supported.",
-                        "evidence": [],
-                    }
+                    _model_response(
+                        packet_id="docs/specs/01-core.md#CORE-1",
+                        rationale="The declared implementation matches.",
+                        summary="The obligation is supported.",
+                    )
                 ),
                 SemanticProvenance(
                     adapter_id=provider.adapter_id,
@@ -2917,14 +2938,11 @@ def test_cli_current_source_change_withholds_every_artifact(
             )
             return ProviderCallResult(
                 json.dumps(
-                    {
-                        "packet_id": "docs/specs/01-core.md#CORE-1",
-                        "classification": "ok",
-                        "confidence": 0.9,
-                        "rationale": "The pre-mutation evidence matched.",
-                        "summary": "The captured obligation was supported.",
-                        "evidence": [],
-                    }
+                    _model_response(
+                        packet_id="docs/specs/01-core.md#CORE-1",
+                        rationale="The pre-mutation evidence matched.",
+                        summary="The captured obligation was supported.",
+                    )
                 ),
                 SemanticProvenance(
                     adapter_id=provider.adapter_id,
@@ -3191,14 +3209,13 @@ def test_cli_current_verifier_uses_complete_resolved_provider_descriptor(
                     for item in request["evidence_regions"]
                     if item["role"] in {"requirement", "implementation"}
                 ]
-                response = {
-                    "packet_id": request["packet_id"],
-                    "classification": "confirmed_mismatch",
-                    "confidence": 0.9,
-                    "rationale": "The controlled analyzer reports a mismatch.",
-                    "summary": "The declared implementation conflicts.",
-                    "evidence": evidence,
-                }
+                response = _model_response(
+                    packet_id=request["packet_id"],
+                    classification="confirmed_mismatch",
+                    rationale="The controlled analyzer reports a mismatch.",
+                    summary="The declared implementation conflicts.",
+                    evidence=evidence,
+                )
             return ProviderCallResult(
                 json.dumps(response),
                 SemanticProvenance(

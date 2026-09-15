@@ -1,6 +1,6 @@
 # Semantic Response And CLI Portability Plan (2026-09-14)
 
-**Status:** active; independently reviewed, implementation not started
+**Status:** active; Slices 1-2 committed, Slice 3 locally qualified
 
 **Class:** 5, spec-changing. Two production contracts change: analyzer
 generation and cross-runtime Wilson serialization. One test-only slice removes
@@ -294,6 +294,9 @@ new interfaces, and tests that preserve mechanisms rather than contracts.
 
 | Slice | Planned behavior | Observed behavior | Rationale or follow-up |
 |---|---|---|---|
+| 1 | Remove assertions that are not CLI contracts | Committed as `f4c6c65`; focused tests passed | Deleted the PTY/SIGSTOP probe and retained deterministic mutation coverage; replay and symlink tests now assert stable outcomes only |
+| 2 | Canonicalize Wilson bounds at their single owner | Committed as `28c8720`; focused tests, Ruff, and mypy passed | `round(value, 15)` collapses the observed supported-runtime difference without creating a numeric framework |
+| 3 | Align analyzer generation with required evidence | One nested `assessment` schema implemented; full hermetic tests, benchmark tests, static gates, self-corpus `check`, and live OpenAI qualification for `gpt-5.6-luna` and `gpt-5.5-2026-04-23` passed | A flat mixed-role array would need a more complex conditional/containment vocabulary. Role-keyed arrays let `anyOf`, `required`, and `minItems` express the existing role matrix directly. Hosted local-model qualification remains pending on the committed SHA. |
 
 Do not mark this plan complete until all three commits exist, local gates pass,
 the provider-backed Slice 3 evidence is recorded, and independent

@@ -146,11 +146,20 @@ def _verification_contracts() -> tuple[VerificationWork, dict[str, Any]]:
         packet,
         {
             "packet_id": packet["packet_id"],
-            "classification": "confirmed_mismatch",
+            "assessment": {
+                "classification": "confirmed_mismatch",
+                "evidence": {
+                    role: [
+                        {key: region[key] for key in ("path", "start_line", "end_line")}
+                        for region in packet["evidence_regions"]
+                        if region["role"] == role
+                    ]
+                    for role in ("requirement", "implementation")
+                },
+            },
             "confidence": 0.9,
             "rationale": "This rationale is excluded from verifier input.",
             "summary": "Implementation returns two, not one.",
-            "evidence": packet["evidence_regions"],
         },
         analysis_key="7" * 64,
     )

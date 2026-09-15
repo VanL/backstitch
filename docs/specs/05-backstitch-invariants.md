@@ -284,7 +284,9 @@ assertion spans that prevent one.
 
 Invariant classifications are `ok`, `weak_binding`,
 `confirmed_mismatch`, `probable_mismatch`, and `ambiguous`. Canonical model
-evidence is the closed role/path/span shape in [SEM-5]. Invariant `ok`
+evidence is reconstructed from the closed role-keyed model coordinates in
+[SEM-5]. The provider schema offers only classifications whose required roles
+exist in the packet. Invariant `ok`
 requires test evidence. An `ok` row without it normalizes to
 `weak_binding` only when requirement and implementation evidence are valid;
 otherwise it is malformed. Weak binding intentionally requires no test role.

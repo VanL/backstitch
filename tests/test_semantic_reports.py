@@ -78,6 +78,32 @@ def _validated(row: dict[str, object]) -> ValidatedSemanticPacket:
     return ValidatedSemanticPacket.from_row(row, cache_eligible=True)
 
 
+def _model_response(
+    packet: dict[str, Any],
+    *,
+    classification: str,
+    evidence: list[dict[str, Any]],
+    confidence: float,
+    rationale: str,
+    summary: str,
+) -> dict[str, Any]:
+    evidence_by_role: dict[str, list[dict[str, Any]]] = {}
+    for item in evidence:
+        coordinate = dict(item)
+        role = coordinate.pop("role")
+        evidence_by_role.setdefault(role, []).append(coordinate)
+    return {
+        "packet_id": packet["packet_id"],
+        "assessment": {
+            "classification": classification,
+            "evidence": evidence_by_role,
+        },
+        "confidence": confidence,
+        "rationale": rationale,
+        "summary": summary,
+    }
+
+
 _PROVIDER = ProviderIdentity(
     "controlled",
     "backstitch-tests",
@@ -774,14 +800,14 @@ def _analysis_report_v3(
     _validated(packet)
     canonical_result = normalize_model_result(
         packet,
-        {
-            "packet_id": packet["packet_id"],
-            "classification": "confirmed_mismatch",
-            "confidence": 0.9,
-            "rationale": "Evidence is local to the packet.",
-            "summary": "The implementation differs.",
-            "evidence": packet["evidence_regions"],
-        },
+        _model_response(
+            packet,
+            classification="confirmed_mismatch",
+            confidence=0.9,
+            rationale="Evidence is local to the packet.",
+            summary="The implementation differs.",
+            evidence=packet["evidence_regions"],
+        ),
         analysis_key="c" * 64,
     ).to_row()
     result_jsonl = canonical_json_bytes(canonical_result) + b"\n"

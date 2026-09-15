@@ -33,17 +33,17 @@ class PromptDescriptor:
 _PROMPTS: dict[SemanticPacketKind, tuple[str, int, str]] = {
     "section": (
         "backstitch.section-analysis",
-        3,
+        4,
         "backstitch_style_analysis.md",
     ),
     "invariant": (
         "backstitch.invariant-analysis",
-        3,
+        4,
         "invariant_binding_analysis.md",
     ),
     "suppression": (
         "backstitch.suppression-analysis",
-        1,
+        2,
         "suppression_analysis.md",
     ),
 }

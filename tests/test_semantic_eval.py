@@ -94,30 +94,34 @@ class ControlledAnalyzer:
             packet = json.loads(prompt.rsplit("\n\n", 1)[1])
             mutation = not self.always_ok and "return 2" in prompt
             evidence = (
-                [
-                    {
-                        "role": "requirement",
-                        "path": "docs/specs/01-feature.md",
-                        "start_line": 3,
-                        "end_line": 9,
-                    },
-                    {
-                        "role": "implementation",
-                        "path": "src/feature.py",
-                        "start_line": 1,
-                        "end_line": 3,
-                    },
-                ]
+                {
+                    "requirement": [
+                        {
+                            "path": "docs/specs/01-feature.md",
+                            "start_line": 3,
+                            "end_line": 9,
+                        }
+                    ],
+                    "implementation": [
+                        {
+                            "path": "src/feature.py",
+                            "start_line": 1,
+                            "end_line": 3,
+                        }
+                    ],
+                }
                 if mutation
-                else []
+                else {}
             )
             response = {
                 "packet_id": packet["packet_id"],
-                "classification": "confirmed_mismatch" if mutation else "ok",
+                "assessment": {
+                    "classification": "confirmed_mismatch" if mutation else "ok",
+                    "evidence": evidence,
+                },
                 "confidence": 1.0,
                 "rationale": "controlled production-path evaluation",
                 "summary": "return contract differs" if mutation else "matches",
-                "evidence": evidence,
             }
             return ProviderCallResult(json.dumps(response), PROVENANCE)
 

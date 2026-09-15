@@ -300,12 +300,17 @@ def test_real_llm_responses_wire_shape_and_closed_normalizer(
 
     packet = _section_packet()
     requirement = semantic_packet_projection(packet)["evidence_regions"][0]
+    requirement_coordinate = {
+        field: requirement[field] for field in ("path", "start_line", "end_line")
+    }
     model_response = {
         "packet_id": packet["packet_id"],
-        "classification": "ambiguous",
+        "assessment": {
+            "classification": "ambiguous",
+            "evidence": {"requirement": [requirement_coordinate]},
+        },
         "confidence": 0.8,
         "rationale": "The bounded evidence does not settle the requirement.",
-        "evidence": [requirement],
         "summary": "Evidence remains ambiguous.",
     }
     requests: list[tuple[str, dict[str, Any]]] = []
@@ -388,7 +393,7 @@ def test_real_llm_responses_wire_shape_and_closed_normalizer(
             analysis_key="a" * 64,
         )
     outside = json.loads(json.dumps(parsed))
-    outside["evidence"][0]["path"] = "outside.py"
+    outside["assessment"]["evidence"]["requirement"][0]["path"] = "outside.py"
     with pytest.raises(SemanticResultError):
         normalize_model_result(packet, outside, analysis_key="a" * 64)
     assert len(requests) == 1
@@ -540,17 +545,31 @@ def test_provider_adapter_constrains_evidence_to_packet_regions(
     schema = cast(dict[str, Any], prompts[0][1]["schema"])
     properties = cast(dict[str, Any], schema["properties"])
     assert properties["packet_id"] == {"const": packet["packet_id"]}
-    variants = properties["evidence"]["items"]["anyOf"]
+    assessment_variants = properties["assessment"]["anyOf"]
+    ambiguous = next(
+        variant
+        for variant in assessment_variants
+        if variant["properties"]["classification"]["const"] == "ambiguous"
+    )
+    requirement_variants = ambiguous["properties"]["evidence"]["properties"][
+        "requirement"
+    ]["items"]["anyOf"]
     assert [
         {
             key: variant["properties"][key]["const"]
-            for key in ("role", "path", "start_line", "end_line")
+            for key in ("path", "start_line", "end_line")
         }
-        for variant in variants
-    ] == semantic_packet_projection(packet)["evidence_regions"]
+        for variant in requirement_variants
+    ] == [
+        {key: region[key] for key in ("path", "start_line", "end_line")}
+        for region in semantic_packet_projection(packet)["evidence_regions"]
+        if region["role"] == "requirement"
+    ]
 
 
-def test_provider_schema_admits_exact_suppression_classifications() -> None:
+def test_provider_schema_omits_classifications_with_unavailable_required_roles() -> (
+    None
+):
     projection = {
         "packet_id": "suppression::docs/specs/01-X.md#SUP-X",
         "kind": "suppression",
@@ -567,15 +586,69 @@ def test_provider_schema_admits_exact_suppression_classifications() -> None:
     schema = _semantic_response_schema(
         "suppression prompt\n\n" + json.dumps(projection)
     )
-    properties = cast(dict[str, Any], schema["properties"])
+    variants = cast(dict[str, Any], schema["properties"])["assessment"]["anyOf"]
 
-    assert properties["classification"]["enum"] == [
-        "ok",
-        "rationale_insufficient",
-        "scope_overbroad",
-        "risk_unaddressed",
-        "ambiguous",
-    ]
+    assert {
+        variant["properties"]["classification"]["const"] for variant in variants
+    } == {"ok", "rationale_insufficient", "ambiguous"}
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        (
+            "section",
+            {
+                "ok": frozenset(),
+                "confirmed_mismatch": frozenset({"requirement", "implementation"}),
+                "probable_mismatch": frozenset({"requirement", "implementation"}),
+                "missing_trace": frozenset({"requirement"}),
+                "ambiguous": frozenset({"requirement"}),
+            },
+        ),
+        (
+            "invariant",
+            {
+                "ok": frozenset({"test"}),
+                "weak_binding": frozenset({"requirement", "implementation"}),
+                "confirmed_mismatch": frozenset({"requirement", "implementation"}),
+                "probable_mismatch": frozenset({"requirement", "implementation"}),
+                "ambiguous": frozenset({"requirement"}),
+            },
+        ),
+        (
+            "suppression",
+            {
+                "ok": frozenset({"requirement"}),
+                "rationale_insufficient": frozenset({"requirement"}),
+                "scope_overbroad": frozenset({"requirement", "counterevidence"}),
+                "risk_unaddressed": frozenset({"requirement", "counterevidence"}),
+                "ambiguous": frozenset({"requirement"}),
+            },
+        ),
+    ],
+)
+def test_provider_schema_matches_spec_required_role_matrix(
+    kind: str, expected: dict[str, frozenset[str]]
+) -> None:
+    projection = {
+        "packet_id": "packet",
+        "kind": kind,
+        "evidence_regions": [
+            {"role": role, "path": f"{role}.txt", "start_line": 1, "end_line": 1}
+            for role in ("requirement", "implementation", "test", "counterevidence")
+        ],
+    }
+    schema = _semantic_response_schema("prompt\n\n" + json.dumps(projection))
+    variants = cast(dict[str, Any], schema["properties"])["assessment"]["anyOf"]
+    observed = {
+        variant["properties"]["classification"]["const"]: frozenset(
+            variant["properties"]["evidence"].get("required", [])
+        )
+        for variant in variants
+    }
+
+    assert observed == expected
 
 
 def test_provider_adapter_rejects_model_identity_mismatch_before_resolution(

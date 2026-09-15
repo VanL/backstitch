@@ -160,11 +160,26 @@ def test_non_lf_characters_preserve_receipts_and_citable_regions(
         packet,
         {
             "packet_id": packet["packet_id"],
-            "classification": "confirmed_mismatch",
+            "assessment": {
+                "classification": "confirmed_mismatch",
+                "evidence": {
+                    "requirement": [
+                        {
+                            key: requirement_region[key]
+                            for key in ("path", "start_line", "end_line")
+                        }
+                    ],
+                    "implementation": [
+                        {
+                            key: implementation_region[key]
+                            for key in ("path", "start_line", "end_line")
+                        }
+                    ],
+                },
+            },
             "confidence": 0.9,
             "rationale": "The shown implementation conflicts with the requirement.",
             "summary": "The implementation disagrees with the contract.",
-            "evidence": [requirement_region, implementation_region],
         },
         analysis_key="a" * 64,
     )

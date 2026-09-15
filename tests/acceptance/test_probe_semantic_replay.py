@@ -188,30 +188,34 @@ def replay_corpus(tmp_path: Path) -> ReplayCorpus:
             packet = json.loads(prompt.rsplit("\n\n", 1)[1])
             is_mismatch = packet["packet_id"].endswith("#REPLAY-2")
             evidence = (
-                [
-                    {
-                        "role": "requirement",
-                        "path": "docs/specs/01-replay.md",
-                        "start_line": 5,
-                        "end_line": 5,
-                    },
-                    {
-                        "role": "implementation",
-                        "path": "pkg/replay-2.py",
-                        "start_line": 4,
-                        "end_line": 4,
-                    },
-                ]
+                {
+                    "requirement": [
+                        {
+                            "path": "docs/specs/01-replay.md",
+                            "start_line": 5,
+                            "end_line": 5,
+                        }
+                    ],
+                    "implementation": [
+                        {
+                            "path": "pkg/replay-2.py",
+                            "start_line": 4,
+                            "end_line": 4,
+                        }
+                    ],
+                }
                 if is_mismatch
-                else []
+                else {}
             )
             response = {
                 "packet_id": packet["packet_id"],
-                "classification": "confirmed_mismatch" if is_mismatch else "ok",
+                "assessment": {
+                    "classification": "confirmed_mismatch" if is_mismatch else "ok",
+                    "evidence": evidence,
+                },
                 "confidence": 1.0,
                 "summary": "Controlled cache-prime verdict.",
                 "rationale": "The response is bounded to this packet.",
-                "evidence": evidence,
             }
             return ProviderCallResult(json.dumps(response), provenance)
 
@@ -408,11 +412,10 @@ def factory(*args, **kwargs):
         packet = json.loads(prompt.rsplit("\\n\\n", 1)[1])
         response = {
             "packet_id": packet["packet_id"],
-            "classification": "ok",
+            "assessment": {"classification": "ok", "evidence": {}},
             "confidence": 1.0,
             "summary": "Controlled subprocess lifecycle verdict.",
             "rationale": "The declared evidence supports this packet.",
-            "evidence": [],
         }
         provenance = SemanticProvenance(
             adapter_id=provider.adapter_id,
@@ -837,11 +840,10 @@ def test_probe_17_hostile_target_is_read_only_data_under_trusted_config(
                 json.dumps(
                     {
                         "packet_id": rows[0]["packet_id"],
-                        "classification": "ok",
+                        "assessment": {"classification": "ok", "evidence": {}},
                         "confidence": 1.0,
                         "summary": "The hostile target was treated as data.",
                         "rationale": "The declared implementation returns one.",
-                        "evidence": [],
                     }
                 ),
                 provenance,

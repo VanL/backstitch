@@ -20,6 +20,13 @@ from backstitch.semantic_cache import (
     ProviderCallResult,
     SemanticProvenance,
 )
+from backstitch.semantic_evidence import (
+    EVIDENCE_ROLES,
+    INVARIANT_CLASSIFICATIONS,
+    SECTION_CLASSIFICATIONS,
+    SUPPRESSION_CLASSIFICATIONS,
+    required_evidence_roles,
+)
 from backstitch.semantic_identity import (
     EffectiveRequest,
     ProviderIdentity,
@@ -293,6 +300,68 @@ def default_provider_adapter(  # noqa: C901 approved [SC-17.1] RUFF-SUP-014 exce
     return call
 
 
+def _assessment_variants(kind: str, regions: list[object]) -> list[dict[str, object]]:
+    regions_by_role: dict[str, list[dict[str, object]]] = {}
+    fields = ("role", "path", "start_line", "end_line")
+    for region in regions:
+        if not isinstance(region, dict) or set(region) != set(fields):
+            raise ValueError("semantic prompt evidence region is invalid")
+        role = region["role"]
+        if role not in EVIDENCE_ROLES:
+            raise ValueError("semantic prompt evidence region role is invalid")
+        coordinate_fields = ("path", "start_line", "end_line")
+        regions_by_role.setdefault(role, []).append(
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    field: {"const": region[field]} for field in coordinate_fields
+                },
+                "required": list(coordinate_fields),
+            }
+        )
+
+    classifications = {
+        "section": SECTION_CLASSIFICATIONS,
+        "invariant": INVARIANT_CLASSIFICATIONS,
+        "suppression": SUPPRESSION_CLASSIFICATIONS,
+    }[kind]
+    assessment_variants: list[dict[str, object]] = []
+    available_roles = frozenset(regions_by_role)
+    for classification in sorted(classifications):
+        required_roles = required_evidence_roles(kind, classification)
+        if not required_roles.issubset(available_roles):
+            continue
+        evidence_schema: dict[str, object] = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                role: {
+                    "type": "array",
+                    "items": {"anyOf": variants},
+                    **({"minItems": 1} if role in required_roles else {}),
+                }
+                for role, variants in regions_by_role.items()
+            },
+        }
+        if required_roles:
+            evidence_schema["required"] = sorted(required_roles)
+        assessment_variants.append(
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "classification": {"const": classification},
+                    "evidence": evidence_schema,
+                },
+                "required": ["classification", "evidence"],
+            }
+        )
+    if not assessment_variants:
+        raise ValueError("semantic prompt has no feasible result classification")
+    return assessment_variants
+
+
 def _semantic_response_schema(prompt: str) -> dict[str, object]:
     """Constrain untrusted evidence to exact packet-local coordinate choices."""
 
@@ -314,50 +383,12 @@ def _semantic_response_schema(prompt: str) -> dict[str, object]:
         raise ValueError("semantic prompt packet identity is invalid")
     if not isinstance(regions, list) or not regions:
         raise ValueError("semantic prompt has no citable evidence regions")
-
-    region_variants: list[dict[str, object]] = []
-    fields = ("role", "path", "start_line", "end_line")
-    for region in regions:
-        if not isinstance(region, dict) or set(region) != set(fields):
-            raise ValueError("semantic prompt evidence region is invalid")
-        region_variants.append(
-            {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {field: {"const": region[field]} for field in fields},
-                "required": list(fields),
-            }
-        )
-
-    classifications = {
-        "section": [
-            "ok",
-            "confirmed_mismatch",
-            "probable_mismatch",
-            "missing_trace",
-            "ambiguous",
-        ],
-        "invariant": [
-            "ok",
-            "weak_binding",
-            "confirmed_mismatch",
-            "probable_mismatch",
-            "ambiguous",
-        ],
-        "suppression": [
-            "ok",
-            "rationale_insufficient",
-            "scope_overbroad",
-            "risk_unaddressed",
-            "ambiguous",
-        ],
-    }[kind]
+    assessment_variants = _assessment_variants(kind, regions)
     required = [
         "packet_id",
-        "classification",
+        "assessment",
         "confidence",
         "rationale",
-        "evidence",
         "summary",
     ]
     return {
@@ -365,7 +396,7 @@ def _semantic_response_schema(prompt: str) -> dict[str, object]:
         "additionalProperties": False,
         "properties": {
             "packet_id": {"const": packet_id},
-            "classification": {"type": "string", "enum": classifications},
+            "assessment": {"anyOf": assessment_variants},
             "confidence": {
                 "anyOf": [
                     {"type": "number", "minimum": 0, "maximum": 1},
@@ -373,10 +404,6 @@ def _semantic_response_schema(prompt: str) -> dict[str, object]:
                 ]
             },
             "rationale": {"type": "string"},
-            "evidence": {
-                "type": "array",
-                "items": {"anyOf": region_variants},
-            },
             "summary": {"type": "string"},
         },
         "required": required,

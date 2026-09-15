@@ -12,17 +12,21 @@ Respond with a single JSON object and nothing else:
 ```json
 {
   "packet_id": "<copy the packet_id verbatim>",
-  "classification": "<one of: ok | confirmed_mismatch | probable_mismatch | missing_trace | ambiguous>",
+  "assessment": {
+    "classification": "<one of: ok | confirmed_mismatch | probable_mismatch | missing_trace | ambiguous>",
+    "evidence": {
+      "requirement": [
+        {
+          "path": "<packet-local file path>",
+          "start_line": <int>,
+          "end_line": <int>
+        }
+      ],
+      "implementation": []
+    }
+  },
   "confidence": <0.0-1.0 or null>,
   "rationale": "<one or two sentences>",
-  "evidence": [
-    {
-      "role": "<requirement or implementation>",
-      "path": "<packet-local file path>",
-      "start_line": <int>,
-      "end_line": <int>
-    }
-  ],
   "summary": "<one concise reviewer-facing sentence>"
 }
 ```
@@ -37,13 +41,14 @@ Classification guide:
   owner in the packet, or code present appears to need a spec owner.
 - `ambiguous`: the spec text is too vague to judge against the code.
 
-Rules: return exactly those six top-level fields and exactly those four fields
-per evidence item. Cite only inclusive spans present in the packet. Use
-`requirement` for the shown spec section and `implementation` for shown owner
-snippets. The packet gives the exact citable `section_start_line` and
+Rules: return exactly those five top-level fields. Put classification and
+evidence inside `assessment`. Group coordinates under `requirement` for the
+shown spec section and `implementation` for shown owner snippets; each
+coordinate has exactly `path`, `start_line`, and `end_line`. Cite only
+inclusive spans present in the packet. The packet gives the exact citable `section_start_line` and
 `section_end_line`, plus exact `start_line` and `end_line` for every owner.
-The `evidence_regions` list is the closed evidence vocabulary: copy evidence
-items verbatim from that list. Never invent, widen, combine, or bridge listed
+The `evidence_regions` list is the closed evidence vocabulary: copy the path
+and span from a listed item into its matching role array. Never invent, widen, combine, or bridge listed
 regions, including disjoint regions with the same path. An owner with
 `end_line: null` has no citable content. Mismatch findings
 require both roles. Missing-trace and ambiguous

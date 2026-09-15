@@ -325,11 +325,26 @@ def test_compile_source_aligned_packet_uses_runtime_authority_and_v3_shape(
         packet,
         {
             "packet_id": packet["packet_id"],
-            "classification": "ambiguous",
+            "assessment": {
+                "classification": "ambiguous",
+                "evidence": {
+                    "requirement": [
+                        {
+                            key: requirement_region[key]
+                            for key in ("path", "start_line", "end_line")
+                        }
+                    ],
+                    "counterevidence": [
+                        {
+                            key: counter_region[key]
+                            for key in ("path", "start_line", "end_line")
+                        }
+                    ],
+                },
+            },
             "confidence": 0.5,
             "rationale": "The decoy creates bounded ambiguity.",
             "summary": "Bounded ambiguity remains.",
-            "evidence": [requirement_region, counter_region],
         },
         analysis_key="a" * 64,
     )
@@ -342,11 +357,26 @@ def test_compile_source_aligned_packet_uses_runtime_authority_and_v3_shape(
             packet,
             {
                 "packet_id": packet["packet_id"],
-                "classification": "confirmed_mismatch",
+                "assessment": {
+                    "classification": "confirmed_mismatch",
+                    "evidence": {
+                        "requirement": [
+                            {
+                                key: requirement_region[key]
+                                for key in ("path", "start_line", "end_line")
+                            }
+                        ],
+                        "counterevidence": [
+                            {
+                                key: counter_region[key]
+                                for key in ("path", "start_line", "end_line")
+                            }
+                        ],
+                    },
+                },
                 "confidence": 0.5,
                 "rationale": "Counterevidence is not declared implementation.",
                 "summary": "Counterevidence cannot satisfy required roles.",
-                "evidence": [requirement_region, counter_region],
             },
             analysis_key="b" * 64,
         )

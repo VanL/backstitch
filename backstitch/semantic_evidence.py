@@ -15,6 +15,7 @@ from backstitch.canonical import canonical_json_bytes, lf_split
 from backstitch.semantic_packets import semantic_packet_projection
 
 EvidenceRole = Literal["requirement", "implementation", "test", "counterevidence"]
+EVIDENCE_ROLES = frozenset({"requirement", "implementation", "test", "counterevidence"})
 
 SECTION_CLASSIFICATIONS = frozenset(
     {
@@ -46,14 +47,15 @@ SUPPRESSION_CLASSIFICATIONS = frozenset(
 MODEL_RESULT_FIELDS = frozenset(
     {
         "packet_id",
-        "classification",
+        "assessment",
         "confidence",
         "rationale",
         "summary",
-        "evidence",
     }
 )
+MODEL_ASSESSMENT_FIELDS = frozenset({"classification", "evidence"})
 MODEL_EVIDENCE_FIELDS = frozenset({"role", "path", "start_line", "end_line"})
+MODEL_EVIDENCE_COORDINATE_FIELDS = frozenset({"path", "start_line", "end_line"})
 
 
 class SemanticResultError(ValueError):
@@ -225,7 +227,7 @@ def _normalize_evidence(
         start_line = item["start_line"]
         end_line = item["end_line"]
         if (
-            role not in ("requirement", "implementation", "test", "counterevidence")
+            role not in EVIDENCE_ROLES
             or not isinstance(path, str)
             or not path.strip()
             or isinstance(start_line, bool)
@@ -336,7 +338,10 @@ def normalize_model_result(  # noqa: C901 approved [SC-17.1] RUFF-SUP-101 except
     }.get(kind)
     if classifications is None:
         raise SemanticResultError("packet kind is invalid for semantic analysis")
-    classification = response["classification"]
+    assessment = response["assessment"]
+    if not isinstance(assessment, dict) or set(assessment) != MODEL_ASSESSMENT_FIELDS:
+        raise SemanticResultError("model assessment does not match the closed schema")
+    classification = assessment["classification"]
     if classification not in classifications:
         raise SemanticResultError("classification is invalid for the packet kind")
     confidence = response["confidence"]
@@ -354,7 +359,28 @@ def normalize_model_result(  # noqa: C901 approved [SC-17.1] RUFF-SUP-101 except
         raise SemanticResultError("summary must be a nonblank string")
     if confidence is None and not rationale.strip():
         raise SemanticResultError("confidence or a nonblank rationale is required")
-    evidence = normalize_packet_evidence(packet, response["evidence"])
+    evidence_by_role = assessment["evidence"]
+    if not isinstance(evidence_by_role, dict):
+        raise SemanticResultError("model evidence must be an object keyed by role")
+    available_roles = {region.role for region in _shown_regions(packet)}
+    flattened_evidence: list[object] = []
+    for role, coordinates in evidence_by_role.items():
+        if role not in EVIDENCE_ROLES or role not in available_roles:
+            raise SemanticResultError(
+                "model evidence role is unavailable in the packet"
+            )
+        if not isinstance(coordinates, list):
+            raise SemanticResultError("model evidence role must contain an array")
+        for coordinate in coordinates:
+            if (
+                not isinstance(coordinate, dict)
+                or set(coordinate) != MODEL_EVIDENCE_COORDINATE_FIELDS
+            ):
+                raise SemanticResultError(
+                    "model evidence coordinate does not match the closed schema"
+                )
+            flattened_evidence.append({"role": role, **coordinate})
+    evidence = normalize_packet_evidence(packet, flattened_evidence)
     roles = {item.role for item in evidence}
     required = required_evidence_roles(kind, classification)
     if kind == "invariant" and classification == "ok" and "test" not in roles:
@@ -396,21 +422,24 @@ def revalidate_canonical_result(
     if not isinstance(row, dict):
         raise SemanticResultError("canonical result is not an object")
     try:
-        response = {
-            "packet_id": row["packet_id"],
-            "classification": row["classification"],
-            "confidence": row["confidence"],
-            "rationale": row["rationale"],
-            "summary": row["summary"],
-            "evidence": [
+        evidence_by_role: dict[str, list[dict[str, object]]] = {}
+        for item in row["evidence"]:
+            evidence_by_role.setdefault(item["role"], []).append(
                 {
-                    "role": item["role"],
                     "path": item["path"],
                     "start_line": item["start_line"],
                     "end_line": item["end_line"],
                 }
-                for item in row["evidence"]
-            ],
+            )
+        response = {
+            "packet_id": row["packet_id"],
+            "assessment": {
+                "classification": row["classification"],
+                "evidence": evidence_by_role,
+            },
+            "confidence": row["confidence"],
+            "rationale": row["rationale"],
+            "summary": row["summary"],
         }
     except (KeyError, TypeError):
         raise SemanticResultError(

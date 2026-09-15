@@ -202,7 +202,7 @@ def test_request_identity_accepts_every_reasoning_effort(
     }
 
 
-def test_resolved_provider_identity_uses_adapter_version_four(
+def test_resolved_provider_identity_uses_adapter_version_five(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("backstitch.semantic_identity.version", lambda name: "0.33")
@@ -215,7 +215,7 @@ def test_resolved_provider_identity_uses_adapter_version_four(
         plugin_distribution_name="llm",
     )
 
-    assert identity.adapter_version == 4
+    assert identity.adapter_version == 5
 
 
 def test_capability_presence_is_resolved_before_request_identity() -> None:
@@ -497,8 +497,8 @@ def test_review_identity_is_the_exact_provider_independent_contract() -> None:
         b'{"analysis_contract_version":1,"packet_hash":"'
         + str(_packet()["packet_hash"]).encode("ascii")
         + b'","prompt":{"id":"backstitch.section-analysis","sha256":'
-        b'"1f0b6fc15b35f12d036bba49bb870c5a5b0f0654241f16c99e1503b102e7aede",'
-        b'"version":3},"request":{"json_mode":"require","max_tokens":512,'
+        b'"862bb3ac0852ae7582805d70e131e5a6046add2520e2df762d7999479631b80c",'
+        b'"version":4},"request":{"json_mode":"require","max_tokens":512,'
         b'"seed":42,"temperature":0.0},"search_epoch":"1"}'
     )
 
