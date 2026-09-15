@@ -46,8 +46,8 @@ Risky plans are blocked if they do not make explicit:
 
 | Plan | Status |
 |------|--------|
-| 2026-09-14-semantic-response-and-ci-recovery-plan.md | active; three CLI-reachable slices block release readiness; zero-job workflow diagnosis deferred |
-| 2026-09-14-v0-4-0-release-readiness-plan.md | active; blocked by semantic response and CI recovery plan |
+| 2026-09-14-semantic-response-and-ci-recovery-plan.md | completed; three CLI-reachable slices qualified; zero-job workflow diagnosis remains separate |
+| 2026-09-14-v0-4-0-release-readiness-plan.md | active; semantic response and CI recovery prerequisite completed |
 | 2026-09-14-review-findings-remediation-plan.md | completed — seven targeted findings closed; native Windows remains deferred |
 | 2026-09-14-native-windows-support-exploration-plan.md | deferred exploration — native Windows product and filesystem questions; independent of remediation |
 | 2026-08-27-publication-destination-authority-plan.md | superseded — replaced before implementation by the 2026-09-14 review-findings remediation plan |

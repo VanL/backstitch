@@ -1,6 +1,6 @@
 # Backstitch 0.4.0 Release Readiness Plan (2026-09-14)
 
-Status: active; blocked by the semantic response and CI recovery plan
+Status: active; semantic response and CI recovery prerequisite completed
 
 Class: 3+P. The work changes which external corpus participates in the
 release precheck, a material verification-process boundary. It also performs
@@ -196,8 +196,9 @@ temporary freshness rule.
   contract gap: the provider schema admitted an invariant `weak_binding`
   response without the `requirement` evidence that [SEM-5] normalization
   requires. Main CI also exposed a cross-runtime Wilson-report defect and
-  three over-specified tests. Release work is blocked by
-  `docs/plans/2026-09-14-semantic-response-and-ci-recovery-plan.md`; do not
-  broaden this plan's original no-spec-change scope. The longstanding zero-job
+  three over-specified tests. The bounded recovery plan completed at `f70d966`:
+  exact-SHA CI run `34991793052` and hosted local-LLM run `34991792986` passed.
+  Release work may resume without broadening this plan's original no-spec-change
+  scope. The longstanding zero-job
   semantic workflows remain separate diagnosis work until their exact GitHub
   validation error is known; they are not made a release gate here.
