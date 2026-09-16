@@ -442,18 +442,11 @@ def test_already_published_mutable_release_is_not_rerun_success(
         )
 
 
-def test_pypi_poll_is_bounded_to_five_attempts_over_a_few_minutes(
+def test_pypi_poll_is_bounded_over_a_few_minutes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    states = iter(
-        (
-            (False, "HTTP 404"),
-            (False, "HTTP 404"),
-            (False, "HTTP 404"),
-            (False, "HTTP 404"),
-            (True, "backstitch 1.2.3"),
-        )
-    )
+    delays = tuple(publication.PYPI_RETRY_DELAYS)
+    states = iter([(False, "HTTP 404")] * len(delays) + [(True, "backstitch 1.2.3")])
     sleeps: list[int] = []
     monkeypatch.setattr(
         publication,
@@ -464,15 +457,16 @@ def test_pypi_poll_is_bounded_to_five_attempts_over_a_few_minutes(
 
     publication.wait_for_pypi("backstitch", "1.2.3")
 
-    assert sleeps == list(publication.PYPI_RETRY_DELAYS)
-    assert len(sleeps) == 4
+    assert sleeps == list(delays)
+    assert sleeps
     assert 120 <= sum(sleeps) <= 300
 
 
 def test_pypi_poll_failure_reports_last_observed_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    states = iter((False, f"attempt {attempt}") for attempt in range(1, 6))
+    attempts = len(publication.PYPI_RETRY_DELAYS) + 1
+    states = iter((False, f"attempt {attempt}") for attempt in range(1, attempts + 1))
     monkeypatch.setattr(
         publication,
         "pypi_release_state",
@@ -480,7 +474,7 @@ def test_pypi_poll_failure_reports_last_observed_state(
     )
     monkeypatch.setattr(publication.time, "sleep", lambda delay: None)
 
-    with pytest.raises(RuntimeError, match="attempt 5"):
+    with pytest.raises(RuntimeError, match=f"attempt {attempts}"):
         publication.wait_for_pypi("backstitch", "1.2.3")
 
 

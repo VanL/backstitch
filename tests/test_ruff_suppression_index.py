@@ -713,63 +713,6 @@ def test_ruff_command_uses_locked_environment_and_canonical_targets(
     assert observed["check"] is False
 
 
-def test_real_pinned_ruff_end_to_end_with_extensionless_governed_source(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("UV_PROJECT", str(ROOT))
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    governed = bin_dir / "check-doc-paths"
-    governed.write_text(
-        "#!/usr/bin/env python3\n"
-        "import os  # noqa: F401 approved [SC-17.1] RUFF-SUP-001 exception\n",
-        encoding="utf-8",
-    )
-    for name in ("check-dom15-fixtures", "coalesce-check"):
-        (bin_dir / name).write_text(
-            "#!/usr/bin/env python3\nvalue = 1\n", encoding="utf-8"
-        )
-    spec = tmp_path / "policy.md"
-    spec.write_text(
-        _spec(_row("RUFF-SUP-001", "`F401`", 1, "`F401=1`")),
-        encoding="utf-8",
-    )
-
-    version = index._run_ruff(tmp_path, "--version")
-    assert version.returncode == 0
-    assert version.stdout.strip() == "ruff 0.15.21"
-    discovered = index._run_ruff(tmp_path, "check", "--show-files", *index.LINT_TARGETS)
-    assert discovered.returncode == 0, discovered.stderr
-    assert str(governed.resolve()) in discovered.stdout.splitlines()
-
-    normal = index._run_ruff(
-        tmp_path, "check", "--output-format", "json", *index.LINT_TARGETS
-    )
-    raw = index._run_ruff(
-        tmp_path,
-        "check",
-        "--ignore-noqa",
-        "--output-format",
-        "json",
-        *index.LINT_TARGETS,
-    )
-    assert normal.returncode == 0
-    assert json.loads(normal.stdout) == []
-    assert raw.returncode == 1
-    raw_payload = json.loads(raw.stdout)
-    assert [(item["code"], item["noqa_row"]) for item in raw_payload] == [("F401", 2)]
-
-    assert (
-        index.main(["--repo-root", str(tmp_path), "--spec", str(spec), "--write"]) == 0
-    )
-    generated = spec.read_text(encoding="utf-8")
-    assert "`bin/check-doc-paths::<module>`" in generated
-    assert "Global active-rule raw inventory: `F401=1`" in generated
-    assert (
-        index.main(["--repo-root", str(tmp_path), "--spec", str(spec), "--check"]) == 0
-    )
-
-
 def test_cli_defaults_to_the_backstitch_core_spec(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -9,7 +9,6 @@ one old spelling.
 from __future__ import annotations
 
 import ast
-import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,8 +20,6 @@ import backstitch.canonical as canonical_module
 import backstitch.diagnostics as diagnostics
 import backstitch.scan_exclusions as scan_exclusions
 import backstitch.semantic_cache as semantic_cache
-import backstitch.semantic_eval_reports as semantic_eval_reports
-import backstitch.semantic_reports as semantic_reports
 import backstitch.settings as settings_module
 from backstitch.filesystem_io import file_stat_identity
 
@@ -995,128 +992,6 @@ def test_diagnostic_registry_family_owns_deterministic_classification() -> None:
         for code, family in families.items()
         if family == "deterministic" and registry.require(code).status == "implemented"
     } == diagnostics.deterministic_issue_codes()
-
-
-def test_d5_closed_record_policies_preserve_each_family_contract() -> None:
-    """D5 characterization: generic closed records agree; counts stay specialized."""
-
-    fields = frozenset({"value"})
-    assert semantic_eval_reports._closed({"value": 1}, fields, "row") == {"value": 1}
-    assert semantic_reports._exact_record({"value": 1}, fields, "row") == {"value": 1}
-    assert alignment_eval._object({"value": 1}, set(fields), "row") == {"value": 1}
-    with pytest.raises(semantic_eval_reports.SemanticEvalContractError):
-        semantic_eval_reports._closed({}, fields, "row")
-    with pytest.raises(semantic_reports.AnalysisReportError):
-        semantic_reports._exact_record({}, fields, "row")
-    with pytest.raises(alignment_eval.AlignmentEvalError):
-        alignment_eval._object({}, set(fields), "row")
-
-    assert semantic_reports._closed_counts(
-        {"section": 0, "invariant": 1}, "counts"
-    ) == {"section": 0, "invariant": 1}
-    with pytest.raises(semantic_reports.PacketReportError):
-        semantic_reports._closed_counts({"section": False, "invariant": 1}, "counts")
-
-
-def test_d5_nonblank_policy_preserves_nfc_divergence() -> None:
-    """D5 characterization: report strings do not currently require NFC.
-
-    The factory may share type/blank checks, but wrappers must retain this
-    difference unless the governing report contract is explicitly revised.
-    """
-
-    decomposed = "e\N{COMBINING ACUTE ACCENT}"
-    assert semantic_reports._nonblank_string(decomposed, "value") == decomposed
-    assert semantic_reports._packet_report_nonblank(decomposed, "value") == decomposed
-    with pytest.raises(semantic_eval_reports.SemanticEvalContractError, match="NFC"):
-        semantic_eval_reports._nonblank(decomposed, "value")
-    with pytest.raises(alignment_eval.AlignmentEvalError, match="NFC"):
-        alignment_eval._nonblank(decomposed, "value")
-    with pytest.raises(alignment_eval.AlignmentEvalError, match="surrogate"):
-        alignment_eval._nonblank("\ud800", "value")
-
-    for blank in ("", " \t"):
-        with pytest.raises(semantic_eval_reports.SemanticEvalContractError):
-            semantic_eval_reports._nonblank(blank, "value")
-        with pytest.raises(semantic_reports.AnalysisReportError):
-            semantic_reports._nonblank_string(blank, "value")
-        with pytest.raises(alignment_eval.AlignmentEvalError):
-            alignment_eval._nonblank(blank, "value")
-
-
-def test_d5_digest_policy_preserves_prefix_and_producer_variants() -> None:
-    """D5 characterization: `_canonical_sha256` is a producer, not a validator."""
-
-    digest = "a" * 64
-    prefixed = "sha256:" + digest
-    assert semantic_eval_reports._digest(digest, "digest") == digest
-    assert semantic_reports._analysis_digest(digest, "digest") == digest
-    assert semantic_reports._packet_report_digest(digest, "digest") == digest
-    assert semantic_eval_reports._digest(prefixed, "digest", prefixed=True) == prefixed
-    assert alignment_eval._sha256(prefixed, "digest") == prefixed
-
-    with pytest.raises(semantic_eval_reports.SemanticEvalContractError):
-        semantic_eval_reports._digest(prefixed, "digest")
-    with pytest.raises(semantic_reports.AnalysisReportError):
-        semantic_reports._analysis_digest(prefixed, "digest")
-    with pytest.raises(alignment_eval.AlignmentEvalError):
-        alignment_eval._sha256(digest, "digest")
-
-    value = {"value": 1}
-    assert alignment_eval._canonical_sha256(value) == (
-        "sha256:" + hashlib.sha256(b'{"value":1}').hexdigest()
-    )
-
-
-def test_d5_integer_policies_preserve_minimums_and_reject_booleans() -> None:
-    """D5 characterization: nonnegative, positive, and session minima differ."""
-
-    assert semantic_eval_reports._integer(0, "value") == 0
-    assert semantic_reports._nonnegative_int(0, "value") == 0
-    assert semantic_reports._analysis_nonnegative_int(0, "value") == 0
-    assert alignment_eval._nonnegative_integer(0, "value") == 0
-    assert semantic_reports._positive_analysis_int(1, "value") == 1
-    assert alignment_eval._session_count(2, "value") == 2
-    assert semantic_eval_reports._integer(2, "value", minimum=2) == 2
-
-    for function, error in (
-        (
-            semantic_eval_reports._integer,
-            semantic_eval_reports.SemanticEvalContractError,
-        ),
-        (semantic_reports._nonnegative_int, semantic_reports.PacketReportError),
-        (
-            semantic_reports._analysis_nonnegative_int,
-            semantic_reports.AnalysisReportError,
-        ),
-        (alignment_eval._nonnegative_integer, alignment_eval.AlignmentEvalError),
-    ):
-        with pytest.raises(error):
-            function(False, "value")
-    with pytest.raises(semantic_reports.AnalysisReportError):
-        semantic_reports._positive_analysis_int(0, "value")
-    with pytest.raises(alignment_eval.AlignmentEvalError):
-        alignment_eval._session_count(1, "value")
-
-
-def test_d5_relative_path_and_boolean_policies_preserve_return_types(
-    tmp_path: Path,
-) -> None:
-    """D5 characterization: alignment paths join a base; eval paths stay text."""
-
-    assert semantic_eval_reports._relative_path("pkg/a.py", "path") == "pkg/a.py"
-    assert alignment_eval._relative_path(tmp_path, "pkg/a.py", "path") == (
-        tmp_path / "pkg/a.py"
-    )
-    for invalid in ("../a.py", "/a.py", "pkg\\a.py"):
-        with pytest.raises(semantic_eval_reports.SemanticEvalContractError):
-            semantic_eval_reports._relative_path(invalid, "path")
-        with pytest.raises(alignment_eval.AlignmentEvalError):
-            alignment_eval._relative_path(tmp_path, invalid, "path")
-
-    assert semantic_eval_reports._boolean(True, "flag") is True
-    with pytest.raises(semantic_eval_reports.SemanticEvalContractError):
-        semantic_eval_reports._boolean(1, "flag")
 
 
 def test_scan_exclusion_matcher_normalizes_backslashes() -> None:

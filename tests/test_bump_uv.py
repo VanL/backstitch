@@ -10,13 +10,18 @@ import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPOSITORY_ROOT / "bin" / "bump_uv.py"
-WORKFLOWS = (
-    "ci.yml",
-    "local-llm.yml",
-    "release-gate.yml",
-    "semantic-pr-report.yml",
-    "semantic-refresh.yml",
-)
+
+
+def _load_bump_uv_module() -> ModuleType:
+    spec = util.spec_from_file_location("bump_uv", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+BUMP_UV = _load_bump_uv_module()
+WORKFLOWS = tuple(BUMP_UV.WORKFLOWS)
 
 
 @pytest.fixture
@@ -32,11 +37,7 @@ def repository(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def bump_uv_module() -> ModuleType:
-    spec = util.spec_from_file_location("bump_uv", SCRIPT)
-    assert spec is not None and spec.loader is not None
-    module = util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return BUMP_UV
 
 
 def test_dry_run_reports_every_managed_file_without_writing(

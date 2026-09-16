@@ -96,75 +96,6 @@ def test_write_version_files_updates_untyped_init_version(tmp_path: Path) -> Non
     assert '__version__ = "0.2.0"' in init.read_text(encoding="utf-8")
 
 
-def test_precheck_commands_match_release_contract() -> None:
-    commands = release.build_precheck_commands()
-
-    assert release.HERMETIC_TEST_COMMAND == (
-        "uv",
-        "run",
-        "pytest",
-        "tests",
-        "-q",
-        "-n",
-        "auto",
-        "--dist",
-        "loadgroup",
-        "-m",
-        "not live_llm and not benchmark",
-    )
-    assert release.BENCHMARK_TEST_COMMAND == (
-        "uv",
-        "run",
-        "pytest",
-        "tests",
-        "-q",
-        "-n",
-        "0",
-        "-m",
-        "benchmark",
-    )
-    assert release.LIVE_LLM_TEST_COMMAND == (
-        "uv",
-        "run",
-        "pytest",
-        "tests/live/test_live_llm.py",
-        "-q",
-        "-s",
-    )
-    assert release.RUFF_CHECK_COMMAND == (
-        "uv",
-        "run",
-        "--frozen",
-        "--no-sync",
-        "ruff",
-        "check",
-        ".",
-        "bin/check-doc-paths",
-        "bin/check-dom15-fixtures",
-        "bin/coalesce-check",
-    )
-    assert release.RUFF_SUPPRESSION_CHECK_COMMAND == (
-        "uv",
-        "run",
-        "--frozen",
-        "--no-sync",
-        "python",
-        "bin/ruff_suppression_index.py",
-        "--check",
-    )
-    assert commands == (
-        release.HERMETIC_TEST_COMMAND,
-        release.BENCHMARK_TEST_COMMAND,
-        release.LIVE_LLM_TEST_COMMAND,
-        release.LOCAL_LLM_TEST_COMMAND,
-        release.RUFF_CHECK_COMMAND,
-        release.RUFF_SUPPRESSION_CHECK_COMMAND,
-        release.RUFF_FORMAT_COMMAND,
-        release.MYPY_COMMAND,
-        release.SELF_CORPUS_COMMAND,
-    )
-
-
 def test_precheck_propagates_protected_live_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -197,6 +128,13 @@ def test_precheck_propagates_protected_live_failure(
     assert excinfo.value.returncode == 7
     assert commands[-1] == release.LIVE_LLM_TEST_COMMAND
     assert release.LOCAL_LLM_TEST_COMMAND not in commands
+
+
+def test_prechecks_include_canonical_ruff_gates() -> None:
+    commands = release.build_precheck_commands()
+
+    assert release.RUFF_CHECK_COMMAND in commands
+    assert release.RUFF_SUPPRESSION_CHECK_COMMAND in commands
 
 
 def test_benchmark_precheck_disables_ambient_xdist(

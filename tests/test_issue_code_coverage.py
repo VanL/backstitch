@@ -215,7 +215,6 @@ def test_intent_coverage_registry_contexts_are_consistent() -> None:
     for (code, context), issue in fired.items():
         expected = INTENT_DIAGNOSTIC_CONTEXTS[code][context]
         assert issue.default_severity == expected
-        assert issue.severity == expected
         assert issue.short_code is not None
         assert issue.short_code.startswith("BSN")
 

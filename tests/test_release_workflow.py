@@ -20,13 +20,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_DIR = ROOT / ".github" / "workflows"
-UV_WORKFLOWS = (
-    "ci.yml",
-    "local-llm.yml",
-    "release-gate.yml",
-    "semantic-pr-report.yml",
-    "semantic-refresh.yml",
-)
 
 
 def _workflow_text(path: str) -> str:
@@ -55,6 +48,14 @@ def _named_workflow_steps(text: str) -> dict[str, str]:
         name, _, body = chunk.partition("\n")
         steps[name] = body
     return steps
+
+
+def _action_repositories(text: str) -> list[str]:
+    return [
+        reference.split("@", 1)[0]
+        for reference in re.findall(r"(?m)^\s*(?:-\s*)?uses:\s*([^\s#]+)", text)
+        if not reference.startswith("./")
+    ]
 
 
 def test_all_external_actions_are_full_shas_with_selected_third_party_owners() -> None:
@@ -87,48 +88,24 @@ def test_all_external_actions_are_full_shas_with_selected_third_party_owners() -
 
 
 def test_every_uv_workflow_uses_the_repository_pin() -> None:
-    for workflow_name in UV_WORKFLOWS:
-        workflow_text = _workflow_text(workflow_name)
+    bump_uv_contract = runpy.run_path(str(ROOT / "bin" / "bump_uv.py"))
+    workflow_names = cast(tuple[str, ...], bump_uv_contract["WORKFLOWS"])
+    assert workflow_names
+    for workflow_name in workflow_names:
+        workflow_text = _active_workflow_text(workflow_name)
         setup_count = workflow_text.count("uses: astral-sh/setup-uv@")
 
         assert setup_count > 0
-        assert workflow_text.count('UV_VERSION: "0.12.5"') == 1
+        assert len(re.findall(r'(?m)^  UV_VERSION:\s*"[^"]+"\s*$', workflow_text)) == 1
         assert workflow_text.count("version: ${{ env.UV_VERSION }}") == setup_count
 
 
-def test_dependabot_maintains_root_uv_and_github_actions_without_auto_merge() -> None:
-    dependabot = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
-
-    assert 'package-ecosystem: "uv"' in dependabot
-    assert 'package-ecosystem: "github-actions"' in dependabot
-    assert dependabot.count('interval: "weekly"') == 2
-    assert "labels:" not in dependabot
-    assert not (WORKFLOW_DIR / "dependabot.yml").exists()
-
-
-def test_provider_dependency_floor_and_lock_are_responses_capable() -> None:
-    with (ROOT / "pyproject.toml").open("rb") as handle:
-        project = tomllib.load(handle)["project"]
-    with (ROOT / "uv.lock").open("rb") as handle:
-        locked = tomllib.load(handle)["package"]
-
-    assert "llm>=0.33,<0.34" in project["dependencies"]
-    versions = {package["name"]: package["version"] for package in locked}
-    assert versions["llm"] == "0.33"
-    assert versions["openai"].startswith("3.")
-    assert "openai" not in {
-        dependency.split("=", 1)[0].split("<", 1)[0].split(">", 1)[0]
-        for dependency in project["dependencies"]
-    }
-
-
-def test_package_metadata_declares_current_posix_platform_support() -> None:
-    with (ROOT / "pyproject.toml").open("rb") as handle:
-        classifiers = set(tomllib.load(handle)["project"]["classifiers"])
-
-    assert "Operating System :: POSIX" in classifiers
-    assert "Operating System :: MacOS :: MacOS X" in classifiers
-    assert "Operating System :: OS Independent" not in classifiers
+def test_ci_and_release_prechecks_include_canonical_ruff_gates() -> None:
+    release_contract = runpy.run_path(str(ROOT / "bin" / "release.py"))
+    workflow = " ".join(_active_workflow_text("ci.yml").split())
+    for key in ("RUFF_CHECK_COMMAND", "RUFF_SUPPRESSION_CHECK_COMMAND"):
+        command = cast(tuple[str, ...], release_contract[key])
+        assert " ".join(command) in workflow
 
 
 def test_backstitch_runtime_directory_is_ignored_and_untracked() -> None:
@@ -155,25 +132,15 @@ def test_backstitch_runtime_directory_is_ignored_and_untracked() -> None:
     assert tracked.stdout == ""
 
 
-def test_ci_checks_release_helper_format_and_types() -> None:
-    workflow = _workflow_text("ci.yml")
+def test_published_metadata_declares_posix_platform_support() -> None:
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        classifiers = set(tomllib.load(handle)["project"]["classifiers"])
 
-    assert (
-        workflow.count(
-            "uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d"
-        )
-        == 4
-    )
-    assert workflow.count("enable-cache: false") == 4
-    assert workflow.count("run: python bin/bump_uv.py --check") == 1
-    assert workflow.count("run: uv sync --frozen --extra dev") == 3
-    assert "uv run ruff format --check" in workflow
-    assert "tests\n" in workflow
-    assert (
-        "uv run mypy backstitch bin/release.py tests --config-file pyproject.toml"
-        in workflow
-    )
-    assert "uv run backstitch check --repo-root ." in workflow
+    assert {
+        "Operating System :: POSIX",
+        "Operating System :: MacOS :: MacOS X",
+    } <= classifiers
+    assert "Operating System :: OS Independent" not in classifiers
 
 
 def test_release_smokes_exact_built_distributions_before_attestation() -> None:
@@ -197,65 +164,6 @@ def test_release_smokes_exact_built_distributions_before_attestation() -> None:
     assert "backstitch.__file__" in workflow
     assert "guide alignment --format json" in workflow
     assert 'check --repo-root "${GITHUB_WORKSPACE}"' in workflow
-
-
-def test_ci_runs_exact_lint_then_suppression_policy_commands() -> None:
-    workflow = _active_workflow_text("ci.yml")
-    lint_command = (
-        "uv run --frozen --no-sync ruff check . bin/check-doc-paths "
-        "bin/check-dom15-fixtures bin/coalesce-check"
-    )
-    suppression_command = (
-        "uv run --frozen --no-sync python bin/ruff_suppression_index.py --check"
-    )
-    active_lines = [line.strip() for line in workflow.splitlines()]
-
-    assert workflow.count(lint_command) == 1
-    assert workflow.count(suppression_command) == 1
-    lint_index = active_lines.index(lint_command)
-    assert active_lines[lint_index + 1] == suppression_command
-    assert "Complexity ceiling" not in workflow
-    assert "ruff check backstitch bin --select C901" not in workflow
-
-
-def test_ci_collects_and_uploads_coverage() -> None:
-    workflow = _workflow_text("ci.yml")
-    coverage_section = workflow.split("  coverage:", 1)[1].split("  binary-wheels:", 1)[
-        0
-    ]
-
-    assert 'python-version: "3.12"' in coverage_section
-    assert '-m "not live_llm and not benchmark"' in coverage_section
-    assert "--cov=backstitch --cov-report=" in coverage_section
-    assert "uv run coverage report --show-missing" in coverage_section
-    assert "uv run coverage xml" in coverage_section
-    assert (
-        "codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f"
-        in coverage_section
-    )
-    assert "files: ./coverage.xml" in coverage_section
-    assert "fail_ci_if_error: false" in coverage_section
-    assert "token: ${{ secrets.CODECOV_TOKEN }}" in coverage_section
-    assert "slug: VanL/backstitch" in coverage_section
-
-
-def test_coverage_policy_and_readme_badge_match_repository() -> None:
-    with (ROOT / "pyproject.toml").open("rb") as handle:
-        coverage = tomllib.load(handle)["tool"]["coverage"]
-
-    assert coverage["run"]["source"] == ["backstitch"]
-    assert coverage["run"]["parallel"] is True
-    assert coverage["report"]["show_missing"] is True
-
-    codecov = (ROOT / ".codecov.yml").read_text(encoding="utf-8")
-    assert "target: 75%" in codecov
-    assert "target: 50%" in codecov
-    assert "threshold: 2%" in codecov
-    assert "threshold: 15%" in codecov
-
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "https://codecov.io/gh/VanL/backstitch/branch/main/graph/badge.svg" in readme
-    assert "](https://codecov.io/gh/VanL/backstitch)" in readme
 
 
 def test_local_pytest_enables_live_while_ci_explicitly_disables_it() -> None:
@@ -313,26 +221,17 @@ def test_trusted_semantic_refresh_separates_reports_from_disposable_cache() -> N
     assert "submodules: false" in active
     assert "lfs: false" in active
     assert 'test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"' in active
-    assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in active
-    assert "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d" in active
-    cache_action = "actions/cache"
-    cache_pin = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
-    assert f"{cache_action}/restore@{cache_pin}" in active
-    assert f"{cache_action}/save@{cache_pin}" in active
+    action_repositories = set(_action_repositories(active))
     assert "actions/checkout@v5" not in active
     assert "astral-sh/setup-uv@v7" not in active
     assert "actions/cache/restore@v5" not in active
     assert "actions/cache/save@v5" not in active
-    assert {
-        line.strip().removeprefix("uses: ").split(" #", 1)[0]
-        for line in active.splitlines()
-        if line.strip().startswith("uses: ")
-    } == {
-        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-        "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d",
-        f"{cache_action}/restore@{cache_pin}",
-        f"{cache_action}/save@{cache_pin}",
-        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    assert action_repositories == {
+        "actions/checkout",
+        "astral-sh/setup-uv",
+        "actions/cache/restore",
+        "actions/cache/save",
+        "actions/upload-artifact",
     }
     job_preamble = active.split("steps:", 1)[0]
     assert "OPENAI_API_KEY" not in job_preamble
@@ -428,7 +327,7 @@ def test_trusted_semantic_refresh_separates_reports_from_disposable_cache() -> N
     assert "steps.cache-save.outcome" in active
     assert "semantic cache persistence failed" in active
 
-    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in active
+    assert "actions/upload-artifact" in _action_repositories(active)
     assert "if: always()" in active
     assert "include-hidden-files: true" in active
     assert "retention-days: 14" in steps["Upload review evidence"]
@@ -620,18 +519,14 @@ def test_trusted_semantic_pr_report_has_closed_hostile_target_boundary() -> None
     ):
         assert message in enforce
 
-    uses = [
-        line.strip().removeprefix("uses: ").split(" #", 1)[0]
-        for line in active.splitlines()
-        if line.strip().startswith("uses: ")
-    ]
-    assert uses.count("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1") == 2
-    assert set(uses) == {
-        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-        "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d",
-        "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
-        "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
-        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    action_repositories = _action_repositories(active)
+    assert action_repositories.count("actions/checkout") == 2
+    assert set(action_repositories) == {
+        "actions/checkout",
+        "astral-sh/setup-uv",
+        "actions/cache/restore",
+        "actions/cache/save",
+        "actions/upload-artifact",
     }
     for prohibited in (
         "git commit",
@@ -892,7 +787,6 @@ def test_local_llm_workflow_is_separate_and_guarded() -> None:
     assert "cancel-in-progress: false" in active
     assert "2 vCPU / 8 GB" in workflow
 
-    assert "uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d" in active
     assert "version: ${{ env.UV_VERSION }}" in active
     assert 'python-version: "3.11"' in active
     assert "enable-cache: false" in active

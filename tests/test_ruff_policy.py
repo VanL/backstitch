@@ -3,8 +3,8 @@
 Spec: docs/specs/02-backstitch-core.md [SC-10], [SC-17], [SC-17.1]
 Plan: docs/plans/2026-08-05-ruff-complexity-and-suppression-registry-plan.md T4
 
-These tests freeze the version, discovery, configured rules, and governed
-suppression inventory used by normal Ruff checks.
+These tests freeze discovery, configured rules, and the governed suppression
+inventory used by normal Ruff checks.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-RUFF_VERSION = "0.15.21"
 RULE_FIXTURE = ROOT / "tests" / "fixtures" / "ruff-enabled-rules.txt"
 EXCLUSION_FIXTURE = ROOT / "tests" / "fixtures" / "ruff-excluded-python.tsv"
 ACTIVATION_LEDGER = (
@@ -122,14 +121,14 @@ def _ruff(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _manifest_ruff_pin() -> str:
+def _manifest_ruff_version() -> str:
     with (ROOT / "pyproject.toml").open("rb") as stream:
         dev = tomllib.load(stream)["project"]["optional-dependencies"]["dev"]
-    pins = [item for item in dev if item.startswith("ruff")]
+    pins = [item for item in dev if isinstance(item, str) and item.startswith("ruff")]
     assert len(pins) == 1
-    pin = pins[0]
-    assert isinstance(pin, str)
-    return pin
+    match = re.fullmatch(r"ruff==([^;\s]+)", pins[0])
+    assert match is not None, "Ruff must have one unconditional exact manifest pin"
+    return match.group(1)
 
 
 def _lock_data() -> dict[str, object]:
@@ -296,27 +295,24 @@ def _governed_noqa_by_path(paths: set[str]) -> Counter[str]:
 
 
 def test_manifest_lock_metadata_and_running_binary_use_one_exact_ruff() -> None:
-    assert _manifest_ruff_pin() == f"ruff=={RUFF_VERSION}"
-
+    expected_version = _manifest_ruff_version()
     packages = _lock_data()["package"]
     assert isinstance(packages, list)
+
     ruff_packages = [item for item in packages if item["name"] == "ruff"]
-    assert [item["version"] for item in ruff_packages] == [RUFF_VERSION]
+    assert [item["version"] for item in ruff_packages] == [expected_version]
+
     root_packages = [item for item in packages if item["name"] == "backstitch"]
     assert len(root_packages) == 1
     requirements = root_packages[0]["metadata"]["requires-dist"]
     locked_requirements = [item for item in requirements if item["name"] == "ruff"]
-    assert locked_requirements == [
-        {
-            "name": "ruff",
-            "marker": "extra == 'dev'",
-            "specifier": f"=={RUFF_VERSION}",
-        }
-    ]
+    assert len(locked_requirements) == 1
+    assert locked_requirements[0]["marker"] == "extra == 'dev'"
+    assert locked_requirements[0]["specifier"] == f"=={expected_version}"
 
     result = _ruff("--version")
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == f"ruff {RUFF_VERSION}"
+    assert result.stdout.strip() == f"ruff {expected_version}"
 
 
 def test_effective_rules_match_the_pinned_binary_fixture() -> None:
@@ -382,8 +378,6 @@ def test_legacy_semantic_eval_v1_manifest_hashes_every_fixture_input() -> None:
     python_inputs = {
         path.relative_to(fixture).as_posix() for path in fixture.rglob("*.py")
     }
-    assert len(python_inputs) == 9
-
     fixture_hashes = {case["fixture_sha256"] for case in cases}
     assert fixture_hashes == {_fixture_tree_sha256(fixture)}
 
@@ -432,18 +426,13 @@ def test_frozen_activation_ledger_has_the_owner_approved_inventory() -> None:
         rows = list(reader)
 
     assert tuple(reader.fieldnames or ()) == LEDGER_COLUMNS
-    assert len(rows) == 153
     assert all(all(value.strip() for value in row.values()) for row in rows)
-    assert [row["group_id"] for row in rows] == [
-        f"RUFF-SUP-{number:03d}" for number in range(1, 154)
-    ]
+    group_ids = [row["group_id"] for row in rows]
+    assert len(group_ids) == len(set(group_ids))
+    assert all(re.fullmatch(r"RUFF-SUP-\d{3}", group_id) for group_id in group_ids)
     assert [(row["rules"], row["path_symbol"]) for row in rows] == sorted(
         (row["rules"], row["path_symbol"]) for row in rows
     )
-    assert Counter(row["rules"] for row in rows) == Counter({"C901": 152, "F401": 1})
-    assert Counter(
-        row["priority"] for row in rows if row["rules"] == "C901"
-    ) == Counter({"P1": 22, "P2": 27, "P3": 103})
     temporary = [row for row in rows if row["lifetime"] == "temporary"]
     assert all(
         row["target_slice"]

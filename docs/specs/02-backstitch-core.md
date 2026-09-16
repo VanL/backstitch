@@ -1038,7 +1038,9 @@ Required proof surfaces:
 - one firing test for each `default_command` value, the disabling `false`
   value, every invalid type/value family, and `extend` override/disable
   behavior
-- configured Ruff policy tests proving the exact manifest/lock/runtime pin,
+- configured Ruff policy tests proving that the single exact manifest pin,
+  lock resolution, and executing binary agree, without duplicating the pinned
+  version as test-owned policy,
   the reviewed lint discovery surface including intended extensionless Python
   entry points, configured `C901` at 10, active-rule raw inventory, and the
   checked [SC-17.1] suppression registry through the same canonical lint
@@ -1812,8 +1814,9 @@ _Implementation mapping_:
 <!-- backstitch: skip-obligation [SC-17.1] "The generated suppression registry is exhaustively checked by Ruff policy and index gates; model evaluation would duplicate deterministic proof and exceed the reviewed provider request capability." -->
 
 Ruff's version is exact-pinned in the development manifest and lock. The
-repository proves that the executing binary, manifest pin, and lock resolve
-to the same version before deriving rule or suppression inventories.
+repository proves that the executing binary and lock resolve to the manifest's
+single exact pin before deriving rule or suppression inventories; tests do not
+carry a second version literal.
 
 The normal configured Ruff check includes `C901` with
 `lint.mccabe.max-complexity = 10`. Lint discovery covers every tracked Python
@@ -2139,6 +2142,8 @@ _Implementation mapping_:
 
 ## Related Plans
 
+- `docs/plans/2026-09-16-test-signal-cleanup-plan.md`
+  (completed test-contract cleanup; [SC-10], [SC-17.1])
 - `docs/plans/2026-09-14-review-findings-remediation-plan.md`
   (completed remediation plan; [SC-5])
 - `docs/plans/2026-08-23-gpt-5-6-luna-responses-plan.md`

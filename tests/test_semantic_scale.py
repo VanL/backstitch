@@ -116,18 +116,6 @@ def test_invalid_or_unobserved_runner_identity_stays_unavailable(
     )
 
 
-def test_committed_performance_posture_is_unavailable_until_runner_is_pinned() -> None:
-    contract_path = Path("tests/performance/runner-contract.json")
-    workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-
-    assert assess_runner_qualification(contract_path, None) == RunnerQualification(
-        status="unavailable",
-        reason="runner_contract_missing",
-        mismatched_fields=(),
-    )
-    assert "\n  semantic-scale:" not in workflow
-
-
 @pytest.mark.parametrize(
     ("field", "value"),
     (

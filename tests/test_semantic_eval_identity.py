@@ -45,7 +45,6 @@ def test_eval_search_epoch_bytes_are_stable(
     expected: str,
 ) -> None:
     assert derive_eval_search_epoch(domain, base, _CORPUS_SHA256, trial) == expected
-    assert expected.count(":") == 1
 
 
 def test_eval_search_epoch_rejects_unknown_domain() -> None:

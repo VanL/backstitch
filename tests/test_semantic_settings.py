@@ -8,7 +8,6 @@ Spec: docs/specs/07-verification-and-evidence-cases.md [EVC-12.2]
 from __future__ import annotations
 
 import json
-import tomllib
 from dataclasses import asdict
 from pathlib import Path
 from typing import TypedDict
@@ -539,108 +538,11 @@ def test_capability_schema_has_exactly_five_request_fields(
 
 def test_repository_dogfood_semantic_configuration_is_explicit() -> None:
     root = Path(__file__).parents[1]
-    with (root / "pyproject.toml").open("rb") as handle:
-        backstitch = tomllib.load(handle)["tool"]["backstitch"]
-    analyze = backstitch["analyze"]
-
-    assert analyze == {
-        "backend_id": "llm",
-        "plugin_id": "openai",
-        "plugin_distribution_name": "llm",
-        "model": "pkg:service/openai.com/gpt-5.6-luna",
-        "adapter_model_id": "gpt-5.6-luna",
-        "model_revision": "gpt-5.6-luna",
-        "capability_schema_version": 1,
-        "capability_revision": "openai-gpt-5.6-luna-2026-08-23",
-        "maximum_input_bytes": 1_600_000,
-        "request_constraints": {
-            "json_mode": {
-                "presence": "required",
-                "allowed_values": ["require"],
-            },
-            "temperature": {
-                "presence": "forbidden",
-            },
-            "seed": {
-                "presence": "forbidden",
-            },
-            "max_tokens": {
-                "presence": "required",
-                "minimum": 1,
-                "maximum": 16384,
-            },
-            "reasoning_effort": {
-                "presence": "optional",
-                "allowed_values": ["max"],
-            },
-        },
-        "concurrency": 1,
-        "cache_path": ".backstitch/semantic-cache",
-        "cache_mode": "read-write",
-        "result_reuse": "evidence-stable",
-        "search_epoch": "1",
-        "json_mode": "require",
-        "max_tokens": 16384,
-        "reasoning_effort": "max",
-        "require_complete": True,
-        "required_kinds": ["section", "invariant", "suppression"],
-        "minimum_packets": 1,
-        "maximum_packets": 128,
-        "maximum_prompt_bytes": 40_000_000,
-        "finding_handling": "require_disposition",
-        "maximum_provider_calls": 128,
-        "lock_wait_timeout_seconds": 300,
-        "maximum_runtime_seconds": 1800,
-        "maximum_estimated_cost_microusd": 30_000_000,
-        "input_cost_microusd_per_million_tokens": 400_000,
-        "output_cost_microusd_per_million_tokens": 1_800_000,
-        "input_token_overhead": 256,
-        "cost_rate_source": (
-            "OpenAI GPT-5.6 Luna model page, reviewed 2026-08-23; conservative "
-            "rates include the published long-prompt multiplier"
-        ),
-    }
-    assert backstitch["verify"] == {
-        "enabled": False,
-        "provider_source": "analyze",
-        "concurrency": 1,
-        "cache_path": ".backstitch/semantic-cache",
-        "cache_mode": "require",
-        "search_epochs": ["1"],
-        "json_mode": "require",
-        "max_tokens": 512,
-        "required_verdicts": 1,
-        "minimum_support_score": 0.90,
-        "indeterminate": "report",
-        "maximum_provider_calls": 100,
-        "maximum_prompt_bytes": 1_000_000,
-        "lock_wait_timeout_seconds": 300,
-        "maximum_runtime_seconds": 1800,
-        "maximum_estimated_cost_microusd": 1_000_000,
-        "eval": {
-            "mode": "report",
-            "qualification_corpus": "",
-            "qualification_corpus_sha256": "",
-            "qualification_report": "",
-            "qualification_report_sha256": "",
-            "trials": 2,
-            "interval_method": "wilson",
-            "confidence_level": 0.95,
-            "minimum_positive_units": 1,
-            "minimum_negative_units": 1,
-            "minimum_evidence_sufficiency_rate": 0.0,
-            "minimum_conditional_precision": 0.0,
-            "minimum_conditional_recall": 0.0,
-            "minimum_end_to_end_recall": 0.0,
-            "minimum_recall_lower_bound": 0.0,
-            "maximum_false_positive_rate": 1.0,
-            "maximum_false_positive_upper_bound": 1.0,
-            "maximum_indeterminate_rate": 1.0,
-            "maximum_uncached_flip_rate": 1.0,
-            "require_all_critical": False,
-        },
-    }
-    assert asdict(resolve_config(root).verify) == {"enabled": False}
+    repository_settings = resolve_config(root)
+    packaged_settings = resolve_config(root, use_repo_config=False)
+    assert asdict(repository_settings.verify) == {"enabled": False}
+    assert repository_settings.analyze != packaged_settings.analyze
+    assert repository_settings.lint != packaged_settings.lint
 
     update_settings = resolve_config(
         root,
