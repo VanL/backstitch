@@ -221,3 +221,9 @@ temporary freshness rule.
   makes its four-CPU/16-GiB boundary explicit, and the release helper records
   the same four-thread model parameter. Its local live command also has a real
   25-minute aggregate deadline rather than relying on per-request timeouts.
+- The `v0.4.0` tag exposed one further workflow-composition defect: broad CI
+  push matching launched a second full matrix for the already-qualified release
+  commit, and the release gate waited 18 minutes for that newer duplicate run.
+  CI now runs on `main` pushes and pull requests, while release tags retain the
+  exact-SHA evidence already produced on `main` and are handled only by the
+  release gate.

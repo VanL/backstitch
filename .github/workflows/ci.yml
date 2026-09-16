@@ -1,11 +1,15 @@
 name: CI
 
-# Hermetic CI runs on every push and PR with no secrets. Repository pytest
+# Hermetic CI runs on main pushes and PRs with no secrets. Release tags point
+# at commits already qualified on main; rerunning the full matrix on tag push
+# only makes the release gate wait for duplicate evidence.
+# Repository pytest
 # config enables live LLM tests for local runs, so CI explicitly deselects or
 # disables them. Provider-backed semantic refresh is isolated in the manual
 # semantic-refresh workflow and never runs in pull-request-controlled CI.
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
