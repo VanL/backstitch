@@ -29,6 +29,10 @@ def _load_release_module() -> ModuleType:
 release = _load_release_module()
 
 
+def test_local_llm_prewarm_allows_the_full_local_analysis_budget() -> None:
+    assert release.LOCAL_LLM_PREWARM_TIMEOUT_SECONDS == 25 * 60
+
+
 def _state(
     *,
     local: str | None = None,

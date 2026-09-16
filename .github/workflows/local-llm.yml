@@ -48,7 +48,8 @@ jobs:
     # 2 vCPU / 8 GB for private repos as of 2026-07-03. This manual lane is
     # designed against the smaller private-runner floor.
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Leave setup and diagnostics headroom around the 25-minute live-test budget.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -181,7 +182,7 @@ jobs:
           PY
 
       - name: Run local live LLM tests
-        timeout-minutes: 15
+        timeout-minutes: 25
         # The BACKSTITCH_LOCAL_LLM_* and OLLAMA_* values are inherited from the
         # workflow-level env block; only the live-gate opt-ins are step-scoped.
         env:

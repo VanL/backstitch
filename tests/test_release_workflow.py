@@ -845,6 +845,8 @@ def test_semantic_pr_main_contains_output_and_transport_failures(
 def test_local_llm_workflow_is_separate_and_guarded() -> None:
     workflow = _workflow_text("local-llm.yml")
     active = _active_workflow_text("local-llm.yml")
+    jobs = _workflow_jobs("local-llm.yml")
+    steps = _named_workflow_steps(active)
 
     assert "name: local-llm" in active
     assert "workflow_dispatch:" in active
@@ -866,8 +868,8 @@ def test_local_llm_workflow_is_separate_and_guarded() -> None:
     assert "enable-cache: false" in active
     assert "ollama/ollama@sha256:" in active
     assert "ollama/ollama:latest" not in active
-    assert "timeout-minutes: 20" in active
-    assert "timeout-minutes: 15" in active
+    assert "timeout-minutes: 35" in jobs["local-llm"]
+    assert "timeout-minutes: 25" in steps["Run local live LLM tests"]
     assert "OLLAMA_CONTEXT_LENGTH:" in active
     assert "OLLAMA_NUM_PREDICT:" in active
     assert "PARAMETER num_ctx ${OLLAMA_CONTEXT_LENGTH}" in workflow
