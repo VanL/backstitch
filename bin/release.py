@@ -1445,10 +1445,14 @@ def release_files_changed(target: ReleaseTarget = ROOT_RELEASE_TARGET) -> bool:
 
 
 def _remote_tag_reuse_note(state: ReleaseState) -> str:
+    workflow_name = Path(state.target.release_workflow).name
     return (
         f"Tag {state.tag_name} already exists on origin at HEAD. Pushing the same tag "
-        f"again will not retrigger {state.target.release_workflow}; rerun the "
-        "existing release-gate workflow manually in GitHub Actions if needed."
+        f"again will not retrigger {state.target.release_workflow}. Rerun an existing "
+        "release-gate run when GitHub permits it. If no run can be rerun, dispatch "
+        "only when this immutable tag already contains the workflow_dispatch trigger; "
+        "older tags require a new version and must never be moved. Recovery command: "
+        f"gh workflow run {workflow_name} --ref {state.tag_name}"
     )
 
 
@@ -1597,11 +1601,6 @@ def _build_parser() -> argparse.ArgumentParser:
             "build, publish to PyPI via Trusted Publishing, and create GitHub "
             "Releases; this helper does not publish directly."
         ),
-    )
-    parser.add_argument(
-        "--skip-checks",
-        action="store_true",
-        help="Skip preflight test/lint/type-check commands",
     )
     parser.add_argument(
         "--dry-run",
@@ -1759,8 +1758,7 @@ def _run_dry_release(
         print("dry-run: working tree is dirty; a real release would fail")
     if args.publish:
         _print_publish_note()
-    if not args.skip_checks:
-        run_precheck_commands(dry_run=True)
+    run_precheck_commands(dry_run=True)
     _print_dry_run_version_action(prepared, target)
     for step in build_postupdate_steps():
         run_command(
@@ -1843,8 +1841,7 @@ def _run_real_release(
     _require_command("uv")
     if args.publish:
         _print_publish_note()
-    if not args.skip_checks:
-        run_precheck_commands()
+    run_precheck_commands()
     _write_release_version(target, prepared)
     for step in build_postupdate_steps():
         run_command(step.command, cwd=step.cwd, env_overrides=step.env_overrides)

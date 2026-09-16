@@ -50,6 +50,80 @@ def _named_workflow_steps(text: str) -> dict[str, str]:
     return steps
 
 
+def _workflow_jobs(path: str) -> dict[str, str]:
+    jobs: dict[str, list[str]] = {}
+    current: str | None = None
+    in_jobs = False
+    for line in _active_workflow_text(path).splitlines():
+        if line == "jobs:":
+            in_jobs = True
+            continue
+        if not in_jobs:
+            continue
+        match = re.fullmatch(r"  ([a-z0-9-]+):", line)
+        if match:
+            current = match.group(1)
+            jobs[current] = []
+        elif current is not None:
+            jobs[current].append(line)
+    return {name: "\n".join(lines) for name, lines in jobs.items()}
+
+
+def _job_needs(job: str) -> frozenset[str]:
+    lines = job.splitlines()
+    for index, line in enumerate(lines):
+        if line == "    needs:":
+            needs: set[str] = set()
+            for child in lines[index + 1 :]:
+                match = re.fullmatch(r"      - ([a-z0-9-]+)", child)
+                if match:
+                    needs.add(match.group(1))
+                    continue
+                break
+            return frozenset(needs)
+    return frozenset()
+
+
+def _job_condition(job: str) -> str:
+    lines = job.splitlines()
+    for index, line in enumerate(lines):
+        match = re.fullmatch(r"    if:\s*(.*)", line)
+        if not match:
+            continue
+        parts = [match.group(1)]
+        for child in lines[index + 1 :]:
+            if child.startswith("      "):
+                parts.append(child.strip())
+                continue
+            break
+        return " ".join(parts)
+    return ""
+
+
+def _evaluate_release_condition(
+    condition: str,
+    *,
+    github_state: str,
+    pypi_state: str,
+    publish_result: str,
+    verify_result: str,
+) -> bool:
+    expression = condition.removeprefix(">-").strip()
+    expression = expression.removeprefix("${{").removesuffix("}}").strip()
+    values = {
+        "needs.resolve-publication-state.result": "success",
+        "needs.resolve-publication-state.outputs.github_state": github_state,
+        "needs.resolve-publication-state.outputs.pypi_state": pypi_state,
+        "needs.publish-to-pypi.result": publish_result,
+        "needs.verify-pypi-release.result": verify_result,
+    }
+    for token, value in sorted(values.items(), key=lambda item: -len(item[0])):
+        expression = expression.replace(token, repr(value))
+    expression = expression.replace("always()", "True")
+    expression = expression.replace("&&", " and ").replace("||", " or ")
+    return bool(eval(expression, {"__builtins__": {}}, {}))
+
+
 def _action_repositories(text: str) -> list[str]:
     return [
         reference.split("@", 1)[0]
@@ -909,35 +983,128 @@ def test_release_gate_builds_with_the_exact_locked_frontend() -> None:
     assert "uv build" not in build_section
 
 
-def test_release_gate_stages_draft_before_pypi_and_publishes_last() -> None:
-    workflow = _workflow_text("release-gate.yml")
+def test_release_gate_publication_jobs_form_the_state_machine_dag() -> None:
+    jobs = _workflow_jobs("release-gate.yml")
 
-    build_index = workflow.index("  build:")
-    stage_index = workflow.index("  stage-github-release:")
-    pypi_index = workflow.index("  publish-to-pypi:")
-    publish_index = workflow.index("  publish-github-release:")
+    assert _job_needs(jobs["stage-github-release"]) == {
+        "build",
+        "resolve-publication-state",
+    }
+    assert _job_needs(jobs["publish-to-pypi"]) == {
+        "stage-github-release",
+        "resolve-publication-state",
+    }
+    assert _job_needs(jobs["verify-pypi-release"]) == {
+        "publish-to-pypi",
+        "resolve-publication-state",
+    }
+    assert _job_needs(jobs["publish-github-release"]) == {
+        "verify-pypi-release",
+        "resolve-publication-state",
+    }
+    assert "replace-draft" in jobs["stage-github-release"]
+    assert "draft: true" in jobs["stage-github-release"]
+    assert "verify_pypi_release.py" in jobs["verify-pypi-release"]
+    assert "publish-draft" in jobs["publish-github-release"]
+    assert "softprops/action-gh-release@" not in jobs["publish-github-release"]
 
-    assert build_index < stage_index < pypi_index < publish_index
-    stage_section = workflow[stage_index:pypi_index]
-    pypi_section = workflow[pypi_index:publish_index]
-    publish_section = workflow[publish_index:]
-    assert "- build" in stage_section
-    assert "replace-draft" in stage_section
-    assert "draft: true" in stage_section
-    assert "uses: softprops/action-gh-release@" in stage_section
-    assert "- stage-github-release" in pypi_section
-    assert "- stage-github-release" in publish_section
-    assert "- publish-to-pypi" in publish_section
-    assert "publish-draft" in publish_section
-    assert "uses: softprops/action-gh-release@" not in publish_section
+
+def test_release_gate_job_conditions_encode_every_safe_state_row() -> None:
+    jobs = _workflow_jobs("release-gate.yml")
+
+    absent_conditions = {
+        _job_condition(jobs[name])
+        for name in ("build", "stage-github-release", "publish-to-pypi")
+    }
+    assert absent_conditions == {
+        "${{ needs.resolve-publication-state.outputs.pypi_state == 'absent' }}"
+    }
+    verify = _job_condition(jobs["verify-pypi-release"])
+    assert "pypi_state == 'absent'" in verify
+    assert "needs.publish-to-pypi.result == 'success'" in verify
+    assert "pypi_state == 'exact'" in verify
+    assert "needs.publish-to-pypi.result == 'skipped'" in verify
+    publish = _job_condition(jobs["publish-github-release"])
+    assert "needs.verify-pypi-release.result == 'success'" in publish
+    assert "outputs.github_state != 'public'" in publish
+
+    expected = {
+        ("absent", "absent"): (True, True, True, True, True),
+        ("draft", "absent"): (True, True, True, True, True),
+        ("draft", "exact"): (False, False, False, True, True),
+        ("public", "exact"): (False, False, False, True, False),
+    }
+    for (github_state, pypi_state), decisions in expected.items():
+        common = {
+            "github_state": github_state,
+            "pypi_state": pypi_state,
+            "verify_result": "skipped",
+        }
+        build = _evaluate_release_condition(
+            _job_condition(jobs["build"]), publish_result="skipped", **common
+        )
+        stage = _evaluate_release_condition(
+            _job_condition(jobs["stage-github-release"]),
+            publish_result="skipped",
+            **common,
+        )
+        upload = _evaluate_release_condition(
+            _job_condition(jobs["publish-to-pypi"]),
+            publish_result="skipped",
+            **common,
+        )
+        publish_result = "success" if upload else "skipped"
+        verify_indexed = _evaluate_release_condition(
+            verify,
+            publish_result=publish_result,
+            **common,
+        )
+        publish_github = _evaluate_release_condition(
+            publish,
+            publish_result=publish_result,
+            github_state=github_state,
+            pypi_state=pypi_state,
+            verify_result="success" if verify_indexed else "skipped",
+        )
+        assert (build, stage, upload, verify_indexed, publish_github) == decisions
 
 
 def test_release_gate_uses_one_shared_publication_state_machine() -> None:
     workflow = _workflow_text("release-gate.yml")
 
-    assert workflow.count(".github/scripts/release_publication.py") == 2
+    assert workflow.count(".github/scripts/release_publication.py") == 3
+    assert "resolve-state" in workflow
     assert "gh api" not in workflow
     assert "gh release edit" not in workflow
+
+
+def test_release_gate_dispatch_is_tag_scoped_and_preserves_running_attempt() -> None:
+    workflow = _active_workflow_text("release-gate.yml")
+
+    assert "workflow_dispatch:" in workflow
+    assert "group: release-gate-${{ github.ref }}" in workflow
+    assert "cancel-in-progress: false" in workflow
+    assert "require-release-tag:" in workflow
+    assert "refs/tags/v*" in workflow
+    require_section = workflow.split("  require-ci:", 1)[1].split(
+        "  verify-tag-current:", 1
+    )[0]
+    assert "- require-release-tag" in require_section
+
+
+def test_release_gate_resolves_state_before_any_mutation() -> None:
+    jobs = _workflow_jobs("release-gate.yml")
+
+    assert "github_state:" in jobs["resolve-publication-state"]
+    assert "pypi_state:" in jobs["resolve-publication-state"]
+    for name in (
+        "build",
+        "stage-github-release",
+        "publish-to-pypi",
+        "verify-pypi-release",
+        "publish-github-release",
+    ):
+        assert "resolve-publication-state" in _job_needs(jobs[name])
 
 
 def test_release_gate_downloads_artifacts_without_an_extra_node_action() -> None:

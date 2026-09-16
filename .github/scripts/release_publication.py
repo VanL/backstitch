@@ -18,7 +18,7 @@ GITHUB_API_BASE: Final[str] = "https://api.github.com"
 GITHUB_API_VERSION: Final[str] = "2026-03-10"
 PYPI_API_BASE: Final[str] = "https://pypi.org/pypi"
 HTTP_TIMEOUT_SECONDS: Final[float] = 30.0
-PYPI_RETRY_DELAYS: Final[tuple[int, ...]] = (15, 30, 60, 120)
+PYPI_ABSENCE_RETRY_DELAYS: Final[tuple[int, ...]] = (15, 30, 60, 120)
 
 
 def _mapping(value: object, *, label: str) -> Mapping[str, object]:
@@ -280,8 +280,60 @@ def _normalize_package_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def pypi_release_state(package: str, version: str) -> tuple[bool, str]:
-    """Return whether PyPI has the exact package/version and a status description."""
+def _pypi_file_identity(raw_file: object) -> tuple[str, str]:
+    release_file = _mapping(raw_file, label="PyPI release file")
+    package_type = release_file.get("packagetype")
+    filename = release_file.get("filename")
+    digest = release_file.get("digests")
+    if package_type not in {"bdist_wheel", "sdist"}:
+        raise RuntimeError(
+            f"PyPI release contains unexpected file type {package_type!r}"
+        )
+    if not isinstance(filename, str) or not filename:
+        raise RuntimeError("PyPI release contains an unnamed distribution")
+    if not isinstance(digest, Mapping) or not isinstance(digest.get("sha256"), str):
+        raise RuntimeError(f"PyPI release file {filename} omitted its SHA-256 digest")
+    return package_type, filename
+
+
+def _require_exact_pypi_payload(payload: object, *, package: str, version: str) -> None:
+    root = _mapping(payload, label="PyPI release response")
+    info = _mapping(root.get("info"), label="PyPI project info")
+    observed_name = info.get("name")
+    observed_version = info.get("version")
+    if not isinstance(observed_name, str) or not isinstance(observed_version, str):
+        raise RuntimeError("PyPI project info omitted package name or version")
+    if _normalize_package_name(observed_name) != _normalize_package_name(package):
+        raise RuntimeError(
+            f"PyPI reported package {observed_name!r}, expected {package!r}"
+        )
+    if observed_version != version:
+        raise RuntimeError(
+            f"PyPI reported version {observed_version!r}, expected {version!r}"
+        )
+
+    raw_urls = root.get("urls")
+    if not isinstance(raw_urls, list):
+        raise RuntimeError("PyPI release response omitted distribution URLs")
+    files = tuple(_pypi_file_identity(raw_file) for raw_file in raw_urls)
+    package_types = [package_type for package_type, _ in files]
+    filenames = [filename for _, filename in files]
+    if sorted(package_types) != ["bdist_wheel", "sdist"]:
+        raise RuntimeError(
+            "PyPI release must contain exactly one wheel and one sdist; "
+            f"observed={sorted(package_types)}"
+        )
+    if len(set(filenames)) != 2:
+        raise RuntimeError("PyPI release contains duplicate distribution filenames")
+
+
+def inspect_pypi_release(
+    package: str,
+    version: str,
+    *,
+    absence_retry_delays: Sequence[int] = (),
+) -> str:
+    """Return ``absent`` or ``exact``; reject ambiguous or partial state."""
 
     encoded_package = urllib.parse.quote(package, safe="")
     encoded_version = urllib.parse.quote(version, safe="")
@@ -290,49 +342,100 @@ def pypi_release_state(package: str, version: str) -> tuple[bool, str]:
         url,
         headers={"Accept": "application/json", "User-Agent": "backstitch-release"},
     )
-    try:
-        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
-            payload = json.load(response)
-    except urllib.error.HTTPError as exc:
-        return False, f"HTTP {exc.code} from {url}"
-    except urllib.error.URLError as exc:
-        return False, f"network error from {url}: {exc.reason}"
-    except json.JSONDecodeError:
-        return False, f"invalid JSON from {url}"
+    delays = iter(absence_retry_delays)
+    while True:
+        try:
+            with urllib.request.urlopen(
+                request, timeout=HTTP_TIMEOUT_SECONDS
+            ) as response:
+                payload = json.load(response)
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:
+                raise RuntimeError(
+                    f"PyPI state request failed: HTTP {exc.code} from {url}"
+                ) from exc
+            try:
+                delay = next(delays)
+            except StopIteration:
+                return "absent"
+            print(f"PyPI release not visible; retrying state check in {delay}s")
+            time.sleep(delay)
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                f"PyPI state request failed for {url}: {exc.reason}"
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"PyPI state request returned invalid JSON from {url}"
+            ) from exc
 
-    if not isinstance(payload, Mapping):
-        return False, f"non-object JSON from {url}"
-    info = payload.get("info")
-    if not isinstance(info, Mapping):
-        return False, f"missing project info from {url}"
-    observed_name = info.get("name")
-    observed_version = info.get("version")
-    if not isinstance(observed_name, str) or not isinstance(observed_version, str):
-        return False, f"incomplete project info from {url}"
-    if _normalize_package_name(observed_name) != _normalize_package_name(package):
-        return False, f"observed package {observed_name} instead of {package}"
-    if observed_version != version:
-        return False, f"observed version {observed_version} instead of {version}"
-    return True, f"{observed_name} {observed_version}"
+    _require_exact_pypi_payload(payload, package=package, version=version)
+    return "exact"
 
 
-def wait_for_pypi(package: str, version: str) -> None:
-    """Wait a bounded few minutes for an already-published rerun to reach PyPI."""
+def _release_asset_names(release: Mapping[str, object]) -> tuple[str, ...]:
+    raw_assets = release.get("assets")
+    if not isinstance(raw_assets, list):
+        raise RuntimeError("GitHub Release asset set was not a JSON list")
+    names: list[str] = []
+    for raw_asset in raw_assets:
+        asset = _mapping(raw_asset, label="GitHub Release asset")
+        name = asset.get("name")
+        if not isinstance(name, str) or not name:
+            raise RuntimeError("GitHub Release asset set contained an unnamed asset")
+        names.append(name)
+    return tuple(names)
 
-    last_state = "not checked"
-    for delay in PYPI_RETRY_DELAYS:
-        exists, last_state = pypi_release_state(package, version)
-        if exists:
-            return
-        time.sleep(delay)
 
-    exists, last_state = pypi_release_state(package, version)
-    if exists:
-        return
-    raise RuntimeError(
-        f"PyPI did not report {package} {version} after five attempts; "
-        f"last observed state: {last_state}"
+def resolve_publication_state(
+    *,
+    repo: str,
+    tag: str,
+    expected_sha: str,
+    package: str,
+    version: str,
+    token: str,
+) -> tuple[str, str]:
+    """Validate and classify the pre-mutation GitHub/PyPI publication state."""
+
+    _require_expected_tag_sha(
+        repo=repo, tag=tag, expected_sha=expected_sha, token=token
     )
+    matches = matching_releases(list_releases(repo, token), tag)
+    if len(matches) > 1:
+        raise RuntimeError(
+            f"Expected at most one GitHub Release for tag {tag}, found {len(matches)}"
+        )
+
+    github_state = "absent"
+    if matches:
+        release = matches[0]
+        _require_expected_release_target(release, expected_sha)
+        asset_names = _release_asset_names(release)
+        require_exact_assets(release, asset_names)
+        if release.get("draft") is True:
+            github_state = "draft"
+        elif release.get("draft") is False and release.get("immutable") is True:
+            github_state = "public"
+        elif release.get("draft") is False:
+            raise RuntimeError(f"Published release for tag {tag} is not immutable")
+        else:
+            raise RuntimeError(f"GitHub Release for tag {tag} has invalid draft state")
+
+    retry_delays = PYPI_ABSENCE_RETRY_DELAYS if github_state != "absent" else ()
+    pypi_state = inspect_pypi_release(
+        package, version, absence_retry_delays=retry_delays
+    )
+    if github_state == "absent" and pypi_state == "exact":
+        raise RuntimeError(
+            "PyPI contains the release but its GitHub artifact ledger is missing"
+        )
+    if github_state == "public" and pypi_state == "absent":
+        raise RuntimeError(
+            "GitHub Release is public but the matching PyPI release is absent"
+        )
+    return github_state, pypi_state
 
 
 def publish_draft(
@@ -340,12 +443,10 @@ def publish_draft(
     repo: str,
     tag: str,
     expected_sha: str,
-    package: str,
-    version: str,
     expected_assets: Sequence[str],
     token: str,
 ) -> None:
-    """Verify and publish the exact matching draft, or validate an exact rerun."""
+    """Verify and publish the exact matching draft."""
 
     _require_expected_tag_sha(
         repo=repo,
@@ -358,14 +459,9 @@ def publish_draft(
     require_exact_assets(release, expected_assets)
 
     if release.get("draft") is False:
-        if release.get("immutable") is not True:
-            raise RuntimeError(
-                f"Published release for tag {tag} is not immutable; refusing to "
-                "treat it as exact rerun success"
-            )
-        wait_for_pypi(package, version)
-        print(f"Immutable release {tag} and PyPI {package} {version} already match")
-        return
+        raise RuntimeError(
+            f"Release for tag {tag} is already public; resolve-state owns reruns"
+        )
     if release.get("draft") is not True:
         raise RuntimeError(f"GitHub Release for tag {tag} has invalid draft state")
 
@@ -396,12 +492,18 @@ def build_parser() -> argparse.ArgumentParser:
     replace_parser.add_argument("--tag", required=True)
     replace_parser.add_argument("--expected-sha", required=True)
 
+    resolve_parser = subparsers.add_parser("resolve-state")
+    resolve_parser.add_argument("--repo", required=True)
+    resolve_parser.add_argument("--tag", required=True)
+    resolve_parser.add_argument("--expected-sha", required=True)
+    resolve_parser.add_argument("--package", required=True)
+    resolve_parser.add_argument("--version", required=True)
+    resolve_parser.add_argument("--github-output", required=True)
+
     publish_parser = subparsers.add_parser("publish-draft")
     publish_parser.add_argument("--repo", required=True)
     publish_parser.add_argument("--tag", required=True)
     publish_parser.add_argument("--expected-sha", required=True)
-    publish_parser.add_argument("--package", required=True)
-    publish_parser.add_argument("--version", required=True)
     publish_parser.add_argument(
         "--expected-asset",
         action="append",
@@ -426,13 +528,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 expected_sha=args.expected_sha,
                 token=token,
             )
-        else:
-            publish_draft(
+        elif args.command == "resolve-state":
+            github_state, pypi_state = resolve_publication_state(
                 repo=args.repo,
                 tag=args.tag,
                 expected_sha=args.expected_sha,
                 package=args.package,
                 version=args.version,
+                token=token,
+            )
+            with open(args.github_output, "a", encoding="utf-8") as output:
+                output.write(f"github_state={github_state}\n")
+                output.write(f"pypi_state={pypi_state}\n")
+            print(f"Publication state: github={github_state}, pypi={pypi_state}")
+        else:
+            publish_draft(
+                repo=args.repo,
+                tag=args.tag,
+                expected_sha=args.expected_sha,
                 expected_assets=tuple(args.expected_assets),
                 token=token,
             )

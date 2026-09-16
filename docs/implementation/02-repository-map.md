@@ -86,6 +86,7 @@ Quick pointers to the key guidance documents in this repository.
 | `.github/workflows/release-gate.yml` | Tag-triggered locked build, attestation, draft-first PyPI/GitHub publication gate |
 | `.github/scripts/require_green_workflows.py` | Release helper that waits for required green workflow runs on one exact commit SHA |
 | `.github/scripts/release_publication.py` | Exact-tag, exact-SHA GitHub Release draft replacement and immutable publication state machine |
+| `.github/scripts/verify_pypi_release.py` | Exact PyPI distribution identity, bounded download, digest, isolated install, and smoke verification |
 | `.github/dependabot.yml` | Weekly review-only root uv and GitHub Actions update proposals |
 
 ## Shared Agent Context

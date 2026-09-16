@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -11,7 +12,9 @@ permissions:
 
 concurrency:
   group: release-gate-${{ github.ref }}
-  cancel-in-progress: true
+  # Preserve the running publication attempt. GitHub may still replace an
+  # older pending attempt in this concurrency group.
+  cancel-in-progress: false
 
 env:
   UV_VERSION: "0.12.5"
@@ -19,9 +22,27 @@ env:
   PACKAGE_DIR: .
 
 jobs:
+  require-release-tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require immutable release tag ref
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          case "${RELEASE_REF}" in
+            refs/tags/v*) ;;
+            *)
+              echo "Release Gate must run from an immutable refs/tags/v* ref"
+              exit 1
+              ;;
+          esac
+
   require-ci:
     runs-on: ubuntu-latest
     timeout-minutes: 130
+    needs:
+      - require-release-tag
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -59,10 +80,40 @@ jobs:
             exit 1
           fi
 
+  resolve-publication-state:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs:
+      - verify-tag-current
+    permissions:
+      contents: read
+    outputs:
+      github_state: ${{ steps.resolve.outputs.github_state }}
+      pypi_state: ${{ steps.resolve.outputs.pypi_state }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Resolve publication state before mutation
+        id: resolve
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python .github/scripts/release_publication.py resolve-state \
+            --repo "${GITHUB_REPOSITORY}" \
+            --tag "${GITHUB_REF_NAME}" \
+            --expected-sha "${GITHUB_SHA}" \
+            --package "${PACKAGE_NAME}" \
+            --version "${GITHUB_REF_NAME#v}" \
+            --github-output "${GITHUB_OUTPUT}"
+
   build:
     needs:
       - require-ci
       - verify-tag-current
+      - resolve-publication-state
+    if: ${{ needs.resolve-publication-state.outputs.pypi_state == 'absent' }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     permissions:
@@ -190,6 +241,8 @@ jobs:
     name: Stage draft GitHub Release
     needs:
       - build
+      - resolve-publication-state
+    if: ${{ needs.resolve-publication-state.outputs.pypi_state == 'absent' }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     permissions:
@@ -239,6 +292,8 @@ jobs:
     name: Publish to PyPI
     needs:
       - stage-github-release
+      - resolve-publication-state
+    if: ${{ needs.resolve-publication-state.outputs.pypi_state == 'absent' }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     environment:
@@ -258,11 +313,77 @@ jobs:
       - name: Publish distribution to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
 
+  verify-pypi-release:
+    name: Verify indexed PyPI distributions
+    needs:
+      - resolve-publication-state
+      - publish-to-pypi
+    if: >-
+      ${{ always() &&
+          needs.resolve-publication-state.result == 'success' &&
+          ((needs.resolve-publication-state.outputs.pypi_state == 'absent' &&
+            needs.publish-to-pypi.result == 'success') ||
+           (needs.resolve-publication-state.outputs.pypi_state == 'exact' &&
+            needs.publish-to-pypi.result == 'skipped')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Acquire expected distribution ledger
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYPI_STATE: ${{ needs.resolve-publication-state.outputs.pypi_state }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          if [ "${PYPI_STATE}" = "absent" ]; then
+            gh run download "${GITHUB_RUN_ID}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --name "${PACKAGE_NAME}-python-package-distributions" \
+              --dir dist/
+          else
+            gh release download "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern '*.whl' \
+              --pattern '*.tar.gz' \
+              --dir dist/
+          fi
+
+      - name: Verify and smoke-test indexed distributions
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          sdists=(dist/*.tar.gz)
+          test "${#wheels[@]}" -eq 1
+          test "${#sdists[@]}" -eq 1
+          python .github/scripts/verify_pypi_release.py \
+            --package "${PACKAGE_NAME}" \
+            --version "${GITHUB_REF_NAME#v}" \
+            --wheel "${wheels[0]}" \
+            --sdist "${sdists[0]}" \
+            --repo-root "${GITHUB_WORKSPACE}"
+
   publish-github-release:
     name: Publish immutable GitHub Release
     needs:
-      - stage-github-release
-      - publish-to-pypi
+      - resolve-publication-state
+      - verify-pypi-release
+    if: >-
+      ${{ always() &&
+          needs.verify-pypi-release.result == 'success' &&
+          needs.resolve-publication-state.outputs.github_state != 'public' }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     permissions:
@@ -277,14 +398,28 @@ jobs:
       - name: Download all the dists
         env:
           GH_TOKEN: ${{ github.token }}
+          PYPI_STATE: ${{ needs.resolve-publication-state.outputs.pypi_state }}
         run: |
-          gh run download "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}" --name "${PACKAGE_NAME}-python-package-distributions" --dir dist/
+          set -euo pipefail
+          mkdir -p dist
+          if [ "${PYPI_STATE}" = "absent" ]; then
+            gh run download "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}" --name "${PACKAGE_NAME}-python-package-distributions" --dir dist/
+          else
+            gh release download "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --pattern '*.whl' --pattern '*.tar.gz' --dir dist/
+          fi
 
       - name: Download attestation bundle
         env:
           GH_TOKEN: ${{ github.token }}
+          PYPI_STATE: ${{ needs.resolve-publication-state.outputs.pypi_state }}
         run: |
-          gh run download "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}" --name "${PACKAGE_NAME}-attestations" --dir attestations/
+          set -euo pipefail
+          mkdir -p attestations
+          if [ "${PYPI_STATE}" = "absent" ]; then
+            gh run download "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}" --name "${PACKAGE_NAME}-attestations" --dir attestations/
+          else
+            gh release download "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --pattern '*.sigstore.json' --dir attestations/
+          fi
 
       - name: Verify assets and publish draft
         env:
@@ -300,6 +435,4 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --tag "${GITHUB_REF_NAME}" \
             --expected-sha "${GITHUB_SHA}" \
-            --package "${PACKAGE_NAME}" \
-            --version "${GITHUB_REF_NAME#v}" \
             "${asset_args[@]}"

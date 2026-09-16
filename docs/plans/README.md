@@ -46,6 +46,7 @@ Risky plans are blocked if they do not make explicit:
 
 | Plan | Status |
 |------|--------|
+| 2026-09-16-release-recovery-and-index-verification-plan.md | completed; source implementation and review passed; next real release remains the external qualification gate |
 | 2026-09-16-test-signal-cleanup-plan.md | completed |
 | 2026-09-15-ci-workflow-and-qwen-qualification-plan.md | completed |
 | 2026-09-14-semantic-response-and-ci-recovery-plan.md | completed; three CLI-reachable slices qualified; zero-job workflow diagnosis remains separate |

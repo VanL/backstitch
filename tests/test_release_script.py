@@ -441,13 +441,13 @@ def test_repository_settings_check_cannot_be_skipped(
 
     with pytest.raises(RuntimeError, match="repository settings blocked release"):
         release._run_real_release(
-            SimpleNamespace(publish=False, skip_checks=True, retag=False),
+            SimpleNamespace(publish=False),
             release.ROOT_RELEASE_TARGET,
             prepared,
         )
 
 
-def test_real_release_requires_main_even_when_checks_are_skipped(
+def test_real_release_requires_main_before_running_checks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prepared = release._PreparedRelease(
@@ -471,7 +471,7 @@ def test_real_release_requires_main_even_when_checks_are_skipped(
 
     with pytest.raises(RuntimeError, match="require main"):
         release._run_real_release(
-            SimpleNamespace(publish=False, skip_checks=True),
+            SimpleNamespace(publish=False),
             release.ROOT_RELEASE_TARGET,
             prepared,
         )
@@ -631,7 +631,7 @@ def test_all_target_dry_run_reuses_current_unpublished_version(
     monkeypatch.setattr(release, "current_head_commit", lambda: "a" * 40)
     monkeypatch.setattr(release, "run_command", fake_run_command)
 
-    assert release.main(["all", "--dry-run", "--skip-checks"]) == 0
+    assert release.main(["all", "--dry-run"]) == 0
 
     output = capsys.readouterr().out
     assert "dry-run: current backstitch version 0.2.0 is unpublished" in output
@@ -645,6 +645,21 @@ def test_release_helper_has_no_remote_retag_escape_hatch() -> None:
 
     with pytest.raises(SystemExit):
         parser.parse_args(["--retag"])
+
+
+def test_release_helper_has_no_skip_checks_escape_hatch() -> None:
+    parser = release._build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--skip-checks"])
+
+
+def test_remote_tag_reuse_note_names_guarded_dispatch_command() -> None:
+    note = release._remote_tag_reuse_note(_state(remote="a" * 40))
+
+    assert "gh workflow run release-gate.yml --ref v0.2.0" in note
+    assert "already contains the workflow_dispatch trigger" in note
+    assert "older tags require a new version" in note
 
 
 def test_workflow_wait_passes_token_only_through_redacted_environment(

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import io
+import json
+import urllib.error
+from email.message import Message
 from pathlib import Path
 from types import ModuleType
 
@@ -26,6 +30,14 @@ def _load_publication_module() -> ModuleType:
 
 
 publication = _load_publication_module()
+
+
+class _JSONResponse(io.BytesIO):
+    def __enter__(self) -> _JSONResponse:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
 
 
 def _release(
@@ -180,6 +192,162 @@ def test_wrong_remote_tag_sha_is_always_rejected(
         )
 
 
+@pytest.mark.parametrize(
+    ("github_release", "pypi_state", "expected"),
+    (
+        (None, "absent", ("absent", "absent")),
+        (_release(), "absent", ("draft", "absent")),
+        (_release(), "exact", ("draft", "exact")),
+        (_release(draft=False, immutable=True), "exact", ("public", "exact")),
+    ),
+)
+def test_resolve_publication_state_accepts_only_safe_matrix_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    github_release: dict[str, object] | None,
+    pypi_state: str,
+    expected: tuple[str, str],
+) -> None:
+    monkeypatch.setattr(
+        publication, "resolve_tag_commit", lambda repo, tag, token: "a" * 40
+    )
+    releases = () if github_release is None else (github_release,)
+    monkeypatch.setattr(publication, "list_releases", lambda repo, token: releases)
+    monkeypatch.setattr(
+        publication,
+        "inspect_pypi_release",
+        lambda package, version, **kwargs: pypi_state,
+    )
+
+    assert (
+        publication.resolve_publication_state(
+            repo="VanL/backstitch",
+            tag="v1.2.3",
+            expected_sha="a" * 40,
+            package="backstitch",
+            version="1.2.3",
+            token="token",
+        )
+        == expected
+    )
+
+
+def test_inspect_pypi_release_distinguishes_absent_from_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing(*args: object, **kwargs: object) -> object:
+        raise urllib.error.HTTPError("url", 404, "missing", Message(), None)
+
+    monkeypatch.setattr(publication.urllib.request, "urlopen", missing)
+    assert publication.inspect_pypi_release("backstitch", "1.2.3") == "absent"
+
+    payload = {
+        "info": {"name": "backstitch", "version": "1.2.3"},
+        "urls": [
+            {
+                "filename": "backstitch-1.2.3-py3-none-any.whl",
+                "packagetype": "bdist_wheel",
+                "digests": {"sha256": "a" * 64},
+            },
+            {
+                "filename": "backstitch-1.2.3.tar.gz",
+                "packagetype": "sdist",
+                "digests": {"sha256": "b" * 64},
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        publication.urllib.request,
+        "urlopen",
+        lambda *args, **kwargs: _JSONResponse(json.dumps(payload).encode()),
+    )
+    assert publication.inspect_pypi_release("backstitch", "1.2.3") == "exact"
+
+
+def test_existing_ledger_rechecks_transient_pypi_absence_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "info": {"name": "backstitch", "version": "1.2.3"},
+        "urls": [
+            {
+                "filename": "backstitch-1.2.3-py3-none-any.whl",
+                "packagetype": "bdist_wheel",
+                "digests": {"sha256": "a" * 64},
+            },
+            {
+                "filename": "backstitch-1.2.3.tar.gz",
+                "packagetype": "sdist",
+                "digests": {"sha256": "b" * 64},
+            },
+        ],
+    }
+    outcomes: list[object] = [
+        urllib.error.HTTPError("url", 404, "missing", Message(), None),
+        _JSONResponse(json.dumps(payload).encode()),
+    ]
+
+    def urlopen(*args: object, **kwargs: object) -> object:
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    sleeps: list[int] = []
+    monkeypatch.setattr(
+        publication, "resolve_tag_commit", lambda repo, tag, token: "a" * 40
+    )
+    monkeypatch.setattr(publication, "list_releases", lambda repo, token: (_release(),))
+    monkeypatch.setattr(publication.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(publication.time, "sleep", sleeps.append)
+
+    assert publication.resolve_publication_state(
+        repo="VanL/backstitch",
+        tag="v1.2.3",
+        expected_sha="a" * 40,
+        package="backstitch",
+        version="1.2.3",
+        token="token",
+    ) == ("draft", "exact")
+    assert sleeps == [publication.PYPI_ABSENCE_RETRY_DELAYS[0]]
+    assert not outcomes
+
+
+@pytest.mark.parametrize(
+    ("github_release", "pypi_state", "message"),
+    (
+        (None, "exact", "artifact ledger is missing"),
+        (_release(draft=False, immutable=True), "absent", "PyPI release is absent"),
+        (_release(draft=False, immutable=False), "exact", "not immutable"),
+    ),
+)
+def test_resolve_publication_state_rejects_unsafe_matrix_rows_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    github_release: dict[str, object] | None,
+    pypi_state: str,
+    message: str,
+) -> None:
+    monkeypatch.setattr(
+        publication, "resolve_tag_commit", lambda repo, tag, token: "a" * 40
+    )
+    releases = () if github_release is None else (github_release,)
+    monkeypatch.setattr(publication, "list_releases", lambda repo, token: releases)
+    monkeypatch.setattr(
+        publication,
+        "inspect_pypi_release",
+        lambda package, version, **kwargs: pypi_state,
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        publication.resolve_publication_state(
+            repo="VanL/backstitch",
+            tag="v1.2.3",
+            expected_sha="a" * 40,
+            package="backstitch",
+            version="1.2.3",
+            token="token",
+        )
+
+
 @pytest.mark.parametrize("target", ("b" * 40, None))
 def test_replace_draft_rejects_wrong_or_missing_release_target(
     monkeypatch: pytest.MonkeyPatch,
@@ -256,7 +424,7 @@ def test_expected_assets_require_one_wheel_sdist_and_sigstore_bundle(
         publication.require_exact_assets(release, expected)
 
 
-def test_publish_draft_verifies_assets_then_publishes_without_pypi_poll(
+def test_publish_draft_verifies_assets_then_publishes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, str, object]] = []
@@ -266,11 +434,6 @@ def test_publish_draft_verifies_assets_then_publishes_without_pypi_poll(
         lambda repo, tag, token: "a" * 40,
     )
     monkeypatch.setattr(publication, "list_releases", lambda repo, token: (_release(),))
-    monkeypatch.setattr(
-        publication,
-        "wait_for_pypi",
-        lambda *args, **kwargs: pytest.fail("a draft follows a successful PyPI job"),
-    )
 
     def request(
         method: str,
@@ -288,8 +451,6 @@ def test_publish_draft_verifies_assets_then_publishes_without_pypi_poll(
         repo="VanL/backstitch",
         tag="v1.2.3",
         expected_sha="a" * 40,
-        package="backstitch",
-        version="1.2.3",
         expected_assets=(
             "package.whl",
             "package.tar.gz",
@@ -331,8 +492,6 @@ def test_publish_draft_rejects_wrong_release_target(
             repo="VanL/backstitch",
             tag="v1.2.3",
             expected_sha="a" * 40,
-            package="backstitch",
-            version="1.2.3",
             expected_assets=(
                 "package.whl",
                 "package.tar.gz",
@@ -359,8 +518,6 @@ def test_publish_draft_fails_closed_on_missing_or_duplicate_state(
             repo="VanL/backstitch",
             tag="v1.2.3",
             expected_sha="a" * 40,
-            package="backstitch",
-            version="1.2.3",
             expected_assets=(
                 "package.whl",
                 "package.tar.gz",
@@ -370,10 +527,9 @@ def test_publish_draft_fails_closed_on_missing_or_duplicate_state(
         )
 
 
-def test_already_published_immutable_release_is_exact_rerun_success(
+def test_publish_draft_rejects_already_public_release(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pypi_calls: list[tuple[str, str]] = []
     monkeypatch.setattr(
         publication,
         "resolve_tag_commit",
@@ -386,53 +542,15 @@ def test_already_published_immutable_release_is_exact_rerun_success(
     )
     monkeypatch.setattr(
         publication,
-        "wait_for_pypi",
-        lambda package, version: pypi_calls.append((package, version)),
-    )
-    monkeypatch.setattr(
-        publication,
         "github_api_request",
         lambda *args, **kwargs: pytest.fail("published release must not be edited"),
     )
 
-    publication.publish_draft(
-        repo="VanL/backstitch",
-        tag="v1.2.3",
-        expected_sha="a" * 40,
-        package="backstitch",
-        version="1.2.3",
-        expected_assets=(
-            "package.whl",
-            "package.tar.gz",
-            "bundle.sigstore.json",
-        ),
-        token="token",
-    )
-
-    assert pypi_calls == [("backstitch", "1.2.3")]
-
-
-def test_already_published_mutable_release_is_not_rerun_success(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        publication,
-        "resolve_tag_commit",
-        lambda repo, tag, token: "a" * 40,
-    )
-    monkeypatch.setattr(
-        publication,
-        "list_releases",
-        lambda repo, token: (_release(draft=False, immutable=False),),
-    )
-
-    with pytest.raises(RuntimeError, match="not immutable"):
+    with pytest.raises(RuntimeError, match="already public"):
         publication.publish_draft(
             repo="VanL/backstitch",
             tag="v1.2.3",
             expected_sha="a" * 40,
-            package="backstitch",
-            version="1.2.3",
             expected_assets=(
                 "package.whl",
                 "package.tar.gz",
@@ -440,42 +558,6 @@ def test_already_published_mutable_release_is_not_rerun_success(
             ),
             token="token",
         )
-
-
-def test_pypi_poll_is_bounded_over_a_few_minutes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    delays = tuple(publication.PYPI_RETRY_DELAYS)
-    states = iter([(False, "HTTP 404")] * len(delays) + [(True, "backstitch 1.2.3")])
-    sleeps: list[int] = []
-    monkeypatch.setattr(
-        publication,
-        "pypi_release_state",
-        lambda package, version: next(states),
-    )
-    monkeypatch.setattr(publication.time, "sleep", sleeps.append)
-
-    publication.wait_for_pypi("backstitch", "1.2.3")
-
-    assert sleeps == list(delays)
-    assert sleeps
-    assert 120 <= sum(sleeps) <= 300
-
-
-def test_pypi_poll_failure_reports_last_observed_state(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    attempts = len(publication.PYPI_RETRY_DELAYS) + 1
-    states = iter((False, f"attempt {attempt}") for attempt in range(1, attempts + 1))
-    monkeypatch.setattr(
-        publication,
-        "pypi_release_state",
-        lambda package, version: next(states),
-    )
-    monkeypatch.setattr(publication.time, "sleep", lambda delay: None)
-
-    with pytest.raises(RuntimeError, match=f"attempt {attempts}"):
-        publication.wait_for_pypi("backstitch", "1.2.3")
 
 
 def test_cli_never_accepts_a_token_argument() -> None:
