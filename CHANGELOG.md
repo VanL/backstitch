@@ -1,6 +1,20 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-09-16
+
+- Added safe immutable-tag release recovery with tag-scoped manual dispatch,
+  running-attempt preservation, pre-mutation GitHub/PyPI state resolution,
+  exact indexed-artifact digest checks, and isolated smoke tests of the wheel
+  and source distribution served by PyPI. Removed the generic release-check
+  bypass.
+- Qualified Qwen2.5 Coder for the local semantic CI lane and updated pinned
+  workflow, action, build, lint, typing, and LLM dependencies through the
+  repository's review gates.
+- Hardened semantic-response normalization for repeated or duplicate evidence
+  and stabilized evaluation bounds across supported Python runtimes.
+- Removed brittle version/process assertions and tautological release tests;
+  retained contract tests now exercise observable state transitions and the
+  full release recovery matrix.
 
 - Changed the default semantic model to GPT-5.6 Luna through the Responses API
   at maximum reasoning effort. Explicitly omitted reasoning effort continues
