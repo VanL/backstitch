@@ -606,8 +606,8 @@ External negative dispatch and first-real-release evidence remain rollout
 gates. They require GitHub Actions and the next real publication; they are not
 local source-completion gates.
 
-Final commit SHA is recorded when this plan lands. Do not record transient
-worktree state.
+Source implementation landed in `aacd03f`. Do not record transient worktree
+state.
 
 ## Out Of Scope
 
