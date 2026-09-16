@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "backstitch"
-version = "0.3.0"
+version = "0.4.0"
 description = "Backstitch style spec-code traceability checks and semantic review tooling"
 readme = "README.md"
 requires-python = ">=3.11"
