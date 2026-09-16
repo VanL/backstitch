@@ -60,6 +60,7 @@ DEFAULT_LOCAL_LLM_BASE_MODEL: Final[str] = "qwen2.5-coder:14b-instruct-q4_K_M"
 DEFAULT_LOCAL_LLM_SERVED_MODEL: Final[str] = "backstitch-local-model:latest"
 DEFAULT_LOCAL_LLM_CONTEXT_LENGTH: Final[str] = "4096"
 DEFAULT_LOCAL_LLM_NUM_PREDICT: Final[str] = "1024"
+DEFAULT_LOCAL_LLM_NUM_THREAD: Final[str] = "4"
 LOCAL_LLM_PREWARM_TIMEOUT_SECONDS: Final[int] = 25 * 60
 LOCAL_LLM_PREWARM_POLL_SECONDS: Final[float] = 2.0
 LOCAL_LLM_INFERENCE_SEED: Final[int] = 42
@@ -439,6 +440,10 @@ def _precheck_env_overrides(command: tuple[str, ...]) -> dict[str, str] | None:
             "OLLAMA_NUM_PREDICT",
             DEFAULT_LOCAL_LLM_NUM_PREDICT,
         )
+        env["OLLAMA_NUM_THREAD"] = os.environ.get(
+            "OLLAMA_NUM_THREAD",
+            DEFAULT_LOCAL_LLM_NUM_THREAD,
+        )
     return env or None
 
 
@@ -527,6 +532,7 @@ def run_command(
     dry_run: bool = False,
     env_overrides: dict[str, str] | None = None,
     private_env_overrides: dict[str, str] | None = None,
+    timeout: float | None = None,
 ) -> None:
     """Run a command, printing it first."""
 
@@ -553,6 +559,7 @@ def run_command(
             env_overrides,
             private_env_overrides,
         ),
+        timeout=timeout,
     )
 
 
@@ -605,6 +612,7 @@ def _prepare_ollama_model(env: dict[str, str]) -> None:
     served_model = env["BACKSTITCH_LOCAL_LLM_SERVED_MODEL"]
     context_length = env["OLLAMA_CONTEXT_LENGTH"]
     num_predict = env["OLLAMA_NUM_PREDICT"]
+    num_thread = env["OLLAMA_NUM_THREAD"]
 
     _json_api_request(
         f"{origin}/api/pull",
@@ -619,6 +627,7 @@ def _prepare_ollama_model(env: dict[str, str]) -> None:
             "parameters": {
                 "num_ctx": int(context_length),
                 "num_predict": int(num_predict),
+                "num_thread": int(num_thread),
                 "temperature": 0,
             },
             "stream": False,
@@ -719,6 +728,11 @@ def run_precheck_commands(*, dry_run: bool = False) -> None:
             command,
             dry_run=dry_run,
             env_overrides=_precheck_env_overrides(command),
+            timeout=(
+                LOCAL_LLM_PREWARM_TIMEOUT_SECONDS
+                if command == LOCAL_LLM_TEST_COMMAND
+                else None
+            ),
         )
 
 

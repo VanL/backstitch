@@ -33,6 +33,9 @@ env:
   BACKSTITCH_LOCAL_LLM_ENDPOINT: http://127.0.0.1:11434/v1
   BACKSTITCH_LOCAL_LLM_UPSTREAM: http://127.0.0.1:11434/v1
   OLLAMA_CONTEXT_LENGTH: "4096"
+  # Match the four-vCPU public ubuntu-latest runner explicitly. Ollama's ARM64
+  # CPU backend has a severe scaling cliff when it auto-selects 16 threads.
+  OLLAMA_NUM_THREAD: "4"
   # 256 provably truncates valid analysis rows (bake-off: 2/5 pass at 256,
   # 4/5 at 512, 7/8 at 1024); 1024 keeps the output bounded without cutting
   # borderline rows mid-JSON.
@@ -44,9 +47,8 @@ env:
 jobs:
   local-llm:
     name: local LLM
-    # GitHub-hosted ubuntu-latest is 4 vCPU / 16 GB for public repos and
-    # 2 vCPU / 8 GB for private repos as of 2026-07-03. This manual lane is
-    # designed against the smaller private-runner floor.
+    # GitHub-hosted ubuntu-latest is 4 vCPU / 16 GB for public repos as of
+    # 2026-09-16. Keep the container and model bounded to that runner shape.
     runs-on: ubuntu-latest
     # Leave setup and diagnostics headroom around the 25-minute live-test budget.
     timeout-minutes: 35
@@ -81,6 +83,8 @@ jobs:
           set -euo pipefail
           docker run -d \
             --name backstitch-llm \
+            --cpus "${OLLAMA_NUM_THREAD}" \
+            --memory 16g \
             -p 127.0.0.1:11434:11434 \
             -v "${OLLAMA_CACHE_DIR}:/root/.ollama" \
             "${OLLAMA_IMAGE}"
@@ -108,6 +112,7 @@ jobs:
           FROM ${BACKSTITCH_LOCAL_LLM_BASE_MODEL}
           PARAMETER num_ctx ${OLLAMA_CONTEXT_LENGTH}
           PARAMETER num_predict ${OLLAMA_NUM_PREDICT}
+          PARAMETER num_thread ${OLLAMA_NUM_THREAD}
           # Defense-in-depth model metadata. The OpenAI-compatible route also
           # requires request-level controls, enforced by the local test proxy.
           PARAMETER temperature 0
@@ -163,6 +168,7 @@ jobs:
           # longer value (40960 for 4096) can satisfy the check.
           printf '%s\n' "${parameters}" | grep -Eq "^num_ctx[[:space:]]+${OLLAMA_CONTEXT_LENGTH}([[:space:]]|$)"
           printf '%s\n' "${parameters}" | grep -Eq "^num_predict[[:space:]]+${OLLAMA_NUM_PREDICT}([[:space:]]|$)"
+          printf '%s\n' "${parameters}" | grep -Eq "^num_thread[[:space:]]+${OLLAMA_NUM_THREAD}([[:space:]]|$)"
           printf '%s\n' "${parameters}" | grep -Eq "^temperature[[:space:]]+0([[:space:]]|$)"
           # Per-run weight-provenance evidence: the cache key is tag+image+epoch
           # (tags are mutable), so these manifest checksums are the only trace

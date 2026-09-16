@@ -212,3 +212,12 @@ temporary freshness rule.
   The test passed in 11:05 within the existing 15-minute limit, with 5 GB of
   memory available and no swap used. The workflow and release helper now use
   that code-focused model; context and output bounds remain unchanged.
+- A release rehearsal on the ARM64 local CI analogue exposed an Ollama CPU
+  scaling cliff rather than a model-capacity failure. With the container free
+  to see 16 CPUs, automatic 16-thread inference produced 0.40 tokens/second;
+  the same image and model produced 31.8 tokens/second when both the container
+  and served model were bounded to the public `ubuntu-latest` four-vCPU shape.
+  The exact local live gate then passed in 134.12 seconds. The workflow now
+  makes its four-CPU/16-GiB boundary explicit, and the release helper records
+  the same four-thread model parameter. Its local live command also has a real
+  25-minute aggregate deadline rather than relying on per-request timeouts.

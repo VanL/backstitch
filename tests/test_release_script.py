@@ -111,6 +111,7 @@ def test_precheck_propagates_protected_live_failure(
         cwd: Path = release.PROJECT_ROOT,
         dry_run: bool = False,
         env_overrides: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> None:
         assert cwd == release.PROJECT_ROOT
         assert dry_run is False
@@ -195,6 +196,7 @@ def test_local_llm_precheck_opts_in_to_local_provider_path(
         "BACKSTITCH_LOCAL_LLM_SERVED_MODEL",
         "OLLAMA_CONTEXT_LENGTH",
         "OLLAMA_NUM_PREDICT",
+        "OLLAMA_NUM_THREAD",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -210,6 +212,7 @@ def test_local_llm_precheck_opts_in_to_local_provider_path(
         "BACKSTITCH_LOCAL_LLM_SERVED_MODEL": "backstitch-local-model:latest",
         "OLLAMA_CONTEXT_LENGTH": "4096",
         "OLLAMA_NUM_PREDICT": "1024",
+        "OLLAMA_NUM_THREAD": "4",
     }
 
 
@@ -577,6 +580,7 @@ def test_dry_run_prints_commands_without_running(
         dry_run: bool = False,
         env_overrides: dict[str, str] | None = None,
         private_env_overrides: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> None:
         assert dry_run is True
         assert cwd == release.PROJECT_ROOT
@@ -621,6 +625,7 @@ def test_all_target_dry_run_reuses_current_unpublished_version(
         dry_run: bool = False,
         env_overrides: dict[str, str] | None = None,
         private_env_overrides: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> None:
         assert dry_run is True
         commands.append(command)

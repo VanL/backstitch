@@ -861,7 +861,7 @@ def test_local_llm_workflow_is_separate_and_guarded() -> None:
     assert "concurrency:" in active
     assert "group: local-llm-${{ github.ref }}" in active
     assert "cancel-in-progress: false" in active
-    assert "2 vCPU / 8 GB" in workflow
+    assert "4 vCPU / 16 GB" in workflow
 
     assert "version: ${{ env.UV_VERSION }}" in active
     assert 'python-version: "3.11"' in active
