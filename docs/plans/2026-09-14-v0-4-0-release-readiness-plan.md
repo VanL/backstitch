@@ -1,6 +1,6 @@
 # Backstitch 0.4.0 Release Readiness Plan (2026-09-14)
 
-Status: active; semantic response and CI recovery prerequisite completed
+Status: completed
 
 Class: 3+P. The work changes which external corpus participates in the
 release precheck, a material verification-process boundary. It also performs
@@ -227,3 +227,5 @@ temporary freshness rule.
   CI now runs on `main` pushes and pull requests, while release tags retain the
   exact-SHA evidence already produced on `main` and are handled only by the
   release gate.
+- Release gate run `35162819293` published and independently verified both
+  indexed PyPI distributions, then published the immutable GitHub Release.
