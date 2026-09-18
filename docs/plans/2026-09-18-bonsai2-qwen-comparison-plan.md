@@ -112,3 +112,14 @@ reproduced external blocker. Update the index at closure and cite commit/run IDs
   The experimental workflow and test are not intended for main-branch promotion.
 - Initial checks: live-helper tests passed; Ruff, focused mypy, doc-path and
   DOM-15 gates passed; self-corpus check found zero errors, warnings and infos.
+
+- Local Docker primary results (ARM64, four-vCPU quota, 16 GiB, swap disabled):
+  Bonsai non-thinking PQ2_0 completed in 1122.514 s; Qwen14B Q4_K_M completed
+  in 170.083 s. Each preserved the clean control, detected the mutation, made
+  two analyzer calls plus one verifier call, then replayed with zero calls and
+  three cache hits. Neither is qualified: one trial leaves uncached flip rate
+  unmeasured, and this two-case corpus is non-authoritative. Independent artifact
+  review confirmed Bonsai's semantic results, request controls and replay hashes.
+  Local Bonsai peak cgroup memory: 9133428736 bytes (8.506 GiB), no OOM events.
+  The comparison is served-deployment latency, not an isolated quantizer test.
+  Raw local evidence is retained under .cache/bonsai-comparison/results.
