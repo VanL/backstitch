@@ -11,7 +11,7 @@ jobs:
   compare:
     name: Docker CPU / ${{ matrix.model }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -36,7 +36,8 @@ jobs:
           set -euo pipefail
           mkdir -p .cache/bonsai-comparison/results
           echo "BACKSTITCH_LOCAL_EVAL_REPORT=$PWD/.cache/bonsai-comparison/results/ci-${{ matrix.model }}.json" >> "$GITHUB_ENV"
-          uv sync --extra dev --locked
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gdb
           uname -a > .cache/bonsai-comparison/results/host.txt
           lscpu >> .cache/bonsai-comparison/results/host.txt
           free -b >> .cache/bonsai-comparison/results/host.txt
@@ -89,13 +90,14 @@ jobs:
           FROM ubuntu:24.04@sha256:b3cc40b72b93588182b5410f723c7aaf142363311c2aa993d8a453ddcbb3ae15
           RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libcurl4t64 ca-certificates && rm -rf /var/lib/apt/lists/*
           COPY docker-runtime/ /runtime/
+          RUN cp -a /runtime /runtime-haswell && for backend in /runtime-haswell/libggml-cpu-*.so; do case "$backend" in */libggml-cpu-haswell.so) ;; *) rm "$backend" ;; esac; done
           ENTRYPOINT ["/runtime/llama-server"]
           DOCKER
           docker build -t comparison-bonsai "$task_dir"
           docker run -d --name comparison-model --cpus=4 --memory=16g --memory-swap=16g \
             -p 127.0.0.1:11434:8080 -v "$task_dir/models:/models:ro" comparison-bonsai \
             -m /models/Bonsai-2-27B-PQ2_0.gguf --alias bonsai2-27b-pq2 --host 0.0.0.0 --port 8080 \
-            -ngl 0 -t 4 -tb 4 -c 4096 -np 1 -n 1024 --temp 0 --seed 42 --reasoning off --no-context-shift --no-repack
+            -ngl 0 -t 4 -tb 4 -c 4096 -np 1 -n 1024 --temp 0 --seed 42 --reasoning off --no-context-shift --no-repack --log-verbosity 5 --metrics
           echo 'BACKSTITCH_LOCAL_LLM_SERVED_MODEL=bonsai2-27b-pq2' >> "$GITHUB_ENV"
           echo 'BACKSTITCH_LOCAL_EVAL_REVISION=3907dc1658db1f78a9826bf8d5bcb8dc65db0d466388937af57f2294fae62ec1' >> "$GITHUB_ENV"
       - name: Verify runner profile and readiness
@@ -119,12 +121,27 @@ jobs:
             sleep 2
           done
           exit 1
-      - name: Run production semantic smoke and replay
-        timeout-minutes: 33
+      - name: Diagnose automatic backend
+        timeout-minutes: 15
+        env:
+          BONSAI_DIAGNOSTIC_STACKS: "1"
+          BONSAI_DIAGNOSTIC_OUTPUT: .cache/bonsai-comparison/results/auto
+        run: python3 .github/scripts/bonsai-ci-diagnostic.py
+      - name: Diagnose AVX2-only backend on the same host
+        timeout-minutes: 10
+        env:
+          BONSAI_DIAGNOSTIC_STACKS: "1"
+          BONSAI_DIAGNOSTIC_OUTPUT: .cache/bonsai-comparison/results/haswell
+          BONSAI_DIAGNOSTIC_CONTAINER: comparison-haswell
+          BONSAI_DIAGNOSTIC_CASES: tiny-plain,full-plain
         run: |
-          set -o pipefail
-          uv run python -m pytest tests/live/test_live_llm.py::test_local_semantic_eval_smoke -q -s \
-            --basetemp=.cache/comparison-pytest 2>&1 | tee .cache/bonsai-comparison/results/pytest.txt
+          docker stop comparison-model
+          docker run -d --name comparison-haswell --cpus=4 --memory=16g --memory-swap=16g \
+            -p 127.0.0.1:11434:8080 -v "$PWD/.cache/bonsai-comparison/models:/models:ro" \
+            --entrypoint /runtime-haswell/llama-server -w /runtime-haswell comparison-bonsai \
+            -m /models/Bonsai-2-27B-PQ2_0.gguf --alias bonsai2-27b-pq2 --host 0.0.0.0 --port 8080 \
+            -ngl 0 -t 4 -tb 4 -c 4096 -np 1 -n 1024 --temp 0 --seed 42 --reasoning off --no-context-shift --no-repack --log-verbosity 5 --metrics
+          python3 .github/scripts/bonsai-ci-diagnostic.py
       - name: Capture runtime evidence
         if: always()
         run: |
@@ -142,4 +159,4 @@ jobs:
           retention-days: 14
       - name: Stop experiment runner
         if: always()
-        run: docker stop comparison-model || true
+        run: docker stop comparison-model comparison-haswell || true

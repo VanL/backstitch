@@ -59,7 +59,8 @@ Bound each run; preserve failures, timings and logs, including on CI cancellatio
 2. Independently review the plan and reusable test design before implementation.
 3. Run incumbent and candidate through production integration, then the frozen
    semantic smoke pair with analyzer/verifier and zero-call replay. Use one trial for both models at temperature 0, seed 42, context 4096 and
-   output 1024; evaluator deadline 1800 seconds. Any two-trial or native-Metal
+   output 1024; verifier runtime limit 1800 seconds and overall CLI timeout
+   1860 seconds. Any two-trial or native-Metal
    follow-up is a separate diagnostic. Primary CPU runs use four threads and
    the same 16 GiB container cap. Retain raw reports,
    server logs, effective controls, elapsed time and available memory telemetry.
@@ -92,8 +93,9 @@ because existing review identified incompatible labels and provenance limits.
 
 ## Deviations and conclusion
 
-None yet. Completion requires concrete local and hosted outcomes, or an explicit
-reproduced external blocker. Update the index at closure and cite commit/run IDs.
+Local results favor Qwen latency and Bonsai memory usage. Hosted Qwen passed;
+Bonsai required a separately recorded runtime workaround. The hosted recovery timed out on its first request. Further CPU-runtime
+diagnosis was requested by the owner; this plan remains active.
 
 - Owner clarified all local inference must use Docker with the CI profile: four
   vCPUs, 16 GiB RAM. Both dedicated containers disable swap and GPU. The preliminary
@@ -102,7 +104,8 @@ reproduced external blocker. Update the index at closure and cite commit/run IDs
   output budget is unchanged. No native-Metal results enter this comparison.
 
 - Probe review passed with accepted reporting-headroom correction: subprocess
-  timeout 1860 seconds, inference budget still 1800, CI test step 33 minutes.
+  timeout 1860 seconds, verifier runtime budget still 1800, CI test step
+  33 minutes.
   Model requests are observed without altering schema, stream, or returned text.
 - Disposable CI workflow review passed after canonicalizing the Ollama alias to
   comparison-qwen:latest. Both matrix members assert Docker limits and pinned
@@ -138,3 +141,70 @@ reproduced external blocker. Update the index at closure and cite commit/run IDs
   is not a repeat semantic score. The retry changes only runtime repacking,
   preserves all model bytes/budgets/gold, and makes readiness checks bounded and
   fail promptly on container exit. It is a separately labeled configuration.
+
+- Recovery execution commit: 10c14ee1cff81b36f76269ab48126c60c1fca237;
+  run https://github.com/VanL/backstitch/actions/runs/35372921176. Bonsai passed
+  hosted readiness with --no-repack and reached production evaluation. The local
+  and hosted CPUs differ despite matching quotas; do not compare their absolute
+  latencies as if the CPU hardware were identical.
+- Retained report SHA256 identities:
+  local-bonsai.json: 264f8ab689199416272cea363cbf7fa34bc0edae9d32ba0c36432000437c859f;
+  local-qwen-final.json: ad860c00a19e810fcae3acc1a4f07896b7bc1da208aedccca51ceb728caaabc4;
+  ci-qwen/ci-qwen.json: ebb83661c30b5aed2f392e216d508a05dc127a0f909cfbbec94f2ef4317912c2.
+  Local Qwen peak was 13609443328 bytes (12.675 GiB), no OOM events.
+- Review of the recovery accepted the bounded retry and required explicit flag
+  differences, preservation of the first failure, and CPU-model inspection before
+  interpreting a hosted latency ratio. Repacking diagnosis remains qualified.
+
+- Documentation review identified stale July JSON-object transport claims;
+  these are now historical and distinguished from the current production
+  streaming JSON-schema path used here. Existing lessons and runbooks already
+  cover effective wire controls, hardware variance and schema enforcement;
+  evaluated for improvement, with no new durable rule warranted.
+
+## Reproduction and artifact boundary
+
+The disposable execution commits retain the complete probe and workflow even
+though the final tree restores both files to baseline. To repeat the experiment,
+check out 4dfe28bd4336885b65e89c1ea1eb45c23ce64786 on an experiment branch
+for the original pair, or 10c14ee1cff81b36f76269ab48126c60c1fca237 for the
+Bonsai-only no-repack retry, and dispatch local-llm on that branch. The workflow
+pins downloads, verifies Docker limits, executes production eval, and uploads
+reports and runtime evidence. It is an experiment, not a default-lane change.
+
+Qwen manifest digest:
+9ec8897f747e246e970bc5cfdda85d22f1123dc2e3d34978a010a75968716849.
+Ollama image (reported version 0.34.0):
+sha256:684d8674b4315fa18f4f0e973a118ec2652ed96f67563277839985175858e0ba.
+Prism runtime archive SHA256: local ARM64
+238f34e59c955eed38433ac5bfc0406ff48c4452768c2cc691c630678c34700d;
+hosted x64 a1fd3a575e70532567845815a042428831771661b857e80f06422fb08904cb7f.
+Model bytes are pinned; Ubuntu base is pinned, while the Docker build's apt
+package resolution is not fully pinned. Container inspections retain effective
+configuration. Hosted artifact retention is 14 days; downloaded copies and local
+reports remain in the ignored .cache/bonsai-comparison/results directory.
+
+
+## Follow-up: diagnose hosted runtime failure
+
+The no-repack run timed out at 1860.104 s with exactly one request, byte-identical
+to the first successful local request. No report or verdict was produced. Docker
+was still running, no OOM events occurred, and cgroup CPU usage was 7528.715 s.
+The hosted retry used AMD EPYC 7763. Its 733900800-byte cgroup peak cannot be
+used as total model memory. File mapping charge ownership is a hypothesis,
+not yet an established explanation.
+
+The owner requested continued diagnosis. Pinned source shows the x86 PQ2 dot
+kernel uses explicit SIMD only for VNNI variants, falling back to scalar loops
+on the retry host's AVX2 CPU. Test that hypothesis before changing a runtime:
+run bounded direct streaming requests (tiny/plain, full/plain, full/schema),
+then repeat the discriminating tiny/full plain requests with a runtime copy
+containing only the Haswell backend on the same host. Keep four CPU cores,
+16 GiB, swap disabled, the model bytes and no-repack setting. These one-token,
+120-second diagnostic probes are not semantic scores. Capture verbose runtime
+logs, actual loaded libraries, process RSS/mappings, memory accounting and
+sampled thread stacks. Restart between probes to isolate cancellation/cache
+state. GDB samples may perturb timing, so do not present them as benchmarks.
+All diagnostic harness changes remain disposable, retained in execution commits
+and restored before final results-only closure. Default policy and gold remain
+unchanged. Local tiny-request harness validation precedes hosted dispatch.
