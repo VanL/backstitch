@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        model: [qwen, bonsai]
+        model: [bonsai]
     env:
       UV_VERSION: "0.12.5"
       BACKSTITCH_LIVE_LLM: "1"
@@ -95,7 +95,7 @@ jobs:
           docker run -d --name comparison-model --cpus=4 --memory=16g --memory-swap=16g \
             -p 127.0.0.1:11434:8080 -v "$task_dir/models:/models:ro" comparison-bonsai \
             -m /models/Bonsai-2-27B-PQ2_0.gguf --alias bonsai2-27b-pq2 --host 0.0.0.0 --port 8080 \
-            -ngl 0 -t 4 -tb 4 -c 4096 -np 1 -n 1024 --temp 0 --seed 42 --reasoning off --no-context-shift
+            -ngl 0 -t 4 -tb 4 -c 4096 -np 1 -n 1024 --temp 0 --seed 42 --reasoning off --no-context-shift --no-repack
           echo 'BACKSTITCH_LOCAL_LLM_SERVED_MODEL=bonsai2-27b-pq2' >> "$GITHUB_ENV"
           echo 'BACKSTITCH_LOCAL_EVAL_REVISION=3907dc1658db1f78a9826bf8d5bcb8dc65db0d466388937af57f2294fae62ec1' >> "$GITHUB_ENV"
       - name: Verify runner profile and readiness
@@ -111,7 +111,11 @@ jobs:
           assert not config['DeviceRequests']
           PY
           for attempt in $(seq 1 120); do
-            if curl -fsS http://127.0.0.1:11434/v1/models; then exit 0; fi
+            if [ "$(docker inspect -f '{{.State.Running}}' comparison-model)" != true ]; then
+              docker logs comparison-model
+              exit 1
+            fi
+            if curl --max-time 5 -fsS http://127.0.0.1:11434/v1/models; then exit 0; fi
             sleep 2
           done
           exit 1

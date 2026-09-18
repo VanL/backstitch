@@ -123,3 +123,18 @@ reproduced external blocker. Update the index at closure and cite commit/run IDs
   Local Bonsai peak cgroup memory: 9133428736 bytes (8.506 GiB), no OOM events.
   The comparison is served-deployment latency, not an isolated quantizer test.
   Raw local evidence is retained under .cache/bonsai-comparison/results.
+
+- First hosted run: https://github.com/VanL/backstitch/actions/runs/35371764892
+  at execution commit 4dfe28bd4336885b65e89c1ea1eb45c23ce64786. Qwen passed
+  both controls, verifier and zero-call replay in 361.104 s, peak 13743202304
+  bytes (12.799 GiB), no OOM. Bonsai exited 139 while loading, before inference;
+  Docker reports OOMKilled=false. This is a runtime setup failure, not a quality
+  miss. Preserved artifacts are under results/ci-qwen and results/ci-bonsai-first.
+- Recovery independently reviewed: upstream PrismML-Eng/llama.cpp issue 180
+  reports this release/model's CPU repacking segfault and --no-repack workaround.
+  The match is a plausible diagnosis, not a locally captured stack trace. Local
+  four-CPU/16-GiB Docker with --no-repack loaded and answered a short arithmetic
+  prompt correctly before dispatching a Bonsai-only hosted retry. That diagnostic
+  is not a repeat semantic score. The retry changes only runtime repacking,
+  preserves all model bytes/budgets/gold, and makes readiness checks bounded and
+  fail promptly on container exit. It is a separately labeled configuration.
