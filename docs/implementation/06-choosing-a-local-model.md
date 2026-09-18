@@ -15,8 +15,9 @@ trusting a row.**
 The main-branch CI incumbent is `qwen2.5-coder:14b-instruct-q4_K_M` through
 Ollama. The older sweep below predates that selection. The Bonsai comparison
 uses the existing schema-3 report-only smoke corpus: one clean return contract
-and one mutation. Each model makes two analyzer calls and one verifier call
-through the production evaluator, then exercises zero-call cache replay.
+and one mutation. Each completed semantic run made two analyzer calls and
+one verifier call through the production evaluator, then exercised zero-call
+cache replay.
 
 Plan and retained execution references:
 `docs/plans/2026-09-18-bonsai2-qwen-comparison-plan.md`.
@@ -30,7 +31,7 @@ Plan and retained execution references:
 
 Both containers have a four-vCPU quota, 16 GiB memory limit, no swap and no GPU.
 Both use four inference threads, context 4096, temperature 0, seed 42, and
-1024 output tokens per request. For every completed row above, all three responses pass the
+1024 output tokens per request. For the three successful runs, all three responses pass the
 production schema/evidence path. No OOM event or response truncation occurred.
 Bonsai took 6.60 times as long for this local workload while using about 33%
 less peak container memory. Memory is cgroup high-water usage, including caches,
@@ -54,7 +55,7 @@ Docker load/generation check passed with that option. The separately identified
 disables repacking and retains the same resource and inference budgets; it
 timed out after 1860.104 seconds during the first request, producing no report.
 The container remained running, with no OOM event; this establishes failure to
-meet the execution budget, not a semantic miss. Runtime diagnosis is ongoing. The first crash is a setup failure, not a semantic score.
+meet the execution budget, not a semantic miss. The runtime diagnosis below localizes the bottleneck. The first crash is a setup failure, not a semantic score.
 Hosted jobs can receive different CPU models: the Qwen job used AMD EPYC 9V45,
 the first Bonsai attempt used Intel Xeon Platinum 8573C, and the retry used
 AMD EPYC 7763. Their resource
@@ -62,9 +63,47 @@ quotas match, not their physical CPU identity. Hosted cgroup peaks include
 provisioning inside each container; Qwen pulls
 weights there, whereas Bonsai mounts a host download. Treat these peaks as
 operational high-water marks, not a clean inference-memory comparison. The
-Bonsai retry reported only 0.684 GiB charged to its cgroup, which cannot be
-interpreted as total model residency; mapped-file charge ownership remains an
-unverified explanation pending process-level memory measurements.
+Bonsai retry reported only about 0.68 GiB charged to its cgroup. The follow-up
+measured 7.28–7.33 GiB process RSS, mostly file-backed pages, confirming that
+the cgroup number is not total model residency. Exact charge ownership was not
+traced.
+
+
+### Hosted CPU diagnosis
+
+The [bounded diagnostic run](https://github.com/VanL/backstitch/actions/runs/35378869111)
+on AMD EPYC 7763 sent requests directly to the same pinned server. A tiny
+23-token prompt without a schema, the full prompt without a schema, and the
+full prompt with its production schema each timed out after 120 seconds with
+only SSE heartbeats and no generated token. The one-token generation cap makes
+these diagnostic probes, not accuracy or qualification tests. Repeating the
+tiny/full plain requests with a forced Haswell backend gave the same outcome;
+process mappings confirmed automatic selection already used that backend.
+
+Across all five probes, all four sampled compute-thread program counters fell
+inside `ggml_vec_dot_pq2_0_q8_0`. Raw GDB symbols were unresolved; mapping the
+addresses through each process's library mappings and the matching pinned ELF
+symbol table identified function start 0xd82d0, size 0x356, with sample offsets
+0xbe–0x313. Independent disassembly review confirmed scalar shifts, masks,
+integer multiplies and adds at the sampled instructions.
+
+The [pinned PQ2 kernel](https://github.com/PrismML-Eng/llama.cpp/blob/prism-b10685-7dffb15/ggml/src/ggml-cpu/arch/x86/quants.c#L561)
+has explicit SIMD paths for VNNI, which the EPYC 7763 lacks. The sampled
+Haswell path therefore uses its scalar fallback. This localizes the observed
+bottleneck to numerical computation during prompt processing; schema parsing
+and Backstitch's transport are unnecessary to reproduce it. Samples do not
+establish eventual completion time or exclude pathological behavior inside the
+kernel. GDB sampling can perturb timing, so these probe durations are bounds,
+not throughput benchmarks.
+
+Fixing the separate Hadamard repack loading crash alone would not add a PQ2
+fast path on this CPU: the pinned
+[repack dispatch](https://github.com/PrismML-Eng/llama.cpp/blob/prism-b10685-7dffb15/ggml/src/ggml-cpu/repack.cpp#L5352)
+requires AVX512-VNNI. A supported faster kernel or a guaranteed compatible CPU
+needs a separate validation run. Four-vCPU/16-GiB limits do not specify the
+instruction set. Keep Qwen as the incumbent for this CI deployment; Bonsai's
+local memory saving does not offset the demonstrated hosted execution failure.
+Neither model is formally qualified by this two-case experiment.
 
 ## Earlier measured rows
 

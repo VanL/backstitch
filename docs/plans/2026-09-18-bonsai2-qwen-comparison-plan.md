@@ -94,8 +94,9 @@ because existing review identified incompatible labels and provenance limits.
 ## Deviations and conclusion
 
 Local results favor Qwen latency and Bonsai memory usage. Hosted Qwen passed;
-Bonsai required a separately recorded runtime workaround. The hosted recovery timed out on its first request. Further CPU-runtime
-diagnosis was requested by the owner; this plan remains active.
+Bonsai required a separately recorded runtime workaround. The hosted recovery timed out on its first request. The owner requested further CPU-runtime
+diagnosis; the bounded probes below localized the failure and close this
+experimental assessment without promoting a model.
 
 - Owner clarified all local inference must use Docker with the CI profile: four
   vCPUs, 16 GiB RAM. Both dedicated containers disable swap and GPU. The preliminary
@@ -208,3 +209,58 @@ state. GDB samples may perturb timing, so do not present them as benchmarks.
 All diagnostic harness changes remain disposable, retained in execution commits
 and restored before final results-only closure. Default policy and gold remain
 unchanged. Local tiny-request harness validation precedes hosted dispatch.
+
+Diagnostic execution: cc3361ce431ad265f9e6dce106bb6c01e44d2cdd,
+https://github.com/VanL/backstitch/actions/runs/35378869111. Independent review
+accepted the design after bounding per-probe readiness to 120 seconds, checking
+HTTP error status, and retaining process/cgroup evidence for both backends.
+The local tiny/plain streaming probe completed in about five seconds with a
+one-token cap. Source basis for the hardware hypothesis: pinned
+`ggml/src/ggml-cpu/arch/x86/quants.c` in Prism's release, function
+`ggml_vec_dot_pq2_0_q8_0`; the non-VNNI branch uses scalar unpack/dot loops.
+This source path refers to the external pinned runtime, not this repository.
+
+
+## Final diagnostic outcome and closure
+
+The diagnostic collector completed successfully; all five inference probes
+timed out at 120 seconds with only SSE comment heartbeats and no token. The
+host was again EPYC 7763. Automatic and forced backend mappings both showed
+Haswell. The tiny plain prompt contained 23 tokens, eliminating the production
+schema and Backstitch adapter as necessary causes. Four compute PCs in each
+probe mapped to ggml_vec_dot_pq2_0_q8_0 in the pinned Haswell ELF: symbol
+0xd82d0, size 0x356, sampled offsets 0xbe–0x313. Independent ELF/disassembly
+review confirmed scalar integer shifts/masks/multiplies/adds. Raw GDB unwinding
+had unresolved symbols and a PID-namespace warning; the conclusion uses the
+captured PCs plus mappings/symbol ranges, not speculative unwound frame names.
+Derived local evidence: results/ci-diagnostic/symbolized-cpu-frames.json.
+
+Process RSS was 7.28–7.33 GiB, mostly file-backed, so the original approximately
+0.68-GiB cgroup charge is not a model memory footprint. No OOM finding explains
+the timeout. The evidence localizes work to the non-VNNI scalar PQ2 kernel;
+it does not measure eventual completion or exclude pathological execution
+inside that kernel. A loader-only fix cannot enable optimized repacked PQ2
+on this AVX2-only CPU under the pinned dispatch. No vendor patch, weight-format
+change, increased budget or CPU guarantee was silently substituted.
+
+Decision: keep Qwen as the current deployment. Bonsai passed the local smoke
+but did not meet hosted execution limits; neither model qualified from these
+two cases. Runtime SIMD support, not resource quota alone, is required in a
+future compatibility assessment. All requested local/hosted attempts reached
+terminal status, and the follow-up identified the runtime bottleneck. The
+remaining vendor-kernel or hardware remedy is unvalidated and outside this
+comparison's conclusions. Source, gold and default policy remain unchanged.
+
+The final tree restores workflow and live-test files byte-for-byte to baseline
+and removes the disposable diagnostic script/payload. Execution commits retain
+all probes for reproduction. Only the model catalog, this plan and its index
+remain changed against baseline. Final documentation gates, self-corpus gate,
+independent conclusions review and commit verification are recorded at closure.
+
+Final independent review found no blocking correction; the catalog opening was
+scoped to completed runs so it does not imply hosted Bonsai reached verification.
+Final gates: check-doc-paths and check-dom15-fixtures passed; hermetic
+backstitch check exited 0 with zero errors, warnings and infos. The experimental
+probe previously passed 62 live-helper tests, focused Ruff/format and mypy checks.
+Baseline diff verification confirms no workflow, live-test or product-code delta.
+The plan index is closed in the same results commit.
