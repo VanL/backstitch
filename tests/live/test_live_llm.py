@@ -31,6 +31,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -1316,6 +1317,190 @@ def test_live_llm_analysis_contract(
         pytest.fail(str(exc), pytrace=False)
     for message in messages:
         print(message)
+
+
+@pytest.mark.skipif(
+    "BACKSTITCH_LOCAL_EVAL_REVISION" not in os.environ,
+    reason="model comparison requires an explicit immutable model revision",
+)
+def test_local_semantic_eval_smoke(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run the production evaluator over its one clean/mutated smoke pair."""
+
+    if _live_kind() != "local":
+        pytest.skip("the local model evaluation assessment requires the local endpoint")
+    if "BACKSTITCH_LOCAL_EVAL_REVISION" not in os.environ:
+        pytest.skip("model comparison requires an explicit immutable model revision")
+    report_path = Path(
+        os.environ.get(
+            "BACKSTITCH_LOCAL_EVAL_REPORT",
+            str(tmp_path / "model-eval-report.json"),
+        )
+    )
+    with _CountingProxy(_resolve_local_upstream()) as proxy:
+        local_config = _configure_local_llm(tmp_path, monkeypatch, proxy)
+        _assert_model_listed(local_config)
+        live_root = _write_live_contract_repo(tmp_path / "eval-config", kind="local")
+        live_config = live_root / ".backstitch.toml"
+        descriptor_lines = _live_descriptor_lines(
+            kind="local",
+            adapter_model_id="backstitch-local",
+        )
+        served_model = local_config.served_model
+        revision = os.environ["BACKSTITCH_LOCAL_EVAL_REVISION"]
+        descriptor_lines = [
+            f"model = {json.dumps('pkg:service/local.test/' + served_model)}"
+            if line.startswith("model = ")
+            else f"model_revision = {json.dumps(revision)}"
+            if line.startswith("model_revision = ")
+            else line
+            for line in descriptor_lines
+        ]
+        live_config.write_text(
+            live_config.read_text(encoding="utf-8").replace(
+                "[analyze]\n",
+                "[analyze]\n" + "\n".join(descriptor_lines) + "\n",
+                1,
+            )
+            + """
+
+[verify]
+enabled = true
+provider_source = "analyze"
+concurrency = 1
+cache_path = ".backstitch/semantic-cache"
+cache_mode = "read-write"
+search_epochs = ["1"]
+json_mode = "require"
+temperature = 0.0
+seed = 42
+max_tokens = 1024
+required_verdicts = 1
+minimum_support_score = 0.9
+indeterminate = "report"
+maximum_provider_calls = 4
+maximum_prompt_bytes = 1000000
+lock_wait_timeout_seconds = 300
+maximum_runtime_seconds = 1800
+maximum_estimated_cost_microusd = 0
+
+[verify.eval]
+mode = "report"
+qualification_corpus = ""
+qualification_corpus_sha256 = ""
+qualification_report = ""
+qualification_report_sha256 = ""
+trials = 1
+interval_method = "wilson"
+confidence_level = 0.95
+minimum_positive_units = 1
+minimum_negative_units = 1
+minimum_evidence_sufficiency_rate = 0.0
+minimum_conditional_precision = 0.0
+minimum_conditional_recall = 0.0
+minimum_end_to_end_recall = 0.0
+minimum_recall_lower_bound = 0.0
+maximum_false_positive_rate = 1.0
+maximum_false_positive_upper_bound = 1.0
+maximum_indeterminate_rate = 1.0
+maximum_uncached_flip_rate = 1.0
+require_all_critical = false
+""",
+            encoding="utf-8",
+        )
+
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.with_suffix(".toml").write_text(
+            live_config.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        requests: list[dict[str, Any]] = []
+        original_prepare = _CountingProxyHandler._prepare_completion
+
+        def observe_request(
+            handler: _CountingProxyHandler, body: bytes
+        ) -> bytes | None:
+            prepared = original_prepare(handler, body)
+            if prepared and _is_completion_path(handler.path):
+                requests.append(json.loads(prepared))
+            return prepared
+
+        monkeypatch.setattr(
+            _CountingProxyHandler, "_prepare_completion", observe_request
+        )
+        started = time.monotonic()
+        try:
+            result = _run_cli(
+                "eval",
+                "--corpus",
+                str(REPO_ROOT / "tests/semantic_eval/v3/manifest.json"),
+                "--output",
+                str(report_path),
+                "--config",
+                str(live_config),
+                label="local model semantic eval smoke",
+                timeout=1860,
+            )
+        except RuntimeError as exc:
+            cause = exc.__cause__
+            for suffix, value in (
+                ("stdout", getattr(cause, "stdout", "")),
+                ("stderr", getattr(cause, "stderr", "")),
+            ):
+                if isinstance(value, bytes):
+                    value = value.decode("utf-8", errors="replace")
+                report_path.with_suffix(f".{suffix}.txt").write_text(
+                    value or "", encoding="utf-8"
+                )
+            report_path.with_suffix(".failure.txt").write_text(
+                str(exc), encoding="utf-8"
+            )
+            raise
+        else:
+            report_path.with_suffix(".stdout.txt").write_text(
+                result.stdout, encoding="utf-8"
+            )
+            report_path.with_suffix(".stderr.txt").write_text(
+                result.stderr, encoding="utf-8"
+            )
+            report_path.with_suffix(".exit.txt").write_text(
+                str(result.returncode), encoding="utf-8"
+            )
+        finally:
+            report_path.with_suffix(".requests.json").write_text(
+                json.dumps(requests, indent=2), encoding="utf-8"
+            )
+            report_path.with_suffix(".elapsed.txt").write_text(
+                str(time.monotonic() - started), encoding="utf-8"
+            )
+
+    _assert_no_traceback(result, "local model semantic eval smoke")
+    assert result.returncode == 0, result.stderr or result.stdout
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    operational = report["operational"]
+    assert operational["analyzer_primary_provider_calls"] == 2
+    assert operational["analyzer_replay_provider_calls"] == 0
+    assert operational["analyzer_replay_cache_misses"] == 0
+    assert operational["verifier_replay_provider_calls"] == 0
+    assert operational["verifier_replay_cache_misses"] == 0
+    assert requests
+    for payload in requests:
+        assert (
+            payload.get("temperature"),
+            payload.get("seed"),
+            payload.get("max_tokens"),
+        ) == (0, 42, 1024)
+    print(
+        json.dumps(
+            {
+                "metrics": report["metrics"],
+                "operational": operational,
+                "qualification": report["qualification"],
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def _live_packet_generation_args(

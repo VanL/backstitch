@@ -94,3 +94,21 @@ because existing review identified incompatible labels and provenance limits.
 
 None yet. Completion requires concrete local and hosted outcomes, or an explicit
 reproduced external blocker. Update the index at closure and cite commit/run IDs.
+
+- Owner clarified all local inference must use Docker with the CI profile: four
+  vCPUs, 16 GiB RAM. Both dedicated containers disable swap and GPU. The preliminary
+  incumbent attempt used a different Ollama image and allowed swap, so was stopped
+  and excluded. Bonsai primary mode is explicitly non-thinking; the 1024-token
+  output budget is unchanged. No native-Metal results enter this comparison.
+
+- Probe review passed with accepted reporting-headroom correction: subprocess
+  timeout 1860 seconds, inference budget still 1800, CI test step 33 minutes.
+  Model requests are observed without altering schema, stream, or returned text.
+- Disposable CI workflow review passed after canonicalizing the Ollama alias to
+  comparison-qwen:latest. Both matrix members assert Docker limits and pinned
+  model identity. Runtime archives: Prism prism-b10685-7dffb15, arm64 local /
+  x64 hosted; Bonsai weights revision 6ed5e12bf84b7a63069882c91dd9e9218647d17b,
+  PQ2_0 SHA256 3907dc1658db1f78a9826bf8d5bcb8dc65db0d466388937af57f2294fae62ec1.
+  The experimental workflow and test are not intended for main-branch promotion.
+- Initial checks: live-helper tests passed; Ruff, focused mypy, doc-path and
+  DOM-15 gates passed; self-corpus check found zero errors, warnings and infos.
