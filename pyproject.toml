@@ -51,7 +51,7 @@ dev = [
 
 [dependency-groups]
 release = [
-    "build==1.6.0",
+    "build==1.6.1",
     "hatchling==1.32.0",
 ]
 
