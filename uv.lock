@@ -98,7 +98,7 @@ release = [
 
 [package.metadata]
 requires-dist = [
-    { name = "llm", specifier = ">=0.33,<0.35" },
+    { name = "llm", specifier = ">=0.33,<0.37" },
     { name = "markdown-it-py", specifier = ">=4.2.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
@@ -515,7 +515,7 @@ wheels = [
 
 [[package]]
 name = "llm"
-version = "0.34"
+version = "0.36"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -535,9 +535,9 @@ dependencies = [
     { name = "sqlite-utils" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f9/8e/5ffec2a091d4cd2691cfd0e8ba3e1904aeb1931313287cfd68f9c1db8b40/llm-0.34.tar.gz", hash = "sha256:09d0b076c4c720c4daeece6ee3a0aae76620059aced552f09589e0e0d7c5f09d", size = 153935, upload-time = "2026-09-02T19:35:05.054Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/93/5e/7d5e3c85a64b7b08d74ff6332ece77685383261575c693ed694f0f9c2e78/llm-0.36.tar.gz", hash = "sha256:e59ad30875a99be2eea0c880543b1ebfe40eea24ae55d4008eb1e12c77964626", size = 154890, upload-time = "2026-09-22T18:52:02.475Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/af/24/ccf5bba8be42f10e312a305116bfc82a61b547eac37c0e1dcee0645bb9df/llm-0.34-py3-none-any.whl", hash = "sha256:de559652a90df7c80e8300610846afad345a05a1a47886a70ca1766942c6478f", size = 145640, upload-time = "2026-09-02T19:35:03.535Z" },
+    { url = "https://files.pythonhosted.org/packages/37/3d/3095e229af58a0c93feb111eb67123367d61aeafdb9d02720ff9fb33d7ab/llm-0.36-py3-none-any.whl", hash = "sha256:801263d046854d15e3f45ee8da5024c23c313d129f67c7c93961649c531bb050", size = 146562, upload-time = "2026-09-22T18:52:00.774Z" },
 ]
 
 [[package]]
