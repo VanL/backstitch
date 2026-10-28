@@ -135,7 +135,7 @@ jobs:
           slug: VanL/backstitch
 
   binary-wheels:
-    name: binary wheels py${{ matrix.python-version }} ${{ matrix.platform.os }}-${{ matrix.platform.arch }}
+    name: ${{ matrix.platform.os == 'windows' && matrix.platform.arch == 'arm64' && matrix.python-version == '3.11' && 'wheels plus PyYAML source' || 'binary wheels' }} py${{ matrix.python-version }} ${{ matrix.platform.os }}-${{ matrix.platform.arch }}
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false

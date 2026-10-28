@@ -159,7 +159,7 @@ before mutation. It then:
 1. checks out the exact SHA and installs the declared uv version
 2. performs `uv sync --frozen --group release` against the selected Python
    3.11 interpreter
-3. builds through the locked `build==1.5.0` frontend with isolation disabled
+3. builds through the locked `build==1.6.1` frontend with isolation disabled
 4. resolves exactly one wheel and one source distribution, installs each into
    its own fresh environment outside the checkout, proves the import comes
    from that environment, and runs version, alignment-guide, and repository
