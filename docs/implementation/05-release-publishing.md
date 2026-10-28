@@ -123,11 +123,12 @@ do not authorize a GitHub settings mutation.
 ## Toolchain Updates
 
 All workflows that install uv declare one `UV_VERSION` and pass it to
-`astral-sh/setup-uv`. `pyproject.toml` constrains the supported minor
-series. Update these coupled surfaces with:
+`astral-sh/setup-uv`. `pyproject.toml` declares a minimum uv version without
+an upper bound, so newer Dependabot runtimes remain usable. CI pins the tested
+version separately. Update these coupled surfaces with:
 
 ```bash
-bin/bump_uv.py --ci-version X.Y.Z --required-version '>=X.Y.Z,<next-minor'
+bin/bump_uv.py --ci-version X.Y.Z --required-version '>=X.Y.Z'
 bin/bump_uv.py --check
 ```
 

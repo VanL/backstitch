@@ -18,9 +18,7 @@ WORKFLOWS = (
 )
 LOCK_DIRECTORIES = (Path("."),)
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
-REQUIRED_VERSION_RE = re.compile(
-    r"^>=(?P<minimum>\d+\.\d+\.\d+),<(?P<maximum>\d+\.\d+(?:\.\d+)?)$"
-)
+REQUIRED_VERSION_RE = re.compile(r"^>=(?P<minimum>\d+\.\d+\.\d+)$")
 
 
 class PolicyError(RuntimeError):
@@ -36,11 +34,10 @@ def _validate_versions(ci_version: str, required_version: str) -> None:
         raise PolicyError(f"invalid CI uv version: {ci_version!r}")
     match = REQUIRED_VERSION_RE.fullmatch(required_version)
     if match is None:
-        raise PolicyError("required uv version must look like '>=0.12.0,<0.13'")
+        raise PolicyError("required uv version must look like '>=0.12.0'")
     pinned = _version_tuple(ci_version)
     minimum = _version_tuple(match.group("minimum"))
-    maximum = _version_tuple(match.group("maximum"))
-    if not minimum <= pinned < maximum:
+    if pinned < minimum:
         raise PolicyError(
             f"CI uv {ci_version} is outside required range {required_version}"
         )
