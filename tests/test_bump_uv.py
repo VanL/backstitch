@@ -57,7 +57,7 @@ def test_dry_run_reports_every_managed_file_without_writing(
             "--ci-version",
             "0.12.5",
             "--required-version",
-            ">=0.12.5,<0.13",
+            ">=0.12.5",
             "--dry-run",
         ],
         capture_output=True,
@@ -94,14 +94,13 @@ def test_update_and_check_cover_the_root_lock(
                 "--ci-version",
                 "0.12.5",
                 "--required-version",
-                ">=0.12.5,<0.13",
+                ">=0.12.5",
             ]
         )
         == 0
     )
     assert (
-        'required-version = ">=0.12.5,<0.13"'
-        in (repository / "pyproject.toml").read_text()
+        'required-version = ">=0.12.5"' in (repository / "pyproject.toml").read_text()
     )
     for name in WORKFLOWS:
         workflow = repository / ".github" / "workflows" / name
@@ -140,7 +139,7 @@ def test_failed_lock_refresh_restores_manifests_and_lock(
                 "--ci-version",
                 "0.12.5",
                 "--required-version",
-                ">=0.12.5,<0.13",
+                ">=0.12.5",
             ]
         )
         == 1
@@ -189,10 +188,40 @@ def test_invalid_workflow_sets_fail_before_writing(
                 "--ci-version",
                 "0.12.5",
                 "--required-version",
-                ">=0.12.5,<0.13",
+                ">=0.12.5",
             ]
         )
         == 1
     )
     assert calls == []
     assert {path: path.read_bytes() for path in paths} == before
+
+
+@pytest.mark.parametrize(
+    "ci_version,required_version",
+    [
+        ("0.12.4", ">=0.12.5"),
+        ("0.12.5", ">=0.12.5,<0.13"),
+    ],
+)
+def test_invalid_version_policy_fails_before_writing(
+    repository: Path, ci_version: str, required_version: str
+) -> None:
+    before = (repository / "pyproject.toml").read_bytes()
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--root",
+            str(repository),
+            "--ci-version",
+            ci_version,
+            "--required-version",
+            required_version,
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert (repository / "pyproject.toml").read_bytes() == before

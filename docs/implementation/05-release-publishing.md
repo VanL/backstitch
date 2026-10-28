@@ -123,17 +123,23 @@ do not authorize a GitHub settings mutation.
 ## Toolchain Updates
 
 All workflows that install uv declare one `UV_VERSION` and pass it to
-`astral-sh/setup-uv`. `pyproject.toml` constrains the supported minor
-series. Update these coupled surfaces with:
+`astral-sh/setup-uv`. `pyproject.toml` declares a minimum uv version without
+an upper bound, so newer Dependabot runtimes remain usable. CI pins the tested
+version separately. Update these coupled surfaces with:
 
 ```bash
-bin/bump_uv.py --ci-version X.Y.Z --required-version '>=X.Y.Z,<next-minor'
+bin/bump_uv.py --ci-version X.Y.Z --required-version '>=X.Y.Z'
 bin/bump_uv.py --check
 ```
 
 The updater edits all managed workflows and the root constraint as one
 transaction, regenerates `uv.lock`, and rolls back source edits if lock
 generation or validation fails.
+
+The binary dependency matrix uses native interpreters. On Windows ARM with
+Python 3.11, PyYAML has no upstream wheel: CI checks every other locked
+dependency with `--no-build`, then tests a complete locked source-capable
+installation. This lane does not establish that PyYAML has a binary wheel.
 
 Dependabot proposes weekly root uv and GitHub Actions updates. There is no
 auto-merge path. Review action source and release notes, update the version
@@ -153,7 +159,7 @@ before mutation. It then:
 1. checks out the exact SHA and installs the declared uv version
 2. performs `uv sync --frozen --group release` against the selected Python
    3.11 interpreter
-3. builds through the locked `build==1.5.0` frontend with isolation disabled
+3. builds through the locked `build==1.6.1` frontend with isolation disabled
 4. resolves exactly one wheel and one source distribution, installs each into
    its own fresh environment outside the checkout, proves the import comes
    from that environment, and runs version, alignment-guide, and repository

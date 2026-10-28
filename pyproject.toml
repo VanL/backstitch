@@ -34,7 +34,7 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
 ]
 dependencies = [
-    "llm>=0.33,<0.35",
+    "llm>=0.33",
     "markdown-it-py>=4.2.0",
     "tree-sitter==0.26.0",
     "tree-sitter-python==0.25.0",
@@ -46,13 +46,13 @@ dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "pytest-xdist>=3.6",
-    "ruff==0.16.6",
+    "ruff==0.17.3",
 ]
 
 [dependency-groups]
 release = [
-    "build==1.6.0",
-    "hatchling==1.32.0",
+    "build==1.6.1",
+    "hatchling==1.33.0",
 ]
 
 [project.scripts]
@@ -63,7 +63,7 @@ Repository = "https://github.com/VanL/backstitch"
 Issues = "https://github.com/VanL/backstitch/issues"
 
 [tool.uv]
-required-version = ">=0.12.5,<0.13"
+required-version = ">=0.12.5"
 default-groups = []
 
 [tool.hatch.build.targets.wheel]
