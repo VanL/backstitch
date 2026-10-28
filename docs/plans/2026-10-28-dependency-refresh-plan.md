@@ -4,7 +4,7 @@ Status: active. Class 4: widening the published llm compatibility range crosses 
 
 ## Sources and context
 
-Consulted program theory, agent context README, decision hierarchy, principles, engineering principles, lessons, hardening and review runbooks, DOM-5/10/11/15, and the user request. `pyproject.toml` owns package constraints; `uv.lock` fixes resolved versions; `.github/workflows/` pins action commits. CI pins uv 0.12.5 independently of the local allowed range.
+Consulted program theory, agent context README, decision hierarchy, principles, engineering principles, lessons, hardening and review runbooks, DOM-5/10/11/15, and the user request. `pyproject.toml` owns package constraints; `uv.lock` fixes resolved versions; `.github/workflows/` pins action commits. CI pins uv 0.13.6 independently of the local allowed range.
 
 ## Outcome and invariants
 
@@ -24,3 +24,5 @@ Implementation was started before writing this plan and before the required risk
 2026-10-28 verification: uv 0.13.5 resolved the lock and policy check passed; real `python -m build` produced sdist and wheel with hatchling 1.33.0; Ruff check and format, mypy (167 files), doc-path and DOM-15 gates, and `backstitch check --repo-root .` (0 errors, 0 warnings, 0 infos) passed. The local hermetic suite reached 99% without a reported failure but was interrupted while still running (exit 130); it is not a pass. GitHub CI remains pending. Tier-1 review attempts: Grok refused to start because its read-only sandbox could not be applied (runtime socket symlink); Claude timed out at 120 seconds. Tier-2 same-family review found no P1/P2 findings, conditional on CI and plan closure; it verified action tag SHAs, uv 0.12.5 lock compatibility and 20 llm adapter tests. This is not cross-family review. No findings to disposition. The call-agent skill's sandbox setup needs repair; Claude containment remains unverified per inventory.
 
 2026-10-28 follow-up: user requested the newest supported versions. CI now uses uv 0.13.6, while the accepted range remains >=0.12.5,<0.14 so Dependabot running 0.13.5 is not excluded. All direct Python dependencies and workflow actions were checked against current stable releases; the lock was upgraded within declared constraints. The expanded lock and uv bump require renewed verification and review before landing.
+
+Follow-up verification: uv 0.13.6 policy and lock checks, real sdist/wheel build, Ruff lint and format, mypy, documentation gates, and self-corpus (0 errors, 0 warnings, 0 infos) passed. uv 0.13.5 also passes lock and policy checks. The 20 llm adapter tests passed with refreshed dependencies. Same-family follow-up review found one stale uv version in this plan, corrected here; no other actionable findings. Full suite and CI remain pending.
