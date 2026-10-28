@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  UV_VERSION: "0.12.5"
+  UV_VERSION: "0.13.6"
   # Qwen2.5 Coder 14B is the bounded local semantic model. A hosted Linux
   # run completed the full live lane in 11:05 with 5 GB still available.
   # A 2026-07-10 audit found Ollama's OpenAI route overrode the stored

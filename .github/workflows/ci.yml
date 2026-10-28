@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 env:
-  UV_VERSION: "0.12.5"
+  UV_VERSION: "0.13.6"
 
 jobs:
   # Gate-wiring rule (writing-specs runbook): every gate names its
