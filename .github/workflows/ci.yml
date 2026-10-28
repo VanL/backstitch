@@ -168,5 +168,24 @@ jobs:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ matrix.python-version }}
           enable-cache: false
+      # PyYAML has no CPython 3.11 Windows ARM wheel. Prove every other
+      # locked dependency has a wheel, then test the complete native install.
+      - name: Prove non-PyYAML dependencies install from wheels (Windows ARM py3.11)
+        if: matrix.platform.os == 'windows' && matrix.platform.arch == 'arm64' && matrix.python-version == '3.11'
+        shell: pwsh
+        run: |
+          $requirements = uv export --locked --extra dev --no-emit-project --no-hashes --no-annotate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $yaml = @($requirements | Where-Object { $_ -match '^pyyaml==' })
+          if ($yaml.Count -ne 1) { throw 'Expected exactly one locked PyYAML requirement' }
+          $requirements | Where-Object { $_ -notmatch '^pyyaml==' } | Set-Content wheels-only.txt
+          uv venv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv pip install --python .venv/Scripts/python.exe --no-deps --no-build -r wheels-only.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install all dependencies, allowing PyYAML source (Windows ARM py3.11)
+        if: matrix.platform.os == 'windows' && matrix.platform.arch == 'arm64' && matrix.python-version == '3.11'
+        run: uv sync --locked --extra dev --no-install-project
       - name: Prove dependencies install from wheels
+        if: matrix.platform.os != 'windows' || matrix.platform.arch != 'arm64' || matrix.python-version != '3.11'
         run: uv sync --locked --extra dev --no-build --no-install-project

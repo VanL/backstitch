@@ -136,6 +136,11 @@ The updater edits all managed workflows and the root constraint as one
 transaction, regenerates `uv.lock`, and rolls back source edits if lock
 generation or validation fails.
 
+The binary dependency matrix uses native interpreters. On Windows ARM with
+Python 3.11, PyYAML has no upstream wheel: CI checks every other locked
+dependency with `--no-build`, then tests a complete locked source-capable
+installation. This lane does not establish that PyYAML has a binary wheel.
+
 Dependabot proposes weekly root uv and GitHub Actions updates. There is no
 auto-merge path. Review action source and release notes, update the version
 comment and full commit SHA together, then run the source-policy tests.
